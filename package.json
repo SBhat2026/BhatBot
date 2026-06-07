@@ -1,0 +1,32 @@
+{
+  "name": "bhatbot",
+  "version": "1.0.0",
+  "description": "Personal Jarvis-style desktop agent that reads CLAUDE.md as live context",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder --mac dmg"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
+    "electron": "^30.0.0",
+    "express": "^5.2.1",
+    "node-pty": "^1.1.0",
+    "node-telegram-bot-api": "^0.67.0",
+    "playwright": "^1.60.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@electron/rebuild": "^4.0.4",
+    "electron-builder": "^24.0.0"
+  },
+  "build": {
+    "appId": "com.siddhant.bhatbot",
+    "productName": "Bhatbot",
+    "mac": {
+      "category": "public.app-category.productivity"
+    }
+  }
+}

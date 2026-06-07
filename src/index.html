@@ -1,0 +1,871 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta http-equiv="Content-Security-Policy"
+  content="default-src 'self' file:; style-src 'self' 'unsafe-inline' file: https://fonts.googleapis.com; font-src https://fonts.gstatic.com; script-src 'self' 'unsafe-inline' file:; connect-src 'self';" />
+<title>Bhatbot</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="../node_modules/@xterm/xterm/css/xterm.css" />
+<style>
+  :root {
+    --bg: #090d13;
+    --surface: #0d1520;
+    --surface-2: #111c2b;
+    --accent: #00c8ff;
+    --accent-dim: #0a4a63;
+    --text: #c8d6e5;
+    --text-dim: #5b708a;
+    --text-dim2: #46627d;
+    --ok: #2fe08a;
+    --warn: #ffb02e;
+    --err: #ff4d5e;
+    --line: #15212f;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    font-family: 'JetBrains Mono', monospace;
+    background: var(--bg);
+    color: var(--text);
+    font-size: 16px;
+    overflow: hidden;
+    user-select: none;
+  }
+  /* scanlines */
+  body::after {
+    content: ''; position: fixed; inset: 0; pointer-events: none; z-index: 9000;
+    background: repeating-linear-gradient(0deg, rgba(0,200,255,0.022) 0 1px, transparent 1px 3px);
+    mix-blend-mode: screen;
+  }
+  /* corner brackets */
+  .corner { position: fixed; width: 14px; height: 14px; z-index: 8000; pointer-events: none; border-color: var(--accent-dim); }
+  .corner.tl { top: 6px; left: 6px; border-top: 1px solid; border-left: 1px solid; }
+  .corner.tr { top: 6px; right: 6px; border-top: 1px solid; border-right: 1px solid; }
+  .corner.bl { bottom: 6px; left: 6px; border-bottom: 1px solid; border-left: 1px solid; }
+  .corner.br { bottom: 6px; right: 6px; border-bottom: 1px solid; border-right: 1px solid; }
+
+  #app { display: flex; flex-direction: column; height: 100%; }
+
+  /* ---------------- titlebar ---------------- */
+  #titlebar {
+    -webkit-app-region: drag;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 9px 12px; border-bottom: 1px solid var(--line);
+    background: linear-gradient(180deg, #0c131d, #0a0f17);
+  }
+  .tb-left { display: flex; align-items: center; gap: 9px; }
+  .hud-ring { width: 18px; height: 18px; animation: spin 7s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .brand { font-weight: 700; letter-spacing: 3px; font-size: 12px; color: var(--text); position: relative; }
+  .brand.glitch::before, .brand.glitch::after {
+    content: 'BHATBOT'; position: absolute; top: 0; left: 0; width: 100%; overflow: hidden;
+  }
+  .brand.glitch::before { color: var(--err); transform: translate(-1.5px, 0); clip-path: inset(0 0 55% 0); }
+  .brand.glitch::after { color: var(--accent); transform: translate(1.5px, 0); clip-path: inset(55% 0 0 0); }
+  .brand.glitch { animation: skew 0.25s steps(2) 1; }
+  @keyframes skew { 0%,100% { transform: skewX(0); } 40% { transform: skewX(-6deg); } 70% { transform: skewX(4deg); } }
+
+  .tb-btns { -webkit-app-region: no-drag; display: flex; gap: 6px; }
+  .tb-btn {
+    width: 22px; height: 22px; border: 1px solid var(--line); background: var(--surface);
+    color: var(--text-dim); cursor: pointer; font-size: 13px; border-radius: 3px;
+    display: flex; align-items: center; justify-content: center; transition: .12s;
+  }
+  .tb-btn:hover { border-color: var(--accent-dim); color: var(--accent); }
+
+  /* ---------------- context bar ---------------- */
+  #ctxbar {
+    display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+    padding: 7px 12px; border-bottom: 1px solid var(--line); background: var(--surface);
+  }
+  .tag {
+    -webkit-app-region: no-drag;
+    font-size: 12px; padding: 4px 8px; border: 1px solid var(--line); border-radius: 3px;
+    color: var(--text-dim); cursor: pointer; transition: .12s; white-space: nowrap;
+  }
+  .tag:hover { border-color: var(--accent-dim); color: var(--accent); }
+  .tag.ctx { border-color: var(--accent-dim); color: var(--accent); cursor: default; }
+
+  /* ---------------- chat ---------------- */
+  #chat { flex: 1; overflow-y: auto; padding: 14px 12px; display: flex; flex-direction: column; gap: 12px; }
+  #chat::-webkit-scrollbar { width: 7px; }
+  #chat::-webkit-scrollbar-thumb { background: var(--accent-dim); border-radius: 4px; }
+  .msg { max-width: 92%; line-height: 1.5; animation: slidein .26s ease; white-space: pre-wrap; word-break: break-word; user-select: text; }
+  @keyframes slidein { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+  .msg.user { align-self: flex-end; background: var(--surface-2); border: 1px solid var(--accent-dim); padding: 8px 11px; border-radius: 8px 8px 2px 8px; color: #dff1ff; }
+  .msg.bot { align-self: flex-start; color: var(--text); padding: 2px 0; }
+  .msg.bot .label { color: var(--accent); font-size: 12px; letter-spacing: 2px; display: block; margin-bottom: 3px; }
+  .msg.err { align-self: flex-start; color: var(--err); border-left: 2px solid var(--err); padding-left: 9px; }
+
+  .tool-row {
+    align-self: flex-start; font-size: 13px; color: var(--text-dim);
+    border-left: 2px solid var(--accent-dim); padding: 4px 9px; background: rgba(0,200,255,0.03);
+    animation: slidein .2s ease; user-select: text; max-width: 92%; word-break: break-word;
+  }
+  .tool-row .ic { display: inline-block; width: 13px; }
+  .tool-row.run .ic { animation: spin 1s linear infinite; color: var(--accent); }
+  .tool-row.ok .ic { color: var(--ok); }
+  .tool-row.fail .ic { color: var(--err); }
+  .tool-row .arg { color: var(--text-dim2); }
+
+  .thinking { align-self: flex-start; display: flex; gap: 4px; padding: 6px 2px; }
+  .thinking span { width: 5px; height: 5px; border-radius: 50%; background: var(--accent); animation: pulse 1.2s infinite; }
+  .thinking span:nth-child(2) { animation-delay: .2s; }
+  .thinking span:nth-child(3) { animation-delay: .4s; }
+  @keyframes pulse { 0%,100% { opacity: .25; transform: scale(.8); } 50% { opacity: 1; transform: scale(1.15); } }
+
+  /* ---------------- quick chips ---------------- */
+  #chips { display: flex; gap: 6px; flex-wrap: wrap; padding: 0 12px 8px; }
+  .chip {
+    font-size: 12px; padding: 6px 11px; border: 1px solid var(--line); border-radius: 14px;
+    color: var(--text-dim); cursor: pointer; transition: .12s; background: var(--surface);
+  }
+  .chip:hover { border-color: var(--accent); color: var(--accent); }
+  #chips.hidden { display: none; }
+
+  /* ---------------- transcript bar ---------------- */
+  #transcript { display: none; padding: 5px 12px; font-size: 11px; color: var(--accent); border-top: 1px solid var(--line); background: rgba(0,200,255,0.04); }
+  #transcript.on { display: block; }
+
+  /* ---------------- input ---------------- */
+  #inputbar { display: flex; align-items: flex-end; gap: 7px; padding: 9px 12px; border-top: 1px solid var(--line); background: var(--surface); }
+  #ta {
+    flex: 1; resize: none; max-height: 110px; min-height: 20px; background: var(--bg); color: var(--text);
+    border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; font-family: inherit; font-size: 16px;
+    outline: none; line-height: 1.4; user-select: text;
+  }
+  #ta:focus { border-color: var(--accent-dim); }
+  .ibtn {
+    width: 34px; height: 34px; border: 1px solid var(--line); background: var(--bg); color: var(--text-dim);
+    cursor: pointer; border-radius: 6px; display: flex; align-items: center; justify-content: center; transition: .12s; flex-shrink: 0;
+  }
+  .ibtn:hover { border-color: var(--accent); color: var(--accent); }
+  #send.busy { opacity: .4; pointer-events: none; }
+  #mic.rec { border-color: var(--err); }
+  /* read-full-reply control under a summarized bot bubble */
+  #attachbar { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 4px 6px; }
+  #attachbar:empty { display: none; }
+  .attchip { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--accent);
+    border: 1px solid var(--accent-dim); border-radius: 12px; padding: 2px 9px; background: rgba(0,200,255,.06); }
+  .attchip b { color: var(--text); font-weight: 500; }
+  .attchip .x { cursor: pointer; color: var(--text-dim); }
+  .attchip .x:hover { color: var(--err); }
+  .readfull { display: inline-block; margin-top: 6px; font-size: 12px; color: var(--accent);
+    border: 1px solid var(--accent-dim); border-radius: 5px; padding: 2px 8px; cursor: pointer; user-select: none; }
+  .readfull:hover { background: var(--accent-dim); }
+  /* embedded Claude Code panel (docked in the HUD) */
+  #codepanel { position: fixed; left: 0; right: 0; bottom: 0; height: 45vh; background: #0a0f17;
+    border-top: 1px solid var(--accent-dim); display: none; flex-direction: column; z-index: 8000;
+    box-shadow: 0 -12px 36px rgba(0,0,0,.55); }
+  #codepanel.open { display: flex; }
+  #codebar { height: 30px; display: flex; align-items: center; gap: 8px; padding: 0 10px; font-size: 11px;
+    color: var(--text-dim); border-bottom: 1px solid var(--line); background: var(--surface); }
+  #codebar b { color: var(--accent); letter-spacing: 2px; }
+  #codebar .sp { flex: 1; }
+  #codebar button { background: none; border: 1px solid var(--line); color: var(--text-dim); border-radius: 4px;
+    cursor: pointer; font-family: inherit; font-size: 11px; padding: 1px 7px; }
+  #codebar button:hover { border-color: var(--accent); color: var(--accent); }
+  #codeterm { flex: 1; padding: 6px 8px; overflow: hidden; }
+  #codegrip { position: absolute; top: -3px; left: 0; right: 0; height: 7px; cursor: ns-resize; }
+  .wave { display: flex; gap: 2px; align-items: center; height: 16px; }
+  .wave i { width: 2px; background: var(--err); animation: wv .7s ease infinite; }
+  .wave i:nth-child(1){animation-delay:0s} .wave i:nth-child(2){animation-delay:.15s}
+  .wave i:nth-child(3){animation-delay:.3s} .wave i:nth-child(4){animation-delay:.45s}
+  .wave i:nth-child(5){animation-delay:.2s}
+  @keyframes wv { 0%,100% { height: 4px; } 50% { height: 15px; } }
+
+  /* ---------------- status bar ---------------- */
+  #statusbar { display: flex; align-items: center; gap: 8px; padding: 6px 12px; border-top: 1px solid var(--line); font-size: 12px; color: var(--text-dim); }
+  #dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); animation: dotpulse 2s infinite; }
+  #dot.busy { background: var(--warn); }
+  @keyframes dotpulse { 0%,100% { box-shadow: 0 0 0 0 rgba(47,224,138,.5); } 50% { box-shadow: 0 0 0 4px rgba(47,224,138,0); } }
+  #count { margin-left: auto; color: var(--text-dim2); }
+
+  /* ---------------- boot overlay ---------------- */
+  #boot {
+    position: fixed; inset: 0; z-index: 10000; background: radial-gradient(circle at 50% 45%, #0c1626 0%, #090d13 70%);
+    display: flex; flex-direction: column; justify-content: center; padding: 0 26px;
+    transition: opacity .5s ease;
+  }
+  #hero { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 0; display: block; }
+  #bootinner { position: relative; z-index: 1; pointer-events: none; }
+  #bootlog { font-size: 15px; line-height: 1.9; color: var(--accent); white-space: pre; min-height: 220px; text-shadow: 0 0 12px rgba(0,200,255,.45); }
+  #bootlog .dim { color: var(--text-dim); }
+  #bootbar { margin-top: 14px; height: 3px; background: rgba(21,33,47,.6); border-radius: 2px; overflow: hidden; box-shadow: 0 0 10px rgba(0,200,255,.25); }
+  #bootbar i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, #0a4a63, #00c8ff); transition: width .25s linear; box-shadow: 0 0 12px #00c8ff; }
+  #boot.gone { opacity: 0; pointer-events: none; }
+</style>
+</head>
+<body>
+<span class="corner tl"></span><span class="corner tr"></span><span class="corner bl"></span><span class="corner br"></span>
+
+<div id="boot">
+  <canvas id="hero"></canvas>
+  <div id="bootinner">
+    <div id="bootlog"></div>
+    <div id="bootbar"><i></i></div>
+  </div>
+</div>
+
+<div id="app">
+  <div id="titlebar">
+    <div class="tb-left">
+      <svg class="hud-ring" viewBox="0 0 24 24" fill="none" stroke="#00c8ff" stroke-width="1.3">
+        <circle cx="12" cy="12" r="9" stroke-dasharray="4 3" opacity="0.7"/>
+        <circle cx="12" cy="12" r="4.5" stroke-dasharray="2 2"/>
+        <circle cx="12" cy="12" r="1.3" fill="#00c8ff" stroke="none"/>
+      </svg>
+      <span class="brand" id="brand">BHATBOT</span>
+    </div>
+    <div class="tb-btns">
+      <button class="tb-btn" id="min" title="Minimize">—</button>
+      <button class="tb-btn" id="hide" title="Hide (⌘⇧B)">×</button>
+    </div>
+  </div>
+
+  <div id="ctxbar">
+    <span class="tag" id="open-nexus" title="Open Nexus research navigator">⚛ Nexus</span>
+    <span class="tag" id="open-studio" title="Open live design canvas">▦ Studio</span>
+    <span class="tag" id="open-terminal" title="Open embedded Claude Code">⌗ Code</span>
+    <span class="tag ctx" id="ctxtag">⬡ …</span>
+  </div>
+
+  <div id="chat"></div>
+
+  <div id="chips">
+    <span class="chip">Nexus priorities</span>
+    <span class="chip">Auth CC prompt</span>
+    <span class="chip">ls ~</span>
+    <span class="chip">git status</span>
+    <span class="chip">Revenue path</span>
+    <span class="chip">PRISM paper</span>
+  </div>
+
+  <div id="transcript"></div>
+
+  <div id="attachbar"></div>
+  <div id="inputbar">
+    <textarea id="ta" rows="1" placeholder="Message Bhatbot…  (Enter to send)"></textarea>
+    <button class="ibtn" id="attach" title="Attach screenshot / photo / screen recording">📎</button>
+    <button class="ibtn" id="mic" title="Voice">🎙</button>
+    <button class="ibtn" id="spk" title="Speak replies (Jarvis voice)">🔊</button>
+    <button class="ibtn" id="send" title="Send">▶</button>
+  </div>
+
+  <div id="statusbar">
+    <span id="dot"></span><span id="status">ONLINE</span>
+    <span id="count">0 exchanges</span>
+  </div>
+</div>
+
+<!-- Embedded Claude Code (docked terminal panel) -->
+<div id="codepanel">
+  <div id="codegrip"></div>
+  <div id="codebar"><b>⌗ CLAUDE CODE</b><span class="sp"></span><button id="code-restart" title="Restart session">⟳</button><button id="code-close" title="Close">✕</button></div>
+  <div id="codeterm"></div>
+</div>
+
+<script>
+'use strict';
+const $ = (s) => document.querySelector(s);
+const chat = $('#chat');
+let history = [];
+let busy = false;
+let exchanges = 0;
+
+// ===================== hero: particle cloud =====================
+// Cyan particle cloud that swirls then coalesces toward a glowing core — the
+// loading-screen hero animation. Runs during boot; stops when boot is dismissed.
+let heroStop = null;
+(function hero() {
+  const cv = document.getElementById('hero');
+  if (!cv) return;
+  const ctx = cv.getContext('2d');
+  const DPR = Math.min(window.devicePixelRatio || 1, 2);
+  let W, H, cx, cy;
+  function resize() {
+    W = cv.width = innerWidth * DPR; H = cv.height = innerHeight * DPR;
+    cv.style.width = innerWidth + 'px'; cv.style.height = innerHeight + 'px';
+    cx = W / 2; cy = H * 0.45;
+  }
+  resize();
+  addEventListener('resize', resize);
+
+  const N = Math.min(150, Math.floor(innerWidth / 9));
+  const P = [];
+  for (let i = 0; i < N; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const r = (Math.min(W, H) * 0.42) * Math.sqrt(Math.random());
+    P.push({
+      a, r, base: r,
+      z: 0.35 + Math.random() * 0.65,           // depth → parallax + size
+      sp: (Math.random() * 0.4 + 0.1) * (Math.random() < 0.5 ? -1 : 1) * 0.004,
+      tw: Math.random() * Math.PI * 2,           // twinkle phase
+      tws: 0.02 + Math.random() * 0.04
+    });
+  }
+
+  let t = 0, raf;
+  function frame() {
+    t++;
+    ctx.clearRect(0, 0, W, H);
+    // pulsing core
+    const pulse = 1 + Math.sin(t * 0.05) * 0.18;
+    const coreR = 16 * DPR * pulse;
+    const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, coreR * 6);
+    g.addColorStop(0, 'rgba(0,200,255,0.55)');
+    g.addColorStop(0.4, 'rgba(0,200,255,0.10)');
+    g.addColorStop(1, 'rgba(0,200,255,0)');
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.arc(cx, cy, coreR * 6, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#dff6ff';
+    ctx.beginPath(); ctx.arc(cx, cy, coreR * 0.5, 0, Math.PI * 2); ctx.fill();
+
+    // breathing radius — cloud gently contracts/expands toward the core
+    const breathe = 1 + Math.sin(t * 0.012) * 0.12;
+    const pts = [];
+    for (const p of P) {
+      p.a += p.sp;
+      p.tw += p.tws;
+      const r = p.base * breathe * p.z;
+      const x = cx + Math.cos(p.a) * r;
+      const y = cy + Math.sin(p.a) * r * 0.7;        // flatten → disc/cloud look
+      const tw = 0.5 + 0.5 * Math.sin(p.tw);
+      const size = (0.8 + p.z * 1.8) * DPR;
+      ctx.beginPath();
+      ctx.fillStyle = `rgba(${120 + 90 * tw | 0},${210},255,${0.25 + 0.6 * tw * p.z})`;
+      ctx.arc(x, y, size, 0, Math.PI * 2); ctx.fill();
+      pts.push({ x, y, z: p.z });
+    }
+    // constellation links between near particles
+    ctx.lineWidth = DPR * 0.6;
+    const maxD = (90 * DPR) ** 2;
+    for (let i = 0; i < pts.length; i++) {
+      for (let j = i + 1; j < pts.length; j++) {
+        const dx = pts[i].x - pts[j].x, dy = pts[i].y - pts[j].y;
+        const d2 = dx * dx + dy * dy;
+        if (d2 < maxD) {
+          const o = (1 - d2 / maxD) * 0.18 * pts[i].z * pts[j].z;
+          ctx.strokeStyle = `rgba(0,200,255,${o})`;
+          ctx.beginPath(); ctx.moveTo(pts[i].x, pts[i].y); ctx.lineTo(pts[j].x, pts[j].y); ctx.stroke();
+        }
+      }
+    }
+    raf = requestAnimationFrame(frame);
+  }
+  frame();
+  heroStop = () => { cancelAnimationFrame(raf); removeEventListener('resize', resize); };
+})();
+
+// ===================== boot sequence =====================
+(function boot() {
+  const today = new Date().toISOString().slice(0, 10);
+  const lines = [
+    '> BHATBOT AGENT v1.0',
+    '> BUILD: ' + today,
+    '> CONTEXT: reading CLAUDE.md…',
+    '> MEMORY: loading ~/.bhatbot/memory.md…',
+    '> TOOLS: fs · shell · browser · claude-code · memory',
+    '> MODEL ROUTING: haiku (simple) · sonnet (reasoning)',
+    '> PROMPT CACHING: enabled (90% input savings)',
+    '> ─────────────────────────────────────────',
+    '> SYSTEMS ONLINE.'
+  ];
+  const log = $('#bootlog');
+  const bar = $('#bootbar i');
+  let i = 0;
+  const tick = () => {
+    if (i < lines.length) {
+      log.textContent += (i ? '\n' : '') + lines[i];
+      bar.style.width = Math.round(((i + 1) / lines.length) * 100) + '%';
+      i++;
+      setTimeout(tick, 110);
+    } else {
+      setTimeout(() => {
+        $('#boot').classList.add('gone');
+        setTimeout(() => { try { heroStop && heroStop(); } catch {} $('#boot').remove(); }, 520);
+      }, 260);
+    }
+  };
+  tick();
+})();
+
+// ===================== brand glitch =====================
+setInterval(() => {
+  const b = $('#brand');
+  b.classList.add('glitch');
+  setTimeout(() => b.classList.remove('glitch'), 260);
+}, 9000);
+
+// ===================== context badge =====================
+(async () => {
+  try {
+    const p = await window.bhatbot.getContextPath();
+    const tag = $('#ctxtag');
+    if (p) {
+      const base = p.replace(/\/CLAUDE\.md$/, '').split('/').filter(Boolean).pop() || '/';
+      tag.textContent = '⬡ ' + base;
+      tag.title = p;
+    } else {
+      tag.textContent = '⬡ no context';
+    }
+  } catch { $('#ctxtag').textContent = '⬡ no context'; }
+})();
+
+// ===================== rendering =====================
+function addUser(text) {
+  const d = document.createElement('div');
+  d.className = 'msg user';
+  d.textContent = text;
+  chat.appendChild(d);
+  scroll();
+}
+function addBot(text) {
+  const d = document.createElement('div');
+  d.className = 'msg bot';
+  const lbl = document.createElement('span');
+  lbl.className = 'label'; lbl.textContent = 'BHATBOT';
+  const body = document.createElement('span');
+  d.appendChild(lbl); d.appendChild(body);
+  chat.appendChild(d);
+  typeOut(body, text || '(no response)');
+  return d;
+}
+// When a long reply is spoken as a summary, offer a click to hear the whole thing.
+function addReadFull(bubble, fullText) {
+  if (!bubble || !ttsOn || !voiceCfg.hasTTS) return;
+  const b = document.createElement('div');
+  b.className = 'readfull'; b.textContent = '🔊 read full reply';
+  b.addEventListener('click', () => speak(fullText, { full: true }));
+  bubble.appendChild(document.createElement('br'));
+  bubble.appendChild(b);
+}
+function addErr(text) {
+  const d = document.createElement('div');
+  d.className = 'msg err';
+  d.textContent = '⚠ ' + text;
+  chat.appendChild(d); scroll();
+}
+function typeOut(el, text) {
+  let i = 0;
+  const step = () => {
+    el.textContent = text.slice(0, i);
+    i++; scroll();
+    if (i <= text.length) setTimeout(step, 7);
+  };
+  step();
+}
+function addThinking() {
+  const d = document.createElement('div');
+  d.className = 'thinking'; d.id = 'thinking';
+  d.innerHTML = '<span></span><span></span><span></span>';
+  chat.appendChild(d); scroll();
+}
+function rmThinking() { const t = $('#thinking'); if (t) t.remove(); }
+
+const toolRows = {};
+function shortArg(name, input) {
+  if (!input) return '';
+  if (input.path) return input.path;
+  if (input.command) return input.command.slice(0, 60);
+  if (input.url) return input.url;
+  return JSON.stringify(input).slice(0, 60);
+}
+function toolStart(u) {
+  const d = document.createElement('div');
+  d.className = 'tool-row run';
+  d.innerHTML = '<span class="ic">⟳</span> ' + u.name + ' <span class="arg"></span>';
+  d.querySelector('.arg').textContent = shortArg(u.name, u.input);
+  chat.appendChild(d); scroll();
+  toolRows[u.name + '|' + shortArg(u.name, u.input)] = d;
+  return d;
+}
+function toolDone(u) {
+  // find most recent running row for this tool
+  const rows = [...document.querySelectorAll('.tool-row.run')];
+  const d = rows[rows.length - 1];
+  if (!d) return;
+  const ok = u.result && u.result.success !== false;
+  d.classList.remove('run');
+  d.classList.add(ok ? 'ok' : 'fail');
+  d.querySelector('.ic').textContent = ok ? '✓' : '✗';
+}
+
+function scroll() { chat.scrollTop = chat.scrollHeight; }
+
+// ===================== send =====================
+let lastProvider = '';
+window.bhatbot.onToolUpdate((u) => {
+  if (u.type === 'tool_start') { rmThinking(); toolStart(u); addThinking(); }
+  else if (u.type === 'tool_done') { toolDone(u); }
+  else if (u.type === 'thinking' && u.text) { rmThinking(); addThought(u.text); addThinking(); }
+  else if (u.type === 'provider_used') {
+    lastProvider = u.provider === 'darkbloom'
+      ? 'darkbloom · ' + (u.model || '')
+      : 'anthropic · ' + String(u.model || '').replace('claude-', '');
+  }
+  else if (u.type === 'guidance_applied') { rmThinking(); addThought('↳ guidance applied: ' + u.text); addThinking(); }
+});
+function addThought(text) {
+  const d = document.createElement('div');
+  d.className = 'tool-row'; d.style.borderLeftColor = 'var(--text-dim2)'; d.style.fontStyle = 'italic';
+  d.textContent = '… ' + text.slice(0, 180);
+  chat.appendChild(d); scroll();
+}
+
+// ---- attachments (screenshots / photos / screen recordings → vision) ----
+let pendingAtt = [];   // { name, blocks:[...] }
+function renderAtt() {
+  const bar = $('#attachbar'); bar.innerHTML = '';
+  pendingAtt.forEach((a, i) => {
+    const c = document.createElement('span'); c.className = 'attchip';
+    const imgs = a.blocks.filter((b) => b.type === 'image').length;
+    c.innerHTML = '📎 <b></b> <span class="x">✕</span>';
+    c.querySelector('b').textContent = a.name + (imgs > 1 ? ` (${imgs} frames)` : '');
+    c.querySelector('.x').addEventListener('click', () => { pendingAtt.splice(i, 1); renderAtt(); });
+    bar.appendChild(c);
+  });
+}
+$('#attach').addEventListener('click', async () => {
+  $('#attach').classList.add('busy');
+  try {
+    const r = await window.bhatbot.pickMedia();
+    (r.names || []).forEach((name, i) => {
+      // pickMedia returns flat blocks for all files; group is approximate — keep one chip per file name
+    });
+    if (r.blocks && r.blocks.length) { pendingAtt.push({ name: (r.names || ['attachment']).join(', '), blocks: r.blocks }); renderAtt(); }
+  } catch (e) { addErr('Attach failed: ' + (e.message || e)); }
+  $('#attach').classList.remove('busy');
+});
+
+async function send(text) {
+  text = (text || $('#ta').value).trim();
+  const atts = pendingAtt.flatMap((a) => a.blocks);
+  if (!text && !atts.length) return; if (busy) return;
+  // "read the whole/entire/full response" → speak the last full reply, don't query the agent
+  if (/^\s*(read|play|speak)( me| it| out| aloud)*( the)?( whole| entire| full| complete)( response| reply| answer| thing| text)?\.?\s*$/i.test(text)) {
+    $('#ta').value = ''; autoresize();
+    if (lastFullReply) speak(lastFullReply, { full: true });
+    else tbar.textContent = 'nothing to read yet';
+    return;
+  }
+  $('#ta').value = ''; autoresize();
+  $('#chips').classList.add('hidden');
+  const nImg = atts.filter((b) => b.type === 'image').length;
+  addUser(text + (nImg ? `  📎 ${nImg} image${nImg > 1 ? 's' : ''}` : ''));
+  history.push({ role: 'user', content: atts.length ? [{ type: 'text', text: text || 'See the attached media.' }, ...atts] : text });
+  pendingAtt = []; renderAtt();
+  setBusy(true);
+  addThinking();
+  try {
+    const res = await window.bhatbot.chat({ history });
+    rmThinking();
+    if (res.error) { addErr(res.error); }
+    else {
+      history = res.history;
+      const bubble = addBot(res.text);
+      speak(res.text);
+      if ((res.text || '').length > 250) addReadFull(bubble, res.text);
+      exchanges++; $('#count').textContent = exchanges + ' exchanges';
+    }
+  } catch (e) {
+    rmThinking(); addErr(String(e.message || e));
+  } finally {
+    setBusy(false);
+  }
+}
+
+function setBusy(b) {
+  busy = b;
+  $('#send').classList.toggle('busy', b);
+  $('#dot').classList.toggle('busy', b);
+  $('#status').textContent = b ? 'PROCESSING…' : ('ONLINE' + (lastProvider ? ' · ' + lastProvider : ''));
+}
+
+// ===================== input wiring =====================
+const ta = $('#ta');
+function autoresize() { ta.style.height = 'auto'; ta.style.height = Math.min(ta.scrollHeight, 110) + 'px'; }
+ta.addEventListener('input', autoresize);
+ta.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+});
+$('#send').addEventListener('click', () => send());
+$('#hide').addEventListener('click', () => window.bhatbot.hideWindow());
+$('#min').addEventListener('click', () => window.bhatbot.minimizeWindow());
+document.querySelectorAll('.chip').forEach((c) =>
+  c.addEventListener('click', () => { ta.value = c.textContent; autoresize(); ta.focus(); })
+);
+document.querySelectorAll('#ctxbar .tag[data-q]').forEach((t) =>
+  t.addEventListener('click', () => send(t.getAttribute('data-q')))
+);
+$('#open-nexus').addEventListener('click', () => window.bhatbot.openNexus());
+$('#open-studio').addEventListener('click', () => window.bhatbot.openStudio());
+$('#open-terminal').addEventListener('click', () => window.toggleCodePanel && window.toggleCodePanel());
+// Vosk listener heard "bhatbot …": run the command, or arm voice if none.
+window.bhatbot.onWakeCommand((text) => {
+  if (text && text.trim()) send(text.trim());     // "bhatbot do X" → execute in Bhatbot
+  else if (!recording) startVoice();              // bare "hey bhatbot" → arm Whisper capture
+});
+
+// ===================== voice: STT + wake word =====================
+const mic = $('#mic');
+const tbar = $('#transcript');
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+let SILENCE_MS = 2000;   // auto-send 2s after you stop talking (overridable via config.silenceMs)
+let voiceCfg = { hasOpenAI: false, picovoiceKey: null, wakeWord: 'jarvis', silenceMs: 2000, ttsEnabled: true, hasTTS: false, ttsProvider: null };
+let recording = false;
+
+// ===================== TTS: streaming sentence-chunked playback =====================
+let ttsOn = false;                       // user toggle; gated by hasTTS
+let ttsSeq = 0;                          // generation id to cancel stale playback
+const ttsQueue = [];                     // {idx, promise<Blob|null>}
+let ttsPlaying = false;
+const spk = $('#spk');
+
+function splitSentences(text) {
+  const clean = String(text || '').replace(/```[\s\S]*?```/g, ' (code block) ').replace(/[*_`#>]/g, '').trim();
+  const parts = clean.match(/[^.!?\n]+[.!?]?(\s|$)|[^.!?\n]+$/g) || [];
+  const out = []; let buf = '';
+  for (let p of parts) { p = p.trim(); if (!p) continue; buf = buf ? buf + ' ' + p : p; if (buf.length >= 60 || /[.!?]$/.test(p)) { out.push(buf); buf = ''; } }
+  if (buf) out.push(buf);
+  return out.filter((s) => s.length);
+}
+
+let lastFullReply = '';
+// Long replies are summarized for voice (full text stays on screen / "read full reply").
+// opts.full = read verbatim regardless of length.
+async function speak(text, opts = {}) {
+  if (!ttsOn || !voiceCfg.hasTTS) return;
+  lastFullReply = String(text || '');
+  let spoken = lastFullReply;
+  // Ultra-short replies → free local macOS `say` (Daniel = British), no API call.
+  if (!opts.full && spoken.trim().length > 0 && spoken.length < 80) {
+    stopSpeaking(); window.bhatbot.sayLocal(spoken); return;
+  }
+  if (!opts.full && spoken.length > 250) {
+    try { const r = await window.bhatbot.summarizeForSpeech(spoken); if (r && r.success && r.text) spoken = r.text; }
+    catch {}
+  }
+  stopSpeaking();                        // cancel any in-flight reply
+  const seq = ++ttsSeq;
+  const sentences = splitSentences(spoken);
+  if (!sentences.length) return;
+  setSpeaking(true);
+  // Kick off synthesis for all sentences immediately (overlap network), but play in order.
+  const jobs = sentences.map((s) => window.bhatbot.synthesizeSpeech(s)
+    .then((r) => (r && r.success) ? b64ToBlob(r.audio, r.mimeType) : null)
+    .catch(() => null));
+  for (let i = 0; i < jobs.length; i++) {
+    const blob = await jobs[i];
+    if (seq !== ttsSeq) return;          // superseded → abort
+    if (!blob) continue;
+    await playBlob(blob, seq);
+    if (seq !== ttsSeq) return;
+  }
+  if (seq === ttsSeq) setSpeaking(false);
+}
+
+let curAudio = null;
+function playBlob(blob, seq) {
+  return new Promise((resolve) => {
+    if (seq !== ttsSeq) return resolve();
+    const url = URL.createObjectURL(blob);
+    const a = new Audio(url); curAudio = a;
+    a.onended = a.onerror = () => { URL.revokeObjectURL(url); resolve(); };
+    a.play().catch(() => { URL.revokeObjectURL(url); resolve(); });
+  });
+}
+function stopSpeaking() {
+  ttsSeq++;                              // invalidate in-flight
+  if (curAudio) { try { curAudio.pause(); } catch {} curAudio = null; }
+  setSpeaking(false);
+}
+function setSpeaking(on) { spk.classList.toggle('rec', on && ttsOn); }
+function b64ToBlob(b64, mime) {
+  const bin = atob(b64); const len = bin.length; const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) bytes[i] = bin.charCodeAt(i);
+  return new Blob([bytes], { type: mime || 'audio/mpeg' });
+}
+function setSpkUI() { spk.style.opacity = ttsOn ? '1' : '0.4'; spk.title = ttsOn ? 'Voice replies: ON (click to mute)' : 'Voice replies: OFF (click to enable Jarvis voice)'; }
+spk.addEventListener('click', () => {
+  if (!voiceCfg.hasTTS) { tbar.textContent = '🔊 No TTS key — set openaiKey or elevenLabsKey in config.json'; return; }
+  ttsOn = !ttsOn; if (!ttsOn) stopSpeaking(); setSpkUI();
+});
+
+function setMicRecording(on) {
+  mic.classList.toggle('rec', on);
+  mic.innerHTML = on ? '<span class="wave"><i></i><i></i><i></i><i></i><i></i></span>' : '🎙';
+  tbar.classList.toggle('on', on);
+}
+
+// ---- Primary STT: MediaRecorder → OpenAI Whisper (reliable, server-side) ----
+let mediaRecorder = null, audioChunks = [], micStream = null, audioCtx = null, silenceAt = 0;
+
+async function startVoice() {
+  if (recording) return;
+  stopSpeaking();                                     // don't talk over the user
+  if (!voiceCfg.hasOpenAI) return startWebSpeech();   // fallback if no OpenAI key
+  try { micStream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
+  catch (e) { addErr('Mic permission denied: ' + e.message); return; }
+  recording = true; setMicRecording(true);
+  tbar.textContent = '🎙 listening… (click mic to send)';
+  audioChunks = [];
+  mediaRecorder = new MediaRecorder(micStream, { mimeType: 'audio/webm' });
+  mediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) audioChunks.push(e.data); };
+  mediaRecorder.onstop = onRecStop;
+  mediaRecorder.start();
+  watchSilence(micStream);
+}
+
+// auto-stop 5s after you stop talking (RMS on a WebAudio analyser)
+function watchSilence(stream) {
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  const src = audioCtx.createMediaStreamSource(stream);
+  const an = audioCtx.createAnalyser(); an.fftSize = 512; src.connect(an);
+  const data = new Uint8Array(an.frequencyBinCount);
+  silenceAt = Date.now();
+  const tick = () => {
+    if (!recording) return;
+    an.getByteTimeDomainData(data);
+    let sum = 0; for (const v of data) { const x = (v - 128) / 128; sum += x * x; }
+    const rms = Math.sqrt(sum / data.length);
+    if (rms > 0.025) silenceAt = Date.now();
+    else if (Date.now() - silenceAt > SILENCE_MS) { endVoice(); return; }
+    requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+}
+
+function endVoice() {                 // manual mic click OR 5s silence
+  if (!recording) return;
+  recording = false;
+  try { if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop(); } catch {}
+}
+
+async function onRecStop() {
+  setMicRecording(false);
+  try { micStream && micStream.getTracks().forEach((t) => t.stop()); } catch {}
+  try { audioCtx && audioCtx.close(); } catch {}
+  if (!audioChunks.length) { tbar.classList.remove('on'); return; }
+  const blob = new Blob(audioChunks, { type: 'audio/webm' });
+  const buf = await blob.arrayBuffer();
+  tbar.classList.add('on'); tbar.textContent = '⏳ transcribing…';
+  const res = await window.bhatbot.transcribeAudio({ audioBuffer: Array.from(new Uint8Array(buf)), mimeType: 'audio/webm' });
+  tbar.classList.remove('on'); tbar.textContent = '';
+  if (res && res.text) { ta.value = res.text; autoresize(); setTimeout(() => send(res.text), 150); }
+  else if (res && res.error) addErr('STT: ' + res.error);
+}
+
+// ---- Fallback STT: Web Speech (only if no OpenAI key) ----
+let recog = null, finalText = '', manualStop = false, silenceTimer = null, restartTimer = null, starting = false;
+function startWebSpeech() {
+  if (!SR) { addErr('No STT available — set openaiKey for Whisper.'); return; }
+  finalText = ''; manualStop = false; recording = true;
+  recog = new SR(); recog.lang = 'en-US'; recog.interimResults = true; recog.continuous = true;
+  recog.onstart = () => { starting = false; };
+  recog.onresult = (e) => {
+    let interim = '';
+    for (let i = e.resultIndex; i < e.results.length; i++) { const t = e.results[i][0].transcript; if (e.results[i].isFinal) finalText += t + ' '; else interim += t; }
+    tbar.textContent = '🎙 ' + ((finalText + interim).trim() || 'listening…');
+    clearTimeout(silenceTimer); silenceTimer = setTimeout(endWebSpeech, SILENCE_MS);
+  };
+  recog.onerror = (e) => { tbar.textContent = '🎙 ' + e.error; if (['not-allowed', 'service-not-allowed', 'audio-capture'].includes(e.error)) { manualStop = true; recording = false; } };
+  recog.onend = () => {
+    if (recording && !manualStop) { clearTimeout(restartTimer); restartTimer = setTimeout(() => { if (recording && !manualStop && !starting) { starting = true; try { recog.start(); } catch { starting = false; } } }, 250); }
+    else { setMicRecording(false); const t = finalText.trim(); finalText = ''; if (t) setTimeout(() => send(t), 150); }
+  };
+  setMicRecording(true); tbar.textContent = '🎙 listening… (click mic to send)';
+  starting = true; try { recog.start(); } catch { starting = false; }
+  clearTimeout(silenceTimer); silenceTimer = setTimeout(endWebSpeech, SILENCE_MS);
+}
+function endWebSpeech() { manualStop = true; recording = false; clearTimeout(silenceTimer); clearTimeout(restartTimer); try { recog && recog.stop(); } catch {} }
+
+mic.addEventListener('click', () => recording ? endVoice() : startVoice());
+
+// ===================== wake word =====================
+// Active now via always-on Web Speech (free, no key). Porcupine upgrade: add a free
+// AccessKey at console.picovoice.ai → config.picovoiceKey, then the offline
+// "Jarvis"/custom-keyword engine replaces this listener.
+let wakeRecog = null;
+function initWake() {
+  if (!SR) return;
+  const phrases = ['hey bhatbot', 'bhatbot', 'jarvis', String(voiceCfg.wakeWord || '').toLowerCase()].filter(Boolean);
+  wakeRecog = new SR(); wakeRecog.lang = 'en-US'; wakeRecog.continuous = true; wakeRecog.interimResults = true;
+  wakeRecog.onresult = (e) => {
+    if (recording) return;            // ignore while capturing a command
+    const heard = [...e.results].slice(-3).map((r) => r[0].transcript.toLowerCase()).join(' ');
+    if (phrases.some((p) => heard.includes(p))) { try { wakeRecog.stop(); } catch {} startVoice(); }
+  };
+  wakeRecog.onerror = () => {};
+  wakeRecog.onend = () => { setTimeout(() => { try { wakeRecog.start(); } catch {} }, 500); };
+  try { wakeRecog.start(); } catch {}
+}
+
+// Wake word now handled by the offline openWakeWord helper (main process) → onWake → startVoice.
+// Web-Speech wake (initWake) left in as a no-key fallback but disabled by default (unreliable in Electron).
+(async () => {
+  try {
+    voiceCfg = (await window.bhatbot.getVoiceConfig()) || voiceCfg;
+    SILENCE_MS = voiceCfg.silenceMs || SILENCE_MS;
+    ttsOn = !!(voiceCfg.hasTTS && voiceCfg.ttsEnabled);   // auto-on if a TTS provider is configured
+    setSpkUI();
+    if (!voiceCfg.hasTTS) spk.style.opacity = '0.4';
+  } catch {}
+})();
+
+ta.focus();
+</script>
+
+<!-- Embedded Claude Code terminal (xterm + pty over IPC) -->
+<script src="../node_modules/@xterm/xterm/lib/xterm.js"></script>
+<script src="../node_modules/@xterm/addon-fit/lib/addon-fit.js"></script>
+<script>
+'use strict';
+(function () {
+  const panel = document.getElementById('codepanel');
+  const mount = document.getElementById('codeterm');
+  let term = null, fit = null, started = false;
+
+  function ensureTerm() {
+    if (term || typeof Terminal === 'undefined' || typeof FitAddon === 'undefined') return;
+    term = new Terminal({
+      fontFamily: 'JetBrains Mono, monospace', fontSize: 13, cursorBlink: true,
+      theme: { background: '#0a0f17', foreground: '#c8d6e5', cursor: '#00c8ff',
+               black: '#0a0f17', brightBlack: '#46627d', blue: '#00c8ff', green: '#3dffb0', red: '#ff4d6a' }
+    });
+    fit = new FitAddon.FitAddon(); term.loadAddon(fit);
+    term.open(mount);
+    window.term.onData((d) => term.write(d));
+    window.term.onExit(() => { term.write('\r\n\x1b[90m[claude code session ended — press ⟳ to restart]\x1b[0m\r\n'); started = false; });
+    term.onData((d) => window.term.input(d));
+  }
+  function sync() { if (!fit) return; try { fit.fit(); window.term.resize(term.cols, term.rows); } catch {} }
+  function startIfNeeded() { if (!started && term) { window.term.start(term.cols, term.rows); started = true; } }
+
+  window.toggleCodePanel = function () {
+    const open = panel.classList.toggle('open');
+    if (open) { ensureTerm(); setTimeout(() => { sync(); startIfNeeded(); term && term.focus(); }, 60); }
+  };
+  document.getElementById('code-close').addEventListener('click', () => panel.classList.remove('open'));
+  document.getElementById('code-restart').addEventListener('click', () => { started = false; if (term) term.reset(); startIfNeeded(); term && term.focus(); });
+  window.addEventListener('resize', () => { if (panel.classList.contains('open')) sync(); });
+
+  // drag the top grip to resize the panel height
+  (function () {
+    const grip = document.getElementById('codegrip'); let dragging = false;
+    grip.addEventListener('mousedown', (e) => { dragging = true; e.preventDefault(); });
+    window.addEventListener('mousemove', (e) => {
+      if (!dragging) return;
+      const h = window.innerHeight - e.clientY;
+      panel.style.height = Math.max(140, Math.min(window.innerHeight - 60, h)) + 'px';
+      sync();
+    });
+    window.addEventListener('mouseup', () => { if (dragging) { dragging = false; sync(); } });
+  })();
+})();
+</script>
+</body>
+</html>

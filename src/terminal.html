@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta http-equiv="Content-Security-Policy"
+  content="default-src 'self' file:; style-src 'self' 'unsafe-inline' file:; script-src 'self' 'unsafe-inline' file:;" />
+<title>Claude Code</title>
+<link rel="stylesheet" href="../node_modules/@xterm/xterm/css/xterm.css" />
+<style>
+  html, body { margin: 0; height: 100%; background: #0a0f17; }
+  #bar { height: 26px; display: flex; align-items: center; gap: 8px; padding: 0 10px;
+    font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #5b708a;
+    border-bottom: 1px solid #15212f; background: #0c131d; }
+  #bar b { color: #00c8ff; letter-spacing: 2px; }
+  #term { height: calc(100% - 27px); padding: 6px; }
+</style>
+</head>
+<body>
+  <div id="bar"><b>CLAUDE CODE</b> · embedded pty · cwd = BHATBOT_PROJECT</div>
+  <div id="term"></div>
+<script src="../node_modules/@xterm/xterm/lib/xterm.js"></script>
+<script src="../node_modules/@xterm/addon-fit/lib/addon-fit.js"></script>
+<script>
+  'use strict';
+  if (typeof Terminal === 'undefined' || typeof FitAddon === 'undefined') {
+    document.getElementById('term').innerHTML =
+      '<div style="color:#ff4d6a;font-family:monospace;padding:14px">xterm failed to load (CSP/path). Check console.</div>';
+    throw new Error('xterm not loaded');
+  }
+  const term = new Terminal({
+    fontFamily: 'JetBrains Mono, monospace', fontSize: 13, cursorBlink: true,
+    theme: { background: '#0a0f17', foreground: '#c8d6e5', cursor: '#00c8ff',
+             black: '#0a0f17', brightBlack: '#46627d', blue: '#00c8ff', green: '#3dffb0', red: '#ff4d6a' }
+  });
+  const fit = new FitAddon.FitAddon();
+  term.loadAddon(fit);
+  term.open(document.getElementById('term'));
+  fit.fit();
+
+  window.term.onData((d) => term.write(d));
+  window.term.onExit(() => term.write('\r\n\x1b[90m[claude code session ended]\x1b[0m\r\n'));
+  term.onData((d) => window.term.input(d));
+
+  function sync() { fit.fit(); window.term.resize(term.cols, term.rows); }
+  window.addEventListener('resize', sync);
+  // start the pty with current size
+  window.term.start(term.cols, term.rows);
+  setTimeout(sync, 100);
+  term.focus();
+</script>
+</body>
+</html>

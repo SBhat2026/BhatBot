@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta http-equiv="Content-Security-Policy"
+  content="default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; script-src 'self' 'unsafe-inline'; img-src 'self' data:;" />
+<title>Bhatbot Activity</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+<style>
+  :root { --bg:#090d13; --surface:#0d1520; --accent:#00c8ff; --ok:#3dffb0; --danger:#ff4d6a; --warn:#ffb340; --line:#15212f; --text:#c8d6e5; --dim:#5b708a; }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { font-family:'JetBrains Mono',monospace; background:var(--bg); color:var(--text); font-size:14px; height:100vh; display:flex; flex-direction:column; }
+  header { display:flex; align-items:center; gap:10px; padding:10px 14px; border-bottom:1px solid var(--line); }
+  .h-title { font-weight:700; letter-spacing:2px; }
+  .badge { font-size:10px; padding:3px 8px; border-radius:3px; border:1px solid var(--line); margin-left:auto; }
+  .badge.running { color:var(--ok); border-color:var(--ok); }
+  .badge.paused { color:var(--warn); border-color:var(--warn); }
+  .badge.idle { color:var(--dim); }
+  .badge.stopped { color:var(--danger); border-color:var(--danger); }
+  #model { font-size:10px; color:var(--accent); border:1px solid var(--line); padding:3px 8px; border-radius:3px; }
+  .controls { display:flex; gap:7px; padding:9px 14px; border-bottom:1px solid var(--line); }
+  .ctl { flex:1; padding:7px; border:1px solid var(--line); background:var(--surface); color:var(--dim); cursor:pointer; border-radius:5px; font-family:inherit; font-size:11px; transition:.12s; }
+  .ctl:hover { border-color:var(--accent); color:var(--accent); }
+  .ctl.stop:hover { border-color:var(--danger); color:var(--danger); }
+  #browserPane { padding:12px 14px; border-bottom:1px solid var(--line); }
+  #browser-view { width:100%; border-radius:4px; border:1px solid var(--line); display:none; }
+  #browserPlaceholder { color:var(--dim); font-size:11px; padding:18px 0; text-align:center; border:1px dashed var(--line); border-radius:4px; }
+  #log { flex:1; overflow-y:auto; padding:10px 14px; display:flex; flex-direction:column; gap:6px; }
+  #log::-webkit-scrollbar { width:7px; } #log::-webkit-scrollbar-thumb { background:#0a4a63; border-radius:4px; }
+  .row { font-size:11px; padding:5px 8px; border-left:2px solid #0a4a63; background:rgba(0,200,255,.03); word-break:break-word; }
+  .row .ic { display:inline-block; width:14px; }
+  .row.run .ic { color:var(--accent); animation:spin 1s linear infinite; }
+  .row.ok .ic { color:var(--ok); } .row.fail .ic { color:var(--danger); }
+  .row .arg { color:var(--dim); } .row .ms { color:#46627d; float:right; }
+  .row.think { border-left-color:#46627d; font-style:italic; color:var(--dim); }
+  @keyframes spin { to { transform:rotate(360deg); } }
+  /* health strip */
+  #health { display:flex; flex-wrap:wrap; gap:14px; padding:7px 14px; border-top:1px solid var(--line);
+    background:var(--surface); font-size:10.5px; color:var(--dim); }
+  #health b { color:var(--text); font-weight:500; }
+  #health #h-dot { font-style:normal; color:var(--dim); }
+  #health #h-dot.running { color:var(--ok); } #health #h-dot.paused { color:var(--warn); } #health #h-dot.stopped { color:var(--danger); }
+  #health #h-ollama.on { color:var(--ok); } #health #h-ollama.off { color:var(--danger); }
+  /* steering / live feedback */
+  .steer { display:flex; gap:7px; padding:9px 14px; border-bottom:1px solid var(--line); align-items:flex-end; }
+  #steerInput { flex:1; resize:none; min-height:34px; max-height:90px; background:var(--bg); color:var(--text);
+    border:1px solid var(--line); border-radius:5px; padding:7px 9px; font-family:inherit; font-size:13px; outline:none; }
+  #steerInput:focus { border-color:var(--accent); }
+  #steerSend { padding:7px 12px; border:1px solid var(--line); background:var(--surface); color:var(--accent);
+    cursor:pointer; border-radius:5px; font-family:inherit; font-size:12px; }
+  #steerSend:hover { border-color:var(--accent); }
+  #learn { display:none; padding:10px 14px; border-bottom:1px solid var(--ok); background:rgba(61,255,176,.06); font-size:12px; }
+  #learn.on { display:block; }
+  #learn .q { color:var(--ok); margin-bottom:6px; }
+  #learn .what { color:var(--dim); margin-bottom:8px; word-break:break-word; }
+  #learn .btns { display:flex; gap:8px; }
+  #learn button { flex:1; padding:7px; border-radius:5px; cursor:pointer; font-family:inherit; font-size:11px; border:1px solid var(--line); background:var(--bg); color:var(--text); }
+  #learn .save:hover { border-color:var(--ok); color:var(--ok); }
+  /* confirm modal */
+  #overlay { position:fixed; inset:0; background:rgba(5,8,12,.82); display:none; align-items:center; justify-content:center; z-index:100; }
+  #overlay.on { display:flex; }
+  .modal { background:var(--surface); border:1px solid var(--danger); border-radius:8px; padding:18px; width:84%; max-width:380px; }
+  .modal h3 { color:var(--danger); font-size:12px; letter-spacing:1px; margin-bottom:10px; }
+  .modal .cmd { background:var(--bg); border:1px solid var(--line); padding:8px; border-radius:4px; font-size:11px; color:var(--warn); margin-bottom:8px; word-break:break-all; }
+  .modal .reason { color:var(--dim); font-size:11px; margin-bottom:14px; }
+  .modal .btns { display:flex; gap:8px; }
+  .modal button { flex:1; padding:9px; border-radius:5px; cursor:pointer; font-family:inherit; font-size:11px; border:1px solid var(--line); background:var(--bg); color:var(--text); }
+  .modal .allow:hover { border-color:var(--ok); color:var(--ok); }
+  .modal .deny:hover { border-color:var(--danger); color:var(--danger); }
+</style>
+</head>
+<body>
+  <header>
+    <span class="h-title">BHATBOT ACTIVITY</span>
+    <span id="model">—</span>
+    <span class="badge idle" id="status">IDLE</span>
+  </header>
+  <div class="controls">
+    <button class="ctl" id="pause">⏸ Pause</button>
+    <button class="ctl" id="resume">▶ Resume</button>
+    <button class="ctl stop" id="stop">⏹ Stop</button>
+  </div>
+  <div class="steer">
+    <textarea id="steerInput" rows="1" placeholder="Steer / teach mid-task… (e.g. 'use the staging URL', 'always run tests first')"></textarea>
+    <button id="steerSend">↳ Send</button>
+  </div>
+  <div id="learn">
+    <div class="q">Learn this for next time?</div>
+    <div class="what" id="learnWhat"></div>
+    <div class="btns">
+      <button class="save" id="learnSave">✓ Save as preference</button>
+      <button id="learnDismiss">✗ Just this once</button>
+    </div>
+  </div>
+  <div id="browserPane">
+    <img id="browser-view" />
+    <div id="browserPlaceholder">No browser active</div>
+  </div>
+  <div id="log"></div>
+
+  <div id="health">
+    <span><i id="h-dot">●</i> <b id="h-state">—</b></span>
+    <span title="estimated API spend today">💸 <b id="h-cost">$0.000</b></span>
+    <span title="memory.md">🧠 <b id="h-mem">0</b> · <b id="h-memkb">0</b>kb</span>
+    <span title="tool calls logged today">🛠 <b id="h-calls">0</b></span>
+    <span title="local Ollama">🦙 <b id="h-ollama">?</b></span>
+  </div>
+
+  <div id="overlay">
+    <div class="modal">
+      <h3>⚠ CONFIRMATION REQUIRED</h3>
+      <div class="cmd" id="m-cmd"></div>
+      <div class="reason" id="m-reason"></div>
+      <div class="btns">
+        <button class="allow" id="m-allow">✓ Allow</button>
+        <button class="deny" id="m-deny">✗ Deny</button>
+      </div>
+    </div>
+  </div>
+
+<script>
+'use strict';
+const $ = (s) => document.querySelector(s);
+const log = $('#log');
+const statusEl = $('#status');
+const starts = {};
+
+function setStatus(s) { statusEl.textContent = s.toUpperCase(); statusEl.className = 'badge ' + s; }
+
+function addRow(name, input) {
+  const d = document.createElement('div');
+  d.className = 'row run';
+  const arg = input && (input.path || input.command || input.url || input.action || input.section || (input.content||'').slice(0,40)) || '';
+  d.innerHTML = '<span class="ic">⟳</span> <b></b> <span class="arg"></span><span class="ms"></span>';
+  d.querySelector('b').textContent = name;
+  d.querySelector('.arg').textContent = String(arg).slice(0, 70);
+  log.appendChild(d); log.scrollTop = log.scrollHeight;
+  starts[name] = { el: d, t: Date.now() };
+  return d;
+}
+function finishRow(name, result) {
+  const s = starts[name]; if (!s) return;
+  const ok = result && result.success !== false;
+  s.el.classList.remove('run'); s.el.classList.add(ok ? 'ok' : 'fail');
+  s.el.querySelector('.ic').textContent = ok ? '✓' : '✗';
+  s.el.querySelector('.ms').textContent = (Date.now() - s.t) + 'ms';
+  delete starts[name];
+}
+function addThink(text) {
+  const d = document.createElement('div');
+  d.className = 'row think';
+  d.textContent = '… ' + text.slice(0, 200);
+  log.appendChild(d); log.scrollTop = log.scrollHeight;
+}
+
+window.activity.onModel((m) => { $('#model').textContent = m.model; });
+window.activity.onUpdate((u) => {
+  if (u.type === 'tool_start') { setStatus('running'); addRow(u.name, u.input); }
+  else if (u.type === 'tool_done') { finishRow(u.name, u.result); }
+  else if (u.type === 'thinking') { addThink(u.text); }
+  else if (u.type === 'guidance_applied') { addGuidance(u.text); }
+});
+
+function addGuidance(text) {
+  const d = document.createElement('div');
+  d.className = 'row'; d.style.borderLeftColor = 'var(--ok)'; d.style.color = 'var(--ok)';
+  d.textContent = '↳ guidance applied: ' + text;
+  log.appendChild(d); log.scrollTop = log.scrollHeight;
+}
+
+// steering input
+const steer = $('#steerInput');
+function sendSteer() {
+  const t = steer.value.trim();
+  if (!t) return;
+  window.activity.sendGuidance(t);
+  addGuidance('(queued) ' + t);
+  steer.value = '';
+}
+$('#steerSend').addEventListener('click', sendSteer);
+steer.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendSteer(); } });
+
+// learn prompt (2a) — offer to persist guidance after the task
+let learnText = '';
+window.activity.onLearnPrompt((p) => { learnText = p.text || ''; $('#learnWhat').textContent = learnText; $('#learn').classList.add('on'); });
+$('#learnSave').addEventListener('click', async () => { if (learnText) await window.activity.saveGuidancePref(learnText); $('#learn').classList.remove('on'); });
+$('#learnDismiss').addEventListener('click', () => $('#learn').classList.remove('on'));
+
+// browser screenshots
+const view = $('#browser-view'); const ph = $('#browserPlaceholder');
+let pollTimer = null;
+function showShot(b64) {
+  view.src = 'data:image/jpeg;base64,' + b64;
+  view.style.display = 'block'; ph.style.display = 'none';
+}
+window.activity.onScreenshot((s) => { if (s && s.data) showShot(s.data); });
+// poll while a browser tool is running
+setInterval(async () => {
+  if (Object.keys(starts).some((k) => k === 'browser')) {
+    const b64 = await window.activity.requestScreenshot();
+    if (b64) showShot(b64);
+  }
+}, 1000);
+
+// controls
+$('#pause').addEventListener('click', () => { window.activity.pause(); setStatus('paused'); });
+$('#resume').addEventListener('click', () => { window.activity.resume(); setStatus('running'); });
+$('#stop').addEventListener('click', () => { window.activity.stop(); setStatus('stopped'); });
+
+// confirmation modal
+let pendingId = null;
+window.activity.onConfirm((c) => {
+  pendingId = c.id;
+  $('#m-cmd').textContent = c.command;
+  $('#m-reason').textContent = c.reason;
+  $('#overlay').classList.add('on');
+});
+$('#m-allow').addEventListener('click', () => { window.activity.respond(pendingId, true); $('#overlay').classList.remove('on'); });
+$('#m-deny').addEventListener('click', () => { window.activity.respond(pendingId, false); $('#overlay').classList.remove('on'); });
+
+// health strip — refresh every 30s
+async function refreshHealth() {
+  try {
+    const h = await window.activity.getHealth();
+    const st = (h.agentState || 'idle').toLowerCase();
+    $('#h-state').textContent = st.toUpperCase();
+    $('#h-dot').className = st;
+    $('#h-cost').textContent = h.estimatedCost;
+    $('#h-mem').textContent = h.memEntries; $('#h-memkb').textContent = h.memKb;
+    $('#h-calls').textContent = h.todayEntries;
+    const o = $('#h-ollama'); o.textContent = h.ollamaOnline ? 'on' : 'off'; o.className = h.ollamaOnline ? 'on' : 'off';
+  } catch {}
+}
+refreshHealth(); setInterval(refreshHealth, 30000);
+</script>
+</body>
+</html>
