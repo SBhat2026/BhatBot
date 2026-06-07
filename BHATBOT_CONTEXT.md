@@ -8,8 +8,7 @@
 
 ## 1. What Bhatbot is
 
-Bhatbot is a personal **Jarvis-style autonomous AI desktop agent** for Siddhant
-Bhat, built as an **Electron app** on macOS (Apple M4, 16 GB RAM). It is powered
+Bhatbot is a personal **Jarvis-style autonomous AI desktop agent** for the user, built as an **Electron app** on macOS (Apple M4, 16 GB RAM). It is powered
 primarily by the **Claude API** and runs natively on the Mac with full access to
 the filesystem, shell, a dedicated browser, voice, and the `claude` CLI. It is
 independent of Claude Desktop / claude.ai.
