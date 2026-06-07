@@ -260,7 +260,7 @@ npm --prefix ~/bhatbot start
 ---
 
 ## 9. Owner context (for the assistant)
-Siddhant Bhat — 18, incoming Princeton (fall 2026). Deep in GNN/ML, computational
+User is incoming Princeton student (fall 2026). Deep in GNN/ML, computational
 biology, full-stack (Next.js/Supabase/Vercel), Unity/C#. Communication style:
 direct, terse, technical, no filler. Active projects Bhatbot knows about: **Nexus**
 (research navigator), **PRISM** (assembly-order GNN, paper), **FABLE** (GO-term
