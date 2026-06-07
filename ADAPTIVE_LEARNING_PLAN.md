@@ -1,6 +1,6 @@
 # Bhatbot — Adaptive Preference Learning Plan
 
-Goal: Bhatbot learns from how Siddhant responds and adapts natively to his
+Goal: Bhatbot learns from how user responds and adapts natively to his
 preferences — without him having to spell them out — while staying corrigible
 (never drifting into behavior he didn't sanction).
 
