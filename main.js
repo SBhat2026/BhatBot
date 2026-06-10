@@ -292,7 +292,15 @@ specific fixes — iterate up to 3 times on creative work before asking for
 human direction. Prefer SVG via studio_write (free, infinitely scalable,
 editable) for logos, icons, diagrams, and UI. Use generate_image (GPT Image 1,
 ~$0.04/image) only for photorealistic or complex artistic content SVG can't
-express. generate_3d turns any image into a GLB model (Blender/Unity/Three.js).
+express. generate_3d turns any image into a textured GLB via AI (Blender/Unity/Three.js).
+
+3D PRINTING: For anything meant to be PRINTED, use make_printable (local, free, outputs
+STL), NOT generate_3d. Pick the mode by intent: a flat logo/icon/stamp/keychain/name-plate
+or cookie-cutter to print as a solid shape -> mode extrude (set height_mm, optional base_mm,
+size_mm). A photo to turn into a backlit lithophane or a relief surface -> mode relief
+(invert true for lithophanes). An existing GLB (e.g. from generate_3d) to make printable ->
+mode convert. If the user just imported/dragged an image, you can omit path. Report the STL
+path and its mm dimensions so they can slice it.
 
 VOICE — <speak> tags control what is said aloud:
 Wrap the part you want SPOKEN in <speak>...</speak>. Only that text is sent to TTS;
@@ -1132,6 +1140,17 @@ const TOOLS = [
       texture_size: { type: 'number', enum: [512, 1024, 2048], description: 'Texture resolution. Default 1024.' },
       filename: { type: 'string', description: 'Output filename (no extension). Defaults to timestamp.' }
     }, required: ['image_path'] } },
+  { name: 'make_printable', description: 'Turn a 2D image into a 3D-PRINTABLE mesh (STL), or convert an existing 3D model to STL. Deterministic + local (no API, no cost). Use this — not generate_3d — when the goal is 3D PRINTING. Modes: "extrude" = threshold the image to a silhouette and extrude it into a solid (logos, stamps, keychains, name plates, cookie-cutters); "relief" = grayscale height-map / backlit lithophane (use invert for lithophanes); "convert" = an existing model (e.g. a generate_3d .glb) → STL. If no path is given it uses the most recently imported/dragged image. Units are millimetres.',
+    input_schema: { type: 'object', properties: {
+      path: { type: 'string', description: 'Absolute path to the image (extrude/relief) or model (convert). Omit to use the last imported image.' },
+      mode: { type: 'string', enum: ['extrude', 'relief', 'convert'], description: 'extrude (silhouette solid) | relief (lithophane/height-map) | convert (model→STL). Default extrude.' },
+      height_mm: { type: 'number', description: 'Extrude depth or relief height in mm. extrude default 4, relief default 3.' },
+      base_mm: { type: 'number', description: 'Flat base thickness in mm under the shape (0 = none).' },
+      size_mm: { type: 'number', description: 'Longest side of the print in mm. extrude default 60, relief default 80.' },
+      invert: { type: 'boolean', description: 'Invert light/dark. For a backlit lithophane (dark=thick), set true.' },
+      filename: { type: 'string', description: 'Output filename (no extension). Defaults to a timestamp.' },
+      preview: { type: 'boolean', description: 'Open an interactive 3D preview (Quick Look) of the result. Default true.' }
+    }, required: [] } },
   { name: 'notify_user', description: 'Reach Siddhant out-of-band when you need a decision mid-task, or when a long task he queued remotely finishes. Routes to Telegram by default. urgency "call" places a real phone call via Twilio (reserve for production failures / system-down). Do NOT use for routine output.',
     input_schema: { type: 'object', properties: {
       message: { type: 'string', description: 'The message (≤400 chars). For a call, write it as a spoken sentence.' },
@@ -1600,8 +1619,82 @@ async function generate3D(input) {
     const gbuf = Buffer.from(await gr.arrayBuffer());
     const outPath = path.join(outDir, `${fname}.glb`);
     fs.writeFileSync(outPath, gbuf);
-    return { success: true, path: outPath, size_mb: (gbuf.length / 1048576).toFixed(2), seconds: tries * 3, message: `3D model → ${outPath}. Import into Blender, Unity, or Three.js.` };
+    if (input.preview !== false) openInteractive3D(outPath);       // interactive Quick Look view
+    return { success: true, path: outPath, size_mb: (gbuf.length / 1048576).toFixed(2), seconds: tries * 3, message: `3D model → ${outPath}. Opened an interactive 3D preview. Import into Blender, Unity, or Three.js (or run make_printable mode convert to get a printable STL).` };
   } catch (e) { return { success: false, error: 'GLB download error: ' + e.message }; }
+}
+
+// ---------------------------------------------------------------------------
+// 2D image → printable 3D mesh (STL), or 3D model (GLB/OBJ) → STL. Deterministic,
+// local, offline. Backed by scripts/mesh_tool.py in the dedicated mesh venv.
+//   extrude → silhouette solid (logos/stamps/keychains/cookie-cutters)
+//   relief  → grayscale height-map / lithophane
+//   convert → existing model (e.g. a TRELLIS .glb) → STL
+// ---------------------------------------------------------------------------
+const MESH_PY = path.join(os.homedir(), '.bhatbot', 'mesh-venv', 'bin', 'python');
+// Open a 3D file (STL/GLB/OBJ) in an INTERACTIVE in-app three.js viewer — its own desktop
+// window (orbit / zoom / pan), offline. The model bytes are streamed over IPC once the
+// viewer signals ready (no file:// fetch / CSP issues).
+let viewerWindow = null, pendingModel = null;
+function openInteractive3D(p) {
+  try {
+    if (!p || !fs.existsSync(p)) return;
+    const ext = path.extname(p).slice(1).toLowerCase();
+    const data = fs.readFileSync(p).toString('base64');
+    const info = (fs.statSync(p).size / 1048576).toFixed(2) + ' MB';
+    pendingModel = { data, ext, name: path.basename(p), info };
+    if (viewerWindow && !viewerWindow.isDestroyed()) {
+      viewerWindow.show(); viewerWindow.focus();
+      viewerWindow.webContents.send('model', pendingModel);
+      return;
+    }
+    viewerWindow = new BrowserWindow({
+      width: 920, height: 740, x: 180, y: 100, title: 'Bhatbot 3D Viewer',
+      backgroundColor: '#0a0f17', fullscreen: false, alwaysOnTop: false,
+      webPreferences: { contextIsolation: true, nodeIntegration: false, preload: path.join(__dirname, 'src', 'preload-viewer.js') },
+    });
+    viewerWindow.loadFile(path.join(__dirname, 'src', 'viewer.html'));
+    viewerWindow.on('closed', () => { viewerWindow = null; });
+  } catch (e) { console.warn('[viewer]', e.message); }
+}
+ipcMain.on('viewer-ready', (e) => { try { if (pendingModel) e.sender.send('model', pendingModel); } catch {} });
+function makePrintable(input) {
+  return new Promise((resolve) => {
+    if (!fs.existsSync(MESH_PY)) { resolve({ success: false, error: 'Mesh toolchain not installed (~/.bhatbot/mesh-venv missing).' }); return; }
+    const mode = ['extrude', 'relief', 'convert'].includes(input.mode) ? input.mode : 'extrude';
+    let src = input.path;
+    if ((!src || !fs.existsSync(src)) && mode !== 'convert' && lastImagePath && fs.existsSync(lastImagePath)) src = lastImagePath;
+    if (!src || !fs.existsSync(src)) { resolve({ success: false, error: `Source not found: ${input.path || '(none)'} — import/drag an image first or pass an absolute path.` }); return; }
+    const outDir = (loadConfig().imageOutputDir || '~/.bhatbot/generated').replace(/^~/, os.homedir());
+    fs.mkdirSync(outDir, { recursive: true });
+    const fname = (input.filename || `print_${Date.now()}`).replace(/[^\w.-]/g, '_');
+    const outPath = path.join(outDir, `${fname}.stl`);
+    const script = path.join(__dirname, 'scripts', 'mesh_tool.py');
+    const args = [script, mode, src, '--out', outPath];
+    if (mode === 'extrude' || mode === 'relief') {
+      if (input.height_mm != null) args.push('--height', String(input.height_mm));
+      if (input.base_mm != null) args.push('--base', String(input.base_mm));
+      if (input.size_mm != null) args.push('--size', String(input.size_mm));
+      if (input.invert) args.push('--invert');
+    }
+    const proc = spawn(MESH_PY, args, { env: { ...process.env, PATH: EXEC_PATH } });
+    let out = '', err = '';
+    proc.stdout.on('data', (d) => { out += d; });
+    proc.stderr.on('data', (d) => { err += d; });
+    const to = setTimeout(() => { try { proc.kill(); } catch {} }, 180000);
+    proc.on('close', () => {
+      clearTimeout(to);
+      let j = null; try { j = JSON.parse(out.trim().split('\n').pop()); } catch {}
+      if (j && j.ok) {
+        if (input.preview !== false) openInteractive3D(j.path);     // interactive Quick Look view
+        resolve({ success: true, path: j.path, mode, dims_mm: j.dims_mm, volume_cm3: j.volume_cm3, watertight: j.watertight,
+          message: `STL → ${j.path} (${j.dims_mm.join('×')} mm${j.volume_cm3 != null ? `, ${j.volume_cm3} cm³` : ''}${j.watertight ? ', watertight' : ', printable (auto-repair in slicer)'}). Opened an interactive 3D preview. Ready to slice for 3D printing.` });
+      } else {
+        resolve({ success: false, error: (j && j.error) || err.slice(-300) || 'mesh_tool failed' });
+      }
+    });
+    proc.on('error', (e) => { clearTimeout(to); resolve({ success: false, error: e.message }); });
+  });
 }
 
 async function executeTool(name, input) {
@@ -1644,6 +1737,8 @@ async function executeTool(name, input) {
       }
       case 'open_in_browser':
         await shell.openExternal(input.url); result = { success: true, opened: input.url }; break;
+      case 'make_printable':
+        result = await makePrintable(input); break;
       case 'notify_user':
         result = await notifyUser(input.message, input.urgency || 'low'); break;
       case 'media_control':
@@ -2820,7 +2915,7 @@ ipcMain.handle('pick-media', async () => {
   });
   if (r.canceled) return { blocks: [], names: [] };
   const blocks = [], names = [];
-  for (const p of r.filePaths) { blocks.push(...await mediaFileToBlocks(p)); names.push(path.basename(p)); }
+  for (const p of r.filePaths) { blocks.push(...await mediaFileToBlocks(p)); names.push(path.basename(p)); rememberImagePath(p); }
   return { blocks, names };
 });
 ipcMain.handle('chat', async (event, { history }) => {
@@ -2846,9 +2941,13 @@ ipcMain.handle('cred-remove', (_e, { ref }) => { credentials.remove(ref); return
 // Drag-dropped / picked file paths → vision/text blocks for the next message.
 ipcMain.handle('attach-paths', async (_e, paths) => {
   const blocks = [], names = [];
-  for (const p of (paths || [])) { try { blocks.push(...await mediaFileToBlocks(p)); names.push(path.basename(p)); } catch {} }
+  for (const p of (paths || [])) { try { blocks.push(...await mediaFileToBlocks(p)); names.push(path.basename(p)); rememberImagePath(p); } catch {} }
   return { blocks, names };
 });
+// Remember the most recently imported still image so make_printable can default to it
+// ("drag a logo in, say 'make this a printable STL'").
+let lastImagePath = null;
+function rememberImagePath(p) { if (/\.(png|jpe?g|gif|webp|heic|heif)$/i.test(p || '')) lastImagePath = p; }
 ipcMain.on('agent-pause', () => { if (agentState === 'running') agentState = 'paused'; });
 ipcMain.on('agent-resume', () => { if (agentState === 'paused') agentState = 'running'; });
 ipcMain.on('agent-stop', () => { agentState = 'stopped'; });

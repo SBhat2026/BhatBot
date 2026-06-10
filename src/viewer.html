@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Bhatbot 3D Viewer</title>
+<style>
+  :root { --accent:#00c8ff; --bg:#0a0f17; }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body { height:100%; overflow:hidden; background:var(--bg); font-family:'JetBrains Mono',monospace; color:#9fb4c8; }
+  #c { width:100%; height:100%; display:block; }
+  #bar { position:fixed; top:0; left:0; right:0; display:flex; align-items:center; gap:14px; padding:7px 14px;
+    font-size:12px; color:#5b708a; background:linear-gradient(180deg,rgba(10,15,23,.92),rgba(10,15,23,0)); z-index:5; pointer-events:none; }
+  #bar b { color:var(--accent); letter-spacing:.12em; }
+  #info { margin-left:auto; }
+  #hint { position:fixed; bottom:10px; left:0; right:0; text-align:center; font-size:11px; color:#46627d; z-index:5; pointer-events:none; }
+  #err { position:fixed; inset:0; display:none; align-items:center; justify-content:center; text-align:center; padding:30px; color:#ff8a99; font-size:13px; line-height:1.6; }
+</style>
+</head>
+<body>
+<div id="bar"><b>◉ 3D VIEWER</b><span id="name"></span><span id="info"></span></div>
+<canvas id="c"></canvas>
+<div id="hint">drag to orbit · scroll to zoom · right-drag to pan</div>
+<div id="err"></div>
+
+<script type="importmap">
+{ "imports": {
+  "three": "../node_modules/three/build/three.module.js",
+  "three/addons/": "../node_modules/three/examples/jsm/"
+} }
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { STLLoader } from 'three/addons/loaders/STLLoader.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+const canvas = document.getElementById('c');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0a0f17);
+const camera = new THREE.PerspectiveCamera(45, 1, 0.01, 5000);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true; controls.dampingFactor = 0.08;
+
+// lighting + grid
+scene.add(new THREE.HemisphereLight(0xbfe6ff, 0x0a0f17, 1.1));
+const key = new THREE.DirectionalLight(0xffffff, 1.4); key.position.set(1, 1.4, 1); scene.add(key);
+const fill = new THREE.DirectionalLight(0x66ccff, 0.5); fill.position.set(-1, 0.5, -0.8); scene.add(fill);
+let grid = null;
+
+let current = null;
+function addGrid(maxDim) {
+  if (grid) scene.remove(grid);
+  grid = new THREE.GridHelper(maxDim * 3, 24, 0x0a4a63, 0x10202c);
+  grid.position.y = -maxDim / 2 - 0.001;
+  scene.add(grid);
+}
+
+function showError(msg) { const e = document.getElementById('err'); e.style.display = 'flex'; e.textContent = msg; }
+
+function b64ToArrayBuffer(b64) {
+  const bin = atob(b64); const len = bin.length; const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes.buffer;
+}
+
+const accentMat = new THREE.MeshStandardMaterial({ color: 0x39d7ff, metalness: 0.15, roughness: 0.55, flatShading: false });
+
+function setModel(buf, ext, name, info) {
+  try {
+    if (current) { scene.remove(current); current = null; }
+    let obj;
+    if (ext === 'glb' || ext === 'gltf') {
+      new GLTFLoader().parse(buf, '', (gltf) => { mount(gltf.scene); }, (e) => showError('GLB parse failed: ' + e));
+      return;
+    } else {
+      const geo = new STLLoader().parse(buf);
+      geo.computeVertexNormals();
+      obj = new THREE.Mesh(geo, accentMat);
+    }
+    mount(obj);
+  } catch (e) { showError(String(e)); }
+  function mount(o) {
+    const box = new THREE.Box3().setFromObject(o);
+    const size = box.getSize(new THREE.Vector3());
+    const center = box.getCenter(new THREE.Vector3());
+    o.position.sub(center);
+    const maxDim = Math.max(size.x, size.y, size.z) || 1;
+    scene.add(o); current = o;
+    camera.position.set(maxDim * 1.5, maxDim * 1.1, maxDim * 1.7);
+    camera.near = maxDim / 100; camera.far = maxDim * 50; camera.updateProjectionMatrix();
+    controls.target.set(0, 0, 0); controls.update();
+    addGrid(maxDim);
+    document.getElementById('name').textContent = name || '';
+    document.getElementById('info').textContent = info || '';
+  }
+}
+
+function resize() {
+  const w = innerWidth, h = innerHeight;
+  renderer.setSize(w, h, false); camera.aspect = w / h; camera.updateProjectionMatrix();
+}
+addEventListener('resize', resize); resize();
+(function loop() { requestAnimationFrame(loop); controls.update(); renderer.render(scene, camera); })();
+
+window.viewer.onModel((d) => {
+  document.getElementById('err').style.display = 'none';
+  setModel(b64ToArrayBuffer(d.data), d.ext, d.name, d.info);
+});
+window.viewer.ready();
+</script>
+</body>
+</html>
