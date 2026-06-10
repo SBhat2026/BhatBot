@@ -1,0 +1,32 @@
+name: BhatBot
+options:
+  bundleIdPrefix: com.bhat
+  deploymentTarget:
+    iOS: "15.0"
+targets:
+  BhatBot:
+    type: application
+    platform: iOS
+    sources: [Sources]
+    info:
+      path: Sources/Info.plist
+      properties:
+        CFBundleDisplayName: BhatBot
+        UILaunchScreen:
+          UIColorName: ""
+        NSMicrophoneUsageDescription: "BhatBot uses the microphone for voice commands and the wake word."
+        NSCameraUsageDescription: "BhatBot uses the camera to attach photos and screenshots."
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+        UIStatusBarStyle: UIStatusBarStyleLightContent
+        UIViewControllerBasedStatusBarAppearance: false
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.bhat.bhatbot
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        GENERATE_INFOPLIST_FILE: NO
+        SWIFT_VERSION: "5.0"

@@ -302,16 +302,16 @@ size_mm). A photo to turn into a backlit lithophane or a relief surface -> mode 
 mode convert. If the user just imported/dragged an image, you can omit path. Report the STL
 path and its mm dimensions so they can slice it.
 
-VOICE — <speak> tags control what is said aloud:
-Wrap the part you want SPOKEN in <speak>...</speak>. Only that text is sent to TTS;
-everything else is shown on screen only. Keep the spoken part short, plain, and
-conversational — no markdown, code, paths, or URLs inside <speak>.
-- Short reply → wrap the whole thing: <speak>Build's green, all tests pass.</speak>
-- Long/detailed reply → put the detail as normal text on screen, and add ONE short
-  spoken line: ...full breakdown on screen... <speak>Found three issues; the auth one
-  is the blocker.</speak>
-If you genuinely have nothing worth saying aloud (pure code/data dump), you may omit
-<speak> entirely and nothing will be spoken. Never read long output verbatim.
+VOICE — speech is ALWAYS on. By default your ENTIRE reply is read aloud as it streams,
+so EVERY reply gets a voice. <speak> tags are a BREVITY OVERRIDE for long replies:
+- Short / conversational reply → just write it. It is spoken in full. No tags needed.
+- Long / detailed reply → wrap ONLY the short line you want said aloud in <speak>…</speak>;
+  the rest shows on screen but is NOT spoken. Keep what's inside <speak> short, plain,
+  conversational — no markdown, code, paths, or URLs.
+  Example: ...full breakdown on screen... <speak>Found three issues; the auth one is the blocker.</speak>
+Rule of thumb: omit <speak> and the whole thing is spoken; add <speak> to keep a long
+reply's spoken part brief. Never dump raw code/data without a <speak> summary, or it gets
+read verbatim.
 
 MEDIA: Use media_control for any Spotify or volume request (play, pause, skip,
 "what's playing", set Spotify or system volume). Plain requests control the Mac's
@@ -2142,7 +2142,21 @@ function maybeTogglePipeline(text) {
   if (!m) return null;
   const on = /enable|on/i.test(m[1]);
   const p = loadConfig().pipeline || {}; p.enabled = on; saveConfig({ pipeline: p });
+  if (on) warmRouter();
   return `Local multi-agent pipeline ${on ? 'enabled' : 'disabled'}, sir.`;
+}
+
+// Preload the router into RAM so the FIRST classification is ~0.7s, not the ~5s cold load.
+// keep_alive:-1 keeps it resident thereafter. Fire-and-forget, safe if Ollama is down.
+let _routerWarmed = false;
+async function warmRouter() {
+  if (_routerWarmed) return; _routerWarmed = true;
+  try {
+    if (!(await ollamaUp())) { _routerWarmed = false; return; }
+    const model = await resolveModel(pipelineCfg().routerModel, ['qwen3:latest', 'gemma3:12b']);
+    await ollamaGenerate(model, 'ok', { num_ctx: CTX_TIERS.router, keep_alive: -1, timeoutMs: 20000 });
+    console.log('[pipeline] router warmed:', model);
+  } catch { _routerWarmed = false; }
 }
 
 // One-shot Ollama generate with explicit RAM levers (num_ctx caps KV cache, num_gpu
@@ -2159,6 +2173,15 @@ async function ollamaGenerate(model, prompt, opts = {}) {
   if (!r.ok) throw new Error(`ollama ${r.status}`);
   const j = await r.json();
   return (j.response || '').trim();
+}
+// Local models inherit the <speak> instructions and often emit the tags literally. Pull
+// them out: `display` = tag-free text for chat, `spoken` = the wrapped line if present
+// (else the whole thing) for TTS.
+function extractSpeakText(s) {
+  const t = String(s || '');
+  const m = t.match(/<speak>([\s\S]*?)<\/speak>/i);
+  const display = t.replace(/<\/?speak>/gi, '').trim();
+  return { display, spoken: (m ? m[1] : display).trim() };
 }
 function parseJsonLoose(s) {
   try { return JSON.parse(s); } catch {}
@@ -2281,7 +2304,12 @@ async function runPipeline(history, apiKey, event, opts = {}) {
     const model = await resolveModel(cfg.routerModel, ['qwen3:latest', 'gemma3:12b']);
     try {
       const text = await ollamaGenerate(model, userMessage, { num_ctx: CTX_TIERS.executor, keep_alive: -1, system: buildSystemPrompt(userMessage) });
-      if (text) { try { event && event.sender && event.sender.send('chat-token', text); } catch {} return { text, history: [...history, { role: 'assistant', content: text }], _provider: 'pipeline-local' }; }
+      if (text) {
+        const { display, spoken } = extractSpeakText(text);   // strip any literal <speak> tags
+        try { event && event.sender && event.sender.send('chat-token', display); } catch {}
+        if (opts.stream) speakDesktop(spoken);   // desktop-originated → speak it (phone does its own TTS)
+        return { text: display, history: [...history, { role: 'assistant', content: display }], _provider: 'pipeline-local' };
+      }
     } catch (e) { console.warn('[pipeline] simple failed:', e.message); }
     return escalate('local simple failed');
   }
@@ -2299,7 +2327,8 @@ async function runPipeline(history, apiKey, event, opts = {}) {
   }
   const validation = await criticValidate(plan, results);
   if (!validation.allPassed) return escalate('critic rejected');
-  const full = results.map((r, i) => `### ${plan.steps[i].action}\n${r.output}`).join('\n\n');
+  const full = extractSpeakText(results.map((r, i) => `### ${plan.steps[i].action}\n${r.output}`).join('\n\n')).display;
+  if (opts.stream) speakDesktop(validation.summary || full);   // speak the critic's summary aloud
   return { text: full, history: [...history, { role: 'assistant', content: full }], _provider: 'pipeline-local', _summary: validation.summary };
 }
 
@@ -2332,6 +2361,7 @@ async function runAgentHeadless(instruction, opts = {}) {
 }
 
 async function initMcpServer() {
+  if (pipelineCfg().enabled) warmRouter();   // preload the local router so the first hop is fast
   const c = loadConfig();
   if (c.mcpEnabled === false) return;
   let token = c.mcpToken;
@@ -3004,34 +3034,46 @@ function partialTagTail(s, tag) {
   for (let k = max; k > 0; k--) if (tag.startsWith(s.slice(s.length - k))) return k;
   return 0;
 }
-// Per-turn streaming parser: pulls <speak>…</speak> content out of the token stream and
-// feeds ONLY that to TTS, while returning the tag-stripped text for on-screen display.
-// Handles tags split across deltas. If the model never used <speak>, we speak nothing
-// (per the prompt) unless the whole reply is short (likely an unwrapped quick answer).
+// Per-turn streaming parser. GUARANTEE: every reply is spoken as it streams.
+//   • If the model uses <speak>…</speak> → speak ONLY that (brevity override: detail
+//     stays on screen, a short line is read aloud).
+//   • If the model omits <speak> → speak the ENTIRE visible reply, streamed sentence by
+//     sentence (no more silent replies). Decision is made early so audio starts at ~the
+//     first sentence; once committed to plain mode we never go silent.
+// Handles tags split across deltas. ttsStreamFeed strips markdown/code before synth.
 function makeSpeakStream(seq) {
   const OPEN = '<speak>', CLOSE = '</speak>';
-  let pending = '', inside = false, sawTag = false, full = '';
+  let pending = '', inside = false, sawTag = false, full = '', mode = 'undecided';
+  const strip = (s) => s.replace(/<\/?speak>/g, '');
   function feed(delta) {
-    full += delta; pending += delta; let display = '';
+    full += delta;
+    // Committed plain mode → fast path: everything visible is spoken.
+    if (mode === 'plain') { const d = strip(pending + delta); pending = ''; if (d) { ttsStreamFeed(seq, d); recordSpoken(d); } return d; }
+    pending += delta; let display = '';
     while (pending.length) {
       if (!inside) {
         const i = pending.indexOf(OPEN);
         if (i === -1) { const keep = partialTagTail(pending, OPEN); display += pending.slice(0, pending.length - keep); pending = pending.slice(pending.length - keep); break; }
-        display += pending.slice(0, i); pending = pending.slice(i + OPEN.length); inside = true; sawTag = true;
+        display += pending.slice(0, i); pending = pending.slice(i + OPEN.length); inside = true; sawTag = true; mode = 'tag';
       } else {
         const j = pending.indexOf(CLOSE);
         if (j === -1) { const keep = partialTagTail(pending, CLOSE); const emit = pending.slice(0, pending.length - keep); if (emit) { ttsStreamFeed(seq, emit); recordSpoken(emit); display += emit; } pending = pending.slice(pending.length - keep); break; }
         const segq = pending.slice(0, j); if (segq) { ttsStreamFeed(seq, segq); recordSpoken(segq); display += segq; } pending = pending.slice(j + CLOSE.length); inside = false;
       }
     }
+    // No <speak> has appeared and we have enough signal (a sentence end or ~60 chars) →
+    // commit to plain mode and speak everything streamed so far. Guarantees speech.
+    if (mode === 'undecided') {
+      const s = strip(full);
+      if (s.length >= 60 || /[.!?\n]/.test(s)) { mode = 'plain'; if (s) { ttsStreamFeed(seq, s); recordSpoken(s); } pending = ''; }
+    }
     return display;
   }
   function finish() {
-    let display = pending.replace(/<\/?speak>/g, '');
-    if (inside && display) { ttsStreamFeed(seq, display); recordSpoken(display); }
-    pending = '';
-    // No <speak> at all but a short reply → speak it (model likely just didn't wrap a quick answer).
-    if (!sawTag) { const f = full.replace(/<\/?speak>/g, '').trim(); if (f && f.length <= 160) { ttsStreamFeed(seq, f); recordSpoken(f); } }
+    const display = strip(pending); pending = '';
+    if ((inside || mode === 'plain') && display) { ttsStreamFeed(seq, display); recordSpoken(display); }
+    // Reply too short to ever trip the threshold (e.g. "Done.") → speak it whole.
+    else if (mode === 'undecided') { const f = strip(full).trim(); if (f) { ttsStreamFeed(seq, f); recordSpoken(f); } }
     ttsStreamFlush(seq);
     return { sawTag, display };
   }

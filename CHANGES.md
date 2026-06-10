@@ -2,6 +2,23 @@
 
 What was built differently from `BHATBOT_MEGAPROMPT.md`, and why. For reference.
 
+## Pass 36 — Standalone iOS app + guaranteed streaming TTS + router warm-up
+
+- **Standalone iPhone app** (`phone-app/`): native WKWebView shell (SwiftUI) loading the
+  funnel URL, so content auto-updates with every push — no rebuild for UI changes. Mic/
+  camera auto-granted, pull-to-refresh, reload-on-foreground, retry-on-offline. XcodeGen
+  `project.yml` + `build.sh`; README covers Xcode-direct / AltStore (auto-resign, never
+  expires) / paid-dev install paths. Compiles clean (iOS 15+). Only the URL+token is baked
+  in (`Sources/Config.swift`). Solves "stop re-adding the Safari shortcut."
+- **Guaranteed streaming TTS.** `makeSpeakStream` flipped: omitting `<speak>` no longer
+  means silence — the ENTIRE reply is now spoken as it streams (decision committed at the
+  first sentence / ~60 chars). `<speak>` becomes a brevity OVERRIDE (speak only the wrapped
+  line) for long replies. STATIC_PROMPT VOICE section updated to match. Pipeline-local
+  replies (simple + complex) now also speak on the desktop (`speakDesktop`). Fixes "not all
+  responses make it speak."
+- **Router warm-up** (`warmRouter`): preloads `gemma3n:e4b` at startup + on enable so the
+  first classification is ~0.7s, not the ~5s cold load. Measured warm router hop: ~0.65s.
+
 ## Pass 34 — Two-way voice calls + phone tabbed UI + phone wake word
 
 - **Twilio two-way voice (JARVIS voice).** `twilioCall` no longer reads a one-shot
