@@ -1,0 +1,26 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "BhatBot workspace tasks.json (orchestrator working set / task graph)",
+  "type": "object",
+  "required": ["seq", "tasks"],
+  "properties": {
+    "seq": { "type": "integer", "minimum": 0 },
+    "tasks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "agent", "goal", "status"],
+        "properties": {
+          "id": { "type": "string" },
+          "agent": { "enum": ["orchestrator", "coding", "research", "browser", "memory", "creative"] },
+          "goal": { "type": "string" },
+          "expects": { "enum": ["patch", "facts", "report", "artifact", "answer"] },
+          "components": { "type": ["array", "null"], "items": { "type": "string" } },
+          "status": { "enum": ["queued", "in_progress", "done", "failed", "blocked", "cancelled"] },
+          "parent": { "type": ["string", "null"] },
+          "summary": { "type": "string" }
+        }
+      }
+    }
+  }
+}

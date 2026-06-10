@@ -15,6 +15,8 @@ contextBridge.exposeInMainWorld('bhatbot', {
   getVoiceConfig: () => ipcRenderer.invoke('get-voice-config'),
   transcribeAudio: (data) => ipcRenderer.invoke('transcribe-audio', data),
   synthesizeSpeech: (text) => ipcRenderer.invoke('synthesize-speech', { text }),
+  playTTS: (text, full) => ipcRenderer.invoke('play-tts', { text, full }),
+  stopTTS: () => ipcRenderer.invoke('stop-tts'),
   summarizeForSpeech: (text) => ipcRenderer.invoke('summarize-for-speech', { text }),
   sayLocal: (text) => ipcRenderer.invoke('say-local', { text }),
   openNexus: () => ipcRenderer.invoke('open-nexus'),

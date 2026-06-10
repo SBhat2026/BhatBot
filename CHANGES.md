@@ -2,6 +2,72 @@
 
 What was built differently from `BHATBOT_MEGAPROMPT.md`, and why. For reference.
 
+## Pass 23 — Streaming responses + streaming TTS + history guard + app control
+
+- **Streaming responses (biggest latency win):** `anthropicStream()` SSE reader assembles
+  the same message shape as the blocking call but emits text deltas live via `onText`.
+  `callModel`/`agentLoop` thread `onText` (desktop chat path only; MCP/Telegram unchanged).
+  Renderer renders tokens into a live bubble. **Verified live: first token ~1.08s** (was
+  ~full-generation wait). Tool loop unchanged — text before a tool_use streams too.
+- **Streaming TTS:** `ttsStream*` speaks each sentence the moment it completes while the
+  model keeps generating → first audio ~sentence 1 (~2-3s), no summarize round-trip, no
+  network TTS-1. Shares `ttsPlaySeq` so a new turn cancels in-flight speech. Renderer skips
+  its own `speak()` when `_streamed` (no double audio).
+- **Self-hallucination guard `validateHistory()`** (called at agentLoop start): drops a user
+  msg that exactly echoes the previous assistant reply (the self-feedback loop), strips
+  orphan `tool_result`s, and pops a trailing assistant turn with an unanswered `tool_use`.
+  Logs each heal to console.
+- **AppleScript open/quit ANY app:** `system_control` gains `open_app` (via `open -a` +
+  activate — reliable cold launch) and `quit_app`. **Live-tested:** Photos, App Store, Notes,
+  Messages (quit+reopen), Claude (quit+reopen) — 5/5 opened, all confirmed running. Spotify
+  open verified.
+- Tool enum updated; descriptions mention launching/quitting apps by name.
+
+## Pass 22 — Orchestrator wired into app + memory layer + speed
+
+- **Spotify Mac playback fixed (real bug):** play path required an already-`is_active`
+  device; the Mac app reports `is_active:false` even when open → every play failed. Now
+  `spotifyConnect` AUTO-TARGETS a device (explicit → active → Computer → first) and always
+  passes `device_id`, which WAKES an inactive Mac. 404 → transfer-then-retry. Verified live:
+  `play status: 204`. (Phone still must start playback once to register on Connect — no API
+  to force-pin a backgrounded phone.)
+- **Orchestrator wired into main.js:** new `delegate_project` tool routes big multi-step
+  goals through the workspace multi-agent stack (flat context). `orchestratorAdapters()`
+  reuses main.js `ollamaChat`/`anthropicRequest` (keeps rate-limit accounting + caching).
+- **Semantic memory built (`lib/memory.js`):** per-workspace vector store, Ollama embeddings
+  with deterministic lexical fallback (works with no embed model installed), cosine top-k,
+  dedup>0.92, decay rollup. Verified: trellis query returns trellis chunks first.
+- **Adapters/CLI:** `lib/adapters.js` (standalone bridge), `scripts/orchestrate.js`
+  (run a goal end-to-end, no Electron), `scripts/resume.js` (print resume token).
+- **Trellis integration (`lib/integrations/trellis.js`):** PiAPI submit/poll/download →
+  artifacts/, tracked as state facts. Needs `trellisApiKey`.
+- **Schemas completed:** goals/workspace/decision/creative/inspect added (envelope/state/
+  tasks already done). Router defaults set to installed models (qwen3, qwen2.5-coder:7b, gemma3:12b).
+- **Speed:**
+  - TTS → ElevenLabs `eleven_flash_v2_5` (~75ms vs turbo ~250-400ms) +
+    `optimize_streaming_latency=3`. Config switched to flash.
+  - Speech summarize threshold 300→500 chars → most replies skip the extra LLM round-trip
+    before speaking → audio starts sooner.
+
+## Pass 21 — Architecture v2 (workspace multi-agent) + Spotify device permanence
+
+- **Spotify "permanent" devices:** `spotifyDevices()` now caches every device ever seen
+  to `config.spotifyDevices` (Spotify drops idle phones from the live list). `pickDevice`
+  falls back to cached/offline devices (`_live` flag); `list_devices` shows online +
+  `[offline — open Spotify on it]`; `transfer` refuses offline with a clear message.
+  Root cause of "phone not listed" = phone backgrounded → drops off Connect; foreground
+  Spotify on the phone once and it's cached thereafter. No API to force-pin.
+- **`ARCHITECTURE.md`** — full v2 redesign: workspaces, structured state vs. semantic
+  memory, 6-agent protocol (typed envelopes, context firewall), context manager (flat
+  ~7k/step regardless of project age), local-first router + cost governor (<$10/mo),
+  autonomous browser dev-loop, 6-phase roadmap.
+- **Scaffolded (real, tested):** `lib/workspace.js`, `lib/state.js`, `lib/context.js`,
+  `lib/router.js`, `lib/agents/{protocol,base,orchestrator}.js`, `lib/agents/roles/`,
+  `lib/schemas/{envelope,state,tasks}.json`, `scripts/ws.js` CLI. Smoke test passes
+  (state set/transition/snapshot, result-envelope apply, checkpoint/resume).
+- Nothing existing removed; current single-agent `agentLoop` + voice/TTS untouched.
+
+
 ## Model IDs (changed)
 - Spec used `claude-sonnet-4-20250514` and `claude-haiku-4-5-20251001`.
 - **Changed to** `claude-sonnet-4-6` (Sonnet 4.6) and `claude-haiku-4-5` (Haiku 4.5) — the current IDs. The dated strings are stale and would 404 or pin an old model.
@@ -201,3 +267,88 @@ User decisions: TTS=add `say` for tiny replies (kept advanced TTS); BUILD=media 
 - **System prompt:** appended VOICE / MEDIA / PHONE / PROACTIVE blocks to STATIC_PROMPT.
 - **Config:** + ttsLocalVoice="Daniel", telegramToken, telegramChatId, briefingEnabled, briefingChecks.
 - Verified: main.js syntax OK; clean boot ([telegram] dormant, [briefing] unscheduled); media_control live; Daniel en_GB present.
+
+## Pass 16 (2026-06-07) — media import (screenshots / photos / screen recordings → vision)
+- **Goal:** import screenshots, screen recordings, and photo-library images into Claude vision, from both HUD and phone.
+- **main.js media helpers:** `VISION_MAX_DIM=1568`, `imgBlock()`, `sipsToJpeg()` (HEIC/resize via `sips -Z 1568 -s format jpeg`), `videoFrames()` (ffmpeg `fps=1/2,scale=1568` → up to 6 b64 jpg frames), `mediaFileToBlocks(path)`, `mimeToExt()`, `mediaBytesToBlocks(buf,mime)`.
+- **IPC `pick-media`** → native dialog (multiSelect, images+video) → `{blocks,names}`. **`runAgentHeadless`** now accepts `opts.blocks` and prepends them to the user turn as a content array.
+- **mcp-server `POST /api/:token/attach`** (`express.raw` 120mb) → `media(req.body, ?mime)` → `{blocks}`; **`/chat`** now accepts `blocks`.
+- **HUD (index.html):** 📎 attach button + chip bar; `send()` builds an image content array. **Phone (mobile.html):** 📎 + hidden `<input type=file accept="image/*,video/*" multiple>` (iOS exposes Photo Library / Camera / Files) → POST `/attach` → `pendingBlocks` → `/chat` with blocks.
+- **preload.js** `pickMedia`. **Verified:** `/attach` returned an image block; `/chat` with it → agent described the image ("Glowing cyan sphere with concentric rings and particles.").
+
+## Pass 17 (2026-06-07) — local Kokoro neural TTS (free, offline, British Jarvis)
+- **Why:** eliminate per-reply TTS API cost + latency; run high-quality voice locally on the M4 (user request: try Kokoro/Piper/local-first).
+- **Install:** `pip install kokoro-onnx soundfile`; models in `~/.bhatbot/kokoro/` (`kokoro-v1.0.onnx` 310MB + `voices-v1.0.bin` 27MB, from thewh1teagle/kokoro-onnx release `model-files-v1.0`).
+- **Warm worker:** `scripts/kokoro_worker.py` loads the model ONCE then serves one JSON request/line on stdin → temp wav path on stdout (avoids the ~0.8s reload per reply). main.js manages it as a singleton (`kokoroStart`/`kokoroSynth`, line-buffered stdout, pending-id map, 30s timeout, auto-respawn on exit). Pre-warmed in `whenReady`; killed in `will-quit`.
+- **synthesizeSpeech:** provider now defaults to **kokoro** when the model is present (`kokoroAvailable()`), else elevenlabs/openai/piper as before. On any kokoro failure it **falls back to elevenLabs → openai** so the voice never goes silent. Extracted `elevenLabsSynth()`/`openaiSynth()` helpers (were inline) for reuse as fallbacks. `get-voice-config` reports kokoro.
+- **Voice:** British `bm_george` (`kokoroVoice`/`kokoroSpeed`/`kokoroLang` configurable; `en-gb`). Returns `audio/wav` — phone decodes via Web Audio `decodeAudioData`, HUD via typed Blob; no client change needed.
+- **Config:** `ttsProvider="kokoro"`, `kokoroVoice="bm_george"`, `kokoroLang="en-gb"` (elevenLabs key retained as fallback).
+- **Verified:** warm worker (ready 821ms; warm synth ~1.3s/sentence); clean boot logs `[tts] kokoro warm (local)`; `POST /api/<token>/tts` → `via=kokoro`, `audio/wav`, 196KB real audio.
+
+### Pass 17.1 — desktop voice actually audible (afplay)
+- **Symptom:** "I didn't hear it say anything" on the Mac (phone fine). Root cause: the renderer `<Audio>` element is unreliable in Electron (autoplay/codec quirks) — the autoplay-policy switch wasn't enough. OS audio itself was fine (`say`, `afplay`, vol all worked).
+- **Fix:** desktop voice now synthesizes AND plays in the **main process**. New `speakDesktop(text,{full})` + `stopDesktopTTS()` (IPC `play-tts`/`stop-tts`): short→`say -v Daniel`, long→`summarizeForSpeech`, else kokoro synth → temp file → **`afplay`**. HUD `speak()`/`stopSpeaking()` rewired to call these (dropped renderer `Audio`/`playBlob`/`curAudio`). Phone path (Web Audio) unchanged. `ttsEnabled:false` honored.
+
+## Pass 18 (2026-06-07) — packaged .app bundle (unlocks Accessibility + autostart)
+- **Why:** AppleScript/System Events automation needs Accessibility permission, which requires a stable .app bundle (also fixes mic-on-autostart — was Terminal-launched for TCC).
+- **electron-builder** (`npm run build` → `--mac dir`; `build:dmg` for a dmg). Config in package.json `build`: `asar:false` (sidesteps spawning python from inside an archive + native-module unpack), icon `build/icon.png` (from mobile 512), `identity:null` (unsigned/ad-hoc — local use), `hardenedRuntime:false`, `gatekeeperAssess:false`. Moved `electron` to devDependencies (builder requirement).
+- **Info.plist** `extendInfo`: NSMicrophoneUsageDescription, NSAppleEventsUsageDescription (AppleScript/Spotify/window control), NSCameraUsageDescription.
+- **Bundle-safe spawns:** added `unpacked(p)` helper (rewrites app.asar→app.asar.unpacked when packaged; no-op with asar:false) applied to `listen.py` + `kokoro_worker.py` paths. Kokoro models/config stay external in `~/.bhatbot/` (read via os.homedir).
+- Built `Bhatbot.app` (285M), installed to **/Applications**, cleared quarantine. Verified: boots clean (kokoro warm, MCP bound `/health` 200, telegram+briefing active), bundle contains scripts + node-pty `pty.node` + src.
+
+### Pass 18.1 — natural cadence + voice customization (phone-focused)
+- **Less robotic:** the main robotic factor was per-sentence chunking (Kokoro resets intonation each chunk). Now **short spoken text (≤350 chars) is synthesized in ONE call** for continuous prosody; only long full-reads stream sentence chunks (fast start). Applied on both desktop (`speakDesktop`) and phone (`speak`).
+- **Customizable voice/speed:** `synthesizeSpeech(text, opts)` → `kokoroSynth(text, opts)` honors `{voice, speed}`; `KOKORO_VOICES` allow-list (junk → config default), speed clamped 0.6–1.4. `/api/:token/tts` accepts `{voice, speed}`.
+- **Phone ⚙ settings sheet:** voice picker (British male/female + US) + speed slider + "Test voice" button; persisted in localStorage (`bb_voice`/`bb_speed`), sent with every `/tts`. Desktop voice configurable via `kokoroVoice`/`kokoroSpeed` in config.json.
+- Verified live: bm_george/bm_lewis@0.9/bf_emma@1.1 all return distinct kokoro audio; junk voice+speed=9 clamped and fell back without error.
+
+### Pass 18.2 — DIAGNOSTIC: wake words + speaking dead in the packaged .app (python PATH)
+- **Reported:** wake keywords and speaking bugged on phone and in the .app.
+- **Root cause:** a Finder/launchd-launched .app inherits a minimal `PATH` (`/usr/bin:/bin`), so the bundled spawns of `python3` resolved to **/usr/bin/python3**, which has none of our deps (`kokoro_onnx`, `vosk`, `openwakeword`). Result: the **wake listener died on import** (no wake words) and the **Kokoro worker died** (TTS error `No module named 'kokoro_onnx'`). TTS also failed to fall back because `kokoroSynth` let `kokoroStart()`'s rejection throw past the elevenlabs/openai fallback. (Worked when I launched from Terminal because Terminal's PATH includes the framework python — masking the bug.)
+- **Fix:**
+  - `resolvePython()` — probes config.pythonBin then known absolute paths, picking the first python that can `import kokoro_onnx`; used by BOTH `startWakeHelper` and the Kokoro worker spawn. Set `config.pythonBin=/Library/Frameworks/Python.framework/Versions/3.13/bin/python3`.
+  - `EXEC_PATH` now also includes the Python.framework `Current`+`3.13` bin dirs.
+  - `kokoroSynth` wraps `kokoroStart()` in try/catch → returns `{error}` so the cloud fallback actually runs if the worker ever dies.
+- **Verified under simulated Finder launch** (`env -i HOME=… PATH=/usr/bin:/bin …` → the exact broken condition): `[tts] kokoro warm`, `[wake] listener ready`, both python children running under the **framework** python, `/tts via=kokoro` (120KB), `/summarize` ok. Rebuilt + reinstalled /Applications.
+- **Still required from user:** grant **Microphone** to Bhatbot.app (System Settings→Privacy→Microphone) for the wake listener to actually hear — imports now succeed, mic is the remaining gate.
+
+### Pass 18.3 — 429 rate-limit handling + context cap (the "API 429 keeps cropping up" bug)
+- **Reported (phone screenshot):** `API 429 ... rate_limit_error ... 50,000 input tokens per minute ... claude-haiku-4-5`. Not mic/accessibility — an Anthropic **tier-1 rate limit**, surfacing because `callClaude` threw on the first 429 with **no retry**, and the agent re-sent ever-growing context each turn.
+- **Fix:**
+  - `anthropicRequest(body, apiKey)` — centralized call with **exponential backoff + jitter on 429/529/5xx**, honoring the `Retry-After` header (cap 30s, 5 retries); also retries network blips. callClaude + summarizeForSpeech route through it. Exhausted 429/529 → friendly message (no raw JSON dumped to the phone).
+  - `capTokens(messages, 20000)` — hard token budget; trims oldest turns before each call, pairing-safe (never starts on an orphan tool_result), so a single call can't blow the 50k/min cap. Applied inside callClaude (also protects the existing summarizing `trimHistory`'s own API call). summary input capped to 8k chars.
+- **Gotcha hit during the fix:** my new helper was first named `trimHistory`, which **collided** with the pre-existing async summarizing `trimHistory` (line ~431) — function hoisting made the later def win, so callClaude sent a Promise as `messages` → `API 400 messages: Input should be a valid array`. Renamed to `capTokens`. Also: `pkill -f "...bhatbot"` does NOT match the dev `electron .` process; kill dev by port (`lsof -ti tcp:8788 | xargs kill -9`) — a stale instance held 8788 and masked the fix.
+- Verified on the installed /Applications build: chat→pong, follow-up→ping, tts via=kokoro, workers on framework python.
+
+### Pass 18.4 — proactive rate-limit avoidance: local-model fallback OR notify+reset
+- **Request:** before sending, decide if a prompt will exceed the token limit; if so use a local (Ollama) model, or else just say so and reset the budget for the next task.
+- **Rolling ITPM tracker:** `recordTokens()` logs real `usage` (input + cache read/creation) from every Anthropic response into a 60s window; `tokensUsedLastMin()` / `rateBudget()` → `{limit, safe (=limit*0.9), used, free}`. Config: `rateLimitTokens` (default 50000 — raise if account tier is higher), `rateLimitSafetyFrac` (0.9).
+- **Preflight in `callModel`:** `requestTokenEstimate(messages)` (system + tools + capped messages). If it exceeds `free`:
+  - `rateLimitMode:'local'` (default) + Ollama up → run the turn on `localModel` (default `qwen3:latest`) via `ollamaChat()` (blocks flattened to text, no tools); response tagged `_provider:'ollama' _rateFallback:true` (shown via the existing provider_used event).
+  - else (Ollama down or `rateLimitMode:'notify'`) → throw a `rateBudget` error; `agentLoop` catches it → returns a friendly "would exceed… context reset" message and **clears history** so the next task starts fresh.
+- **Voice summaries:** `summarizeForSpeech` now Haiku-first ONLY when there's budget (it's tiny/fast), else local-model fallback — so voice never dies under rate limit and doesn't itself trip the cap. (Tried local-first; qwen3 cold-load was too slow for voice, so reverted to Haiku-first.)
+- **Verified:** normal chat → Claude (`pong`); forced `rateLimitTokens=200` → local model answered ("…Paris."); `rateLimitMode='notify'` → "⚠ would exceed… context reset" + reset. Rebuilt/reinstalled /Applications.
+
+## Pass 19 (2026-06-07) — AppleScript automation, browser workflow recording, Spotify fix
+- **Spotify fix (root cause = AppleScript, not permissions; basic control already worked exit 0):**
+  - `play track "<name>"` silently fails — Spotify's AppleScript `play track` needs a **URI**, not a name. Now name→URI via the **Spotify Web API** (client-credentials: only `spotifyClientId`+`spotifyClientSecret`, no user OAuth) → `play track "<uri>"` locally; URIs/URLs play directly; no creds → opens `spotify:search:` and says so.
+  - `get_now_playing` errored (`-1728`) when stopped → now checks `player state` first and reports "nothing playing"/paused.
+  - Launches Spotify if not running; `osaErr()` detects `-1743` (Automation not authorized) → tells user to grant Automation→Spotify.
+- **`system_control` tool (NEW)** — generalizes AppleScript/System Events to any app: `activate_app`, `keystroke`, `shortcut` (key+modifiers, e.g. ⌘S), `menu` (app+menuPath ["File","Save"]), `clipboard_get/set`, `notification`, `applescript` (raw). Needs Accessibility (keystroke/menu) + Automation (per-app). Verified clipboard_get → returned set value.
+- **`browser_workflow` tool (NEW)** — record/replay browser macros. `start_recording` → browser actions are captured (navigate/click/type/evaluate) → `save_workflow{name}` → `~/.bhatbot/workflows/<name>.json`; `replay_workflow`, `list/show/delete_workflow`, `cancel_recording`. Empirical traces > re-derived selectors. Verified record→save→replay (example.com → title "Example Domain").
+- **Rate-limit fallback fix:** the local-model fallback (18.4) was hijacking tool-requiring turns (Ollama can't call tools → empty). Now gated to first turn only, and empty local output falls through to notify+reset instead of returning nothing.
+- STATIC_PROMPT += MEDIA(name→URI note) / SYSTEM CONTROL / BROWSER WORKFLOWS. Tools now 16. Rebuilt + reinstalled /Applications.
+
+### Pass 19.1 — voice upgrade: ElevenLabs default (Kokoro too synthetic)
+- User found Kokoro `bm_george` too robotic ("Stephen Hawking"). Switched default `ttsProvider=elevenlabs`, voice=Daniel British (`onwK4e9ZLuTAKqWW03F9`), model `eleven_turbo_v2_5` (low latency). Verified `/tts via=elevenlabs` (mp3, 90KB).
+- Fallback chain hardened: ElevenLabs → (on quota/auth/rate/network) free local **Kokoro** → OpenAI, so voice never dies when the EL free tier (10k chars/mo) is exhausted.
+- Phone ⚙ voice/speed picker is Kokoro-specific → inert while provider=elevenlabs (harmless).
+- Spotify redirect URI guidance: use loopback IP `http://127.0.0.1:8888/callback` (Spotify deprecated `localhost`); future-proof for standalone-app OAuth.
+
+## Pass 20 (2026-06-07) — Spotify Connect (control phone/any device via Web API)
+- **Goal:** play/control Spotify ON the phone (or any device), not just the Mac's app.
+- **Why it needs more than client-credentials:** AppleScript only controls the local Mac app. Controlling another device = Spotify **Connect** Web API, which needs **user OAuth** (Authorization Code flow) + **Premium**.
+- **`scripts/spotify-auth.js`** (NEW, run once): opens Spotify login, catches redirect on `http://127.0.0.1:8888/callback` (the loopback URI in the dashboard), exchanges code → saves `spotifyRefreshToken` + sets `spotifyUseConnect:true` in config. Scopes: user-modify/read-playback-state, user-read-currently-playing.
+- **main.js Connect layer:** `spotifyUserToken` (refresh-token → cached access token), `spotifyApi`, `spotifyDevices`, `pickDevice` (name/"phone"/"mac" matching), `spotifyConnect` (play/pause/next/prev/volume/now-playing/list_devices/transfer via `/v1/me/player`, optional `?device_id=`). `connErr` maps 404→"open Spotify on device", 403→"needs Premium".
+- **mediaControl routing:** uses Connect when `spotifyRefreshToken` set AND (`device` given / list_devices / transfer / `spotifyUseConnect`); else AppleScript (Mac). `media_control` tool gained `device` param + `list_devices`/`transfer` actions. Works identically whether the request comes from the phone PWA or the Mac.
+- **Verified:** not-linked path graceful; local Mac control intact (now-playing returned real track). Phone playback pending user running spotify-auth.js + Premium. Rebuilt/reinstalled /Applications.

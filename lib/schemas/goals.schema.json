@@ -1,0 +1,12 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "workspace goals.json",
+  "type": "object",
+  "required": ["north_star"],
+  "properties": {
+    "north_star": { "type": "string", "description": "single-sentence project objective" },
+    "sub_goals": { "type": "array", "items": { "type": "object", "properties": { "id": { "type": "string" }, "text": { "type": "string" }, "done": { "type": "boolean" } } } },
+    "acceptance": { "type": "array", "items": { "type": "string" }, "description": "measurable done-criteria" },
+    "updated": { "type": "string", "format": "date-time" }
+  }
+}

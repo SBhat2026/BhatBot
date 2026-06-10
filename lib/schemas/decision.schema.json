@@ -1,0 +1,19 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "decisions.json (append-only ADR-lite)",
+  "type": "object",
+  "required": ["decisions"],
+  "properties": {
+    "decisions": { "type": "array", "items": {
+      "type": "object", "required": ["id", "what"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^dec_[0-9]+$" },
+        "ts": { "type": "string", "format": "date-time" },
+        "by": { "type": "string", "description": "agent role" },
+        "task": { "type": "string" },
+        "what": { "type": "string" }, "why": { "type": "string" },
+        "alts": { "type": "array", "items": { "type": "string" } }
+      }
+    } }
+  }
+}

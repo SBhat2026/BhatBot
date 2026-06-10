@@ -1,0 +1,65 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "BhatBot agent envelopes (task | result)",
+  "oneOf": [
+    {
+      "type": "object",
+      "required": ["kind", "id", "agent", "goal"],
+      "properties": {
+        "kind": { "const": "task" },
+        "id": { "type": "string" },
+        "agent": { "enum": ["orchestrator", "coding", "research", "browser", "memory", "creative"] },
+        "goal": { "type": "string" },
+        "context": {
+          "type": "object",
+          "properties": {
+            "state": { "type": "object" },
+            "memory": { "type": "array", "items": { "type": "string" } },
+            "files": { "type": "array", "items": { "type": "string" } },
+            "constraints": { "type": "array", "items": { "type": "string" } },
+            "components": { "type": ["array", "null"], "items": { "type": "string" } }
+          }
+        },
+        "expects": { "enum": ["patch", "facts", "report", "artifact", "answer"] },
+        "budget": {
+          "type": "object",
+          "properties": { "model": { "type": "string" }, "max_tokens": { "type": "number" }, "max_usd": { "type": "number" } }
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": ["kind", "task_id", "agent", "status"],
+      "properties": {
+        "kind": { "const": "result" },
+        "task_id": { "type": "string" },
+        "agent": { "enum": ["orchestrator", "coding", "research", "browser", "memory", "creative"] },
+        "status": { "enum": ["ok", "partial", "failed", "needs_input"] },
+        "summary": { "type": "string" },
+        "state_updates": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": { "path": { "type": "string" }, "value": {}, "status": { "type": "string" } },
+            "required": ["path"]
+          }
+        },
+        "artifacts": { "type": "array", "items": { "type": "string" } },
+        "memory_writes": {
+          "type": "array",
+          "items": { "type": "object", "required": ["text"], "properties": { "text": { "type": "string" }, "tags": { "type": "array", "items": { "type": "string" } } } }
+        },
+        "decision": {
+          "type": ["object", "null"],
+          "properties": { "what": { "type": "string" }, "why": { "type": "string" }, "alts": { "type": "array", "items": { "type": "string" } } }
+        },
+        "next": {
+          "type": "array",
+          "items": { "type": "object", "properties": { "agent": { "type": "string" }, "goal": { "type": "string" }, "expects": { "type": "string" } } }
+        },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "cost": { "type": "object", "properties": { "model": { "type": ["string", "null"] }, "tokens": { "type": "number" }, "usd": { "type": "number" } } }
+      }
+    }
+  ]
+}

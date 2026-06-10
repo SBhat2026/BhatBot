@@ -1,0 +1,12 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "creative agent task/result extras",
+  "type": "object",
+  "properties": {
+    "kind": { "enum": ["3d", "image"] },
+    "prompt": { "type": "string" },
+    "image_url": { "type": ["string", "null"] },
+    "params": { "type": "object", "properties": { "resolution": { "type": "integer" }, "format": { "type": "string" }, "steps": { "type": "integer" } } },
+    "output": { "type": "array", "items": { "type": "string" }, "description": "artifact paths" }
+  }
+}

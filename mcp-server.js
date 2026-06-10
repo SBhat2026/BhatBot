@@ -131,11 +131,15 @@ async function startMcpServer({ port, token, runAgent, transcribe, synthesize, s
     } catch (e) { res.status(500).json({ error: String(e && e.message ? e.message : e) }); }
   });
 
-  // TTS — Jarvis voice; returns base64 audio.
+  // TTS — Jarvis voice; returns base64 audio. Phone can pass {voice, speed} to customize.
   app.post('/api/:token/tts', guard, async (req, res) => {
     try {
       if (!synthesize) return res.status(501).json({ error: 'tts unavailable' });
-      const r = await synthesize((req.body && req.body.text) || '');
+      const b = req.body || {};
+      const opts = {};
+      if (b.voice) opts.voice = String(b.voice);
+      if (b.speed != null) opts.speed = Number(b.speed);
+      const r = await synthesize(b.text || '', opts);
       res.json(r.error ? { error: r.error } : { audio: r.audio, mimeType: r.mimeType, via: r.via });
     } catch (e) { res.status(500).json({ error: String(e && e.message ? e.message : e) }); }
   });

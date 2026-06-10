@@ -1,0 +1,19 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "browser visual-inspection findings (dev loop)",
+  "type": "object",
+  "required": ["findings"],
+  "properties": {
+    "screenshot": { "type": "string" },
+    "findings": { "type": "array", "items": {
+      "type": "object", "required": ["severity", "issue"],
+      "properties": {
+        "severity": { "enum": ["blocker", "major", "minor", "nit"] },
+        "where": { "type": "string", "description": "selector or region" },
+        "issue": { "type": "string" },
+        "fix_hint": { "type": "string" }
+      }
+    } },
+    "pass": { "type": "boolean", "description": "true = no blocking findings; loop can stop" }
+  }
+}

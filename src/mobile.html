@@ -47,12 +47,26 @@
   #spk.off { opacity:.4; }
   #send { background:var(--cyan); color:#04222e; border-color:var(--cyan); font-size:17px; }
   @keyframes pulse { 0%,100%{ box-shadow:0 0 0 0 rgba(57,215,255,.5);} 50%{ box-shadow:0 0 0 12px rgba(57,215,255,0);} }
+  .hbtn { width:32px; height:32px; font-size:16px; border-radius:9px; margin-left:8px; }
+  /* voice settings bottom-sheet */
+  .modal { position:fixed; inset:0; background:rgba(0,0,0,.55); display:flex; align-items:flex-end; z-index:50; }
+  .sheet { width:100%; background:var(--panel); border-top:1px solid var(--line);
+    border-radius:18px 18px 0 0; padding:18px 18px calc(env(safe-area-inset-bottom) + 22px); }
+  .sh-h { display:flex; align-items:center; font-weight:600; letter-spacing:.4px; margin-bottom:14px; font-size:16px; }
+  .sh-h .x { margin-left:auto; color:var(--dim); width:30px; height:30px; display:grid; place-items:center; border:1px solid var(--line); border-radius:8px; font-size:14px; }
+  .sheet label { display:block; color:var(--dim); font-size:13px; margin:14px 0 6px; }
+  .sheet select { width:100%; background:var(--bg); color:var(--txt); border:1px solid var(--line);
+    border-radius:10px; padding:11px 12px; font:inherit; outline:none; }
+  .sheet input[type=range] { width:100%; accent-color:var(--cyan); }
+  .testbtn { width:100%; height:auto; border-radius:12px; padding:12px; margin-top:18px; font-size:15px;
+    background:rgba(57,215,255,.1); border:1px solid #1b4a5e; color:var(--cyan); }
 </style>
 </head>
 <body>
 <header>
   <span class="dot" id="dot"></span><b>BHATBOT</b>
   <small id="net">connecting…</small>
+  <button id="gear" class="hbtn" title="Voice settings">⚙</button>
 </header>
 <div id="log"></div>
 <footer>
@@ -67,6 +81,33 @@
   </div>
   <input type="file" id="file" accept="image/*,video/*" multiple style="display:none">
 </footer>
+<div id="settings" class="modal" style="display:none">
+  <div class="sheet">
+    <div class="sh-h">Voice <span class="x" id="setclose">✕</span></div>
+    <label for="voicesel">Voice</label>
+    <select id="voicesel">
+      <optgroup label="British — male">
+        <option value="bm_george">George (British, deep — JARVIS)</option>
+        <option value="bm_lewis">Lewis (British)</option>
+        <option value="bm_daniel">Daniel (British)</option>
+        <option value="bm_fable">Fable (British)</option>
+      </optgroup>
+      <optgroup label="British — female">
+        <option value="bf_emma">Emma (British)</option>
+        <option value="bf_isabella">Isabella (British)</option>
+      </optgroup>
+      <optgroup label="American">
+        <option value="am_michael">Michael (US, male)</option>
+        <option value="am_adam">Adam (US, male)</option>
+        <option value="af_bella">Bella (US, female)</option>
+        <option value="af_nicole">Nicole (US, female)</option>
+      </optgroup>
+    </select>
+    <label for="spdrange">Speed — <span id="spdval">1.0×</span> <span style="color:var(--dim)">(lower = calmer)</span></label>
+    <input id="spdrange" type="range" min="0.6" max="1.4" step="0.05" value="1">
+    <button id="vtest" class="testbtn">▶ Test voice</button>
+  </div>
+</div>
 <script>
 // ---- token + endpoints (page is served at /app/<token>) ----
 const TOKEN = location.pathname.split('/')[2] || '';
@@ -162,7 +203,7 @@ async function send(forced) {
     if (r.error) { t.remove(); add('err', r.error); }
     else {
       t.className = 'msg bot'; t.textContent = r.text || '(no output)';
-      if ((r.text || '').length > 250) addReadFull(t, r.text);
+      if ((r.text || '').length > 300) addReadFull(t, r.text);
       await speak(r.text || '');
     }
   } catch (e) { t.remove(); add('err', String(e.message || e)); }
@@ -188,8 +229,11 @@ function splitSentences(text) {
 }
 function b64ToBuf(b64) { const bin = atob(b64), len = bin.length, u = new Uint8Array(len); for (let i=0;i<len;i++) u[i] = bin.charCodeAt(i); return u.buffer; }
 function stopSpeaking() { ttsSeq++; if (curSrc) { try { curSrc.stop(); } catch {} curSrc = null; } }
+// Voice prefs (persisted) — customizable from the ⚙ settings panel.
+let voicePref = localStorage.getItem('bb_voice') || 'bm_george';
+let speedPref = parseFloat(localStorage.getItem('bb_speed') || '1');
 async function ttsOne(s) {
-  try { const r = await fetch(API + '/tts', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ text: s }) }).then(x => x.json()); return (r && r.audio) ? b64ToBuf(r.audio) : null; }
+  try { const r = await fetch(API + '/tts', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ text: s, voice: voicePref, speed: speedPref }) }).then(x => x.json()); return (r && r.audio) ? b64ToBuf(r.audio) : null; }
   catch { return null; }
 }
 function playBuf(arrBuf, seq) {
@@ -207,15 +251,32 @@ async function speak(text, opts = {}) {
   if (!ttsOn) return;
   lastFullReply = String(text || '');
   let spoken = lastFullReply;
-  if (!opts.full && spoken.length > 250) {
+  if (!opts.full && spoken.length > 300) {
     try { const r = await fetch(API + '/summarize', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ text: spoken }) }).then(x => x.json()); if (r && r.text) spoken = r.text; } catch {}
   }
   stopSpeaking(); const seq = ++ttsSeq;
-  const sents = splitSentences(spoken); if (!sents.length) return;
-  const jobs = sents.map(ttsOne);
+  // Short text → ONE synth call = continuous natural prosody (sentence-chunking resets
+  // intonation each time → robotic). Only long full-reads stream chunks for fast start.
+  const chunks = spoken.trim().length <= 350 ? [spoken.trim()] : splitSentences(spoken);
+  if (!chunks.length) return;
+  const jobs = chunks.map(ttsOne);
   for (let i = 0; i < jobs.length; i++) { const b = await jobs[i]; if (seq !== ttsSeq) return; if (b) await playBuf(b, seq); if (seq !== ttsSeq) return; }
 }
 spk.addEventListener('click', () => { ttsOn = !ttsOn; spk.classList.toggle('off', !ttsOn); spk.textContent = ttsOn ? '🔊' : '🔇'; if (!ttsOn) stopSpeaking(); });
+
+// ---- Voice settings (persisted in localStorage, sent with every /tts) ----
+const settings = document.getElementById('settings'), voicesel = document.getElementById('voicesel');
+const spdrange = document.getElementById('spdrange'), spdval = document.getElementById('spdval');
+voicesel.value = voicePref; spdrange.value = String(speedPref); spdval.textContent = speedPref.toFixed(2) + '×';
+document.getElementById('gear').addEventListener('click', () => { ensureCtx(); settings.style.display = 'flex'; });
+document.getElementById('setclose').addEventListener('click', () => settings.style.display = 'none');
+settings.addEventListener('click', (e) => { if (e.target === settings) settings.style.display = 'none'; });
+voicesel.addEventListener('change', () => { voicePref = voicesel.value; localStorage.setItem('bb_voice', voicePref); });
+spdrange.addEventListener('input', () => { speedPref = parseFloat(spdrange.value); spdval.textContent = speedPref.toFixed(2) + '×'; localStorage.setItem('bb_speed', String(speedPref)); });
+document.getElementById('vtest').addEventListener('click', async () => {
+  ensureCtx(); stopSpeaking(); const seq = ++ttsSeq;
+  const b = await ttsOne("Good evening, sir. This is how I shall sound."); if (b && seq === ttsSeq) playBuf(b, seq);
+});
 
 // ---- STT: hands-free conversation loop. WAV capture via Web Audio (iOS-safe). ----
 // Mic tap starts a CONVERSATION: it listens, sends, speaks the reply, then listens

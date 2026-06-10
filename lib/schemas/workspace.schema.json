@@ -1,0 +1,12 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "workspace.json (identity + prefs)",
+  "type": "object",
+  "required": ["id", "name", "slug"],
+  "properties": {
+    "id": { "type": "string" }, "name": { "type": "string" }, "slug": { "type": "string" },
+    "created": { "type": "string", "format": "date-time" }, "updated": { "type": "string", "format": "date-time" },
+    "integrations": { "type": "object", "description": "per-workspace toggles (trellis, github, etc.)" },
+    "model_prefs": { "type": "object", "description": "override default model routing for this project" }
+  }
+}

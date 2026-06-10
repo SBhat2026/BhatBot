@@ -11,6 +11,12 @@ const crypto = require('crypto');
 const darkbloom = require('./darkbloom');
 const { classify } = require('./taskClassifier');
 const { startMcpServer, stopMcpServer } = require('./mcp-server');
+// Workspace multi-agent stack (Architecture v2) — orchestrator delegates big projects to
+// stateless agents over structured state, keeping the chat context flat. See ARCHITECTURE.md.
+const workspaceMgr = require('./lib/workspace');
+const orchestrator = require('./lib/agents/orchestrator');
+const wsState = require('./lib/state');
+const wsMemory = require('./lib/memory');
 
 const DB_MODELS = { db_speech: 'gpt-oss-20b', db_directive: 'gemma-4-26b' };
 
@@ -22,7 +28,40 @@ const HOTKEY = 'CommandOrControl+Shift+B';
 const MODEL_SONNET = 'claude-sonnet-4-6';      // corrected from stale spec id
 const MODEL_HAIKU = 'claude-haiku-4-5';        // corrected from stale spec id
 const MAX_AGENT_ITERATIONS = 12;
-const EXEC_PATH = `${process.env.PATH || ''}:/usr/local/bin:/opt/homebrew/bin`;
+const EXEC_PATH = `${process.env.PATH || ''}:/usr/local/bin:/opt/homebrew/bin:/Library/Frameworks/Python.framework/Versions/Current/bin:/Library/Frameworks/Python.framework/Versions/3.13/bin`;
+// In a packaged .app, files live inside app.asar (a virtual archive). Electron patches
+// fs reads to see into it, but a spawned process (python) opens the path itself and
+// can't read app.asar — so anything we SPAWN must be asarUnpack'd and its path rewritten
+// from app.asar → app.asar.unpacked. Use this for script paths passed to spawn.
+function unpacked(p) { return app.isPackaged ? p.replace('app.asar' + path.sep, 'app.asar.unpacked' + path.sep) : p; }
+// A Finder-launched .app gets a minimal PATH (/usr/bin:/bin), so a bare `python3`
+// resolves to /usr/bin/python3 — which lacks our deps (kokoro_onnx, vosk, openwakeword)
+// → the wake listener AND Kokoro TTS worker silently die. Resolve an absolute python
+// that actually has the modules. config.pythonBin overrides; otherwise probe known spots.
+let _pythonBin = null;
+function resolvePython() {
+  if (_pythonBin) return _pythonBin;
+  let candidates = [];
+  try { const cb = loadConfig().pythonBin; if (cb) candidates.push(cb); } catch {}
+  candidates.push(
+    '/Library/Frameworks/Python.framework/Versions/3.13/bin/python3',
+    '/Library/Frameworks/Python.framework/Versions/Current/bin/python3',
+    '/opt/homebrew/bin/python3',
+    '/usr/local/bin/python3'
+  );
+  // Prefer a python that can actually import kokoro_onnx (proves it's the right env).
+  for (const p of candidates) {
+    try {
+      if (!fs.existsSync(p)) continue;
+      const t = spawnSync(p, ['-c', 'import kokoro_onnx'], { timeout: 8000 });
+      if (t.status === 0) { _pythonBin = p; return p; }
+    } catch {}
+  }
+  // Fallback: first existing candidate, else bare python3.
+  for (const p of candidates) { try { if (fs.existsSync(p)) { _pythonBin = p; return p; } } catch {} }
+  _pythonBin = 'python3';
+  return _pythonBin;
+}
 const OLLAMA_URL = 'http://localhost:11434';
 const OLLAMA_VISION_MODEL = 'gemma3:12b'; // local, free, offline second-opinion vision
 const KEEP_IMAGES = 2;                     // max screenshots retained in history
@@ -32,6 +71,8 @@ let activityWindow = null;
 let agentState = 'idle'; // 'running' | 'paused' | 'stopped'
 let browser = null;
 let page = null;
+let recordingSteps = null;   // array while recording a browser workflow, else null
+const WORKFLOW_DIR = path.join(os.homedir(), '.bhatbot', 'workflows');
 const pendingConfirms = new Map();
 let pendingGuidance = [];   // live feedback queued mid-task (steering)
 let nexusWindow = null, studioWindow = null, terminalWindow = null;
@@ -184,7 +225,21 @@ chat and lead with a short spoken-friendly summary. Long replies are auto-summar
 for voice; the user can ask to "read the full response".
 
 MEDIA: Use media_control for any Spotify or volume request (play, pause, skip,
-"what's playing", set Spotify or system volume).
+"what's playing", set Spotify or system volume). Plain requests control the Mac's
+Spotify. If Siddhant names a device (on my phone, on the Mac), pass the device field
+to target it via Spotify Connect; use action list_devices to see what's online and
+transfer to move playback. Connect needs the one-time link + Premium — if it's not
+linked, say so and that he can run scripts/spotify-auth.js. Playing by name resolves
+via the Spotify Web API.
+
+SYSTEM CONTROL: Use system_control for native macOS automation beyond shell/browser —
+activate an app, type keystrokes, send shortcuts (e.g. ⌘S), click menu items, read/set
+the clipboard, post a notification, or run raw AppleScript. Needs Accessibility +
+Automation permission for Bhatbot (tell Siddhant to grant it if a call is blocked).
+
+BROWSER WORKFLOWS: For repeated multi-step web tasks, use browser_workflow:
+start_recording, perform the browser steps, save_workflow{name}; later replay_workflow{name}.
+Prefer replaying a saved workflow over re-deriving selectors.
 
 PHONE: Messages may arrive from Siddhant's phone via Telegram or the PWA — no
 activity window there. Keep those replies tight (≤400 chars when possible) and say
@@ -224,24 +279,192 @@ function chooseModel(lastUserMessage) {
 // ---------------------------------------------------------------------------
 // Claude API (prompt caching GA — cache_control, no beta header needed)
 // ---------------------------------------------------------------------------
-async function callClaude(messages, apiKey, model) {
-  const res = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': apiKey,
-      'anthropic-version': '2023-06-01'
-    },
-    body: JSON.stringify({
-      model,
-      max_tokens: 4096,
-      system: [{ type: 'text', text: buildSystemPrompt(), cache_control: { type: 'ephemeral' } }],
-      tools: TOOLS,
-      messages
-    })
+// Rough token estimate (~4 chars/token incl. base64 images) — for context trimming.
+function estimateTokens(obj) { try { return Math.ceil(JSON.stringify(obj).length / 4); } catch { return 0; } }
+// A user turn that LEADS with a tool_result is an orphan if its tool_use was trimmed away.
+function leadsWithToolResult(m) {
+  return m && m.role === 'user' && Array.isArray(m.content) && m.content.some((b) => b && b.type === 'tool_result');
+}
+// Trim oldest turns until the message payload fits a token budget. Tier-1 cap is 50k
+// input tokens/min; we keep messages well under that (system+tools eat the rest) so a
+// single big call can't blow the limit. Pairing-safe: never start on an orphan tool_result.
+function capTokens(messages, maxTok = 20000) {
+  if (!Array.isArray(messages)) return messages;
+  let msgs = messages.slice();
+  while (msgs.length > 2 && estimateTokens(msgs) > maxTok) {
+    msgs.shift();
+    while (msgs.length && leadsWithToolResult(msgs[0])) msgs.shift();
+  }
+  return msgs;
+}
+
+// Centralized Anthropic call with exponential backoff on 429 / 529 / 5xx, honoring the
+// Retry-After header. Transient rate limits self-heal instead of erroring to the user.
+// --- Rolling per-minute input-token tracker (the rate limit is input-tokens/minute) ---
+let _tokWin = [];   // [ [epochMs, inputTokens], ... ]
+function recordTokens(n) {
+  if (!n) return;
+  const now = Date.now(); _tokWin.push([now, n]);
+  const cut = now - 60000; while (_tokWin.length && _tokWin[0][0] < cut) _tokWin.shift();
+}
+function tokensUsedLastMin() {
+  const cut = Date.now() - 60000; while (_tokWin.length && _tokWin[0][0] < cut) _tokWin.shift();
+  return _tokWin.reduce((s, e) => s + e[1], 0);
+}
+function rateBudget() {
+  const c = loadConfig();
+  const limit = c.rateLimitTokens || 50000;            // tier-1 default; raise in config if account tier is higher
+  const safe = Math.floor(limit * (c.rateLimitSafetyFrac || 0.9));   // leave headroom
+  const used = tokensUsedLastMin();
+  return { limit, safe, used, free: Math.max(0, safe - used) };
+}
+// Estimated input tokens a Claude request would cost (system + tools + trimmed messages).
+function requestTokenEstimate(messages) {
+  return estimateTokens({ system: buildSystemPrompt(), tools: TOOLS, messages: capTokens(messages) });
+}
+async function ollamaUp() {
+  try { const r = await fetch(`${OLLAMA_URL}/api/tags`, { signal: AbortSignal.timeout(700) }); return r.ok; } catch { return false; }
+}
+// Local-model chat fallback (Ollama). Flattens our message blocks to plain text (no tools).
+async function ollamaChat(messages, system, model) {
+  const msgs = messages.map((m) => ({
+    role: m.role === 'assistant' ? 'assistant' : 'user',
+    content: typeof m.content === 'string' ? m.content
+      : Array.isArray(m.content) ? m.content.map((b) =>
+          b.type === 'text' ? b.text
+          : b.type === 'tool_result' ? ('[tool result] ' + (typeof b.content === 'string' ? b.content : JSON.stringify(b.content)).slice(0, 4000))
+          : b.type === 'tool_use' ? ('[used tool ' + b.name + ']')
+          : b.type === 'image' ? '[image]' : '').filter(Boolean).join('\n')
+      : ''
+  })).filter((m) => m.content);
+  if (system) msgs.unshift({ role: 'system', content: system });
+  const r = await fetch(`${OLLAMA_URL}/api/chat`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model, messages: msgs, stream: false })
   });
-  if (!res.ok) throw new Error(`API ${res.status}: ${await res.text()}`);
-  return res.json();
+  if (!r.ok) throw new Error('ollama ' + r.status);
+  const j = await r.json();
+  return (j.message && j.message.content) || '';
+}
+
+async function anthropicRequest(body, apiKey, { retries = 5 } = {}) {
+  let attempt = 0;
+  while (true) {
+    let res;
+    try {
+      res = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+        body: JSON.stringify(body)
+      });
+    } catch (e) {                                   // network blip → retry too
+      if (attempt >= retries) throw e;
+      await new Promise((r) => setTimeout(r, Math.min(1000 * 2 ** attempt, 16000) + Math.random() * 400));
+      attempt++; continue;
+    }
+    if (res.ok) {
+      const j = await res.json();
+      try { const u = j.usage || {}; recordTokens((u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0)); } catch {}
+      return j;
+    }
+    const retryable = res.status === 429 || res.status === 529 || res.status >= 500;
+    if (retryable && attempt < retries) {
+      const ra = parseFloat(res.headers.get('retry-after'));
+      const waitMs = isFinite(ra) ? Math.min(ra * 1000, 30000) : Math.min(1000 * 2 ** attempt, 16000);
+      try { await res.text(); } catch {}            // drain so the socket frees
+      console.warn(`[api] ${res.status} → retry ${attempt + 1}/${retries} in ${Math.round(waitMs)}ms`);
+      await new Promise((r) => setTimeout(r, waitMs + Math.random() * 400));
+      attempt++; continue;
+    }
+    const bodyText = await res.text().catch(() => '');
+    if (res.status === 429) throw new Error("Rate limit reached (tier-1 cap, 50k tokens/min). I waited and retried but it's still busy — give it a minute, or add credits at console.anthropic.com to raise the limit.");
+    if (res.status === 529) throw new Error('Anthropic is overloaded right now. Try again shortly.');
+    throw new Error(`API ${res.status}: ${bodyText.slice(0, 300)}`);
+  }
+}
+
+async function callClaude(messages, apiKey, model) {
+  return anthropicRequest({
+    model,
+    max_tokens: 4096,
+    system: [{ type: 'text', text: buildSystemPrompt(), cache_control: { type: 'ephemeral' } }],
+    tools: TOOLS,
+    messages: capTokens(messages)
+  }, apiKey);
+}
+
+// Streaming variant — emits text deltas via onText(delta) as they arrive (first word in
+// ~0.5s instead of waiting ~full generation), then returns the SAME assembled shape as
+// anthropicRequest so the tool loop is unchanged. Used on the desktop chat path.
+async function anthropicStream(body, apiKey, onText, { retries = 3 } = {}) {
+  let attempt = 0;
+  while (true) {
+    let res;
+    try {
+      res = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+        body: JSON.stringify({ ...body, stream: true })
+      });
+    } catch (e) { if (attempt >= retries) throw e; await sleep(Math.min(1000 * 2 ** attempt, 16000) + Math.random() * 400); attempt++; continue; }
+    if (!res.ok) {
+      const retryable = res.status === 429 || res.status === 529 || res.status >= 500;
+      if (retryable && attempt < retries) {
+        const ra = parseFloat(res.headers.get('retry-after'));
+        const waitMs = isFinite(ra) ? Math.min(ra * 1000, 30000) : Math.min(1000 * 2 ** attempt, 16000);
+        try { await res.text(); } catch {}
+        await sleep(waitMs + Math.random() * 400); attempt++; continue;
+      }
+      const t = await res.text().catch(() => '');
+      if (res.status === 429) throw new Error("Rate limit reached (tier-1 cap, 50k tokens/min). I waited and retried but it's still busy — give it a minute, or add credits at console.anthropic.com.");
+      if (res.status === 529) throw new Error('Anthropic is overloaded right now. Try again shortly.');
+      throw new Error(`API ${res.status}: ${t.slice(0, 300)}`);
+    }
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    const blocks = []; let stop_reason = null, usage = {};
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let nl;
+      while ((nl = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, nl).trim(); buf = buf.slice(nl + 1);
+        if (!line.startsWith('data:')) continue;
+        const data = line.slice(5).trim();
+        if (!data || data === '[DONE]') continue;
+        let ev; try { ev = JSON.parse(data); } catch { continue; }
+        if (ev.type === 'message_start') { usage = (ev.message && ev.message.usage) || usage; }
+        else if (ev.type === 'content_block_start') {
+          const b = ev.content_block;
+          blocks[ev.index] = b.type === 'tool_use' ? { type: 'tool_use', id: b.id, name: b.name, _json: '' } : { type: 'text', text: '' };
+        } else if (ev.type === 'content_block_delta') {
+          const b = blocks[ev.index]; if (!b) continue;
+          if (ev.delta.type === 'text_delta') { b.text += ev.delta.text; if (onText) try { onText(ev.delta.text); } catch {} }
+          else if (ev.delta.type === 'input_json_delta') { b._json += ev.delta.partial_json; }
+        } else if (ev.type === 'content_block_stop') {
+          const b = blocks[ev.index];
+          if (b && b.type === 'tool_use') { try { b.input = JSON.parse(b._json || '{}'); } catch { b.input = {}; } delete b._json; }
+        } else if (ev.type === 'message_delta') {
+          if (ev.delta && ev.delta.stop_reason) stop_reason = ev.delta.stop_reason;
+          if (ev.usage) usage = { ...usage, ...ev.usage };
+        } else if (ev.type === 'error') { throw new Error('stream error: ' + JSON.stringify(ev.error).slice(0, 200)); }
+      }
+    }
+    try { recordTokens((usage.input_tokens || 0) + (usage.output_tokens || 0)); } catch {}
+    return {
+      content: blocks.filter(Boolean).map((b) => b.type === 'tool_use' ? { type: 'tool_use', id: b.id, name: b.name, input: b.input || {} } : { type: 'text', text: b.text }),
+      stop_reason: stop_reason || 'end_turn', usage
+    };
+  }
+}
+function callClaudeStream(messages, apiKey, model, onText) {
+  return anthropicStream({
+    model, max_tokens: 4096,
+    system: [{ type: 'text', text: buildSystemPrompt(), cache_control: { type: 'ephemeral' } }],
+    tools: TOOLS, messages: capTokens(messages)
+  }, apiKey, onText);
 }
 
 function lastUserText(messages) {
@@ -256,7 +479,7 @@ function lastUserText(messages) {
 // Claude for everything needing tools, reasoning, memory, or as fallback.
 // `allowDarkbloom` is only true on the first turn (Darkbloom path is single-shot,
 // no tool loop). Returns Anthropic-shaped response so agentLoop is unchanged.
-async function callModel(messages, apiKey, allowDarkbloom) {
+async function callModel(messages, apiKey, allowDarkbloom, onText) {
   const cfg = loadConfig();
   const route = classify(lastUserText(messages));
   const dbReady = cfg.darkbloomEnabled && cfg.darkbloomKey;
@@ -269,14 +492,38 @@ async function callModel(messages, apiKey, allowDarkbloom) {
           : m.content.filter((b) => b.type === 'text').map((b) => b.text).join('\n')
       }));
       const text = await darkbloom.chat(oa, DB_MODELS[route], cfg.darkbloomKey, buildSystemPrompt(), cfg.darkbloomBaseUrl);
+      if (onText && text) try { onText(text); } catch {}     // non-streaming provider → emit whole text once
       return { content: [{ type: 'text', text }], stop_reason: 'end_turn', _provider: 'darkbloom', _model: DB_MODELS[route] };
     } catch (e) {
       console.warn(`Darkbloom failed (${route}) → Claude fallback:`, e.message);
     }
   }
 
+  // Preflight rate-limit check: if this request would blow the per-minute token budget,
+  // either run it on a local Ollama model (free, no quota) or — if local is unavailable
+  // / mode='notify' — abort with a clear message so the caller can reset for next task.
+  const est = requestTokenEstimate(messages);
+  const budget = rateBudget();
+  if (est > budget.free) {
+    const mode = cfg.rateLimitMode || 'local';
+    // Local fallback only on the FIRST turn (allowDarkbloom) — Ollama can't run tools, so
+    // hijacking a mid-task tool loop would break it. Mid-loop over-budget → notify + reset.
+    if (mode !== 'notify' && allowDarkbloom && await ollamaUp()) {
+      try {
+        const lm = cfg.localModel || 'qwen3:latest';
+        const text = (await ollamaChat(messages, buildSystemPrompt(), lm) || '').trim();
+        if (text) { if (onText) try { onText(text); } catch {} return { content: [{ type: 'text', text }], stop_reason: 'end_turn', _provider: 'ollama', _model: lm, _rateFallback: true }; }
+      } catch (e) { console.warn('[rate] ollama fallback failed:', e.message); }
+    }
+    const err = new Error(`⚠ This would exceed your per-minute token limit (needs ~${Math.round(est / 1000)}k, only ~${Math.round(budget.free / 1000)}k free this minute). I've reset the context — try again in ~a minute${mode === 'notify' ? '' : ' (Ollama can auto-answer simple turns when you\'re over budget)'}.`);
+    err.rateBudget = true;
+    throw err;
+  }
+
   const claudeModel = (route === 'sonnet' || route === 'db_directive') ? MODEL_SONNET : MODEL_HAIKU;
-  const r = await callClaude(messages, apiKey, claudeModel);
+  const r = onText
+    ? await callClaudeStream(messages, apiKey, claudeModel, onText)
+    : await callClaude(messages, apiKey, claudeModel);
   r._provider = 'anthropic';
   r._model = claudeModel;
   return r;
@@ -437,31 +684,222 @@ function osa(args) {
     p.on('close', (code) => resolve({ ok: code === 0, out: out.trim(), err: err.trim() }));
   });
 }
+// Spotify "play X by name" needs a track URI — AppleScript's `play track` rejects plain
+// names. We resolve name→URI via the Spotify Web API (client-credentials = only a client
+// id+secret, no user OAuth), then play that URI locally over AppleScript.
+async function spotifyToken(c) {
+  if (!c.spotifyClientId || !c.spotifyClientSecret) return null;
+  try {
+    const auth = Buffer.from(`${c.spotifyClientId}:${c.spotifyClientSecret}`).toString('base64');
+    const r = await fetch('https://accounts.spotify.com/api/token', {
+      method: 'POST', headers: { Authorization: 'Basic ' + auth, 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: 'grant_type=client_credentials'
+    });
+    if (!r.ok) return null;
+    return (await r.json()).access_token || null;
+  } catch { return null; }
+}
+async function spotifySearchUri(c, query) {
+  const tok = await spotifyToken(c); if (!tok) return null;
+  try {
+    const r = await fetch(`https://api.spotify.com/v1/search?type=track&limit=1&q=${encodeURIComponent(query)}`, { headers: { Authorization: 'Bearer ' + tok } });
+    if (!r.ok) return null;
+    const it = (((await r.json()).tracks || {}).items || [])[0];
+    return it ? { uri: it.uri, label: `${it.name} — ${it.artists.map((a) => a.name).join(', ')}` } : null;
+  } catch { return null; }
+}
+function osaErr(r) {
+  const e = r.err || '';
+  if (e.includes('-1743') || e.includes('Not authorized')) return 'macOS blocked the Apple event. Grant it: System Settings → Privacy & Security → Automation → enable Bhatbot → Spotify (and System Events).';
+  return e || 'osascript failed';
+}
+
+// --- Spotify Connect (Web API, user OAuth) — control playback on ANY device (phone,
+// Mac, speakers) from anywhere. Needs a one-time login (scripts/spotify-auth.js stores
+// spotifyRefreshToken) + Spotify Premium. Lets the phone PWA play ON the phone. ---
+let _spotUserTok = { token: null, exp: 0 };
+async function spotifyUserToken(c) {
+  if (!c.spotifyRefreshToken) return null;
+  if (_spotUserTok.token && Date.now() < _spotUserTok.exp - 10000) return _spotUserTok.token;
+  try {
+    const auth = Buffer.from(`${c.spotifyClientId}:${c.spotifyClientSecret}`).toString('base64');
+    const r = await fetch('https://accounts.spotify.com/api/token', {
+      method: 'POST', headers: { Authorization: 'Basic ' + auth, 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ grant_type: 'refresh_token', refresh_token: c.spotifyRefreshToken }).toString()
+    });
+    if (!r.ok) return null;
+    const j = await r.json();
+    _spotUserTok = { token: j.access_token, exp: Date.now() + (j.expires_in || 3600) * 1000 };
+    return _spotUserTok.token;
+  } catch { return null; }
+}
+async function spotifyApi(c, method, p, body) {
+  const tok = await spotifyUserToken(c);
+  if (!tok) return { status: 401, ok: false, error: 'Spotify not linked — run `node ~/bhatbot/scripts/spotify-auth.js` once to log in.' };
+  try {
+    const r = await fetch('https://api.spotify.com/v1' + p, {
+      method, headers: { Authorization: 'Bearer ' + tok, ...(body ? { 'Content-Type': 'application/json' } : {}) },
+      body: body ? JSON.stringify(body) : undefined
+    });
+    const txt = await r.text(); let j = null; try { j = txt ? JSON.parse(txt) : null; } catch {}
+    return { status: r.status, ok: r.ok, json: j, text: txt };
+  } catch (e) { return { status: 0, ok: false, error: e.message }; }
+}
+async function spotifyDevices(c) {
+  const r = await spotifyApi(c, 'GET', '/me/player/devices');
+  const live = (r.json && r.json.devices) || [];
+  // Remember every device we ever see (Spotify drops idle phones from the live list),
+  // so we can still list + target them by a stable id later → "permanent" devices.
+  try {
+    const cache = { ...(c.spotifyDevices || {}) };
+    for (const d of live) cache[d.id] = { id: d.id, name: d.name, type: d.type, lastSeen: Date.now() };
+    saveConfig({ spotifyDevices: cache });
+  } catch {}
+  return live;
+}
+function matchDev(list, n) {
+  return list.find((d) => d.name.toLowerCase().includes(n))
+    || (/phone|iphone|mobile/.test(n) && list.find((d) => d.type === 'Smartphone'))
+    || (/mac|computer|laptop|desktop/.test(n) && list.find((d) => d.type === 'Computer')) || null;
+}
+function pickDevice(devices, name, c) {
+  if (!name) return null;
+  const n = String(name).toLowerCase();
+  const live = matchDev(devices, n);
+  if (live) return { ...live, _live: true };
+  // Fall back to a remembered device (may be asleep) — we'll try it and report if offline.
+  const cached = matchDev(Object.values((c && c.spotifyDevices) || {}), n);
+  return cached ? { ...cached, _live: false } : null;
+}
+function connErr(r) {
+  if (r.error) return r.error;
+  if (r.status === 404) return 'No active Spotify device. Open Spotify on the target device, then try "transfer to <device>".';
+  if (r.status === 403) return 'Spotify rejected it — Connect playback control requires Spotify Premium.';
+  return `Spotify API ${r.status}${r.text ? ': ' + r.text.slice(0, 160) : ''}`;
+}
+async function spotifyConnect(c, a, q, vol, deviceName) {
+  const devices = await spotifyDevices(c);
+  const dev = pickDevice(devices, deviceName, c);
+  if (deviceName && !dev) {
+    const known = Object.values(c.spotifyDevices || {}).map((d) => d.name);
+    return { success: false, error: `Device "${deviceName}" not found. Open Spotify there first. Online: ${devices.map((d) => d.name).join(', ') || 'none'}.${known.length ? ' Known: ' + known.join(', ') + '.' : ''}` };
+  }
+  // Auto-target a device when the user didn't name one. Spotify often reports the Mac
+  // app as is_active:false even while open — passing device_id on the play/control call
+  // WAKES it, so we must always target a concrete device, never rely on "currently active".
+  const computer = devices.find((d) => d.type === 'Computer');
+  const active = devices.find((d) => d.is_active);
+  const target = dev || active || computer || devices[0] || null;
+  const dq = target && target._live !== false ? `?device_id=${target.id}` : (target ? `?device_id=${target.id}` : '');
+  const ok = (r, msg) => (r.ok || r.status === 204) ? { success: true, result: msg } : { success: false, error: connErr(r) };
+  switch (a) {
+    case 'list_devices': {
+      const liveIds = new Set(devices.map((d) => d.id));
+      const cached = Object.values(c.spotifyDevices || {}).filter((d) => !liveIds.has(d.id));
+      const lines = [
+        ...devices.map((d) => `${d.name} (${d.type})${d.is_active ? ' [active]' : ' [online]'}`),
+        ...cached.map((d) => `${d.name} (${d.type}) [offline — open Spotify on it]`),
+      ];
+      return { success: true, result: lines.length ? lines.join('\n') : 'No Spotify devices known yet. Open the Spotify app on your phone/Mac once to register it.' };
+    }
+    case 'transfer':
+      if (!dev) return { success: false, error: 'No device matched. Run list_devices to see options.' };
+      if (!dev._live) return { success: false, error: `${dev.name} is offline. Open Spotify on it, then transfer.` };
+      return ok(await spotifyApi(c, 'PUT', '/me/player', { device_ids: [dev.id], play: true }), `Playback moved to ${dev.name}`);
+    case 'pause':    return ok(await spotifyApi(c, 'PUT', '/me/player/pause' + dq), 'Paused');
+    case 'resume':   return ok(await spotifyApi(c, 'PUT', '/me/player/play' + dq), 'Resumed');
+    case 'next':     return ok(await spotifyApi(c, 'POST', '/me/player/next' + dq), 'Skipped');
+    case 'previous': return ok(await spotifyApi(c, 'POST', '/me/player/previous' + dq), 'Previous track');
+    case 'set_volume': return ok(await spotifyApi(c, 'PUT', `/me/player/volume?volume_percent=${vol}${target ? '&device_id=' + target.id : ''}`), `Volume ${vol}%`);
+    case 'get_now_playing': {
+      const r = await spotifyApi(c, 'GET', '/me/player/currently-playing');
+      if (r.status === 204 || !r.json || !r.json.item) return { success: true, result: 'Nothing playing.' };
+      const it = r.json.item;
+      return { success: true, result: `${it.name} — ${it.artists.map((x) => x.name).join(', ')}${r.json.is_playing ? '' : ' (paused)'}` };
+    }
+    case 'play_track':
+    case 'search_and_play': {
+      if (!q) return { success: false, error: 'no query' };
+      let uri = q, label = q;
+      if (!/^spotify:|^https?:\/\/open\.spotify\.com/.test(q)) {
+        const hit = await spotifySearchUri(c, q);
+        if (!hit) return { success: false, error: `No match for "${q}".` };
+        uri = hit.uri; label = hit.label;
+      }
+      if (!target) return { success: false, error: `No Spotify devices found. Open the Spotify app on your Mac or phone (and start any track once so it registers), then try again.` };
+      // First attempt: play directly on the target (this wakes an inactive Mac).
+      let pr = await spotifyApi(c, 'PUT', '/me/player/play' + dq, { uris: [uri] });
+      // If Spotify says the device isn't ready (404), transfer playback to it then retry.
+      if (pr.status === 404) {
+        await spotifyApi(c, 'PUT', '/me/player', { device_ids: [target.id], play: false });
+        await new Promise((r) => setTimeout(r, 600));
+        pr = await spotifyApi(c, 'PUT', '/me/player/play' + dq, { uris: [uri] });
+      }
+      return ok(pr, `▶ ${label} on ${target.name}`);
+    }
+    default: return { success: false, error: `Unknown action: ${a}` };
+  }
+}
+
 async function mediaControl(input) {
+  const c = loadConfig();
   const a = input.action;
-  const q = input.query || '';
+  const q = (input.query || '').trim();
   const vol = Math.max(0, Math.min(100, Number(input.volume)));
   const spotify = (body) => ['-e', `tell application "Spotify" to ${body}`];
+
+  if (a === 'set_system_volume') {
+    const r = await osa(['-e', `set volume output volume ${vol}`]);
+    return r.ok ? { success: true, result: `System volume ${vol}%` } : { success: false, error: osaErr(r) };
+  }
+  // Spotify Connect path (controls any device incl. the phone) when linked AND a device
+  // is targeted, device listing/transfer is asked, or Connect is the configured default.
+  if (c.spotifyRefreshToken && (input.device || a === 'list_devices' || a === 'transfer' || c.spotifyUseConnect)) {
+    return spotifyConnect(c, a, q, vol, input.device);
+  }
+  if (a === 'list_devices' || a === 'transfer') {
+    return { success: false, error: 'Spotify Connect not linked. Run `node ~/bhatbot/scripts/spotify-auth.js` once (needs Premium) to control your phone/other devices.' };
+  }
+  // Make sure Spotify is up before any Spotify action (avoids "app not running" failures).
+  await osa(['-e', 'if application "Spotify" is not running then tell application "Spotify" to activate']);
+  // Make sure Spotify is up before any Spotify action (avoids "app not running" failures).
+  await osa(['-e', 'if application "Spotify" is not running then tell application "Spotify" to activate']);
+
+  if (a === 'get_now_playing') {
+    const st = await osa(spotify('return player state'));
+    if (!st.ok) return { success: false, error: osaErr(st) };
+    if (st.out !== 'playing' && st.out !== 'paused') return { success: true, result: `Spotify is ${st.out || 'stopped'} — nothing playing.` };
+    const np = await osa(spotify('return name of current track & " — " & artist of current track'));
+    return np.ok ? { success: true, result: (st.out === 'paused' ? '(paused) ' : '') + np.out } : { success: false, error: osaErr(np) };
+  }
+
+  if (a === 'play_track' || a === 'search_and_play') {
+    if (!q) return { success: false, error: 'no query' };
+    if (/^spotify:|^https?:\/\/open\.spotify\.com/.test(q)) {           // already a URI/URL
+      const r = await osa(spotify(`play track "${q.replace(/"/g, '')}"`));
+      return r.ok ? { success: true, result: `Playing ${q}` } : { success: false, error: osaErr(r) };
+    }
+    const hit = await spotifySearchUri(c, q);                            // name → URI via Web API
+    if (hit) {
+      const r = await osa(spotify(`play track "${hit.uri}"`));
+      return r.ok ? { success: true, result: `▶ ${hit.label}` } : { success: false, error: osaErr(r) };
+    }
+    // No Spotify Web API creds → can't resolve a name to a track. Open the in-app search.
+    await osa(['-e', `open location "spotify:search:${encodeURIComponent(q)}"`]);
+    return { success: true, result: `Opened Spotify search for "${q}". To play by name directly, set spotifyClientId + spotifyClientSecret in ~/.bhatbot/config.json (free Spotify developer app).` };
+  }
+
   let args;
   switch (a) {
-    case 'pause':            args = spotify('pause'); break;
-    case 'resume':           args = spotify('play'); break;
-    case 'next':             args = spotify('next track'); break;
-    case 'previous':         args = spotify('previous track'); break;
-    case 'get_now_playing':  args = spotify('return name of current track & " — " & artist of current track'); break;
-    case 'set_volume':       args = spotify(`set sound volume to ${vol}`); break;
-    case 'set_system_volume':args = ['-e', `set volume output volume ${vol}`]; break;
-    case 'play_track':
-    case 'search_and_play':  args = ['-e', `tell application "Spotify" to play track "${q.replace(/"/g, '')}"`]; break;
+    case 'pause':    args = spotify('pause'); break;
+    case 'resume':   args = spotify('play'); break;
+    case 'next':     args = spotify('next track'); break;
+    case 'previous': args = spotify('previous track'); break;
+    case 'set_volume': args = spotify(`set sound volume to ${vol}`); break;
     default: return { success: false, error: `Unknown action: ${a}` };
   }
   const r = await osa(args);
-  // search_and_play often needs a URI; if direct play fails, fall back to opening a search in the app.
-  if (!r.ok && (a === 'search_and_play' || a === 'play_track') && q) {
-    await osa(['-e', `tell application "Spotify" to search for "${q.replace(/"/g, '')}"`]);
-    return { success: true, result: `Opened Spotify search for "${q}". Pick a track to play.` };
-  }
-  return r.ok ? { success: true, result: r.out || 'done' } : { success: false, error: r.err || 'osascript failed' };
+  return r.ok ? { success: true, result: r.out || 'done' } : { success: false, error: osaErr(r) };
 }
 
 // ---------------------------------------------------------------------------
@@ -482,11 +920,30 @@ const TOOLS = [
     input_schema: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'] } },
   { name: 'open_in_browser', description: "Open a URL in Siddhant's default browser.",
     input_schema: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'] } },
-  { name: 'media_control', description: 'Control Spotify + system audio via AppleScript. Use for any play/pause/skip/volume/"what\'s playing" request. set_volume = Spotify volume; set_system_volume = macOS output volume (both 0-100).',
+  { name: 'delegate_project', description: 'Run a large, multi-step project goal through the workspace multi-agent orchestrator (planner → coding/research/browser/memory/creative agents over structured state). Use for big tasks that would otherwise blow up the chat context (building features, long research, multi-file work). Returns a short summary; full state persists in the workspace. Optionally name a workspace to continue an existing project.',
+    input_schema: { type: 'object', properties: { goal: { type: 'string' }, workspace: { type: 'string', description: 'workspace slug/name; omit to use/create the active one' }, max_tasks: { type: 'number' } }, required: ['goal'] } },
+  { name: 'media_control', description: 'Control Spotify + system audio. Without a device it controls the Mac\'s Spotify via AppleScript. With a `device` (e.g. "phone") it uses Spotify Connect to control THAT device anywhere (needs one-time link + Premium). list_devices = show available Spotify devices; transfer = move playback to a device. set_volume = Spotify volume; set_system_volume = macOS output (0-100).',
     input_schema: { type: 'object', properties: {
-      action: { type: 'string', enum: ['play_track','pause','resume','next','previous','set_volume','get_now_playing','search_and_play','set_system_volume'] },
+      action: { type: 'string', enum: ['play_track','pause','resume','next','previous','set_volume','get_now_playing','search_and_play','set_system_volume','list_devices','transfer'] },
       query: { type: 'string', description: 'Track/artist for play_track or search_and_play' },
-      volume: { type: 'number', description: '0-100 for volume actions' }
+      volume: { type: 'number', description: '0-100 for volume actions' },
+      device: { type: 'string', description: 'Target device name for Spotify Connect, e.g. "phone", "iPhone", "Mac". Omit to control the Mac\'s local Spotify app.' }
+    }, required: ['action'] } },
+  { name: 'system_control', description: 'macOS GUI/system automation via AppleScript + System Events. Control ANY app: open_app/activate_app (launch + focus any app by name, e.g. "Photos", "App Store", "Notes", "Messages", "Claude"), quit_app (close an app), keystroke (type text), shortcut (key+modifiers like command/shift/option/control), menu (click a menu item via app+menuPath e.g. ["File","Save"]), clipboard_get/clipboard_set, notification, or applescript (run raw AppleScript). Use this for things the browser/shell cannot do (launching/quitting apps, clicking native UI, window/menu control, clipboard).',
+    input_schema: { type: 'object', properties: {
+      action: { type: 'string', enum: ['applescript','open_app','activate_app','quit_app','keystroke','shortcut','menu','clipboard_get','clipboard_set','notification'] },
+      app: { type: 'string', description: 'Target app name for open_app/activate_app/quit_app/menu' },
+      script: { type: 'string', description: 'Raw AppleScript for action=applescript' },
+      text: { type: 'string', description: 'Text for keystroke/clipboard_set/notification' },
+      title: { type: 'string', description: 'Title for notification' },
+      key: { type: 'string', description: 'Single key for shortcut (e.g. "s")' },
+      modifiers: { type: 'array', items: { type: 'string' }, description: 'e.g. ["command"], ["command","shift"]' },
+      menuPath: { type: 'array', items: { type: 'string' }, description: 'e.g. ["File","Save"]' }
+    }, required: ['action'] } },
+  { name: 'browser_workflow', description: 'Record/replay reusable browser macros. start_recording → do browser actions → save_workflow{name} captures the working steps; replay_workflow{name} re-runs them; list_workflows / show_workflow / delete_workflow / cancel_recording. Use to save multi-step web tasks (login, navigate, fill, extract) the user repeats.',
+    input_schema: { type: 'object', properties: {
+      action: { type: 'string', enum: ['start_recording','save_workflow','cancel_recording','list_workflows','show_workflow','replay_workflow','delete_workflow'] },
+      name: { type: 'string' }, description: { type: 'string' }
     }, required: ['action'] } },
   { name: 'save_memory', description: `Persist a fact to long-term memory. section ∈ {${MEMORY_SECTIONS.join(', ')}}.`,
     input_schema: { type: 'object', properties: { section: { type: 'string', enum: MEMORY_SECTIONS }, content: { type: 'string' } }, required: ['section', 'content'] } },
@@ -590,15 +1047,20 @@ async function browserAction(input) {
     sendToActivity('screenshot', { data: b64 });
     return b64;
   };
+  // While recording a workflow, capture the replayable mutating steps (not screenshots/reads).
+  const rec = (step) => { if (recordingSteps) recordingSteps.push(step); };
   switch (input.action) {
     case 'navigate':
       await page.goto(input.url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      rec({ action: 'navigate', url: input.url });
       return { success: true, url: page.url(), title: await page.title(), _image: await shot() };
     case 'click':
       await page.click(input.selector, { timeout: 15000 });
+      rec({ action: 'click', selector: input.selector });
       return { success: true, _image: await shot() };
     case 'type':
       await page.fill(input.selector, input.text);
+      rec({ action: 'type', selector: input.selector, text: input.text });
       return { success: true, _image: await shot() };
     case 'screenshot':
       return { success: true, note: 'Screenshot captured.', _image: await shot() };
@@ -607,10 +1069,112 @@ async function browserAction(input) {
       return { success: true, text: txt.slice(0, 10 * 1024) };
     }
     case 'evaluate':
+      rec({ action: 'evaluate', js: input.js });
       return { success: true, result: await page.evaluate(input.js) };
     default:
       return { success: false, error: 'Unknown browser action' };
   }
+}
+
+// ---------------------------------------------------------------------------
+// Browser workflow recording — capture the sequence of browser actions that
+// actually worked on a site, save it by name, replay it later as a macro.
+// Empirical traces beat the model re-deriving selectors from scratch each time.
+// ---------------------------------------------------------------------------
+function wfPath(name) { return path.join(WORKFLOW_DIR, String(name).replace(/[^\w.-]/g, '_') + '.json'); }
+async function browserWorkflow(input) {
+  const a = input.action;
+  try {
+    if (a === 'start_recording') { recordingSteps = []; return { success: true, result: 'Recording browser steps. Perform the task, then save_workflow.' }; }
+    if (a === 'save_workflow') {
+      if (!recordingSteps || !recordingSteps.length) return { success: false, error: 'Nothing recorded — start_recording first, then do browser actions.' };
+      if (!input.name) return { success: false, error: 'name required' };
+      fs.mkdirSync(WORKFLOW_DIR, { recursive: true });
+      const wf = { name: input.name, description: input.description || '', created: new Date().toISOString(), steps: recordingSteps };
+      fs.writeFileSync(wfPath(input.name), JSON.stringify(wf, null, 2));
+      const n = recordingSteps.length; recordingSteps = null;
+      return { success: true, result: `Saved workflow "${input.name}" (${n} steps).` };
+    }
+    if (a === 'cancel_recording') { recordingSteps = null; return { success: true, result: 'Recording cancelled.' }; }
+    if (a === 'list_workflows') {
+      if (!fs.existsSync(WORKFLOW_DIR)) return { success: true, result: 'No workflows yet.' };
+      const items = fs.readdirSync(WORKFLOW_DIR).filter((f) => f.endsWith('.json')).map((f) => {
+        try { const w = JSON.parse(fs.readFileSync(path.join(WORKFLOW_DIR, f), 'utf8')); return `• ${w.name} (${(w.steps || []).length} steps)${w.description ? ' — ' + w.description : ''}`; } catch { return '• ' + f; }
+      });
+      return { success: true, result: items.length ? items.join('\n') : 'No workflows yet.' };
+    }
+    if (a === 'show_workflow') {
+      if (!input.name || !fs.existsSync(wfPath(input.name))) return { success: false, error: 'workflow not found' };
+      return { success: true, result: fs.readFileSync(wfPath(input.name), 'utf8') };
+    }
+    if (a === 'delete_workflow') {
+      if (!input.name || !fs.existsSync(wfPath(input.name))) return { success: false, error: 'workflow not found' };
+      fs.unlinkSync(wfPath(input.name)); return { success: true, result: `Deleted "${input.name}".` };
+    }
+    if (a === 'replay_workflow') {
+      if (!input.name || !fs.existsSync(wfPath(input.name))) return { success: false, error: 'workflow not found' };
+      const wf = JSON.parse(fs.readFileSync(wfPath(input.name), 'utf8'));
+      const log = []; let lastImage;
+      for (let i = 0; i < (wf.steps || []).length; i++) {
+        const step = wf.steps[i];
+        const r = await browserAction(step);
+        if (r._image) lastImage = r._image;
+        if (r.success === false) { log.push(`✗ step ${i + 1} ${step.action}: ${r.error}`); return { success: false, error: `Workflow "${input.name}" failed at step ${i + 1}`, result: log.join('\n'), _image: lastImage }; }
+        log.push(`✓ ${step.action}${step.url ? ' ' + step.url : step.selector ? ' ' + step.selector : ''}`);
+      }
+      return { success: true, result: `Replayed "${input.name}" (${wf.steps.length} steps):\n` + log.join('\n'), _image: lastImage };
+    }
+    return { success: false, error: `Unknown action: ${a}` };
+  } catch (e) { return { success: false, error: e.message }; }
+}
+
+// ---------------------------------------------------------------------------
+// macOS GUI / system automation via AppleScript + System Events. Generalizes the
+// Spotify pattern to any app: activate, keystroke, shortcut, click menu items,
+// clipboard, notifications, or run raw AppleScript. Needs Accessibility (keystroke/
+// menu/UI) and Automation (per-app) permission — granted to Bhatbot.app once.
+// ---------------------------------------------------------------------------
+async function systemControl(input) {
+  const a = input.action;
+  const esc = (s) => String(s == null ? '' : s).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  let r;
+  switch (a) {
+    case 'applescript':
+      r = await osa(['-e', String(input.script || '')]); break;
+    case 'activate_app':
+    case 'open_app':
+      // `open -a` reliably launches even apps that aren't running (tell..activate can stall
+      // on a cold app); then activate to bring it to the front.
+      r = await osa(['-e', `do shell script "open -a " & quoted form of "${esc(input.app)}"`, '-e', `tell application "${esc(input.app)}" to activate`]);
+      break;
+    case 'quit_app':
+      r = await osa(['-e', `tell application "${esc(input.app)}" to quit`]); break;
+    case 'keystroke':
+      r = await osa(['-e', `tell application "System Events" to keystroke "${esc(input.text)}"`]); break;
+    case 'shortcut': {                                   // key + modifiers, e.g. key:"s" modifiers:["command"]
+      const mods = (input.modifiers || []).map((m) => `${m} down`).join(', ');
+      const using = mods ? ` using {${mods}}` : '';
+      r = await osa(['-e', `tell application "System Events" to keystroke "${esc(input.key)}"${using}`]); break;
+    }
+    case 'menu': {                                       // app + menuPath:["File","Save"]
+      const p = input.menuPath || [];
+      if (p.length < 2) return { success: false, error: 'menuPath needs at least [menu, item]' };
+      const menu = esc(p[0]); const item = esc(p[p.length - 1]);
+      const script = `tell application "${esc(input.app)}" to activate
+delay 0.2
+tell application "System Events" to tell process "${esc(input.app)}" to click menu item "${item}" of menu "${menu}" of menu bar 1`;
+      r = await osa(['-e', script]); break;
+    }
+    case 'clipboard_get':
+      r = await osa(['-e', 'the clipboard as text']); break;
+    case 'clipboard_set':
+      r = await osa(['-e', `set the clipboard to "${esc(input.text)}"`]); break;
+    case 'notification':
+      r = await osa(['-e', `display notification "${esc(input.text)}" with title "${esc(input.title || 'Bhatbot')}"`]); break;
+    default:
+      return { success: false, error: `Unknown action: ${a}` };
+  }
+  return r.ok ? { success: true, result: r.out || 'done' } : { success: false, error: osaErr(r) };
 }
 
 async function visionLocal(input) {
@@ -652,6 +1216,41 @@ function saveMemoryEntry(section, content) {
   return { success: true, saved: `${section}: ${content}` };
 }
 
+// Build the adapters the orchestrator/agents need, reusing main.js's own model callers
+// (so rate-limit accounting + prompt caching still apply). Memory is per-workspace.
+function orchestratorAdapters(wsDir) {
+  const c = loadConfig();
+  const embedModel = (c.models && c.models.embed) || c.embedModel || 'nomic-embed-text';
+  return {
+    ollamaUp,
+    ollamaChat: (m, s, model) => ollamaChat(m, s, model),
+    anthropic: async (m, s, model) => {
+      const j = await anthropicRequest({ model, max_tokens: 2048, system: [{ type: 'text', text: s, cache_control: { type: 'ephemeral' } }], messages: m }, getApiKey());
+      return (j.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('\n');
+    },
+    memFn: (q, k) => wsMemory.search(wsDir, q, k, { embedModel }),
+    memWrite: (w) => wsMemory.write(wsDir, w, { embedModel }),
+  };
+}
+
+// delegate_project: run a multi-step goal through the workspace orchestrator instead of the
+// single chat loop. Keeps the conversation context flat — only a short summary returns.
+async function delegateProject(input) {
+  let slug = input.workspace || workspaceMgr.getActive();
+  if (!slug || !workspaceMgr.exists(slug)) { const w = workspaceMgr.create(input.workspace || (input.goal || 'project').slice(0, 40)); slug = w.slug; workspaceMgr.setActive(slug); }
+  const w = workspaceMgr.load(slug);
+  const cfg = loadConfig();
+  cfg.__metrics = { cost_month_usd: (wsState.open(w.dir).snapshot().components, 0) };
+  const steps = [];
+  const res = await orchestrator.run(input.goal, {
+    wsDir: w.dir, config: cfg, adapters: orchestratorAdapters(w.dir),
+    maxTasks: input.max_tasks || 12,
+    onStep: ({ task, result }) => steps.push(`${task.id} [${task.agent}] ${result.status}: ${result.summary}`),
+  });
+  return { success: true, workspace: slug, completed: res.completed, open: res.open, blocked: res.blocked,
+    state: wsState.open(w.dir).digest(), steps };
+}
+
 async function executeTool(name, input) {
   let result;
   try {
@@ -690,6 +1289,12 @@ async function executeTool(name, input) {
         await shell.openExternal(input.url); result = { success: true, opened: input.url }; break;
       case 'media_control':
         result = await mediaControl(input); break;
+      case 'system_control':
+        result = await systemControl(input); break;
+      case 'delegate_project':
+        result = await delegateProject(input); break;
+      case 'browser_workflow':
+        result = await browserWorkflow(input); break;
       case 'save_memory':
         result = saveMemoryEntry(input.section, input.content); break;
       case 'browser':
@@ -814,18 +1419,30 @@ function sendToActivity(channel, data) {
   try { if (activityWindow && !activityWindow.isDestroyed()) activityWindow.webContents.send(channel, data); } catch {}
 }
 
-async function agentLoop(history, apiKey, event) {
+async function agentLoop(history, apiKey, event, opts = {}) {
   agentState = 'running';
   pendingGuidance = [];          // fresh per task
   const usedGuidance = [];       // collected for the post-task "learn this?" prompt
   let iterations = 0;
+  history = validateHistory(history);            // heal any corruption before it compounds
   history = await trimHistory(history, apiKey);
+
+  // Streaming: emit text deltas to the renderer (live bubble) AND speak each finished
+  // sentence as it lands. Only on the desktop chat path (opts.stream); MCP/Telegram stay
+  // non-streaming so their headless senders are untouched.
+  const stream = !!opts.stream;
+  const ttsSeq = stream ? ttsStreamStart() : null;
+  const onText = stream ? (delta) => {
+    sendToAll(event, 'tool-update', { type: 'token', text: delta });
+    if (ttsSeq != null) ttsStreamFeed(ttsSeq, delta);
+  } : undefined;
 
   // All exits go through here so live guidance can be offered for learning (2a).
   const finish = (text) => {
     agentState = 'idle';
+    if (ttsSeq != null) ttsStreamFlush(ttsSeq);
     if (usedGuidance.length) sendToActivity('learn_prompt', { text: usedGuidance.join(' | ') });
-    return { text, history };
+    return { text, history, _streamed: stream };
   };
 
   while (iterations < MAX_AGENT_ITERATIONS) {
@@ -833,7 +1450,13 @@ async function agentLoop(history, apiKey, event) {
     while (agentState === 'paused') await sleep(300);
 
     history = evictOldImages(history, KEEP_IMAGES);
-    const response = await callModel(history, apiKey, iterations === 0);
+    let response;
+    try {
+      response = await callModel(history, apiKey, iterations === 0, onText);
+    } catch (e) {
+      if (e && e.rateBudget) { history = []; return finish(e.message); }  // notify + reset for next task
+      throw e;
+    }
     sendToActivity('model', { model: response._model });
     sendToAll(event, 'tool-update', { type: 'provider_used', provider: response._provider || 'anthropic', model: response._model });
     const hasTools = response.content.some((b) => b.type === 'tool_use');
@@ -844,8 +1467,9 @@ async function agentLoop(history, apiKey, event) {
       return finish(text);
     }
 
+    // Pre-tool narration. When streaming, tokens already rendered + spoke it → don't re-emit.
     const thinkText = response.content.filter((b) => b.type === 'text').map((b) => b.text).join('');
-    if (thinkText) sendToAll(event, 'tool-update', { type: 'thinking', text: thinkText });
+    if (thinkText && !stream) sendToAll(event, 'tool-update', { type: 'thinking', text: thinkText });
 
     const toolResults = [];
     for (const block of response.content) {
@@ -1025,12 +1649,12 @@ function createWindow() {
   const { width } = screen.getPrimaryDisplay().workAreaSize;
   mainWindow = new BrowserWindow({
     width: 430, height: 650, x: width - 450, y: 50,
-    frame: false, fullscreen: false, alwaysOnTop: false, skipTaskbar: false, resizable: true, maximizable: true,
+    frame: false, fullscreen: true, alwaysOnTop: false, skipTaskbar: false, resizable: true, maximizable: true,
     minWidth: 360, minHeight: 400, backgroundColor: '#090d13',
     webPreferences: { nodeIntegration: false, contextIsolation: true, preload: path.join(__dirname, 'preload.js') }
   });
   mainWindow.loadFile(path.join(__dirname, 'src', 'index.html'));
-  mainWindow.maximize();   // big like before, but now freely resizable (was locked fullscreen)
+  mainWindow.setFullScreen(true);   // always open fullscreen (still resizable — can exit via ⌃⌘F)
 }
 
 function openActivityWindow() {
@@ -1048,7 +1672,7 @@ function openActivityWindow() {
 function toggleWindow() {
   if (!mainWindow) return createWindow();
   if (mainWindow.isVisible() && mainWindow.isFocused()) mainWindow.hide();
-  else { mainWindow.show(); mainWindow.focus(); }
+  else { if (!mainWindow.isFullScreen()) mainWindow.setFullScreen(true); mainWindow.show(); mainWindow.focus(); }
 }
 
 // --- Nexus (embedded research navigator) ---
@@ -1133,10 +1757,10 @@ function startPty(cols, rows) {
 // --- Vosk always-on listener: "bhatbot <command>" → feed command into the agent loop ---
 function startWakeHelper() {
   if (wakeProc) return;
-  const script = path.join(__dirname, 'scripts', 'listen.py');
+  const script = unpacked(path.join(__dirname, 'scripts', 'listen.py'));
   if (!fs.existsSync(script)) return;
   try {
-    wakeProc = require('child_process').spawn('python3', ['-u', script], { env: { ...process.env, PATH: EXEC_PATH } });
+    wakeProc = require('child_process').spawn(resolvePython(), ['-u', script], { env: { ...process.env, PATH: EXEC_PATH } });
     let buf = '';
     const triggerWake = (cmd) => {
       if (mainWindow && !mainWindow.isDestroyed()) {
@@ -1189,8 +1813,9 @@ ipcMain.on('pty-input', (_e, data) => { try { ptyProc && ptyProc.write(data); } 
 ipcMain.on('pty-resize', (_e, { cols, rows }) => { try { ptyProc && ptyProc.resize(cols, rows); } catch {} });
 ipcMain.handle('get-voice-config', () => {
   const c = loadConfig();
-  const ttsProvider = c.ttsProvider || (c.elevenLabsKey ? 'elevenlabs' : (c.openaiKey ? 'openai' : (c.piperBin ? 'piper' : null)));
-  const hasTTS = ttsProvider === 'elevenlabs' ? !!c.elevenLabsKey
+  const ttsProvider = c.ttsProvider || (kokoroAvailable() ? 'kokoro' : (c.elevenLabsKey ? 'elevenlabs' : (c.openaiKey ? 'openai' : (c.piperBin ? 'piper' : null))));
+  const hasTTS = ttsProvider === 'kokoro' ? kokoroAvailable()
+    : ttsProvider === 'elevenlabs' ? !!c.elevenLabsKey
     : ttsProvider === 'openai' ? !!c.openaiKey
     : ttsProvider === 'piper' ? !!c.piperBin : false;
   return {
@@ -1200,25 +1825,131 @@ ipcMain.handle('get-voice-config', () => {
     hasReplicateKey: !!c.replicateKey, hasImageGen: !!c.openaiKey
   };
 });
-// Multi-provider TTS — openai (default, deep male "onyx"), elevenlabs (real JARVIS voice), piper (offline)
+// ---------------------------------------------------------------------------
+// Kokoro — local neural TTS (free, offline, high quality). A python worker is
+// kept WARM (model loaded once, ~1.2s) so each reply only pays synth time
+// (~0.85x realtime on the M4). British "bm_george" by default for the J.A.R.V.I.S.
+// feel. Falls back to cloud TTS in synthesizeSpeech if the worker ever dies.
+// ---------------------------------------------------------------------------
+const KOKORO_DIR = path.join(os.homedir(), '.bhatbot', 'kokoro');
+let kokoroProc = null, kokoroReady = null, kokoroBuf = '', kokoroNextId = 1;
+const kokoroPending = new Map();
+
+function kokoroAvailable() {
+  try { return fs.existsSync(path.join(KOKORO_DIR, 'kokoro-v1.0.onnx')) && fs.existsSync(path.join(KOKORO_DIR, 'voices-v1.0.bin')); }
+  catch { return false; }
+}
+
+function kokoroStart() {
+  if (kokoroReady) return kokoroReady;
+  kokoroReady = new Promise((resolve, reject) => {
+    const worker = unpacked(path.join(__dirname, 'scripts', 'kokoro_worker.py'));
+    const py = resolvePython();
+    let settled = false;
+    kokoroProc = spawn(py, [worker, KOKORO_DIR], { env: { ...process.env, PATH: EXEC_PATH } });
+    kokoroProc.on('error', (e) => { if (!settled) { settled = true; reject(e); } cleanup(e); });
+    kokoroProc.stderr.on('data', () => {}); // model logs to stderr; ignore
+    kokoroProc.stdout.on('data', (d) => {
+      kokoroBuf += d.toString();
+      let nl;
+      while ((nl = kokoroBuf.indexOf('\n')) >= 0) {
+        const line = kokoroBuf.slice(0, nl).trim(); kokoroBuf = kokoroBuf.slice(nl + 1);
+        if (!line) continue;
+        let msg; try { msg = JSON.parse(line); } catch { continue; }
+        if (msg.ready && !settled) { settled = true; resolve(); continue; }
+        if (msg.fatal && !settled) { settled = true; reject(new Error(msg.fatal)); continue; }
+        const p = kokoroPending.get(msg.id);
+        if (p) { kokoroPending.delete(msg.id); p(msg); }
+      }
+    });
+    kokoroProc.on('close', () => cleanup(new Error('kokoro worker exited')));
+    function cleanup(err) {
+      for (const [, p] of kokoroPending) p({ error: err.message });
+      kokoroPending.clear(); kokoroProc = null; kokoroReady = null; kokoroBuf = '';
+    }
+  });
+  return kokoroReady;
+}
+
+// Allowed Kokoro voices (guards against junk from the phone). British male/female first.
+const KOKORO_VOICES = ['bm_george', 'bm_lewis', 'bm_daniel', 'bm_fable', 'bf_emma', 'bf_isabella', 'bf_alice', 'bf_lily', 'am_michael', 'am_adam', 'af_bella', 'af_nicole'];
+async function kokoroSynth(text, opts = {}) {
+  if (!kokoroAvailable()) return { error: 'kokoro model not installed' };
+  try { await kokoroStart(); } catch (e) { return { error: 'kokoro worker failed: ' + e.message }; }
+  if (!kokoroProc) return { error: 'kokoro worker unavailable' };
+  const c = loadConfig();
+  const id = kokoroNextId++;
+  const voice = (opts.voice && KOKORO_VOICES.includes(opts.voice)) ? opts.voice : (c.kokoroVoice || 'bm_george');
+  let speed = Number(opts.speed != null ? opts.speed : (c.kokoroSpeed != null ? c.kokoroSpeed : 1.0));
+  if (!isFinite(speed)) speed = 1.0;
+  speed = Math.max(0.6, Math.min(1.4, speed));   // clamp to a sane, non-robotic range
+  const req = { id, text: String(text).slice(0, 2000), voice, speed, lang: c.kokoroLang || 'en-gb' };
+  const msg = await new Promise((resolve) => {
+    const timer = setTimeout(() => { kokoroPending.delete(id); resolve({ error: 'kokoro timeout' }); }, 30000);
+    kokoroPending.set(id, (m) => { clearTimeout(timer); resolve(m); });
+    try { kokoroProc.stdin.write(JSON.stringify(req) + '\n'); }
+    catch (e) { kokoroPending.delete(id); clearTimeout(timer); resolve({ error: e.message }); }
+  });
+  if (msg.error) return { error: msg.error };
+  try {
+    const buf = fs.readFileSync(msg.path); fs.unlink(msg.path, () => {});
+    return { success: true, audio: buf.toString('base64'), mimeType: 'audio/wav', via: 'kokoro' };
+  } catch (e) { return { error: e.message }; }
+}
+
+async function elevenLabsSynth(t, c) {
+  if (!c.elevenLabsKey) return { error: 'no elevenLabsKey' };
+  const voiceId = c.ttsVoice || c.elevenLabsVoiceId || 'pNInz6obpgDQGcFmaJgB';
+  // flash_v2_5 = ElevenLabs' lowest-latency model (~75ms vs turbo's ~250-400ms), same
+  // voices. optimize_streaming_latency=3 trims first-byte time further. Big speaking-speed win.
+  const model = c.ttsModel || 'eleven_flash_v2_5';
+  const r = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}?output_format=mp3_44100_128&optimize_streaming_latency=3`, {
+    method: 'POST', headers: { 'xi-api-key': c.elevenLabsKey, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text: t, model_id: model, voice_settings: { stability: 0.4, similarity_boost: 0.75, style: 0.2, use_speaker_boost: false } })
+  });
+  if (r.ok) { const buf = Buffer.from(await r.arrayBuffer()); return { success: true, audio: buf.toString('base64'), mimeType: 'audio/mpeg', via: 'elevenlabs' }; }
+  return { error: `elevenlabs ${r.status}: ${(await r.text()).slice(0, 200)}`, status: r.status };
+}
+
+async function openaiSynth(t, c) {
+  if (!c.openaiKey) return { error: 'no openaiKey' };
+  const r = await fetch('https://api.openai.com/v1/audio/speech', {
+    method: 'POST', headers: { 'Authorization': 'Bearer ' + c.openaiKey, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model: c.openaiTtsModel || 'gpt-4o-mini-tts', voice: c.openaiTtsVoice || 'onyx', input: t, response_format: 'mp3',
+      instructions: c.ttsInstructions || 'Calm, refined British butler. Measured, crisp, understated wit — like J.A.R.V.I.S.' })
+  });
+  if (!r.ok) return { error: `openai-tts ${r.status}: ${(await r.text()).slice(0, 200)}` };
+  const buf = Buffer.from(await r.arrayBuffer());
+  return { success: true, audio: buf.toString('base64'), mimeType: 'audio/mpeg', via: 'openai' };
+}
+
+// Multi-provider TTS — kokoro (local neural, default), elevenlabs (cloud JARVIS), openai (onyx), piper (offline)
 // Plain function so both the IPC handler (desktop HUD) and the express server (phone PWA) can call it.
-async function synthesizeSpeech(text) {
+async function synthesizeSpeech(text, opts = {}) {
   const c = loadConfig();
   const t = (text || '').trim();
   if (!t) return { error: 'empty text' };
-  const provider = c.ttsProvider || (c.elevenLabsKey ? 'elevenlabs' : (c.openaiKey ? 'openai' : (c.piperBin ? 'piper' : null)));
+  // Default to local Kokoro when installed (free, offline); honor explicit ttsProvider otherwise.
+  const provider = c.ttsProvider || (kokoroAvailable() ? 'kokoro' : (c.elevenLabsKey ? 'elevenlabs' : (c.openaiKey ? 'openai' : (c.piperBin ? 'piper' : null))));
   try {
+    if (provider === 'kokoro') {
+      const r = await kokoroSynth(t, opts);
+      if (r.success) return r;
+      // worker died / not installed → fall back to cloud so voice never goes silent
+      console.error('[tts] kokoro failed, falling back:', r.error);
+      if (c.elevenLabsKey) { const e = await elevenLabsSynth(t, c); if (e.success) return e; }
+      if (c.openaiKey) return await openaiSynth(t, c);
+      return { error: 'kokoro failed and no cloud fallback: ' + r.error };
+    }
     if (provider === 'elevenlabs') {
-      if (!c.elevenLabsKey) return { error: 'no elevenLabsKey' };
-      const voiceId = c.ttsVoice || c.elevenLabsVoiceId || 'pNInz6obpgDQGcFmaJgB'; // default deep male (Adam); set a JARVIS voice id
-      const model = c.ttsModel || 'eleven_turbo_v2_5';
-      const r = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}?output_format=mp3_44100_128`, {
-        method: 'POST', headers: { 'xi-api-key': c.elevenLabsKey, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: t, model_id: model, voice_settings: { stability: 0.45, similarity_boost: 0.8, style: 0.25 } })
-      });
-      if (r.ok) { const buf = Buffer.from(await r.arrayBuffer()); return { success: true, audio: buf.toString('base64'), mimeType: 'audio/mpeg', via: 'elevenlabs' }; }
-      // quota/auth/rate → fall back to OpenAI onyx so voice never dies mid-session
-      if (![401, 402, 429].includes(r.status) || !c.openaiKey) return { error: `elevenlabs ${r.status}: ${(await r.text()).slice(0, 200)}` };
+      const e = await elevenLabsSynth(t, c);
+      if (e.success) return e;
+      // EL failed (quota/auth/rate/network) → fall back to free local Kokoro, then OpenAI,
+      // so the voice never dies even when the ElevenLabs free tier is exhausted.
+      console.error('[tts] elevenlabs failed, falling back:', e.error);
+      if (kokoroAvailable()) { const k = await kokoroSynth(t); if (k.success) return k; }
+      if (c.openaiKey) return await openaiSynth(t, c);
+      return { error: e.error };
     }
     if (provider === 'piper') {
       if (!c.piperBin) return { error: 'no piperBin' };
@@ -1233,18 +1964,156 @@ async function synthesizeSpeech(text) {
       return { success: true, audio: buf.toString('base64'), mimeType: 'audio/wav' };
     }
     // default: OpenAI
-    if (!c.openaiKey) return { error: 'no TTS provider configured (set openaiKey, elevenLabsKey, or piperBin)' };
-    const r = await fetch('https://api.openai.com/v1/audio/speech', {
-      method: 'POST', headers: { 'Authorization': 'Bearer ' + c.openaiKey, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: c.openaiTtsModel || 'gpt-4o-mini-tts', voice: c.openaiTtsVoice || 'onyx', input: t, response_format: 'mp3',
-        instructions: c.ttsInstructions || 'Calm, refined British butler. Measured, crisp, understated wit — like J.A.R.V.I.S.' })
-    });
-    if (!r.ok) return { error: `openai-tts ${r.status}: ${(await r.text()).slice(0, 200)}` };
-    const buf = Buffer.from(await r.arrayBuffer());
-    return { success: true, audio: buf.toString('base64'), mimeType: 'audio/mpeg', via: 'openai' };
+    if (!c.openaiKey) return { error: 'no TTS provider configured (set kokoro model, openaiKey, elevenLabsKey, or piperBin)' };
+    return await openaiSynth(t, c);
   } catch (e) { return { error: e.message }; }
 }
 ipcMain.handle('synthesize-speech', (_e, { text }) => synthesizeSpeech(text));
+
+// Desktop voice output — synthesize in main, play with macOS `afplay`. The renderer
+// <Audio> element is unreliable in Electron (autoplay/codec quirks → silent desktop,
+// the long-standing "works on phone not Mac" bug). afplay is rock-solid and the
+// synthesis already lives here. Returns once playback has STARTED (not finished).
+let ttsPlayProc = null, ttsPlaySeq = 0;
+function stopDesktopTTS() {
+  ttsPlaySeq++;
+  if (ttsPlayProc) { try { ttsPlayProc.kill(); } catch {} ttsPlayProc = null; }
+}
+// Sentence chunks for streaming speech (synth one, play it while the next synthesizes).
+function splitForSpeech(text) {
+  const clean = String(text || '').replace(/```[\s\S]*?```/g, ' code block ').replace(/[*_`#>]/g, '').trim();
+  const parts = clean.match(/[^.!?\n]+[.!?]?(\s|$)|[^.!?\n]+$/g) || [];
+  const out = []; let buf = '';
+  for (let p of parts) { p = p.trim(); if (!p) continue; buf = buf ? buf + ' ' + p : p; if (buf.length >= 60 || /[.!?]$/.test(p)) { out.push(buf); buf = ''; } }
+  if (buf) out.push(buf);
+  return out.filter((s) => s.length);
+}
+function playFile(file, seq) {
+  return new Promise((res) => {
+    if (seq !== ttsPlaySeq) return res();
+    ttsPlayProc = spawn('afplay', [file], { env: { ...process.env, PATH: EXEC_PATH } });
+    ttsPlayProc.on('close', () => { fs.unlink(file, () => {}); res(); });
+    ttsPlayProc.on('error', () => { fs.unlink(file, () => {}); res(); });
+  });
+}
+async function speakDesktop(text, opts = {}) {
+  const c = loadConfig();
+  if (c.ttsEnabled === false) return { success: false, skipped: 'tts disabled' };
+  let t = String(text || '').trim();
+  if (!t) return { success: false };
+  stopDesktopTTS();
+  const seq = ++ttsPlaySeq;
+  // Ultra-short → free macOS `say` (Daniel = British), no synth needed.
+  if (!opts.full && t.length < 80) { sayLocal(t); return { success: true, via: 'say' }; }
+  // Long → condense for speech (full text still on screen / "read full"). Threshold 500
+  // (was 300): most replies now skip the extra summarize LLM round-trip → speaks sooner.
+  if (!opts.full && t.length > 500) {
+    try { const s = await summarizeForSpeech(t); if (s && s.success && s.text) t = s.text; } catch {}
+  }
+  if (seq !== ttsPlaySeq) return { success: false, superseded: true };
+  // Short text → ONE synth call so Kokoro keeps continuous, natural prosody (chunking
+  // resets intonation each sentence → robotic). Only long full-reads stream sentence
+  // chunks (to start audio sooner). 350 chars ≈ a few smooth sentences.
+  const chunks = t.length <= 350 ? [t] : splitForSpeech(t);
+  if (!chunks.length) return { success: false };
+  const jobs = chunks.map((s) => synthesizeSpeech(s).catch(() => null)); // prefetch in parallel
+  for (let i = 0; i < jobs.length; i++) {
+    const r = await jobs[i];
+    if (seq !== ttsPlaySeq) return { success: false, superseded: true };
+    if (!r || !r.success) continue;
+    const ext = (r.mimeType || '').includes('wav') ? 'wav' : 'mp3';
+    const out = path.join(os.tmpdir(), `bhatbot-say-${seq}-${i}.${ext}`);
+    try { fs.writeFileSync(out, Buffer.from(r.audio, 'base64')); } catch { continue; }
+    await playFile(out, seq);
+    if (seq !== ttsPlaySeq) return { success: false, superseded: true };
+  }
+  return { success: true, via: 'tts' };
+}
+ipcMain.handle('play-tts', (_e, { text, full }) => speakDesktop(text, { full: !!full }));
+
+// --- Streaming TTS: speak each sentence the moment it completes, while the model is still
+// generating the next. First audio at ~sentence 1 (~2-3s) instead of after the whole reply
+// + a summarize call. Shares ttsPlaySeq so a new turn cancels in-flight speech. ---
+let ttsStreamSeq = 0, ttsStreamBuf = '', ttsStreamQ = [], ttsStreamDraining = false;
+function ttsStreamStart() {
+  stopDesktopTTS();
+  ttsStreamSeq = ++ttsPlaySeq; ttsStreamBuf = ''; ttsStreamQ = []; ttsStreamDraining = false;
+  return ttsStreamSeq;
+}
+function ttsStreamFeed(seq, delta) {
+  if (seq !== ttsStreamSeq) return;
+  if (loadConfig().ttsEnabled === false) return;
+  ttsStreamBuf += delta;
+  const re = /[^.!?\n]*[.!?\n]+/g; let m, consumed = 0;
+  while ((m = re.exec(ttsStreamBuf))) { const s = m[0].trim(); consumed = re.lastIndex; if (s.length > 2) ttsStreamEnqueue(seq, s); }
+  if (consumed) ttsStreamBuf = ttsStreamBuf.slice(consumed);
+}
+function ttsStreamFlush(seq) {
+  if (seq !== ttsStreamSeq) return;
+  const rest = ttsStreamBuf.trim(); ttsStreamBuf = '';
+  if (rest && loadConfig().ttsEnabled !== false) ttsStreamEnqueue(seq, rest);
+}
+function ttsStreamEnqueue(seq, sentence) {
+  if (seq !== ttsStreamSeq) return;
+  const clean = String(sentence).replace(/```[\s\S]*?```/g, ' code block ').replace(/[*_`#>]/g, '').trim();
+  if (!clean) return;
+  ttsStreamQ.push(clean);
+  if (!ttsStreamDraining) ttsStreamDrain(seq);
+}
+async function ttsStreamDrain(seq) {
+  ttsStreamDraining = true;
+  try {
+    while (ttsStreamQ.length) {
+      if (seq !== ttsStreamSeq) break;
+      const s = ttsStreamQ.shift();
+      const r = await synthesizeSpeech(s).catch(() => null);
+      if (seq !== ttsStreamSeq) break;
+      if (!r || !r.success) continue;
+      const ext = (r.mimeType || '').includes('wav') ? 'wav' : 'mp3';
+      const out = path.join(os.tmpdir(), `bb-stream-${seq}-${Math.random().toString(36).slice(2)}.${ext}`);
+      try { fs.writeFileSync(out, Buffer.from(r.audio, 'base64')); } catch { continue; }
+      await playFile(out, seq);
+    }
+  } finally { ttsStreamDraining = false; }
+}
+
+// History integrity guard. Agent histories must alternate user/assistant and keep every
+// tool_use paired with a following tool_result. Corruptions (a stray user message that just
+// echoes the assistant's own last reply → self-hallucination loops; an orphan tool_result
+// with no preceding tool_use → API 400) are logged and healed in place so a session can't
+// get wedged. Returns a cleaned copy.
+function validateHistory(history) {
+  if (!Array.isArray(history)) return [];
+  const blocks = (m) => Array.isArray(m.content) ? m.content : [{ type: 'text', text: String(m.content || '') }];
+  const textOf = (m) => blocks(m).filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim();
+  const toolUseIds = (m) => (m.role === 'assistant' ? blocks(m).filter((b) => b.type === 'tool_use').map((b) => b.id) : []);
+  const out = [];
+  for (let i = 0; i < history.length; i++) {
+    const m = history[i];
+    if (!m || !m.role) { console.warn('[history] dropped malformed message at', i); continue; }
+    // 1) user message that exactly echoes the previous assistant text = the self-feedback bug.
+    if (m.role === 'user' && out.length && out[out.length - 1].role === 'assistant') {
+      const ut = textOf(m), at = textOf(out[out.length - 1]);
+      if (ut && ut === at) { console.warn('[history] dropped user msg echoing assistant reply (self-hallucination guard) at', i); continue; }
+    }
+    // 2) orphan tool_result (no matching tool_use in the immediately preceding assistant msg).
+    if (m.role === 'user' && Array.isArray(m.content) && m.content.some((b) => b.type === 'tool_result')) {
+      const prevIds = out.length ? toolUseIds(out[out.length - 1]) : [];
+      const kept = m.content.filter((b) => b.type !== 'tool_result' || prevIds.includes(b.tool_use_id));
+      if (kept.length !== m.content.length) console.warn('[history] stripped orphan tool_result(s) at', i);
+      if (!kept.length) continue;
+      out.push({ role: 'user', content: kept }); continue;
+    }
+    out.push(m);
+  }
+  // 3) assistant tool_use whose tool_result never arrived → drop the trailing dangling turn.
+  while (out.length && out[out.length - 1].role === 'assistant' && toolUseIds(out[out.length - 1]).length) {
+    console.warn('[history] dropped trailing assistant turn with unanswered tool_use');
+    out.pop();
+  }
+  return out;
+}
+ipcMain.handle('stop-tts', () => { stopDesktopTTS(); return { success: true }; });
 
 // Plain STT function (shared by desktop HUD + phone PWA). iOS MediaRecorder emits
 // audio/mp4, not webm — derive the upload filename ext from mimeType so Whisper sniffs it.
@@ -1280,27 +2149,34 @@ async function transcribeAudio(audioBuffer, mimeType) {
 ipcMain.handle('transcribe-audio', (_e, { audioBuffer, mimeType }) => transcribeAudio(audioBuffer, mimeType));
 
 // Spoken-summary: long replies get condensed for voice (the full text still shows on
-// screen / can be read in full on demand). Lightweight Haiku call, no tools.
+// screen / can be read in full on demand). Haiku first (tiny + fast + negligible quota);
+// if Haiku is rate-limited/unavailable, fall back to the local model so voice never dies.
+const SPEECH_SYS = "You are J.A.R.V.I.S., a refined British butler, distilling a written reply into spoken form for Siddhant. Convey the actual MEANING and outcome — the direct answer, the key result or conclusion, any important numbers/names, and what was done or recommended — not merely the topic. Stay faithful; never invent or add. Speak naturally in 1–3 flowing sentences as you would aloud. No markdown, lists, code, or preamble — just the spoken line.";
 async function summarizeForSpeech(text) {
   const t = (text || '').trim();
   if (!t) return { error: 'empty text' };
+  const cfg = loadConfig();
   const apiKey = getApiKey();
-  if (!apiKey) return { error: 'no api key' };
-  try {
-    const res = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
-      body: JSON.stringify({
-        model: MODEL_HAIKU, max_tokens: 200,
-        system: "You are a British butler (J.A.R.V.I.S.) condensing a written reply for spoken delivery. Give a crisp 1–2 sentence spoken summary capturing the key point and any direct answer. No preamble, no markdown, no lists, no code — just the spoken line.",
-        messages: [{ role: 'user', content: t }]
-      })
-    });
-    if (!res.ok) return { error: `summary ${res.status}` };
-    const j = await res.json();
-    const out = (j.content || []).filter(b => b.type === 'text').map(b => b.text).join(' ').trim();
-    return out ? { success: true, text: out } : { error: 'empty summary' };
-  } catch (e) { return { error: e.message }; }
+  // 1) Haiku — only if there's budget this minute (a summary is small, ~few hundred tok).
+  if (apiKey && requestTokenEstimate([{ role: 'user', content: t.slice(0, 8000) }]) < rateBudget().free) {
+    try {
+      const j = await anthropicRequest({
+        model: MODEL_HAIKU, max_tokens: 280, system: SPEECH_SYS,
+        messages: [{ role: 'user', content: t.slice(0, 8000) }]
+      }, apiKey, { retries: 1 });
+      const out = (j.content || []).filter(b => b.type === 'text').map(b => b.text).join(' ').trim();
+      if (out) return { success: true, text: out, via: 'haiku' };
+    } catch (e) { console.warn('[summary] haiku failed → local:', e.message); }
+  }
+  // 2) Local model fallback (no quota) — used when rate-limited or Haiku errored.
+  if (await ollamaUp()) {
+    try {
+      const lm = cfg.localModel || 'qwen3:latest';
+      const out = (await ollamaChat([{ role: 'user', content: t.slice(0, 8000) }], SPEECH_SYS, lm) || '').trim();
+      if (out) return { success: true, text: out, via: 'ollama' };
+    } catch (e) { console.warn('[summary] ollama failed:', e.message); }
+  }
+  return { error: 'no summary path available' };
 }
 ipcMain.handle('summarize-for-speech', (_e, { text }) => summarizeForSpeech(text));
 
@@ -1374,7 +2250,7 @@ ipcMain.handle('pick-media', async () => {
 ipcMain.handle('chat', async (event, { history }) => {
   const apiKey = getApiKey();
   if (!apiKey) return { error: 'No ANTHROPIC_API_KEY in env or ~/.bhatbot/config.json' };
-  try { return await agentLoop(history, apiKey, (event && event.sender ? event : { sender: { send() {} } })); }
+  try { return await agentLoop(history, apiKey, (event && event.sender ? event : { sender: { send() {} } }), { stream: true }); }
   catch (e) { return { error: String(e && e.message ? e.message : e) }; }
 });
 ipcMain.on('agent-pause', () => { if (agentState === 'running') agentState = 'paused'; });
@@ -1403,6 +2279,8 @@ app.whenReady().then(() => {
     initMcpServer();
     startTelegramBridge();
     scheduleBriefing();
+    // Pre-warm local Kokoro TTS so the first spoken reply isn't cold (~0.8s load).
+    if (kokoroAvailable()) kokoroStart().then(() => console.log('[tts] kokoro warm (local)')).catch((e) => console.error('[tts] kokoro warmup failed:', e.message));
   } catch (e) { console.error('Startup error:', e); }
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 });
@@ -1411,6 +2289,7 @@ app.on('will-quit', async () => {
   try { if (browser) await browser.close(); } catch {}
   try { if (wakeProc) wakeProc.kill(); } catch {}
   try { if (ptyProc) ptyProc.kill(); } catch {}
+  try { if (kokoroProc) kokoroProc.kill(); } catch {}
   try { stopMcpServer(); } catch {}
   try { if (briefingTimer) clearTimeout(briefingTimer); } catch {}
   try { if (telegramBot) telegramBot.stopPolling(); } catch {}

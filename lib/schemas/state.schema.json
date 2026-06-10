@@ -1,0 +1,35 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "BhatBot workspace state.json (structured facts — what is true now)",
+  "type": "object",
+  "required": ["version", "components"],
+  "properties": {
+    "version": { "type": "integer", "minimum": 0 },
+    "updated": { "type": "string", "format": "date-time" },
+    "components": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/definitions/component" }
+    },
+    "metrics": {
+      "type": "object",
+      "properties": {
+        "tokens_today": { "type": "number" },
+        "cost_month_usd": { "type": "number" }
+      }
+    }
+  },
+  "definitions": {
+    "component": {
+      "type": "object",
+      "required": ["status", "facts"],
+      "properties": {
+        "status": { "enum": ["planned", "partial", "working", "broken", "blocked", "done"] },
+        "facts": { "type": "object", "description": "Typed key/values — the real data. Booleans/numbers/strings preferred over prose." },
+        "blockers": { "type": "array", "items": { "type": "string" } },
+        "refs": { "type": "array", "items": { "type": "string" }, "description": "Links to decisions (dec_*) / memory chunks (mem_*)" },
+        "updated": { "type": "string", "format": "date-time" },
+        "rev": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}

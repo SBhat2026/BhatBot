@@ -498,8 +498,26 @@ function scroll() { chat.scrollTop = chat.scrollHeight; }
 
 // ===================== send =====================
 let lastProvider = '';
+// Live streaming bubble: tokens append in real time (first word ~0.5s). A new tool call
+// "closes" the current bubble so post-tool text starts a fresh one below the tool rows.
+let liveBubble = null, streamedThisTurn = false;
+function liveAppend(delta) {
+  if (!liveBubble) {
+    const d = document.createElement('div');
+    d.className = 'msg bot';
+    const lbl = document.createElement('span'); lbl.className = 'label'; lbl.textContent = 'BHATBOT';
+    const body = document.createElement('span'); body.className = 'streambody';
+    d.appendChild(lbl); d.appendChild(body);
+    chat.appendChild(d);
+    liveBubble = d;
+  }
+  liveBubble.querySelector('.streambody').textContent += delta;
+  scroll();
+}
+function closeLiveBubble() { liveBubble = null; }
 window.bhatbot.onToolUpdate((u) => {
-  if (u.type === 'tool_start') { rmThinking(); toolStart(u); addThinking(); }
+  if (u.type === 'token') { rmThinking(); streamedThisTurn = true; liveAppend(u.text); }
+  else if (u.type === 'tool_start') { rmThinking(); closeLiveBubble(); toolStart(u); addThinking(); }
   else if (u.type === 'tool_done') { toolDone(u); }
   else if (u.type === 'thinking' && u.text) { rmThinking(); addThought(u.text); addThinking(); }
   else if (u.type === 'provider_used') {
@@ -559,20 +577,31 @@ async function send(text) {
   history.push({ role: 'user', content: atts.length ? [{ type: 'text', text: text || 'See the attached media.' }, ...atts] : text });
   pendingAtt = []; renderAtt();
   setBusy(true);
+  streamedThisTurn = false; liveBubble = null;
   addThinking();
   try {
     const res = await window.bhatbot.chat({ history });
     rmThinking();
-    if (res.error) { addErr(res.error); }
+    if (res.error) { addErr(res.error); closeLiveBubble(); }
     else {
       history = res.history;
-      const bubble = addBot(res.text);
-      speak(res.text);
-      if ((res.text || '').length > 250) addReadFull(bubble, res.text);
+      lastFullReply = res.text || lastFullReply;
+      if (streamedThisTurn && res._streamed) {
+        // Text already rendered live + spoken in main during generation. Just finalize:
+        // snap the last bubble to the authoritative text and offer "read full" for long replies.
+        if (liveBubble) { liveBubble.querySelector('.streambody').textContent = res.text || liveBubble.querySelector('.streambody').textContent; if ((res.text || '').length > 300) addReadFull(liveBubble, res.text); }
+        else if (res.text) { const b = addBot(res.text); if (res.text.length > 300) addReadFull(b, res.text); }
+        closeLiveBubble();
+      } else {
+        // Non-streaming path (fallback providers): render + speak as before.
+        const bubble = addBot(res.text);
+        speak(res.text);
+        if ((res.text || '').length > 300) addReadFull(bubble, res.text);
+      }
       exchanges++; $('#count').textContent = exchanges + ' exchanges';
     }
   } catch (e) {
-    rmThinking(); addErr(String(e.message || e));
+    rmThinking(); closeLiveBubble(); addErr(String(e.message || e));
   } finally {
     setBusy(false);
   }
@@ -619,7 +648,7 @@ let voiceCfg = { hasOpenAI: false, picovoiceKey: null, wakeWord: 'jarvis', silen
 let recording = false;
 
 // ===================== TTS: streaming sentence-chunked playback =====================
-let ttsOn = false;                       // user toggle; gated by hasTTS
+let ttsOn = true;                        // user toggle; gated by hasTTS (Kokoro is local+free → on by default)
 let ttsSeq = 0;                          // generation id to cancel stale playback
 const ttsQueue = [];                     // {idx, promise<Blob|null>}
 let ttsPlaying = false;
@@ -637,50 +666,21 @@ function splitSentences(text) {
 let lastFullReply = '';
 // Long replies are summarized for voice (full text stays on screen / "read full reply").
 // opts.full = read verbatim regardless of length.
+// Desktop voice is synthesized AND played in the main process via `afplay`
+// (the renderer <Audio> element is unreliable in Electron → silent desktop).
+// All the decision logic (short→say, long→summarize, kokoro synth) lives in main.
 async function speak(text, opts = {}) {
   if (!ttsOn || !voiceCfg.hasTTS) return;
   lastFullReply = String(text || '');
-  let spoken = lastFullReply;
-  // Ultra-short replies → free local macOS `say` (Daniel = British), no API call.
-  if (!opts.full && spoken.trim().length > 0 && spoken.length < 80) {
-    stopSpeaking(); window.bhatbot.sayLocal(spoken); return;
-  }
-  if (!opts.full && spoken.length > 250) {
-    try { const r = await window.bhatbot.summarizeForSpeech(spoken); if (r && r.success && r.text) spoken = r.text; }
-    catch {}
-  }
+  if (!lastFullReply.trim()) return;
   stopSpeaking();                        // cancel any in-flight reply
-  const seq = ++ttsSeq;
-  const sentences = splitSentences(spoken);
-  if (!sentences.length) return;
   setSpeaking(true);
-  // Kick off synthesis for all sentences immediately (overlap network), but play in order.
-  const jobs = sentences.map((s) => window.bhatbot.synthesizeSpeech(s)
-    .then((r) => (r && r.success) ? b64ToBlob(r.audio, r.mimeType) : null)
-    .catch(() => null));
-  for (let i = 0; i < jobs.length; i++) {
-    const blob = await jobs[i];
-    if (seq !== ttsSeq) return;          // superseded → abort
-    if (!blob) continue;
-    await playBlob(blob, seq);
-    if (seq !== ttsSeq) return;
-  }
-  if (seq === ttsSeq) setSpeaking(false);
-}
-
-let curAudio = null;
-function playBlob(blob, seq) {
-  return new Promise((resolve) => {
-    if (seq !== ttsSeq) return resolve();
-    const url = URL.createObjectURL(blob);
-    const a = new Audio(url); curAudio = a;
-    a.onended = a.onerror = () => { URL.revokeObjectURL(url); resolve(); };
-    a.play().catch(() => { URL.revokeObjectURL(url); resolve(); });
-  });
+  try { await window.bhatbot.playTTS(lastFullReply, !!opts.full); }
+  catch {}
 }
 function stopSpeaking() {
-  ttsSeq++;                              // invalidate in-flight
-  if (curAudio) { try { curAudio.pause(); } catch {} curAudio = null; }
+  ttsSeq++;
+  try { window.bhatbot.stopTTS(); } catch {}
   setSpeaking(false);
 }
 function setSpeaking(on) { spk.classList.toggle('rec', on && ttsOn); }
