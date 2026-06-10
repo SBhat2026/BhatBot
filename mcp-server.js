@@ -90,12 +90,31 @@ async function startMcpServer({ port, token, runAgent, transcribe, synthesize, s
     });
   });
 
-  app.get('/app/:token/sw.js', guard, (_req, res) => {
-    res.type('application/javascript').send(
-      "self.addEventListener('install',e=>self.skipWaiting());" +
-      "self.addEventListener('activate',e=>self.clients.claim());" +
-      "self.addEventListener('fetch',()=>{});"
-    );
+  // Real caching service worker → the home-screen app launches instantly, survives the
+  // Mac being briefly unreachable, and NEVER needs re-adding. Network-first for the app
+  // shell (so edits land via the version poll), cache-first for static assets (icons).
+  // Cache name keyed to the build id so a new build cleanly supersedes the old cache.
+  app.get('/app/:token/sw.js', guard, (req, res) => {
+    const base = `/app/${req.params.token}`;
+    noStore(res);
+    res.type('application/javascript').send(`
+const CACHE = 'bhatbot-${appVersion()}';
+const SHELL = ['${base}', '${base}/icon-192.png', '${base}/icon-512.png', '${base}/manifest.webmanifest'];
+self.addEventListener('install', (e) => { e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL).catch(()=>{})).then(()=>self.skipWaiting())); });
+self.addEventListener('activate', (e) => { e.waitUntil(caches.keys().then((ks)=>Promise.all(ks.filter((k)=>k!==CACHE).map((k)=>caches.delete(k)))).then(()=>self.clients.claim())); });
+self.addEventListener('fetch', (e) => {
+  const req = e.request;
+  if (req.method !== 'GET') return;                    // never cache POST (chat/stt/tts)
+  const url = new URL(req.url);
+  if (!url.pathname.startsWith('${base}')) return;     // only the app scope
+  if (url.pathname.includes('/version') || url.pathname.includes('/activity') || url.pathname.includes('/config')) return; // always live
+  const isShell = req.mode === 'navigate' || url.pathname === '${base}';
+  if (isShell) {
+    e.respondWith(fetch(req).then((r) => { const cp = r.clone(); caches.open(CACHE).then((c)=>c.put('${base}', cp)); return r; }).catch(() => caches.match('${base}')));
+  } else {
+    e.respondWith(caches.match(req).then((c) => c || fetch(req).then((r) => { const cp = r.clone(); caches.open(CACHE).then((cc)=>cc.put(req, cp)); return r; })));
+  }
+});`);
   });
 
   app.get('/app/:token/icon-192.png', guard, (_req, res) => res.type('png').send(fs.readFileSync(path.join(SRC, 'mobile', 'icon-192.png'))));

@@ -146,14 +146,20 @@ const BUILD = '__BUILD__';                       // injected at serve time; driv
 document.getElementById('manifest').href = '/app/' + TOKEN + '/manifest.webmanifest';
 document.getElementById('touchicon').href = '/app/' + TOKEN + '/icon-192.png';
 
-// Auto-update: kill any old caching service worker, then poll the build id and
-// reload the home-screen app whenever a new version is deployed (no reinstall).
-if ('serviceWorker' in navigator) navigator.serviceWorker.getRegistrations().then(rs => rs.forEach(r => r.unregister())).catch(()=>{});
+// Installable PWA: register a real caching service worker so the home-screen app
+// launches instantly, works if the Mac is briefly unreachable, and NEVER needs
+// re-adding. Updates still land automatically via the build-id poll below.
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('/app/' + TOKEN + '/sw.js', { scope: '/app/' + TOKEN }).catch(()=>{});
 let _updating = false;
 async function checkUpdate() {
   try {
     const v = await fetch('/app/' + TOKEN + '/version', { cache: 'no-store' }).then(r => r.json()).then(j => j.version);
-    if (v && v !== BUILD && !_updating) { _updating = true; location.reload(); }
+    if (v && v !== BUILD && !_updating) {
+      _updating = true;
+      // New build → drop the SW cache so the fresh shell loads, then reload.
+      try { const ks = await caches.keys(); await Promise.all(ks.map(k => caches.delete(k))); } catch {}
+      location.reload();
+    }
   } catch {}
 }
 document.addEventListener('visibilitychange', () => { if (!document.hidden) checkUpdate(); });

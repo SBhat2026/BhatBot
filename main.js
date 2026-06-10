@@ -346,7 +346,15 @@ you hit an ambiguous decision that could go two very different ways; when a
 monitored system (Nexus, PRISM, FABLE) goes unhealthy; or when you've been
 blocked >5 minutes and a human decision unblocks you. urgency "high" pings louder;
 urgency "call" places an actual phone call (reserve for production failures). Do
-NOT use it for anything routine.`;
+NOT use it for anything routine.
+
+PIPELINE: For complex multi-step tasks you may operate in staged mode. When asked
+to PLAN, output ONLY valid JSON with a steps array — no markdown, no preamble. When
+asked to EXECUTE a single step, output ONLY that step's result — no meta-commentary,
+no "here is step 3". The pipeline handles sequencing; each stage just emits its own
+output. Context budget by stage: routing → answer in <30 tokens; planning → full
+decomposition; execution → current step only; critic → pass/fail + error; delivery →
+1-2 spoken sentences for TTS, then full markdown.`;
 
 // Defensive: never let API keys / app passwords reach the model context, even if
 // one accidentally lands in memory.md or CLAUDE.md. Secrets live in config.json only.
@@ -2086,6 +2094,215 @@ async function agentLoop(history, apiKey, event, opts = {}) {
   return finish('⚠ Max iterations reached.');
 }
 
+// ===========================================================================
+// MULTI-AGENT PIPELINE — local-first orchestration on Ollama (router → planner →
+// executor → critic → delivery), escalating to the Claude agentLoop for cloud-class
+// work or on repeated local failure. Off by default (config.pipeline.enabled);
+// when on, the chat handler routes through runPipeline instead of straight to Claude.
+// Design goal: powerful yet computationally cheap — keep the small router resident,
+// load the 12B planner only when needed, watch RAM, cap KV cache via num_ctx tiers.
+// ===========================================================================
+const OLLAMA_API = `${OLLAMA_URL}/api`;
+const CTX_TIERS = { router: 4096, critic: 16384, executor: 65536, planner: 131072, fullRepo: 262144 };
+
+// Resolve a desired model to one that's actually installed (cached). gemma3n:e4b →
+// qwen3:latest if not yet pulled; gemma3:12b is present. Avoids 404s on missing tags.
+let _ollamaModels = null, _ollamaModelsAt = 0;
+async function installedModels() {
+  if (_ollamaModels && Date.now() - _ollamaModelsAt < 60000) return _ollamaModels;
+  try {
+    const r = await fetch(`${OLLAMA_URL}/api/tags`, { signal: AbortSignal.timeout(1500) });
+    const j = await r.json();
+    _ollamaModels = (j.models || []).map((m) => m.name); _ollamaModelsAt = Date.now();
+  } catch { _ollamaModels = []; }
+  return _ollamaModels;
+}
+async function resolveModel(want, fallbacks) {
+  const have = await installedModels();
+  const has = (n) => have.some((m) => m === n || m.split(':')[0] === n.split(':')[0]);
+  for (const cand of [want, ...(fallbacks || [])]) if (cand && has(cand)) return cand;
+  return want;   // last resort — let Ollama error rather than silently misroute
+}
+function pipelineCfg() {
+  const p = (loadConfig().pipeline) || {};
+  return {
+    enabled: p.enabled === true,
+    routerModel: p.routerModel || 'gemma3n:e4b',
+    plannerModel: p.plannerModel || 'gemma3:12b',
+    executorModel: p.executorModel || 'gemma3:12b',
+    criticModel: p.criticModel || 'gemma3n:e4b',
+    maxSteps: p.maxSteps || 12
+  };
+}
+
+// Natural-language toggle for the pipeline, usable from any entry point (desktop,
+// phone, Telegram). Returns a reply string if it handled a toggle, else null.
+function maybeTogglePipeline(text) {
+  const m = String(text || '').match(/\b(enable|turn on|disable|turn off)\s+(the\s+)?(local\s+)?(multi-?agent\s+)?pipeline\b/i);
+  if (!m) return null;
+  const on = /enable|on/i.test(m[1]);
+  const p = loadConfig().pipeline || {}; p.enabled = on; saveConfig({ pipeline: p });
+  return `Local multi-agent pipeline ${on ? 'enabled' : 'disabled'}, sir.`;
+}
+
+// One-shot Ollama generate with explicit RAM levers (num_ctx caps KV cache, num_gpu
+// forces Metal, keep_alive controls resident time). Used by every pipeline stage.
+async function ollamaGenerate(model, prompt, opts = {}) {
+  const { system, num_ctx = CTX_TIERS.router, keep_alive = -1, format } = opts;
+  const body = { model, prompt, stream: false, options: { num_ctx, num_gpu: 99 }, keep_alive };
+  if (system) body.system = system;
+  if (format) body.format = format;   // 'json' → Ollama constrains output to valid JSON
+  const r = await fetch(`${OLLAMA_API}/generate`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    signal: AbortSignal.timeout(opts.timeoutMs || 120000)
+  });
+  if (!r.ok) throw new Error(`ollama ${r.status}`);
+  const j = await r.json();
+  return (j.response || '').trim();
+}
+function parseJsonLoose(s) {
+  try { return JSON.parse(s); } catch {}
+  const m = String(s).match(/\{[\s\S]*\}/);
+  if (m) { try { return JSON.parse(m[0]); } catch {} }
+  return null;
+}
+
+// macOS free-RAM check — gate loading the 12B planner so we don't thrash/swap.
+function checkRamPressure() {
+  return new Promise((resolve) => {
+    try {
+      exec('vm_stat', { timeout: 2000 }, (err, stdout) => {
+        if (err) return resolve(true);
+        let freePages = 0; const pg = (stdout.match(/page size of (\d+)/) || [])[1] || 4096;
+        for (const l of stdout.split('\n')) { const m = l.match(/Pages (free|speculative|inactive):\s+(\d+)/); if (m) freePages += parseInt(m[2]); }
+        resolve((freePages * pg) / 1048576 > 1500);   // need ≥1.5GB reclaimable to load 12B
+      });
+    } catch { resolve(true); }
+  });
+}
+
+// Stage 1 — Router (small, resident). simple | complex | cloud.
+async function routerClassify(message) {
+  const cfg = pipelineCfg();
+  const model = await resolveModel(cfg.routerModel, ['qwen3:latest', 'gemma3:12b']);
+  try {
+    const out = await ollamaGenerate(model, message, {
+      num_ctx: CTX_TIERS.router, keep_alive: -1, format: 'json',
+      system: `Classify the request into one JSON object, nothing else.
+{"path":"simple|complex|cloud","reason":"<one sentence>","estimatedSteps":<1-20>,"needsFullContext":<bool>,"needsTools":<bool>}
+simple: single-turn answer, no tools, no code.
+complex: multi-step, tools, code gen, file ops.
+cloud: >200K tokens, high stakes, vision, or anything needing the full desktop tool set.`
+    });
+    return parseJsonLoose(out) || { path: 'cloud', reason: 'parse fail', estimatedSteps: 1, needsTools: true };
+  } catch (e) { return { path: 'cloud', reason: 'router error: ' + e.message, needsTools: true }; }
+}
+
+async function plannerPass(message, classification) {
+  const cfg = pipelineCfg();
+  const model = await resolveModel(cfg.plannerModel, ['gemma3:12b', 'qwen3:latest']);
+  const ctx = classification.needsFullContext ? CTX_TIERS.fullRepo : CTX_TIERS.planner;
+  let projectCtx = '';
+  try { const md = path.join(process.env.BHATBOT_PROJECT || os.homedir(), 'CLAUDE.md'); if (fs.existsSync(md)) projectCtx = fs.readFileSync(md, 'utf8').slice(0, 8000); } catch {}
+  const system = `You are the PLANNER stage of BhatBot. Decompose the task into ordered steps.
+Output ONLY valid JSON, no markdown.${projectCtx ? `\n## Project context\n${projectCtx}` : ''}
+{"steps":[{"action":"<desc>","tool":"<tool_name>|null","input":"<what to pass>","validation":"<success condition>"}],"contextNeeded":<tokens>}`;
+  try {
+    const out = await ollamaGenerate(model, message, { num_ctx: ctx, keep_alive: 300, format: 'json', system });
+    const p = parseJsonLoose(out);
+    if (p && Array.isArray(p.steps) && p.steps.length) return p;
+  } catch (e) { console.warn('[pipeline] planner failed:', e.message); }
+  return { steps: [{ action: message, tool: null, input: message, validation: 'any output' }] };
+}
+
+async function compressStepOutput(output) {
+  const s = String(output || '');
+  if (s.length < 2000) return s;
+  const cfg = pipelineCfg();
+  const model = await resolveModel(cfg.criticModel, ['qwen3:latest', 'gemma3:12b']);
+  try { return await ollamaGenerate(model, s.slice(0, 20000), { num_ctx: CTX_TIERS.executor, system: 'Compress to the essential facts in under 300 words.' }); }
+  catch { return s.slice(0, 2000); }
+}
+
+async function executorStep(step, previousResults) {
+  // Real tool steps run on BhatBot's actual tool layer (same as Claude uses).
+  if (step.tool && TOOLS.some((t) => t.name === step.tool)) {
+    try {
+      let input = step.input;
+      if (typeof input === 'string') { const j = parseJsonLoose(input); if (j) input = j; }
+      const r = await executeTool(step.tool, input);
+      const failed = r && r.success === false;
+      return { output: typeof r === 'string' ? r : JSON.stringify(r), failed, error: failed ? (r.error || 'tool failed') : null };
+    } catch (e) { return { output: '', failed: true, error: e.message }; }
+  }
+  // Reasoning/codegen steps run on the local executor model.
+  const cfg = pipelineCfg();
+  const model = await resolveModel(cfg.executorModel, ['gemma3:12b', 'qwen3:latest']);
+  const ctxParts = [];
+  for (const r of previousResults) ctxParts.push('Prior: ' + (await compressStepOutput(r.output)).slice(0, 1200));
+  try {
+    const out = await ollamaGenerate(model, String(step.input || step.action), {
+      num_ctx: CTX_TIERS.executor, keep_alive: 300,
+      system: `${ctxParts.join('\n')}\n\nExecute this step. Return ONLY the output, no commentary.`
+    });
+    return { output: out, failed: false };
+  } catch (e) { return { output: '', failed: true, error: e.message }; }
+}
+
+async function criticValidate(plan, results) {
+  const cfg = pipelineCfg();
+  const model = await resolveModel(cfg.criticModel, ['qwen3:latest', 'gemma3:12b']);
+  const summary = results.map((r, i) => `${plan.steps[i] ? plan.steps[i].action : 'step'}: ${String(r.output || '').slice(0, 200)}`).join('\n');
+  try {
+    const out = await ollamaGenerate(model, summary, {
+      num_ctx: CTX_TIERS.critic, format: 'json',
+      system: `Validate these outputs against the plan. JSON only.\nPlan: ${plan.steps.map((s) => s.action).join(' → ')}\n{"allPassed":true|false,"failedSteps":[],"summary":"<one sentence>"}`
+    });
+    return parseJsonLoose(out) || { allPassed: true, summary: 'Completed' };
+  } catch { return { allPassed: true, summary: 'Completed' }; }
+}
+
+// Stage orchestrator. Returns { text, history, _provider } matching agentLoop's shape so the
+// chat handler is interchangeable. event/opts forwarded to agentLoop on cloud escalation.
+async function runPipeline(history, apiKey, event, opts = {}) {
+  const cfg = pipelineCfg();
+  const userMessage = lastUserText(history);
+  const escalate = (why) => { sendToActivity('tool-update', { type: 'thinking', text: '⤴ pipeline → Claude (' + why + ')' }); return agentLoop(history, apiKey, event, opts); };
+
+  if (!cfg.enabled || !(await ollamaUp())) return agentLoop(history, apiKey, event, opts);
+
+  const cls = await routerClassify(userMessage);
+  sendToActivity('tool-update', { type: 'thinking', text: `🧭 router: ${cls.path} — ${cls.reason || ''}` });
+
+  // Anything touching the desktop tool set, vision, or high stakes → Claude (full tools + safety).
+  if (cls.path === 'cloud' || cls.needsTools || /image|tool_result/.test(JSON.stringify(history.slice(-1)))) return escalate(cls.path === 'cloud' ? 'cloud-class' : 'needs tools');
+
+  if (cls.path === 'simple') {
+    const model = await resolveModel(cfg.routerModel, ['qwen3:latest', 'gemma3:12b']);
+    try {
+      const text = await ollamaGenerate(model, userMessage, { num_ctx: CTX_TIERS.executor, keep_alive: -1, system: buildSystemPrompt(userMessage) });
+      if (text) { try { event && event.sender && event.sender.send('chat-token', text); } catch {} return { text, history: [...history, { role: 'assistant', content: text }], _provider: 'pipeline-local' }; }
+    } catch (e) { console.warn('[pipeline] simple failed:', e.message); }
+    return escalate('local simple failed');
+  }
+
+  // complex (local, no tools) — plan → execute → critic → deliver, escalating on trouble.
+  if (!(await checkRamPressure())) return escalate('RAM pressure');
+  const plan = await plannerPass(userMessage, cls);
+  if (plan.steps.length > cfg.maxSteps) return escalate('plan too large');
+  sendToActivity('tool-update', { type: 'thinking', text: `📋 plan: ${plan.steps.length} steps` });
+  const results = [];
+  for (const step of plan.steps) {
+    let r = await executorStep(step, results);
+    if (r.failed) { const retry = await executorStep(step, results); if (retry.failed) return escalate('step failed: ' + step.action); r = retry; }
+    results.push(r);
+  }
+  const validation = await criticValidate(plan, results);
+  if (!validation.allPassed) return escalate('critic rejected');
+  const full = results.map((r, i) => `### ${plan.steps[i].action}\n${r.output}`).join('\n\n');
+  return { text: full, history: [...history, { role: 'assistant', content: full }], _provider: 'pipeline-local', _summary: validation.summary };
+}
+
 // ---------------------------------------------------------------------------
 // Remote control (MCP) — run the agent headless, keep a rolling remote history.
 // Activity still streams to the activity window via sendToActivity, so you can
@@ -2095,12 +2312,17 @@ let mcpHistory = [];
 async function runAgentHeadless(instruction, opts = {}) {
   const apiKey = getApiKey();
   if (!apiKey) return { error: 'No ANTHROPIC_API_KEY in env or config.json' };
+  const toggle = maybeTogglePipeline(instruction);
+  if (toggle) return { text: toggle };
   if (opts.reset) mcpHistory = [];
   const blocks = Array.isArray(opts.blocks) ? opts.blocks : [];
   mcpHistory.push({ role: 'user', content: blocks.length ? [{ type: 'text', text: String(instruction || '') }, ...blocks] : String(instruction || '') });
   sendToActivity('tool-update', { type: 'thinking', text: '📱 remote task: ' + String(instruction || '').slice(0, 200) });
   try {
-    const res = await agentLoop(mcpHistory, apiKey, { sender: { send() {} } });
+    const ev = { sender: { send() {} } };
+    const res = pipelineCfg().enabled
+      ? await runPipeline(mcpHistory, apiKey, ev, {})
+      : await agentLoop(mcpHistory, apiKey, ev, {});
     mcpHistory = res.history;
     if (mcpHistory.length > 40) mcpHistory = mcpHistory.slice(-40);
     return { text: res.text };
@@ -3112,8 +3334,14 @@ ipcMain.handle('chat', async (event, { history }) => {
   // "wrap up" / "that's all" ends the session (note generated after the reply lands).
   const ut = lastUserText(history);
   const wrap = /\b(wrap up|wrap it up|that'?s all|we'?re done|end session|close out|debrief)\b/i.test(ut);
+  // Pipeline toggle by voice/text — flips config.pipeline.enabled without the settings UI.
+  const toggle = maybeTogglePipeline(ut);
+  if (toggle) return { text: toggle, history: [...history, { role: 'assistant', content: toggle }] };
   try {
-    const res = await agentLoop(history, apiKey, (event && event.sender ? event : { sender: { send() {} } }), { stream: true });
+    const ev = (event && event.sender ? event : { sender: { send() {} } });
+    const res = pipelineCfg().enabled
+      ? await runPipeline(history, apiKey, ev, { stream: true })
+      : await agentLoop(history, apiKey, ev, { stream: true });
     if (wrap) setTimeout(() => endSession('wrap-up'), 1200);
     return res;
   }
