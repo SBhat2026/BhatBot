@@ -2,6 +2,39 @@
 
 What was built differently from `BHATBOT_MEGAPROMPT.md`, and why. For reference.
 
+## Pass 25 — JARVIS personality + <speak> + acks + reflection; FIX app-open & browsing
+
+- **FIX app opening (consistently broke in the packaged app):** root cause = `tell app to
+  activate` sends an Apple event needing Automation TCC, which the Finder-launched .app
+  isn't granted → silent fail. Now `open_app`/`activate_app` launch via `open -a` directly
+  (LaunchServices, NO TCC needed). `quit_app` = AppleScript quit → pkill fallback if
+  Automation isn't granted. `osa()` now runs with EXEC_PATH. Verified `open -a` live.
+- **FIX web browsing:** `ensureBrowser` now launches with `--no-sandbox`
+  `--disable-setuid-sandbox --disable-dev-shm-usage` (Chromium routinely fails to start from
+  a packaged Electron app without these) + realistic UA/viewport/locale (less bot-blocking)
+  + a concurrency guard (no double-launch race) + clear launch-failure message (run
+  `npx playwright install chromium`). Page-action errors auto-reset a dead browser. Verified
+  live: launched + navigated a real JS site (HN) in 669ms and extracted text.
+- **Personality (biggest behavior change):** STATIC_PROMPT rewritten to JARVIS — default
+  short, brief ack → execute silently → brief result, assume-and-act (≤1 clarifying question
+  only when ambiguous AND costly), "want me to?" gate on large/irreversible actions, and
+  reference past work (FABLE/PRISM) so it feels like it knows Siddhant. Plus explicit tool
+  guidance: open_app for apps, browser tool for live sites.
+- **<speak> tags:** model wraps the spoken part in <speak>…</speak>; a streaming parser
+  (`makeSpeakStream`) feeds ONLY that to TTS while displaying tag-stripped text on screen —
+  handles tags split across stream chunks. No tag + short reply → still spoken; no tag +
+  long → silent. Unit-tested 4 cases.
+- **Instant verbal acks:** action requests get an immediate spoken "On it."/"Right away."
+  (from `ACKS`) the moment the task starts, before the model responds → perceived spoken
+  latency ≈ 0. Config `instantAck` (def on).
+- **Single voice:** removed the macOS `say` shortcut for short text — all speech now uses
+  the one configured voice (was a second, different voice for <80-char replies).
+- **Critique→memory reflection:** `reflectOnCorrection` fires only on correction signal
+  words, async (never blocks), Haiku (~$0.00015), saves to 'Preferences & Patterns' only if
+  actionable, and confirms with a delayed (3.5s) spoken "Noted." Config `reflection` (def on).
+- DEFERRED (bigger lifts, noted for next): barge-in (interrupt TTS on speech), Resemblyzer
+  speaker verification (enrollment + 0.72 threshold), single-window UI refactor (webview).
+
 ## Pass 24 — Full agent autonomy + token reduction + autonomous mode + vision loop
 
 - **Agents now EXECUTE tools (full autonomy):** `lib/agents/exec.js` runs a provider-agnostic

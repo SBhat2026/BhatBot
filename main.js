@@ -181,11 +181,27 @@ IDENTITY: Siddhant is an 18-year-old incoming Princeton student (fall 2026).
 Deep expertise in GNN/ML, computational biology, full-stack dev (Next.js /
 Supabase / Vercel), Unity/C#, Blender, scientific software.
 
-PERSONALITY: Direct, technical, no preamble, no filler. Dry wit acceptable.
-Jarvis-style: capable, never effusive. Address as Siddhant occasionally.
+PERSONALITY — you are J.A.R.V.I.S., not a chatbot:
+- Default to SHORT. One or two sentences unless asked for depth or the task needs it.
+  Detail goes on screen; what you say aloud stays brief.
+- Brief verbal acknowledgment, then execute, then a brief result. Don't narrate the
+  middle. "On it." → [work silently] → "Done — 3 tests pass."
+- Assume the sensible default and act. Ask AT MOST ONE clarifying question, and only
+  when the request is genuinely ambiguous AND guessing wrong is costly. Otherwise pick
+  the obvious interpretation, state the assumption in one clause, and proceed.
+- For large or irreversible autonomous actions (deploys, deletes, mass edits, sending
+  things outward), give a one-line "want me to?" gate before doing it. Small reversible
+  actions: just do them.
+- Reference past work and what you know about Siddhant when relevant ("like the FABLE
+  retrieval refactor", "same pattern as PRISM") — be the assistant that remembers, not
+  one that responds cold. Address him as Siddhant occasionally, never effusive, dry wit ok.
 
 TOOLS: Use them proactively. When given a path — read it. When asked to run
 something — run it. Don't narrate what you're about to do, just do it.
+- Open/launch a Mac app → system_control open_app (NOT run_shell). Quit → quit_app.
+- Browse/read a live site, check a deployment, navigate a web UI → the browser tool
+  (your own headless Chromium). Use fetch_url ONLY for simple raw text/JSON, never for
+  JS-heavy or login-gated pages. open_in_browser only when Siddhant wants it in HIS browser.
 
 BROWSER: You have a dedicated Playwright browser, completely separate from
 Siddhant's browser. His cursor never moves. Use it for web research, checking
@@ -220,10 +236,16 @@ editable) for logos, icons, diagrams, and UI. Use generate_image (GPT Image 1,
 ~$0.04/image) only for photorealistic or complex artistic content SVG can't
 express. generate_3d turns any image into a GLB model (Blender/Unity/Three.js).
 
-VOICE: Your replies are spoken aloud (TTS). Keep them concise and conversational
-— no markdown or code blocks in what should be spoken; put detailed output in the
-chat and lead with a short spoken-friendly summary. Long replies are auto-summarized
-for voice; the user can ask to "read the full response".
+VOICE — <speak> tags control what is said aloud:
+Wrap the part you want SPOKEN in <speak>...</speak>. Only that text is sent to TTS;
+everything else is shown on screen only. Keep the spoken part short, plain, and
+conversational — no markdown, code, paths, or URLs inside <speak>.
+- Short reply → wrap the whole thing: <speak>Build's green, all tests pass.</speak>
+- Long/detailed reply → put the detail as normal text on screen, and add ONE short
+  spoken line: ...full breakdown on screen... <speak>Found three issues; the auth one
+  is the blocker.</speak>
+If you genuinely have nothing worth saying aloud (pure code/data dump), you may omit
+<speak> entirely and nothing will be spoken. Never read long output verbatim.
 
 MEDIA: Use media_control for any Spotify or volume request (play, pause, skip,
 "what's playing", set Spotify or system volume). Plain requests control the Mac's
@@ -725,7 +747,7 @@ async function mediaBytesToBlocks(buf, mime) {
 // ---------------------------------------------------------------------------
 function osa(args) {
   return new Promise((resolve) => {
-    const p = spawn('osascript', args);
+    const p = spawn('osascript', args, { env: { ...process.env, PATH: EXEC_PATH } });
     let out = '', err = '';
     p.stdout.on('data', (d) => out += d); p.stderr.on('data', (d) => err += d);
     p.on('error', (e) => resolve({ ok: false, out: '', err: e.message }));
@@ -1092,16 +1114,32 @@ function runShell(command, cwd, timeoutMs) {
   });
 }
 
+let browserLaunching = null;
 async function ensureBrowser() {
   if (browser && page) return;
-  const { chromium } = require('playwright');
-  browser = await chromium.launch({ headless: true, slowMo: 200 });
-  page = await browser.newPage();
+  if (browserLaunching) return browserLaunching;     // de-dupe concurrent launches (race → 2 browsers)
+  browserLaunching = (async () => {
+    const { chromium } = require('playwright');
+    // --no-sandbox: Chromium often fails to start from a packaged/Finder-launched Electron
+    // app without it (the real "browsing doesn't work in Bhatbot" cause). Realistic UA +
+    // viewport reduce bot-blocking that makes pages look broken/empty.
+    browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-blink-features=AutomationControlled', '--disable-dev-shm-usage'] });
+    const context = await browser.newContext({
+      userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+      viewport: { width: 1280, height: 800 }, locale: 'en-US',
+    });
+    page = await context.newPage();
+  })();
+  try { await browserLaunching; } finally { browserLaunching = null; }
 }
 
 async function browserAction(input) {
   openActivityWindow();
-  await ensureBrowser();
+  try { await ensureBrowser(); }
+  catch (e) {
+    browser = null; page = null; browserLaunching = null;
+    return { success: false, error: `Browser failed to launch: ${e.message.split('\n')[0]}. Fix: run \`cd ~/bhatbot && npx playwright install chromium\` once.` };
+  }
   // Screenshots stream to the activity window AND are returned as `_image`
   // (base64). agentLoop turns `_image` into a real vision image block so Claude
   // sees the page, then evicts old images so we don't re-bomb the rate limit.
@@ -1113,30 +1151,37 @@ async function browserAction(input) {
   };
   // While recording a workflow, capture the replayable mutating steps (not screenshots/reads).
   const rec = (step) => { if (recordingSteps) recordingSteps.push(step); };
-  switch (input.action) {
-    case 'navigate':
-      await page.goto(input.url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-      rec({ action: 'navigate', url: input.url });
-      return { success: true, url: page.url(), title: await page.title(), _image: await shot() };
-    case 'click':
-      await page.click(input.selector, { timeout: 15000 });
-      rec({ action: 'click', selector: input.selector });
-      return { success: true, _image: await shot() };
-    case 'type':
-      await page.fill(input.selector, input.text);
-      rec({ action: 'type', selector: input.selector, text: input.text });
-      return { success: true, _image: await shot() };
-    case 'screenshot':
-      return { success: true, note: 'Screenshot captured.', _image: await shot() };
-    case 'get_text': {
-      const txt = await page.innerText(input.selector || 'body');
-      return { success: true, text: txt.slice(0, 10 * 1024) };
+  try {
+    switch (input.action) {
+      case 'navigate':
+        await page.goto(input.url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+        rec({ action: 'navigate', url: input.url });
+        return { success: true, url: page.url(), title: await page.title(), _image: await shot() };
+      case 'click':
+        await page.click(input.selector, { timeout: 15000 });
+        rec({ action: 'click', selector: input.selector });
+        return { success: true, _image: await shot() };
+      case 'type':
+        await page.fill(input.selector, input.text);
+        rec({ action: 'type', selector: input.selector, text: input.text });
+        return { success: true, _image: await shot() };
+      case 'screenshot':
+        return { success: true, note: 'Screenshot captured.', _image: await shot() };
+      case 'get_text': {
+        const txt = await page.innerText(input.selector || 'body');
+        return { success: true, text: txt.slice(0, 10 * 1024) };
+      }
+      case 'evaluate':
+        rec({ action: 'evaluate', js: input.js });
+        return { success: true, result: await page.evaluate(input.js) };
+      default:
+        return { success: false, error: 'Unknown browser action' };
     }
-    case 'evaluate':
-      rec({ action: 'evaluate', js: input.js });
-      return { success: true, result: await page.evaluate(input.js) };
-    default:
-      return { success: false, error: 'Unknown browser action' };
+  } catch (e) {
+    const msg = String(e && e.message || e);
+    // A dead/crashed page can't recover in place — reset so the next call relaunches clean.
+    if (/Target closed|crashed|Browser has been closed|Execution context was destroyed/i.test(msg)) { try { await browser.close(); } catch {} browser = null; page = null; }
+    return { success: false, error: `Browser ${input.action} failed: ${msg.split('\n')[0]}` };
   }
 }
 
@@ -1206,13 +1251,27 @@ async function systemControl(input) {
     case 'applescript':
       r = await osa(['-e', String(input.script || '')]); break;
     case 'activate_app':
-    case 'open_app':
-      // `open -a` reliably launches even apps that aren't running (tell..activate can stall
-      // on a cold app); then activate to bring it to the front.
-      r = await osa(['-e', `do shell script "open -a " & quoted form of "${esc(input.app)}"`, '-e', `tell application "${esc(input.app)}" to activate`]);
+    case 'open_app': {
+      // Launch via LaunchServices (`open -a`) directly — needs NO Automation/Accessibility
+      // permission, unlike `tell app to activate` (an Apple event that TCC blocks in the
+      // packaged app → the long-standing "app opening doesn't work in Bhatbot" bug).
+      r = await new Promise((res) => {
+        const p = spawn('open', ['-a', String(input.app || '')], { env: { ...process.env, PATH: EXEC_PATH } });
+        let e = ''; p.stderr.on('data', (d) => e += d);
+        p.on('error', (er) => res({ ok: false, err: er.message }));
+        p.on('close', (c) => res(c === 0 ? { ok: true, out: `Opened ${input.app}` } : { ok: false, err: (e.trim() || `Unable to open "${input.app}" — check the exact app name`) }));
+      });
       break;
-    case 'quit_app':
-      r = await osa(['-e', `tell application "${esc(input.app)}" to quit`]); break;
+    }
+    case 'quit_app': {
+      // Graceful AppleScript quit; if Automation isn't granted, fall back to pkill (SIGTERM).
+      let rr = await osa(['-e', `tell application "${esc(input.app)}" to quit`]);
+      if (!rr.ok) {
+        const killed = await new Promise((res) => { const p = spawn('pkill', ['-x', String(input.app || '')], { env: { ...process.env, PATH: EXEC_PATH } }); p.on('error', () => res(false)); p.on('close', (c) => res(c === 0)); });
+        rr = killed ? { ok: true, out: `Quit ${input.app}` } : rr;
+      }
+      r = rr; break;
+    }
     case 'keystroke':
       r = await osa(['-e', `tell application "System Events" to keystroke "${esc(input.text)}"`]); break;
     case 'shortcut': {                                   // key + modifiers, e.g. key:"s" modifiers:["command"]
@@ -1556,17 +1615,22 @@ async function agentLoop(history, apiKey, event, opts = {}) {
   // non-streaming so their headless senders are untouched.
   const stream = !!opts.stream;
   const ttsSeq = stream ? ttsStreamStart() : null;
+  if (stream && ttsSeq != null) maybeAck(ttsSeq, lastUserText(history));   // instant verbal ack
+  const speakParser = stream ? makeSpeakStream(ttsSeq) : null;
+  // Display the tag-stripped tokens live; TTS hears only <speak>…</speak> (handled inside the parser).
   const onText = stream ? (delta) => {
-    sendToAll(event, 'tool-update', { type: 'token', text: delta });
-    if (ttsSeq != null) ttsStreamFeed(ttsSeq, delta);
+    const disp = speakParser ? speakParser.feed(delta) : delta;
+    if (disp) sendToAll(event, 'tool-update', { type: 'token', text: disp });
   } : undefined;
 
   // All exits go through here so live guidance can be offered for learning (2a).
   const finish = (text) => {
     agentState = 'idle';
-    if (ttsSeq != null) ttsStreamFlush(ttsSeq);
+    if (speakParser) speakParser.finish(); else if (ttsSeq != null) ttsStreamFlush(ttsSeq);
     if (usedGuidance.length) sendToActivity('learn_prompt', { text: usedGuidance.join(' | ') });
-    return { text, history, _streamed: stream };
+    // Strip any <speak> tags from the returned text (renderer shows this as the final bubble).
+    reflectOnCorrection(history, lastUserText(history), text);   // async, non-blocking
+    return { text: String(text || '').replace(/<\/?speak>/g, '').trim(), history, _streamed: stream };
   };
 
   while (iterations < MAX_AGENT_ITERATIONS) {
@@ -2127,8 +2191,8 @@ async function speakDesktop(text, opts = {}) {
   if (!t) return { success: false };
   stopDesktopTTS();
   const seq = ++ttsPlaySeq;
-  // Ultra-short → free macOS `say` (Daniel = British), no synth needed.
-  if (!opts.full && t.length < 80) { sayLocal(t); return { success: true, via: 'say' }; }
+  // Single consistent voice: always synthesize through the configured provider (no more
+  // macOS `say` shortcut for short text — that was a second, different voice).
   // Long → condense for speech (full text still on screen / "read full"). Threshold 500
   // (was 300): most replies now skip the extra summarize LLM round-trip → speaks sooner.
   if (!opts.full && t.length > 500) {
@@ -2176,6 +2240,82 @@ function ttsStreamFlush(seq) {
   if (seq !== ttsStreamSeq) return;
   const rest = ttsStreamBuf.trim(); ttsStreamBuf = '';
   if (rest && loadConfig().ttsEnabled !== false) ttsStreamEnqueue(seq, rest);
+}
+// Longest suffix of s that is also a prefix of tag — i.e. a possibly-split tag at a chunk
+// boundary, which we must hold back rather than display/speak.
+function partialTagTail(s, tag) {
+  const max = Math.min(s.length, tag.length - 1);
+  for (let k = max; k > 0; k--) if (tag.startsWith(s.slice(s.length - k))) return k;
+  return 0;
+}
+// Per-turn streaming parser: pulls <speak>…</speak> content out of the token stream and
+// feeds ONLY that to TTS, while returning the tag-stripped text for on-screen display.
+// Handles tags split across deltas. If the model never used <speak>, we speak nothing
+// (per the prompt) unless the whole reply is short (likely an unwrapped quick answer).
+function makeSpeakStream(seq) {
+  const OPEN = '<speak>', CLOSE = '</speak>';
+  let pending = '', inside = false, sawTag = false, full = '';
+  function feed(delta) {
+    full += delta; pending += delta; let display = '';
+    while (pending.length) {
+      if (!inside) {
+        const i = pending.indexOf(OPEN);
+        if (i === -1) { const keep = partialTagTail(pending, OPEN); display += pending.slice(0, pending.length - keep); pending = pending.slice(pending.length - keep); break; }
+        display += pending.slice(0, i); pending = pending.slice(i + OPEN.length); inside = true; sawTag = true;
+      } else {
+        const j = pending.indexOf(CLOSE);
+        if (j === -1) { const keep = partialTagTail(pending, CLOSE); const emit = pending.slice(0, pending.length - keep); if (emit) { ttsStreamFeed(seq, emit); display += emit; } pending = pending.slice(pending.length - keep); break; }
+        const segq = pending.slice(0, j); if (segq) { ttsStreamFeed(seq, segq); display += segq; } pending = pending.slice(j + CLOSE.length); inside = false;
+      }
+    }
+    return display;
+  }
+  function finish() {
+    let display = pending.replace(/<\/?speak>/g, '');
+    if (inside && display) ttsStreamFeed(seq, display);
+    pending = '';
+    // No <speak> at all but a short reply → speak it (model likely just didn't wrap a quick answer).
+    if (!sawTag) { const f = full.replace(/<\/?speak>/g, '').trim(); if (f && f.length <= 160) ttsStreamFeed(seq, f); }
+    ttsStreamFlush(seq);
+    return { sawTag, display };
+  }
+  return { feed, finish };
+}
+// Instant verbal acknowledgments — spoken the moment a task starts (before the model even
+// responds) so perceived spoken latency ≈ 0. JARVIS pattern: ack → work → result.
+const ACKS = ['On it.', 'On it, Siddhant.', 'Right away.', 'Got it.', 'Working on it.', 'Sure thing.'];
+const ACTION_RE = /\b(open|launch|play|pause|skip|run|build|fix|check|create|make|find|search|deploy|write|send|close|quit|set|update|install|delete|remove|pull up|show me|navigate|go to|download|generate|render|start|stop|turn)\b/i;
+function maybeAck(seq, userText) {
+  const c = loadConfig();
+  if (c.instantAck === false || c.ttsEnabled === false) return;
+  if (!ACTION_RE.test(userText || '')) return;     // only acknowledge action requests, not idle chat
+  ttsStreamFeed(seq, ACKS[Math.floor(Math.random() * ACKS.length)]);
+}
+
+// Critique → memory reflection. Pure upside: fires ONLY when the user's message reads as a
+// correction, runs async (never blocks the reply), costs ~$0.00015 (Haiku), and saves only
+// if Haiku returns something actionable. Confirms with a quiet, delayed "Noted." so it
+// doesn't step on the main response. The learning loop that makes Bhatbot feel like it adapts.
+const CORRECTION_RE = /\b(that's wrong|that is wrong|incorrect|not what i|don'?t do that|stop doing|i told you|not like that|wrong answer|you (got|did) (it|that) wrong|be more|be less|too (verbose|long|short|terse|wordy)|no,? (don'?t|stop|that|i|you)|actually,? (i|you|it)|instead of|never do)\b/i;
+function reflectOnCorrection(history, userText, priorText) {
+  try {
+    const c = loadConfig();
+    if (c.reflection === false) return;
+    if (!userText || !CORRECTION_RE.test(userText)) return;
+    // last assistant text in history = what's being corrected
+    let prior = priorText || '';
+    if (!prior) { const a = [...(history || [])].reverse().find((m) => m.role === 'assistant'); if (a) prior = typeof a.content === 'string' ? a.content : (Array.isArray(a.content) ? a.content.filter((b) => b.type === 'text').map((b) => b.text).join(' ') : ''); }
+    (async () => {
+      try {
+        const r = await callClaude([{ role: 'user', content: `User correction: "${userText.slice(0, 500)}"\nMy prior reply: "${String(prior).slice(0, 800)}"\n\nExtract ONE durable working-preference to remember for next time, as a single imperative line (e.g. "Keep spoken replies under two sentences"). If there is nothing durable/actionable, output exactly: NONE` }], getApiKey(), MODEL_HAIKU);
+        const pref = (r.content || []).filter((b) => b.type === 'text').map((b) => b.text).join(' ').trim();
+        if (!pref || /^none\b/i.test(pref) || pref.length < 6) return;
+        saveMemoryEntry('Preferences & Patterns', pref.replace(/^[-*\s]+/, '').slice(0, 200));
+        sendToActivity('tool-update', { type: 'thinking', text: '🧠 learned: ' + pref.slice(0, 120) });
+        if (c.ttsEnabled !== false) setTimeout(() => { try { speakDesktop('Noted.', { full: true }); } catch {} }, 3500);
+      } catch {}
+    })();
+  } catch {}
 }
 function ttsStreamEnqueue(seq, sentence) {
   if (seq !== ttsStreamSeq) return;
