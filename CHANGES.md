@@ -509,3 +509,8 @@ User decisions: TTS=add `say` for tiny replies (kept advanced TTS); BUILD=media 
 ### Pass 31.1 — fix blank 3D viewer (vendored three.js for packaged app)
 - **Bug:** viewer window opened but stayed black in the packaged app. Two causes: (1) electron-builder prunes `three/examples/jsm/` from node_modules → STL/GLTF/OrbitControls loaders 404; (2) modern `three.module.js` re-exports from `three.core.js`. Both made the ES module silently fail to load → only static HTML showed.
 - **Fix:** vendored three into `src/vendor/three/` (three.module.js + three.core.js + the jsm addon tree) — under my own source so it's always packaged; repointed viewer.html importmap to `./vendor/three/`. Verified end-to-end: imports resolve and the trophy STL renders (165k non-bg px) from the freshly installed /Applications bundle on real GPU.
+
+## Pass 32 (2026-06-10) — token-estimator image fix + Telegram verified + Trellis credit confirmed
+- **Fixed the false "needs ~411k tokens" rate-limit block:** `estimateTokens` counted a base64 image as length/4 (~375k tokens for one 1024² PNG) when Anthropic bills images by dimensions (~1.6k). Now strips image/`_image`/`data` payloads from the JSON and adds a flat ~1600 each. Verified: a 1.5 MB image went from ~375k → 1,635 est tokens. Image→3D / vision turns no longer falsely trip the per-minute limiter.
+- **Telegram bridge verified live:** token + chat_id (8722195743) configured; sent a real test message to the phone (ok). Inbound replies hit the running app's poller. Saved `myPhone:+16094806321` for Twilio.
+- **Trellis confirmed working with the new $5 Replicate credit:** versioned endpoint, 512-tex test → succeeded in 63s, 3.23 MB GLB.

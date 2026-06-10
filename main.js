@@ -429,7 +429,21 @@ function chooseModel(lastUserMessage) {
 // Claude API (prompt caching GA — cache_control, no beta header needed)
 // ---------------------------------------------------------------------------
 // Rough token estimate (~4 chars/token incl. base64 images) — for context trimming.
-function estimateTokens(obj) { try { return Math.ceil(JSON.stringify(obj).length / 4); } catch { return 0; } }
+// Estimate input tokens. CRITICAL: images are billed by DIMENSIONS (~1.6k tokens for a large
+// image), NOT by their base64 length — so counting the base64 string as length/4 over-estimates
+// a single image as ~400k tokens and falsely trips the per-minute rate limiter on any vision /
+// image-generation turn. We strip image payloads from the JSON and add a flat ~1600 each.
+function estimateTokens(obj) {
+  try {
+    let imgTokens = 0;
+    const s = JSON.stringify(obj, (k, v) => {
+      if (v && typeof v === 'object' && v.type === 'image' && v.source) { imgTokens += 1600; return '[IMG]'; }
+      if ((k === '_image' || k === 'data') && typeof v === 'string' && v.length > 2000) { imgTokens += 1600; return '[IMG]'; }
+      return v;
+    });
+    return Math.ceil(s.length / 4) + imgTokens;
+  } catch { return 0; }
+}
 // A user turn that LEADS with a tool_result is an orphan if its tool_use was trimmed away.
 function leadsWithToolResult(m) {
   return m && m.role === 'user' && Array.isArray(m.content) && m.content.some((b) => b && b.type === 'tool_result');
