@@ -23,6 +23,7 @@ contextBridge.exposeInMainWorld('bhatbot', {
   openStudio: () => ipcRenderer.invoke('open-studio'),
   openTerminal: () => ipcRenderer.invoke('open-terminal'),
   onWakeCommand: (cb) => ipcRenderer.on('wake-command', (_e, d) => cb(d.text)),
+  onBargeIn: (cb) => ipcRenderer.on('barge-in', (_e, d) => cb(d)),
   onToolUpdate: (cb) => ipcRenderer.on('tool-update', (_e, u) => cb(u)),
   removeToolUpdateListener: () => ipcRenderer.removeAllListeners('tool-update')
 });

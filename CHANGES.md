@@ -2,6 +2,22 @@
 
 What was built differently from `BHATBOT_MEGAPROMPT.md`, and why. For reference.
 
+## Pass 26 — Barge-in (interrupt TTS by speaking)
+
+- **Barge-in:** speak over Bhatbot and it stops talking. `listen.py` gained an energy VAD
+  that arms ONLY while TTS plays (main streams "TTS 1"/"TTS 0" to the listener's stdin) with
+  a raised echo-rejection threshold (0.085 normalized RMS, ~240ms sustained) so Bhatbot's own
+  voice through the speakers doesn't self-trigger. On detection it prints `VOICE`; main calls
+  `stopDesktopTTS()` and fires `barge-in` → renderer arms Whisper capture so the interrupting
+  words become the next command. Wake word during playback also interrupts.
+- `setTtsActive()` tracks playback (set in `playFile`, cleared in `stopDesktopTTS`) and
+  notifies the listener. Config: `bargeIn` (def on), `bargeInThreshold` (0.085).
+- Verified VAD decision logic in simulation: rejects echo-level (~0.04), fires on close
+  speech (~0.15) once, never arms when TTS is off, ignores <240ms blips.
+- HONEST LIMITATION (no AEC): on laptop speakers at high volume the echo can approach the
+  threshold; if it self-interrupts, raise `bargeInThreshold` to ~0.11, or use headphones
+  (then lower to ~0.05 for a hair-trigger). Wake-word interrupt always works regardless.
+
 ## Pass 25 — JARVIS personality + <speak> + acks + reflection; FIX app-open & browsing
 
 - **FIX app opening (consistently broke in the packaged app):** root cause = `tell app to

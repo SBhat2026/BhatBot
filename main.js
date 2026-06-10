@@ -1948,7 +1948,11 @@ function startWakeHelper() {
   const script = unpacked(path.join(__dirname, 'scripts', 'listen.py'));
   if (!fs.existsSync(script)) return;
   try {
-    wakeProc = require('child_process').spawn(resolvePython(), ['-u', script], { env: { ...process.env, PATH: EXEC_PATH } });
+    const wc = loadConfig();
+    const wakeEnv = { ...process.env, PATH: EXEC_PATH,
+      BHATBOT_BARGE: wc.bargeIn === false ? '0' : '1',
+      BHATBOT_BARGE_THRESH: String(wc.bargeInThreshold || 0.085) };
+    wakeProc = require('child_process').spawn(resolvePython(), ['-u', script], { env: wakeEnv });
     let buf = '';
     const triggerWake = (cmd) => {
       if (mainWindow && !mainWindow.isDestroyed()) {
@@ -1963,8 +1967,11 @@ function startWakeHelper() {
       while ((i = buf.indexOf('\n')) >= 0) {
         const line = buf.slice(0, i).trim();
         buf = buf.slice(i + 1);
-        if (line === 'WAKE') triggerWake('');               // bare wake → renderer arms Whisper
-        else if (line.startsWith('CMD')) triggerWake(line.slice(3).trim());
+        if (line === 'VOICE') {                              // barge-in: user spoke over the TTS
+          if (ttsActive) { stopDesktopTTS(); sendToActivity('tool-update', { type: 'thinking', text: '🎙 barge-in — stopped speaking' }); if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('barge-in', {}); }
+        }
+        else if (line === 'WAKE') { if (ttsActive) stopDesktopTTS(); triggerWake(''); }   // wake also interrupts
+        else if (line.startsWith('CMD')) { if (ttsActive) stopDesktopTTS(); triggerWake(line.slice(3).trim()); }
         else if (line === 'READY') console.log('[wake] listener ready');
       }
     });
@@ -2162,10 +2169,19 @@ ipcMain.handle('synthesize-speech', (_e, { text }) => synthesizeSpeech(text));
 // <Audio> element is unreliable in Electron (autoplay/codec quirks → silent desktop,
 // the long-standing "works on phone not Mac" bug). afplay is rock-solid and the
 // synthesis already lives here. Returns once playback has STARTED (not finished).
-let ttsPlayProc = null, ttsPlaySeq = 0;
+let ttsPlayProc = null, ttsPlaySeq = 0, ttsActive = false;
+// Tell the wake listener whether audio is playing, so its barge-in VAD only arms during
+// playback (and uses the echo-rejection threshold then). Drives the `ttsActive` flag the
+// barge-in handler checks.
+function setTtsActive(on) {
+  if (ttsActive === on) return;
+  ttsActive = on;
+  try { if (wakeProc && wakeProc.stdin && wakeProc.stdin.writable) wakeProc.stdin.write(on ? 'TTS 1\n' : 'TTS 0\n'); } catch {}
+}
 function stopDesktopTTS() {
   ttsPlaySeq++;
   if (ttsPlayProc) { try { ttsPlayProc.kill(); } catch {} ttsPlayProc = null; }
+  setTtsActive(false);
 }
 // Sentence chunks for streaming speech (synth one, play it while the next synthesizes).
 function splitForSpeech(text) {
@@ -2179,9 +2195,11 @@ function splitForSpeech(text) {
 function playFile(file, seq) {
   return new Promise((res) => {
     if (seq !== ttsPlaySeq) return res();
+    setTtsActive(true);                                  // arm barge-in for the duration of this clip
     ttsPlayProc = spawn('afplay', [file], { env: { ...process.env, PATH: EXEC_PATH } });
-    ttsPlayProc.on('close', () => { fs.unlink(file, () => {}); res(); });
-    ttsPlayProc.on('error', () => { fs.unlink(file, () => {}); res(); });
+    const done = () => { fs.unlink(file, () => {}); if (seq === ttsPlaySeq) setTtsActive(false); res(); };
+    ttsPlayProc.on('close', done);
+    ttsPlayProc.on('error', done);
   });
 }
 async function speakDesktop(text, opts = {}) {

@@ -638,6 +638,9 @@ window.bhatbot.onWakeCommand((text) => {
   if (text && text.trim()) send(text.trim());     // "bhatbot do X" → execute in Bhatbot
   else if (!recording) startVoice();              // bare "hey bhatbot" → arm Whisper capture
 });
+// Barge-in: user spoke over Bhatbot → main already stopped the TTS; arm capture so their
+// interrupting words become the next command.
+window.bhatbot.onBargeIn(() => { if (!recording) startVoice(); });
 
 // ===================== voice: STT + wake word =====================
 const mic = $('#mic');

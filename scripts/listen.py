@@ -21,12 +21,34 @@ import sys
 import json
 import time
 import queue
+import threading
 
 DEBUG = os.environ.get("BHATBOT_WAKE_DEBUG") == "1"
 THRESH = float(os.environ.get("BHATBOT_WAKE_THRESH", "0.5"))
 MODEL_DIR = os.path.expanduser(os.environ.get("BHATBOT_VOSK_MODEL", "~/.bhatbot/vosk-model"))
 ENGINES = os.environ.get("BHATBOT_WAKE_ENGINES", "oww,vosk").split(",")
 DEBOUNCE = 2.5  # seconds to ignore further hits after a wake
+
+# --- Barge-in (interrupt TTS by speaking) ---
+# Energy VAD that only fires WHILE Bhatbot is speaking (main sends "TTS 1"/"TTS 0" on
+# stdin). Threshold is raised during playback so the mic echo of Bhatbot's own voice through
+# the speakers doesn't self-trigger; only clearly louder/closer user speech crosses it.
+BARGE = os.environ.get("BHATBOT_BARGE", "1") == "1"
+# Normalized RMS (0..1) the user's speech must exceed during playback to count as barge-in.
+BARGE_THRESH = float(os.environ.get("BHATBOT_BARGE_THRESH", "0.085"))
+BARGE_FRAMES = int(os.environ.get("BHATBOT_BARGE_FRAMES", "3"))  # ~240ms sustained (80ms/frame)
+_tts_active = False
+
+
+def _stdin_reader():
+    # Main process tells us when TTS is playing so VAD only arms then.
+    global _tts_active
+    for line in sys.stdin:
+        s = line.strip()
+        if s == "TTS 1":
+            _tts_active = True
+        elif s == "TTS 0":
+            _tts_active = False
 
 # In-vocab homophones for "hey bhatbot" (Vosk small can't say "bhatbot").
 # Confirmed-working set: "hey bhatbot" reliably lands as one of these two.
@@ -90,6 +112,12 @@ def main():
         q.put(bytes(indata))
 
     last_wake = 0.0
+    last_barge = 0.0
+    voiced_frames = 0
+
+    if BARGE:
+        threading.Thread(target=_stdin_reader, daemon=True).start()
+        derr("barge-in armed (thresh=%.3f frames=%d)" % (BARGE_THRESH, BARGE_FRAMES))
 
     def fire(why):
         nonlocal last_wake
@@ -106,9 +134,24 @@ def main():
                            channels=1, callback=cb):
         while True:
             data = q.get()
+            pcm = np.frombuffer(data, dtype=np.int16)
+            # Barge-in: while Bhatbot is speaking, sustained mic energy above the (raised)
+            # threshold = the user talking over it → emit VOICE so main stops the TTS.
+            if BARGE and _tts_active:
+                rms = float(np.sqrt(np.mean((pcm.astype(np.float32) / 32768.0) ** 2))) if pcm.size else 0.0
+                if rms >= BARGE_THRESH:
+                    voiced_frames += 1
+                    if voiced_frames >= BARGE_FRAMES and (time.time() - last_barge) > 1.0:
+                        last_barge = time.time()
+                        voiced_frames = 0
+                        derr("BARGE rms=%.3f" % rms)
+                        print("VOICE", flush=True)
+                else:
+                    voiced_frames = 0
+            else:
+                voiced_frames = 0
             if oww is not None:
                 try:
-                    pcm = np.frombuffer(data, dtype=np.int16)
                     scores = oww.predict(pcm)
                     top = max(scores.values()) if scores else 0.0
                     if DEBUG and top > 0.2:
