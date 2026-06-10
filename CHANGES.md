@@ -2,6 +2,29 @@
 
 What was built differently from `BHATBOT_MEGAPROMPT.md`, and why. For reference.
 
+## Pass 34 — Two-way voice calls + phone tabbed UI + phone wake word
+
+- **Twilio two-way voice (JARVIS voice).** `twilioCall` no longer reads a one-shot
+  `<Say>`; it places a webhook-driven CONVERSATION. New routes in `mcp-server.js`:
+  `/voice/:token/incoming` (greets + `<Gather input=speech>`), `/voice/:token/gather`
+  (runs the agent on `SpeechResult`, speaks the reply, loops), `/voice/:token/clip/:id`
+  (serves the synthesized clip), `/voice/:token/status` (cleanup). Replies are
+  synthesized with BhatBot's own TTS (`synthesizeSpeech`) and played via `<Play>` so the
+  call uses the real Jarvis voice, not Twilio's Google voice. `main.js` owns the turn:
+  `voiceTurn(callSid, speech)` keeps per-CallSid history, forces 1-2 short spoken
+  sentences, hangs up on goodbye intent. Degrades to the old one-shot `<Say>` if no
+  public funnel host. Webhook host auto-detected via `getPublicHost()` (Tailscale →
+  `config.publicHost`).
+- **Phone PWA gets the tabbed UI.** `src/mobile.html` now has a bottom tab bar:
+  💬 Chat / ⚡ Activity / 🔭 Nexus. Activity mirrors the desktop's live tool/thinking
+  stream via a new ring buffer (`activityFeed`/`pushActivity` fed by `sendToAll` +
+  `sendToActivity`) polled at `/api/:token/activity?since=`; unread badge. Nexus loads
+  `nexusUrl` (from `/api/:token/config`) in an iframe.
+- **Phone wake word.** 👂 toggle keeps the mic open and only acts when you say
+  "hey BhatBot" / "hey Jarvis" (`WAKE_RE`), stripping the wake phrase and sending the
+  rest (or acknowledging "Yes, sir?" if the wake word was said alone). Foreground-only
+  (a web app can't listen with the screen off) — Mac keeps the always-on wake word.
+
 ## Pass 28 — Upgrade-prompt reconciliation: "sir", creds vault, token trims, drag-drop
 
 Most of the 7-phase upgrade_prompt.md was already shipped (Passes 22-27). This pass closes

@@ -60,6 +60,24 @@
   .sheet input[type=range] { width:100%; accent-color:var(--cyan); }
   .testbtn { width:100%; height:auto; border-radius:12px; padding:12px; margin-top:18px; font-size:15px;
     background:rgba(57,215,255,.1); border:1px solid #1b4a5e; color:var(--cyan); }
+  /* tabbed views */
+  #views { flex:1; min-height:0; display:flex; position:relative; }
+  .view { position:absolute; inset:0; display:none; flex-direction:column; }
+  .view.on { display:flex; }
+  #view-nexus iframe { flex:1; width:100%; border:0; background:#090d13; }
+  #actfeed { flex:1; overflow-y:auto; padding:12px; -webkit-overflow-scrolling:touch; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12.5px; }
+  .act { display:flex; gap:8px; padding:7px 9px; margin:5px 0; border:1px solid var(--line); border-radius:9px; background:var(--panel); }
+  .act .k { color:var(--cyan); flex:0 0 auto; font-size:11px; opacity:.8; }
+  .act .v { color:var(--txt); word-break:break-word; white-space:pre-wrap; }
+  #actfeed .empty { color:var(--dim); text-align:center; margin-top:40px; }
+  /* bottom tab bar */
+  #tabs { display:flex; border-top:1px solid var(--line); background:#0c1219; padding-bottom:env(safe-area-inset-bottom); }
+  #tabs .tab { flex:1; text-align:center; padding:9px 4px 8px; color:var(--dim); font-size:10px; letter-spacing:.4px; }
+  #tabs .tab .ic { display:block; font-size:19px; margin-bottom:2px; filter:grayscale(1) opacity(.7); }
+  #tabs .tab.on { color:var(--cyan); }
+  #tabs .tab.on .ic { filter:none; }
+  #tabs .tab .badge { display:inline-block; min-width:15px; padding:0 4px; margin-left:3px; font-size:10px; color:#04222e; background:var(--cyan); border-radius:8px; vertical-align:top; }
+  #mic.wake { background:#1b3a4a; border-color:var(--cyan); color:var(--cyan); }
 </style>
 </head>
 <body>
@@ -68,12 +86,15 @@
   <small id="net">connecting…</small>
   <button id="gear" class="hbtn" title="Voice settings">⚙</button>
 </header>
+<div id="views">
+<section id="view-chat" class="view on">
 <div id="log"></div>
 <footer>
   <div id="bar"></div>
   <div id="attbar"></div>
   <div class="row">
     <button id="spk" title="Voice replies">🔊</button>
+    <button id="wake" title="Wake word — say &quot;hey BhatBot&quot;">👂</button>
     <button id="mic" title="Hands-free conversation">🎙</button>
     <button id="attach" title="Attach photo / screenshot / screen recording">📎</button>
     <textarea id="ta" rows="1" placeholder="Message Bhatbot…" enterkeyhint="send"></textarea>
@@ -81,6 +102,15 @@
   </div>
   <input type="file" id="file" accept="image/*,video/*" multiple style="display:none">
 </footer>
+</section>
+<section id="view-activity" class="view"><div id="actfeed"><div class="empty">No activity yet.</div></div></section>
+<section id="view-nexus" class="view"></section>
+</div>
+<nav id="tabs">
+  <div class="tab on" data-tab="chat"><span class="ic">💬</span>Chat</div>
+  <div class="tab" data-tab="activity"><span class="ic">⚡</span>Activity<span class="badge" id="actbadge" style="display:none">0</span></div>
+  <div class="tab" data-tab="nexus"><span class="ic">🔭</span>Nexus</div>
+</nav>
 <div id="settings" class="modal" style="display:none">
   <div class="sheet">
     <div class="sh-h">Voice <span class="x" id="setclose">✕</span></div>
@@ -282,7 +312,7 @@ document.getElementById('vtest').addEventListener('click', async () => {
 // Mic tap starts a CONVERSATION: it listens, sends, speaks the reply, then listens
 // again — and keeps waiting until YOU actually speak (never times out on silence
 // before you've said anything). Tap again to end the conversation.
-let convoActive = false, listening = false, micStream = null, proc = null, srcNode = null, muteNode = null;
+let convoActive = false, wakeMode = false, listening = false, micStream = null, proc = null, srcNode = null, muteNode = null;
 let recChunks = [], heardSpeech = false, silenceAt = 0, capRate = 16000;
 const SILENCE_MS = 1600, SPEECH_RMS = 0.03;
 
@@ -295,6 +325,24 @@ mic.addEventListener('click', () => {
   ensureCtx();
   if (convoActive || listening) { convoActive = false; stopSpeaking(); stopListening(); bar.textContent = ''; setMicUI(); }
   else { convoActive = true; stopSpeaking(); setMicUI(); startListening(); }
+});
+
+// 👂 Wake-word mode: keeps the mic open and only acts when you say "hey BhatBot" /
+// "hey Jarvis". Foreground only (a web app can't listen with the screen off) — when
+// the BhatBot app is open on top, just speak the wake word, no tapping.
+const wakeBtn = document.getElementById('wake');
+wakeBtn.addEventListener('click', () => {
+  ensureCtx();
+  wakeMode = !wakeMode;
+  wakeBtn.classList.toggle('wake', wakeMode);
+  if (wakeMode) {
+    bar.textContent = '👂 waiting for "hey BhatBot"…';
+    if (!listening && !convoActive) startListening();
+  } else {
+    if (!convoActive) { stopListening(); bar.textContent = ''; }
+    setMicUI();
+  }
+  setMicUI();
 });
 
 async function startListening() {
@@ -324,18 +372,31 @@ function stopListening() {
   try { micStream && micStream.getTracks().forEach(t => t.stop()); } catch {}
   setMicUI(); finalize();
 }
+const WAKE_RE = /\b(?:hey|ok|okay|hi|yo)?\s*(?:bhat\s?bot|jarvis|j\.?a\.?r\.?v\.?i\.?s)\b[\s,.:;!?-]*(.*)$/i;
 async function finalize() {
   const flat = flatten(recChunks); recChunks = [];
-  if (!heardSpeech || flat.length < capRate * 0.25) { if (convoActive) return startListening(); bar.textContent = ''; return; }
+  if (!heardSpeech || flat.length < capRate * 0.25) { if (convoActive || wakeMode) return startListening(); bar.textContent = ''; return; }
   bar.textContent = '⏳ transcribing…';
   const wav = encodeWAV(downsample(flat, capRate, 16000), 16000);
   try {
     const r = await fetch(API + '/stt?mime=audio/wav', { method:'POST', headers:{'content-type':'audio/wav'}, body: wav }).then(x => x.json());
     bar.textContent = '';
-    if (r.text) { ta.value = r.text; autoresize(); await send(r.text); }
-    else if (r.error) add('err', 'STT: ' + r.error);
+    const said = (r.text || '').trim();
+    if (r.error) add('err', 'STT: ' + r.error);
+    else if (said) {
+      // Wake mode (and not in a full mic conversation): only act if the wake word was said.
+      if (wakeMode && !convoActive) {
+        const m = said.match(WAKE_RE);
+        if (m) {
+          const cmd = (m[1] || '').trim();
+          bar.textContent = '👂 ' + said;
+          if (cmd) { ta.value = cmd; autoresize(); await send(cmd); }
+          else { await speak('Yes, sir?'); }     // wake word alone → acknowledge, await command
+        } else { bar.textContent = '👂 waiting for "hey BhatBot"…'; }   // ignore non-wake speech
+      } else { ta.value = said; autoresize(); await send(said); }
+    }
   } catch (e) { bar.textContent = ''; add('err', 'STT: ' + (e.message || e)); }
-  if (convoActive) startListening();                              // keep the conversation going
+  if (convoActive || wakeMode) startListening();                  // keep listening
 }
 
 // ---- WAV helpers ----
@@ -356,7 +417,65 @@ function encodeWAV(samples, rate) {
   return buf;
 }
 
-add('bot', 'Bhatbot online. Type, or tap 🎙 for hands-free conversation — I keep listening between turns until you tap ⏹.');
+// ---- Tabs: Chat / Activity / Nexus ----
+let curTab = 'chat', nexusLoaded = false;
+const tabs = [...document.querySelectorAll('#tabs .tab')];
+const views = { chat: document.getElementById('view-chat'), activity: document.getElementById('view-activity'), nexus: document.getElementById('view-nexus') };
+function showTab(name) {
+  curTab = name;
+  tabs.forEach(t => t.classList.toggle('on', t.dataset.tab === name));
+  for (const k in views) views[k].classList.toggle('on', k === name);
+  if (name === 'activity') { actSeen = actLastId; updateActBadge(); }
+  if (name === 'nexus' && !nexusLoaded) loadNexus();
+}
+tabs.forEach(t => t.addEventListener('click', () => { ensureCtx(); showTab(t.dataset.tab); }));
+
+async function loadNexus() {
+  nexusLoaded = true;
+  const v = views.nexus;
+  v.innerHTML = '<div style="margin:auto;color:var(--dim);font-size:13px">loading Nexus…</div>';
+  try {
+    const cfg = await fetch(API + '/config').then(r => r.json());
+    const url = cfg.nexusUrl || 'https://nexusresearch.xyz';
+    v.innerHTML = '';
+    const f = document.createElement('iframe'); f.src = url; f.allow = 'fullscreen';
+    f.onerror = () => { v.innerHTML = '<div style="margin:auto;color:var(--dim);padding:24px;text-align:center">Nexus could not be embedded.<br><a style="color:var(--cyan)" href="' + url + '" target="_blank">Open in browser ↗</a></div>'; };
+    v.appendChild(f);
+  } catch { v.innerHTML = '<div style="margin:auto;color:var(--dim)">Nexus unavailable</div>'; }
+}
+
+// ---- Activity feed: poll the Mac's live tool/thinking stream ----
+const actfeed = document.getElementById('actfeed'), actbadge = document.getElementById('actbadge');
+let actLastId = 0, actSeen = 0;
+function updateActBadge() {
+  const n = actLastId - actSeen;
+  if (n > 0 && curTab !== 'activity') { actbadge.style.display = 'inline-block'; actbadge.textContent = n > 99 ? '99+' : String(n); }
+  else { actbadge.style.display = 'none'; }
+}
+function renderAct(events) {
+  if (!events.length) return;
+  if (actfeed.querySelector('.empty')) actfeed.innerHTML = '';
+  for (const e of events) {
+    const row = document.createElement('div'); row.className = 'act';
+    const time = new Date(e.t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    row.innerHTML = '<span class="k">' + time + ' · ' + (e.kind || '') + '</span><span class="v"></span>';
+    row.querySelector('.v').textContent = e.text;
+    actfeed.appendChild(row);
+    actLastId = Math.max(actLastId, e.id);
+  }
+  while (actfeed.children.length > 200) actfeed.removeChild(actfeed.firstChild);
+  if (curTab === 'activity') { actfeed.scrollTop = actfeed.scrollHeight; actSeen = actLastId; }
+  updateActBadge();
+}
+async function pollActivity() {
+  try {
+    const r = await fetch(API + '/activity?since=' + actLastId, { cache: 'no-store' }).then(x => x.json());
+    if (r && r.events) renderAct(r.events);
+  } catch {}
+}
+setInterval(pollActivity, 3000); pollActivity();
+
+add('bot', 'Bhatbot online. Type, or tap 🎙 for hands-free conversation. Tap 👂 and just say "hey BhatBot" to wake me. Activity + Nexus are in the tabs below.');
 </script>
 </body>
 </html>

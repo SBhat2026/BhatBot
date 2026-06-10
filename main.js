@@ -1949,12 +1949,50 @@ function sendToAll(chatEvent, channel, data) {
     if (activityWindow && !activityWindow.isDestroyed() && activityWindow.webContents !== sender)
       activityWindow.webContents.send(channel, data);
   } catch {}
+  pushActivity(channel, data);
 }
 function sendToActivity(channel, data) {
   // Direct callers (briefing, barge-in, studio/3D progress, MCP/Telegram tasks) — these are NOT
   // also routed via sendToAll, so a single send to the main renderer is correct (no double).
   try { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, data); } catch {}
   try { if (activityWindow && !activityWindow.isDestroyed()) activityWindow.webContents.send(channel, data); } catch {}
+  pushActivity(channel, data);
+}
+
+// Activity ring buffer — mirrors tool/thinking events so the phone's Activity tab can poll
+// them (the phone has no IPC). Both sendToActivity and the chat path (sendToAll) feed it.
+const activityFeed = [];
+let activitySeq = 0;
+function pushActivity(channel, data) {
+  try {
+    if (channel !== 'tool-update' && channel !== 'tool-start' && channel !== 'tool-result') return;
+    const d = data || {};
+    let text = d.text || d.note || d.name || d.type || '';
+    if (typeof text !== 'string') text = JSON.stringify(text);
+    if (!text) return;
+    activityFeed.push({ id: ++activitySeq, t: Date.now(), kind: d.type || d.kind || channel, text: String(text).slice(0, 400) });
+    if (activityFeed.length > 200) activityFeed.splice(0, activityFeed.length - 200);
+  } catch {}
+}
+function getActivity(since) {
+  const s = Number(since) || 0;
+  return { seq: activitySeq, events: activityFeed.filter((e) => e.id > s) };
+}
+
+// Public funnel host (for Twilio webhooks + the phone's "open this URL"). Detected from
+// Tailscale, cached in config.publicHost. Returns bare host (no scheme), or '' if unknown.
+let _publicHost = null;
+function getPublicHost() {
+  if (_publicHost) return _publicHost;
+  const c = loadConfig();
+  if (c.publicHost) { _publicHost = String(c.publicHost).replace(/^https?:\/\//, '').replace(/\/+$/, ''); return _publicHost; }
+  try {
+    const out = require('child_process').execSync('tailscale status --json', { timeout: 4000 }).toString();
+    const dns = (JSON.parse(out).Self || {}).DNSName || '';
+    const host = dns.replace(/\.$/, '');
+    if (host) { _publicHost = host; saveConfig({ publicHost: host }); return host; }
+  } catch {}
+  return '';
 }
 
 async function agentLoop(history, apiKey, event, opts = {}) {
@@ -2078,9 +2116,15 @@ async function initMcpServer() {
   if (!token) { token = crypto.randomBytes(24).toString('hex'); saveConfig({ mcpToken: token }); }
   const port = c.mcpPort || 8788;
   try {
-    await startMcpServer({ port, token, runAgent: runAgentHeadless, transcribe: transcribeAudio, synthesize: synthesizeSpeech, summarize: summarizeForSpeech, media: mediaBytesToBlocks });
+    await startMcpServer({
+      port, token, runAgent: runAgentHeadless, transcribe: transcribeAudio,
+      synthesize: synthesizeSpeech, summarize: summarizeForSpeech, media: mediaBytesToBlocks,
+      voiceTurn, endVoiceCall, getActivity, nexusUrl: NEXUS_URL
+    });
     console.log(`[mcp] listening on http://127.0.0.1:${port}/mcp/${token}`);
     console.log(`[app] phone PWA at  http://127.0.0.1:${port}/app/${token}`);
+    const host = getPublicHost();
+    if (host) console.log(`[app] open on phone:  https://${host}/app/${token}`);
     console.log(`[mcp] publish with:  tailscale funnel ${port}`);
   } catch (e) { console.error('[mcp] failed to start:', e.message); }
 }
@@ -2146,8 +2190,50 @@ function telegramNotify(text) {
   } catch {}
 }
 
-// Place an actual outbound phone call via Twilio, reading `message` aloud. Reserved for
-// urgency:'call'. Needs twilioSid/twilioToken/twilioFrom/myPhone in config.
+// ---------------------------------------------------------------------------
+// Twilio two-way voice — a real phone CONVERSATION, not a one-shot announcement.
+// BhatBot calls you, greets you in the JARVIS voice (his own TTS, played to the
+// call), then listens (<Gather speech>), runs the agent on what you say, and
+// speaks the reply — looping until you say goodbye / hang up. The webhook routes
+// live on the same express/funnel server (mcp-server.js); main.js owns the agent
+// turn + speech synthesis so the call uses the same voice as the desktop.
+// ---------------------------------------------------------------------------
+const voiceCalls = new Map();   // CallSid → { history:[], turns:0 }
+const VOICE_BYE = /\b(good ?bye|bye bye|that'?s all|hang up|end (the )?call|nothing else|i'?m done|talk later|see you)\b/i;
+
+// One spoken turn of a live call. speech = what the user just said (empty on the
+// first turn → just greet). Returns { text, hangup }. Short, spoken-style replies.
+async function voiceTurn(callSid, speech, greeting) {
+  let st = voiceCalls.get(callSid);
+  if (!st) { st = { history: [], turns: 0 }; voiceCalls.set(callSid, st); }
+  st.turns++;
+  if (st.turns > 30) return { text: 'We have spoken a good while, sir. I shall ring off now. Goodbye.', hangup: true };
+  const said = String(speech || '').trim();
+  if (!said) {
+    const g = String(greeting || 'Good evening, sir. How may I help?').trim();
+    st.history.push({ role: 'assistant', content: g });
+    return { text: g, hangup: false };
+  }
+  if (VOICE_BYE.test(said) && said.length < 40) {
+    return { text: 'Very good, sir. Goodbye.', hangup: true };
+  }
+  st.history.push({ role: 'user', content: '[PHONE CALL — reply in 1-2 short spoken sentences, no markdown, no lists] ' + said });
+  if (st.history.length > 24) st.history = st.history.slice(-24);
+  try {
+    const res = await agentLoop(st.history, getApiKey(), { sender: { send() {} } });
+    st.history = (res.history || st.history).slice(-24);
+    let text = (res.text || 'I had no reply, sir.').replace(/[*_`#>\[\]]/g, '').replace(/\s+/g, ' ').trim();
+    if (text.length > 600) text = text.slice(0, 597) + '…';
+    return { text, hangup: false };
+  } catch (e) {
+    return { text: 'Forgive me sir, I ran into an error: ' + (e.message || 'unknown') + '.', hangup: false };
+  }
+}
+function endVoiceCall(callSid) { if (callSid) voiceCalls.delete(callSid); }
+
+// Place an actual outbound phone call via Twilio. Reserved for urgency:'call'. If the
+// public funnel host is reachable, the call becomes a two-way JARVIS-voice conversation
+// (webhook-driven, his own TTS). Without a host it degrades to a one-shot spoken message.
 async function twilioCall(message) {
   const c = loadConfig();
   if (!c.twilioSid || !c.twilioToken || !c.twilioFrom || !c.myPhone) {
@@ -2155,10 +2241,23 @@ async function twilioCall(message) {
   }
   let twilio;
   try { twilio = require('twilio'); } catch { return { sent: false, error: 'twilio package not installed (npm i twilio)' }; }
-  const safe = String(message).replace(/[<>&]/g, ' ').slice(0, 600);
-  const twiml = '<Response><Say voice="Google.en-US-Neural2-D">' + safe + '</Say></Response>';
+  const client = twilio(c.twilioSid, c.twilioToken);
+  const greeting = String(message).slice(0, 600);
+  const host = getPublicHost();
   try {
-    const call = await twilio(c.twilioSid, c.twilioToken).calls.create({ twiml, to: c.myPhone, from: c.twilioFrom });
+    if (host && c.mcpToken) {
+      // Two-way: point Twilio at our webhook, which plays the JARVIS voice + gathers speech.
+      const url = `https://${host}/voice/${c.mcpToken}/incoming?msg=${encodeURIComponent(greeting)}`;
+      const call = await client.calls.create({
+        url, method: 'POST', to: c.myPhone, from: c.twilioFrom,
+        statusCallback: `https://${host}/voice/${c.mcpToken}/status`, statusCallbackEvent: ['completed']
+      });
+      return { sent: true, via: 'twilio-conversation', sid: call.sid };
+    }
+    // Fallback: one-shot announcement (no public host to host the conversation webhook).
+    const safe = greeting.replace(/[<>&]/g, ' ');
+    const twiml = '<Response><Say voice="Google.en-US-Neural2-D">' + safe + '</Say></Response>';
+    const call = await client.calls.create({ twiml, to: c.myPhone, from: c.twilioFrom });
     return { sent: true, via: 'twilio', sid: call.sid };
   } catch (e) { return { sent: false, error: e.message }; }
 }

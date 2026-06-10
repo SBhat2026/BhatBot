@@ -7,7 +7,7 @@
 
 let httpServer = null;
 
-async function startMcpServer({ port, token, runAgent, transcribe, synthesize, summarize, media }) {
+async function startMcpServer({ port, token, runAgent, transcribe, synthesize, summarize, media, voiceTurn, endVoiceCall, getActivity, nexusUrl }) {
   if (httpServer) return httpServer;
   const express = require('express');
   const fs = require('fs');
@@ -151,6 +151,99 @@ async function startMcpServer({ port, token, runAgent, transcribe, synthesize, s
       const r = await summarize((req.body && req.body.text) || '');
       res.json(r.error ? { error: r.error } : { text: r.text });
     } catch (e) { res.status(500).json({ error: String(e && e.message ? e.message : e) }); }
+  });
+
+  // Activity feed — phone Activity tab polls this (?since=lastId) to mirror the desktop's
+  // live tool/thinking stream. No-op if the host didn't provide getActivity.
+  app.get('/api/:token/activity', guard, (req, res) => {
+    if (!getActivity) return res.json({ seq: 0, events: [] });
+    noStore(res); res.json(getActivity(req.query.since));
+  });
+
+  // Where the phone's Nexus tab should point.
+  app.get('/api/:token/config', guard, (_req, res) => { noStore(res); res.json({ nexusUrl: nexusUrl || '' }); });
+
+  // -------------------------------------------------------------------------
+  // Twilio two-way voice — webhook-driven phone CONVERSATION in the JARVIS voice.
+  // Twilio POSTs urlencoded; these routes return TwiML. Synthesized clips are
+  // cached briefly and served via <Play> so the call uses BhatBot's own TTS.
+  // -------------------------------------------------------------------------
+  const form = express.urlencoded({ extended: false });
+  const clips = new Map();   // id → { buf, mime, at }
+  let clipSeq = 0;
+  setInterval(() => { const now = Date.now(); for (const [k, v] of clips) if (now - v.at > 600000) clips.delete(k); }, 120000).unref?.();
+  const xmlEsc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+  // Synthesize `text` in the Jarvis voice → cache → return a <Play>…</Play> element.
+  // Falls back to Twilio <Say> if synthesis is unavailable so the call never goes silent.
+  async function sayElement(req, text) {
+    const t = String(text || '').trim();
+    if (!t) return '';
+    if (synthesize) {
+      try {
+        const r = await synthesize(t);
+        if (r && r.audio) {
+          const id = (++clipSeq).toString(36) + Date.now().toString(36);
+          const mime = r.mimeType || 'audio/mpeg';
+          clips.set(id, { buf: Buffer.from(r.audio, 'base64'), mime, at: Date.now() });
+          const ext = /wav/.test(mime) ? 'wav' : 'mp3';
+          return `<Play>https://${req.get('host')}/voice/${token}/clip/${id}.${ext}</Play>`;
+        }
+      } catch {}
+    }
+    return `<Say voice="Google.en-US-Neural2-D">${xmlEsc(t)}</Say>`;
+  }
+  function gatherTwiml(req, playEl, hangup) {
+    if (hangup) return `<?xml version="1.0" encoding="UTF-8"?><Response>${playEl}<Hangup/></Response>`;
+    const action = `https://${req.get('host')}/voice/${token}/gather`;
+    return `<?xml version="1.0" encoding="UTF-8"?><Response>` +
+      `<Gather input="speech" action="${action}" method="POST" speechTimeout="auto" speechModel="experimental_conversations" actionOnEmptyResult="true">` +
+      `${playEl}</Gather>` +
+      // If the gather returns nothing (silence), loop back so it keeps listening.
+      `<Redirect method="POST">${action}</Redirect></Response>`;
+  }
+
+  app.get('/voice/:token/clip/:id', guard, (req, res) => {
+    const c = clips.get(String(req.params.id).replace(/\.(mp3|wav)$/, ''));
+    if (!c) return res.status(404).end();
+    res.set('Content-Type', c.mime).set('Cache-Control', 'no-store').send(c.buf);
+  });
+
+  // First leg: greet (msg from query) then listen.
+  app.post('/voice/:token/incoming', guard, form, async (req, res) => {
+    try {
+      const callSid = req.body.CallSid || '';
+      const greeting = req.query.msg || 'Good evening, sir. How may I help?';
+      const r = voiceTurn ? await voiceTurn(callSid, '', greeting) : { text: greeting };
+      const play = await sayElement(req, r.text);
+      res.type('text/xml').send(gatherTwiml(req, play, r.hangup));
+    } catch (e) {
+      res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?><Response><Say>System error.</Say><Hangup/></Response>`);
+    }
+  });
+
+  // Subsequent legs: user spoke → agent turn → speak reply → listen again.
+  app.post('/voice/:token/gather', guard, form, async (req, res) => {
+    try {
+      const callSid = req.body.CallSid || '';
+      const speech = req.body.SpeechResult || '';
+      if (!speech.trim()) {
+        // Silence/timeout — gentle reprompt, keep the line open.
+        const play = await sayElement(req, 'I am still here, sir. Go on.');
+        return res.type('text/xml').send(gatherTwiml(req, play, false));
+      }
+      const r = voiceTurn ? await voiceTurn(callSid, speech) : { text: 'Voice agent unavailable.' , hangup: true };
+      const play = await sayElement(req, r.text);
+      if (r.hangup && endVoiceCall) endVoiceCall(callSid);
+      res.type('text/xml').send(gatherTwiml(req, play, r.hangup));
+    } catch (e) {
+      res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?><Response><Say>System error.</Say><Hangup/></Response>`);
+    }
+  });
+
+  app.post('/voice/:token/status', guard, form, (req, res) => {
+    try { if (endVoiceCall && (req.body.CallStatus === 'completed' || req.body.CallStatus === 'failed')) endVoiceCall(req.body.CallSid); } catch {}
+    res.status(204).end();
   });
 
   await new Promise((resolve) => { httpServer = app.listen(port, '127.0.0.1', resolve); });
