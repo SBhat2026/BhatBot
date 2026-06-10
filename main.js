@@ -2105,11 +2105,12 @@ async function notifyUser(message, urgency) {
   const msg = String(message || '').slice(0, 400);
   if (!msg.trim()) return { sent: false, error: 'empty message' };
   const c = loadConfig();
-  const mode = c.notifyMode || 'telegram';
-  if (urgency === 'call' && mode !== 'telegram') {
+  // urgency 'call' ALWAYS attempts a real phone call (that's the whole point of the level) —
+  // it's not gated by notifyMode. Falls back to a Telegram record either way.
+  if (urgency === 'call') {
     const r = await twilioCall(msg);
-    telegramNotify('📞 (calling) ' + msg);
-    return r;
+    telegramNotify((r.sent ? '📞 (called you) ' : '📞 (call failed → ') + msg + (r.sent ? '' : ') ' + (r.error || '')));
+    return r.sent ? r : { sent: true, via: 'telegram', callError: r.error };   // still reached via Telegram
   }
   const prefix = urgency === 'high' ? '🔴 BHATBOT: ' : '⚪ BhatBot: ';
   telegramNotify(prefix + msg);
