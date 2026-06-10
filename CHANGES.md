@@ -514,3 +514,7 @@ User decisions: TTS=add `say` for tiny replies (kept advanced TTS); BUILD=media 
 - **Fixed the false "needs ~411k tokens" rate-limit block:** `estimateTokens` counted a base64 image as length/4 (~375k tokens for one 1024² PNG) when Anthropic bills images by dimensions (~1.6k). Now strips image/`_image`/`data` payloads from the JSON and adds a flat ~1600 each. Verified: a 1.5 MB image went from ~375k → 1,635 est tokens. Image→3D / vision turns no longer falsely trip the per-minute limiter.
 - **Telegram bridge verified live:** token + chat_id (8722195743) configured; sent a real test message to the phone (ok). Inbound replies hit the running app's poller. Saved `myPhone:+16094806321` for Twilio.
 - **Trellis confirmed working with the new $5 Replicate credit:** versioned endpoint, 512-tex test → succeeded in 63s, 3.23 MB GLB.
+
+### Pass 32.1 — fix chat text/tool-row duplication ("I'll create a I'll create a…")
+- **Cause:** Pass 30 made `sendToActivity` push to `mainWindow`, but `sendToAll` already sends to `chatEvent.sender` (which IS mainWindow during a desktop chat) AND then called `sendToActivity` → every token / tool-row delivered to the renderer twice. With Haiku's sentence-sized deltas this read as duplicated text + doubled tool rows.
+- **Fix:** `sendToAll` now sends to the chat renderer once (+ a legacy standalone activity window only if it's a different webContents). Direct `sendToActivity` callers (briefing/barge-in/progress/MCP) unchanged.

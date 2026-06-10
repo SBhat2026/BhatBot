@@ -1874,12 +1874,21 @@ async function executeTool(name, input) {
 // Agent loop
 // ---------------------------------------------------------------------------
 function sendToAll(chatEvent, channel, data) {
-  try { chatEvent.sender.send(channel, data); } catch {}
-  sendToActivity(channel, data);
+  // chatEvent.sender is the chat renderer — which IS the main window during a desktop chat,
+  // and the in-window Activity panel is that same renderer. So sending here is enough; do NOT
+  // also route through sendToActivity()→mainWindow or every token/tool-row renders TWICE
+  // (the "I'll create a I'll create a…" duplication bug). Only mirror to a legacy standalone
+  // activity window if one is somehow open AND it isn't the same webContents we just sent to.
+  const sender = chatEvent && chatEvent.sender;
+  try { sender && sender.send(channel, data); } catch {}
+  try {
+    if (activityWindow && !activityWindow.isDestroyed() && activityWindow.webContents !== sender)
+      activityWindow.webContents.send(channel, data);
+  } catch {}
 }
 function sendToActivity(channel, data) {
-  // Activity is now an in-window panel → route to the main window. (Legacy separate window
-  // still fed if one happens to be open.)
+  // Direct callers (briefing, barge-in, studio/3D progress, MCP/Telegram tasks) — these are NOT
+  // also routed via sendToAll, so a single send to the main renderer is correct (no double).
   try { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, data); } catch {}
   try { if (activityWindow && !activityWindow.isDestroyed()) activityWindow.webContents.send(channel, data); } catch {}
 }
