@@ -482,3 +482,11 @@ User decisions: TTS=add `say` for tiny replies (kept advanced TTS); BUILD=media 
 - **Config:** added `twilioSid/twilioToken/twilioFrom/myPhone/notifyMode` placeholders. `npm i twilio`.
 - **OmniParser:** cloned repo switched to `mac` branch; `.venv` (python3.11) created; deps installed from filtered `requirements.mac.txt` (dropped Windows-only `uiautomation`). Weight download (`huggingface-cli download microsoft/OmniParser-v2.0 …`) left to user per instruction. `OmniParser/` gitignored (own .git).
 - **UI_RESHAPE_PLAN.md (NEW):** Phase 5 single-window plan — generic `showPanel()` tab system; Nexus/Studio/Code/Activity/Notes as in-place `#stage` panels (Notes pattern already shipped); agent **browser becomes its own non-fullscreen desktop Chromium window** (`headless:false`, 1280×800) — the one exception. Studio vision-capture rewire flagged as the heavy lift.
+
+### Pass 29.1 — OmniParser weights in + verified on Apple GPU (MPS)
+- Downloaded V2 checkpoints (1.0 GB) into `OmniParser/weights/` via `hf download` (note: `huggingface-cli download` is a silent no-op in huggingface-hub 1.x — use `hf`). `icon_caption` → renamed `icon_caption_florence`.
+- **Two mac fixes (local only — OmniParser is gitignored):**
+  1. **transformers pinned `==4.49.0`** (5.x breaks Florence-2 remote code: `Florence2LanguageConfig has no attribute forced_bos_token_id`). Pinned in `requirements.mac.txt`.
+  2. **`util/utils.py get_caption_model_processor`** patched: fp16 only on CUDA; **fp32 on MPS + CPU** (MPS Half/float conv mismatch: "Input type (float) and bias type (c10::Half)"). Both blip2 + florence2 branches.
+- **Verified e2e:** parsed 67 elements from `imgs/google_page.png` on `mps` (YOLO 0.75s; Florence-2 caption step ~168s = the bottleneck). torch 2.12, MPS available.
+- Recovery after a re-clone: `git checkout mac` → `python3.11 -m venv .venv` → `pip install -r requirements.mac.txt` (drops Windows-only `uiautomation`, pins transformers 4.49) → re-apply the utils.py fp32-on-MPS patch → `hf download` weights.
