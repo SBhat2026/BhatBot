@@ -236,11 +236,11 @@
 
   <div id="chat"></div>
 
-  <!-- Voice-first project log: dated session-note cards (each saved to ~/.bhatbot/notes/). -->
-  <div id="notes-panel" class="hidden" style="position:absolute;inset:64px 0 0 0;background:#070b11;z-index:20;display:flex;flex-direction:column;">
+  <!-- Voice-first project log: swaps in-place for #chat when the Notes tab is active. -->
+  <div id="notes-panel" style="display:none;flex:1;min-height:0;flex-direction:column;">
     <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 16px;border-bottom:1px solid #16202c;">
       <b style="color:#39d7ff;letter-spacing:.08em;font-size:13px;">PROJECT LOG</b>
-      <span id="notes-close" style="cursor:pointer;color:#5b7187;">✕ close</span>
+      <span id="notes-close" title="Back to chat" style="cursor:pointer;color:#5b7187;font-size:12px;padding:2px 8px;border:1px solid #1d2a39;border-radius:5px;">← Chat</span>
     </div>
     <div id="notes-list" style="overflow:auto;padding:12px 14px;flex:1;"></div>
   </div>
@@ -680,18 +680,26 @@ async function loadNotes() {
   list.innerHTML = notes.length ? '' : '<div style="color:#5b7187;text-align:center;margin-top:40px">No session notes yet. Talk to Bhatbot, then say "wrap up" or go quiet 30s — a debrief card lands here.</div>';
   for (const n of notes) list.appendChild(noteCard(n));
 }
+// Swap the main output region between chat and the project log (tab-style, in place).
 function toggleNotes(show) {
-  const p = $('#notes-panel'); const want = show === undefined ? p.classList.contains('hidden') : show;
-  p.classList.toggle('hidden', !want);
+  const p = $('#notes-panel'), c = $('#chat'), tab = $('#open-notes');
+  const open = p.style.display !== 'none';
+  const want = show === undefined ? !open : show;
+  p.style.display = want ? 'flex' : 'none';
+  c.style.display = want ? 'none' : 'flex';
+  $('#chips').style.display = want ? 'none' : '';        // hide quick chips while viewing logs
+  tab.style.color = want ? '#39d7ff' : '';
+  tab.style.borderColor = want ? '#2a6f8a' : '';
   if (want) loadNotes();
 }
 $('#open-notes').addEventListener('click', () => toggleNotes());
-$('#notes-close').addEventListener('click', () => toggleNotes(false));
+$('#notes-close').addEventListener('click', (e) => { e.stopPropagation(); toggleNotes(false); });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') toggleNotes(false); });
 window.bhatbot.onSessionNote((n) => {
   const list = $('#notes-list');
   if (list) { const ph = list.querySelector('div[style*="text-align:center"]'); if (ph) ph.remove(); const card = noteCard(n); list.insertBefore(card, list.firstChild); }
   $('#open-notes').style.color = '#39d7ff';                      // pulse the tab to signal a new note
-  setTimeout(() => { $('#open-notes').style.color = ''; }, 4000);
+  setTimeout(() => { if ($('#notes-panel').style.display === 'none') $('#open-notes').style.color = ''; }, 4000);
 });
 // Space ends the session (generate the note now) — only when not typing in the input box.
 document.addEventListener('keydown', (e) => {
