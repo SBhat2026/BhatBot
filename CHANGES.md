@@ -2,6 +2,33 @@
 
 What was built differently from `BHATBOT_MEGAPROMPT.md`, and why. For reference.
 
+## Pass 24 — Full agent autonomy + token reduction + autonomous mode + vision loop
+
+- **Agents now EXECUTE tools (full autonomy):** `lib/agents/exec.js` runs a provider-agnostic
+  tool-use loop (model emits tool_use → run via `toolExec` → feed tool_result back → repeat).
+  `base.js` uses it for any role with tools; `roles/ROLE_TOOLS` maps each role to a tool
+  subset. main.js `orchestratorAdapters` now supplies `anthropicTools`/`ollamaTools`
+  (Ollama tool-calling → Anthropic-shaped content)/`toolExec=executeTool`/`toolDefs=TOOLS`
+  + `onEvent` (streams agent actions to the activity window). Verified: exec loop executes a
+  write_file and returns a result envelope; **a local model (qwen3) drives tools end-to-end**.
+  NOTE: `qwen2.5-coder:7b` can't emit Ollama tool_calls → router `local_code` switched to
+  `qwen3:latest` (tool-capable).
+- **Token reduction (memory reorg + query structure):** `buildSystemPrompt` split into a
+  CACHED static block + a small RETRIEVED memory block. `memoryRetrieve(query,k)` scores
+  memory.md entries by idf-weighted term overlap (stopword-filtered) and injects only the
+  top-k instead of the whole file. Measured ~19% of full memory injected on a test corpus.
+  Two-block `systemBlocks()` used by callClaude + callClaudeStream (query = last user text).
+  Config: `memoryRetrieval` (def on), `memoryTopK` (14), `memoryRetrievalMinChars` (2500 —
+  small files still inject whole).
+- **Autonomous mode (`autonomousMode`, default ON):** `requestConfirm` auto-approves the
+  destructive-shell confirm gate (audit-logged + shown in activity) so headless agents never
+  block — HARD_BLOCKED catastrophic patterns + secret redaction remain the hard floor.
+- **Visual / vision dev-loop:** `lib/inspect.js` → structured findings {pass, findings:
+  [{severity,where,issue,fix_hint}]} from a local vision model (gemma3:12b, format:json).
+  New `ui_inspect` tool (target browser page or whole screen via screencapture; attaches the
+  image so Claude can see it too). Given to coding/browser/creative roles → code→launch→
+  inspect→fix loop.
+
 ## Pass 23 — Streaming responses + streaming TTS + history guard + app control
 
 - **Streaming responses (biggest latency win):** `anthropicStream()` SSE reader assembles

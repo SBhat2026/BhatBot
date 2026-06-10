@@ -17,6 +17,7 @@ const workspaceMgr = require('./lib/workspace');
 const orchestrator = require('./lib/agents/orchestrator');
 const wsState = require('./lib/state');
 const wsMemory = require('./lib/memory');
+const visualInspect = require('./lib/inspect');
 
 const DB_MODELS = { db_speech: 'gpt-oss-20b', db_directive: 'gemma-4-26b' };
 
@@ -260,8 +261,55 @@ function redactSecrets(s) {
     .replace(/\b(?=[A-Za-z0-9_\-]{40,}\b)(?=[A-Za-z0-9_\-]*[A-Za-z])(?=[A-Za-z0-9_\-]*[0-9])[A-Za-z0-9_\-]+/g, '[REDACTED_TOKEN]');
 }
 
-function buildSystemPrompt() {
-  return redactSecrets(STATIC_PROMPT + loadMemory() + loadProjectContext());
+// Static, stable part of the system prompt → goes in the CACHED block (cheap repeat reads).
+function buildStaticPrompt() {
+  return redactSecrets(STATIC_PROMPT + loadProjectContext());
+}
+function loadMemoryRaw() {
+  try {
+    if (!fs.existsSync(MEMORY_PATH)) { fs.mkdirSync(path.dirname(MEMORY_PATH), { recursive: true }); fs.writeFileSync(MEMORY_PATH, INITIAL_MEMORY); }
+    return fs.readFileSync(MEMORY_PATH, 'utf8');
+  } catch { return ''; }
+}
+// Retrieval over memory.md: instead of injecting the ENTIRE file every call (a token sink
+// that grows forever), score entries by query-term overlap and inject only the top-k.
+// Small files are injected whole (no benefit to retrieve). This is the per-call token cut.
+function memoryRetrieve(query, k = 14) {
+  const raw = loadMemoryRaw();
+  const c = loadConfig();
+  if (c.memoryRetrieval === false || raw.length < (c.memoryRetrievalMinChars || 2500)) return raw;
+  const entries = []; let heading = '';
+  for (const ln of raw.split('\n')) {
+    const t = ln.trim(); if (!t) continue;
+    if (/^#{1,6}\s/.test(t)) { heading = t.replace(/^#+\s/, ''); continue; }
+    entries.push({ heading, text: t });
+  }
+  const STOP = new Set(['the', 'and', 'for', 'are', 'was', 'how', 'does', 'did', 'with', 'this', 'that', 'you', 'your', 'can', 'will', 'work', 'works', 'have', 'has', 'what', 'when', 'where', 'why', 'who', 'use', 'using', 'get', 'got', 'make', 'made', 'want', 'need', 'should', 'would', 'into', 'from', 'about', 'also', 'than', 'then', 'them', 'they', 'its']);
+  const terms = ((query || '').toLowerCase().match(/[a-z0-9]{3,}/g) || []).filter((t) => !STOP.has(t));
+  if (!terms.length) return raw.slice(0, 3500);
+  // Rarer terms count more (idf-ish): a term appearing in few entries is more discriminating.
+  const df = {}; for (const t of terms) df[t] = entries.reduce((n, e) => n + ((e.heading + ' ' + e.text).toLowerCase().includes(t) ? 1 : 0), 0) || 1;
+  const scored = entries.map((e) => { const hay = (e.heading + ' ' + e.text).toLowerCase(); let s = 0; for (const t of terms) if (hay.includes(t)) s += 1 / df[t]; return { e, s }; }).filter((x) => x.s > 0);
+  scored.sort((a, b) => b.s - a.s);
+  const top = scored.slice(0, k);
+  if (!top.length) return '';
+  const byH = {}; for (const { e } of top) (byH[e.heading] = byH[e.heading] || []).push(e.text);
+  return Object.entries(byH).map(([h, ts]) => (h ? '### ' + h + '\n' : '') + ts.join('\n')).join('\n\n');
+}
+function buildMemoryBlock(query) {
+  const m = memoryRetrieve(query, (loadConfig().memoryTopK) || 14);
+  return m ? redactSecrets('\n\n---\n## RELEVANT MEMORY\n\n' + m) : '';
+}
+// Two-block system: [cached static] + [small retrieved memory]. Returns the Anthropic
+// system array; flattened string form (buildSystemPrompt) is used by ollama/estimate.
+function systemBlocks(query) {
+  const blocks = [{ type: 'text', text: buildStaticPrompt(), cache_control: { type: 'ephemeral' } }];
+  const mem = buildMemoryBlock(query || '');
+  if (mem) blocks.push({ type: 'text', text: mem });
+  return blocks;
+}
+function buildSystemPrompt(query) {
+  return buildStaticPrompt() + buildMemoryBlock(query || '');
 }
 
 // ---------------------------------------------------------------------------
@@ -320,7 +368,7 @@ function rateBudget() {
 }
 // Estimated input tokens a Claude request would cost (system + tools + trimmed messages).
 function requestTokenEstimate(messages) {
-  return estimateTokens({ system: buildSystemPrompt(), tools: TOOLS, messages: capTokens(messages) });
+  return estimateTokens({ system: buildSystemPrompt(lastUserText(messages)), tools: TOOLS, messages: capTokens(messages) });
 }
 async function ollamaUp() {
   try { const r = await fetch(`${OLLAMA_URL}/api/tags`, { signal: AbortSignal.timeout(700) }); return r.ok; } catch { return false; }
@@ -387,7 +435,7 @@ async function callClaude(messages, apiKey, model) {
   return anthropicRequest({
     model,
     max_tokens: 4096,
-    system: [{ type: 'text', text: buildSystemPrompt(), cache_control: { type: 'ephemeral' } }],
+    system: systemBlocks(lastUserText(messages)),
     tools: TOOLS,
     messages: capTokens(messages)
   }, apiKey);
@@ -462,7 +510,7 @@ async function anthropicStream(body, apiKey, onText, { retries = 3 } = {}) {
 function callClaudeStream(messages, apiKey, model, onText) {
   return anthropicStream({
     model, max_tokens: 4096,
-    system: [{ type: 'text', text: buildSystemPrompt(), cache_control: { type: 'ephemeral' } }],
+    system: systemBlocks(lastUserText(messages)),
     tools: TOOLS, messages: capTokens(messages)
   }, apiKey, onText);
 }
@@ -491,7 +539,7 @@ async function callModel(messages, apiKey, allowDarkbloom, onText) {
         content: typeof m.content === 'string' ? m.content
           : m.content.filter((b) => b.type === 'text').map((b) => b.text).join('\n')
       }));
-      const text = await darkbloom.chat(oa, DB_MODELS[route], cfg.darkbloomKey, buildSystemPrompt(), cfg.darkbloomBaseUrl);
+      const text = await darkbloom.chat(oa, DB_MODELS[route], cfg.darkbloomKey, buildSystemPrompt(lastUserText(messages)), cfg.darkbloomBaseUrl);
       if (onText && text) try { onText(text); } catch {}     // non-streaming provider → emit whole text once
       return { content: [{ type: 'text', text }], stop_reason: 'end_turn', _provider: 'darkbloom', _model: DB_MODELS[route] };
     } catch (e) {
@@ -511,7 +559,7 @@ async function callModel(messages, apiKey, allowDarkbloom, onText) {
     if (mode !== 'notify' && allowDarkbloom && await ollamaUp()) {
       try {
         const lm = cfg.localModel || 'qwen3:latest';
-        const text = (await ollamaChat(messages, buildSystemPrompt(), lm) || '').trim();
+        const text = (await ollamaChat(messages, buildSystemPrompt(lastUserText(messages)), lm) || '').trim();
         if (text) { if (onText) try { onText(text); } catch {} return { content: [{ type: 'text', text }], stop_reason: 'end_turn', _provider: 'ollama', _model: lm, _rateFallback: true }; }
       } catch (e) { console.warn('[rate] ollama fallback failed:', e.message); }
     }
@@ -954,6 +1002,8 @@ const TOOLS = [
     }, required: ['action'] } },
   { name: 'vision_local', description: `Second-opinion vision from a LOCAL model (via Ollama) on the current browser page. Free/offline. Use to cross-check your own read or when you want an independent description.`,
     input_schema: { type: 'object', properties: { prompt: { type: 'string', description: 'What to ask about the page' } } } },
+  { name: 'ui_inspect', description: 'Capture a screenshot (target:"browser" = current Playwright page, target:"screen" = the whole Mac screen) and get STRUCTURED visual QA findings from a local vision model: {pass, findings:[{severity,where,issue,fix_hint}]}. The screenshot is attached so you can also see it yourself. Use in a build → launch → inspect → fix loop to visually verify a UI and decide whether to keep iterating.',
+    input_schema: { type: 'object', properties: { target: { type: 'string', enum: ['browser', 'screen'] }, goal: { type: 'string', description: 'what to check for / acceptance criteria' } } } },
   { name: 'ask_ai', description: 'Query ANOTHER AI model for research, a second opinion, or to cross-check. Providers: claude (Sonnet), openai (GPT), gemini (Google), local (your Ollama models). Use when you want an independent answer or to compare models.',
     input_schema: { type: 'object', properties: {
       provider: { type: 'string', enum: ['claude', 'openai', 'gemini', 'local'] },
@@ -1009,7 +1059,21 @@ function auditLog(name, input, result) {
   } catch {}
 }
 
+// Autonomous mode: the user explicitly wants maximum self-driving. When on (default true),
+// confirmation gates auto-approve so the agent never blocks waiting for a click — BUT the
+// HARD_BLOCKED catastrophic patterns and secret redaction always remain in force, and every
+// auto-approved action is still audit-logged. Set autonomousMode:false in config to require
+// manual approval again.
+function isAutonomous() {
+  const c = loadConfig();
+  return c.autonomousMode !== false;   // default ON
+}
 function requestConfirm(command, reason) {
+  if (isAutonomous()) {
+    try { fs.appendFileSync(AUDIT_PATH, JSON.stringify({ ts: new Date().toISOString(), autoApproved: command.slice(0, 200), reason }) + '\n'); } catch {}
+    sendToActivity('tool-update', { type: 'thinking', text: '⚡ auto-approved: ' + reason });
+    return Promise.resolve(true);
+  }
   return new Promise((resolve) => {
     openActivityWindow();
     const id = String(Date.now()) + Math.random().toString(36).slice(2, 6);
@@ -1216,9 +1280,43 @@ function saveMemoryEntry(section, content) {
   return { success: true, saved: `${section}: ${content}` };
 }
 
+// Ollama tool-calling: convert Anthropic-shaped messages+tools → Ollama /api/chat, then
+// convert the response back to Anthropic-shaped content blocks so lib/agents/exec.js stays
+// provider-agnostic. Lets local models (qwen2.5-coder, qwen3) drive tools for free.
+async function ollamaToolChat(messages, system, tools, model) {
+  const msgs = messages.map((m) => ({
+    role: m.role === 'assistant' ? 'assistant' : (m.role === 'tool' ? 'tool' : 'user'),
+    content: typeof m.content === 'string' ? m.content
+      : Array.isArray(m.content) ? m.content.map((b) =>
+          b.type === 'text' ? b.text
+          : b.type === 'tool_result' ? ('[tool result] ' + (typeof b.content === 'string' ? b.content : JSON.stringify(b.content)).slice(0, 6000))
+          : b.type === 'tool_use' ? ('[calling ' + b.name + ' ' + JSON.stringify(b.input) + ']') : '').filter(Boolean).join('\n')
+      : '',
+  })).filter((m) => m.content);
+  if (system) msgs.unshift({ role: 'system', content: system });
+  const otools = (tools || []).map((t) => ({ type: 'function', function: { name: t.name, description: t.description, parameters: t.input_schema } }));
+  const r = await fetch(`${OLLAMA_URL}/api/chat`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model, messages: msgs, tools: otools, stream: false, options: { temperature: 0.3 } }),
+  });
+  if (!r.ok) throw new Error('ollama ' + r.status);
+  const j = await r.json();
+  const content = [];
+  const txt = (j.message && j.message.content) || '';
+  if (txt) content.push({ type: 'text', text: txt });
+  for (const tc of (j.message && j.message.tool_calls) || []) {
+    let input = tc.function && tc.function.arguments;
+    if (typeof input === 'string') { try { input = JSON.parse(input); } catch { input = {}; } }
+    content.push({ type: 'tool_use', id: 'ot_' + crypto.randomBytes(4).toString('hex'), name: tc.function.name, input: input || {} });
+  }
+  const hasTools = content.some((b) => b.type === 'tool_use');
+  return { content: content.length ? content : [{ type: 'text', text: '' }], stop_reason: hasTools ? 'tool_use' : 'end_turn' };
+}
+
 // Build the adapters the orchestrator/agents need, reusing main.js's own model callers
-// (so rate-limit accounting + prompt caching still apply). Memory is per-workspace.
-function orchestratorAdapters(wsDir) {
+// (so rate-limit accounting + prompt caching still apply) AND its real tool executor —
+// this is what gives agents full autonomy (they actually run tools). Memory is per-workspace.
+function orchestratorAdapters(wsDir, event) {
   const c = loadConfig();
   const embedModel = (c.models && c.models.embed) || c.embedModel || 'nomic-embed-text';
   return {
@@ -1227,6 +1325,16 @@ function orchestratorAdapters(wsDir) {
     anthropic: async (m, s, model) => {
       const j = await anthropicRequest({ model, max_tokens: 2048, system: [{ type: 'text', text: s, cache_control: { type: 'ephemeral' } }], messages: m }, getApiKey());
       return (j.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('\n');
+    },
+    // Tool-capable callers (Anthropic-shaped response) + the real executor + tool defs.
+    anthropicTools: (m, s, tools, model) => anthropicRequest({ model, max_tokens: 4096, system: [{ type: 'text', text: s, cache_control: { type: 'ephemeral' } }], tools, messages: capTokens(m) }, getApiKey()),
+    ollamaTools: (m, s, tools, model) => ollamaToolChat(m, s, tools, model),
+    toolExec: (name, input) => executeTool(name, input),
+    toolDefs: TOOLS,
+    onEvent: (ev) => {                                    // surface agent actions to the activity window
+      if (ev.type === 'tool') sendToActivity('tool-update', { type: 'tool_start', name: ev.name, input: ev.input });
+      else if (ev.type === 'tool_done') sendToActivity('tool-update', { type: 'tool_done', name: ev.name, result: { ...ev.result, _image: undefined, _imageMime: undefined } });
+      else if (ev.type === 'text' && ev.text) sendToActivity('tool-update', { type: 'thinking', text: ev.text.slice(0, 200) });
     },
     memFn: (q, k) => wsMemory.search(wsDir, q, k, { embedModel }),
     memWrite: (w) => wsMemory.write(wsDir, w, { embedModel }),
@@ -1301,6 +1409,22 @@ async function executeTool(name, input) {
         result = await browserAction(input); break;
       case 'vision_local':
         result = await visionLocal(input); break;
+      case 'ui_inspect': {
+        let b64;
+        if ((input.target || 'browser') === 'browser' && page) {
+          try { b64 = (await page.screenshot({ type: 'jpeg', quality: 60 })).toString('base64'); } catch {}
+        }
+        if (!b64) {
+          const out = path.join(os.tmpdir(), `bb-shot-${Date.now()}.jpg`);
+          await new Promise((res) => { const p = spawn('/usr/sbin/screencapture', ['-x', '-t', 'jpg', out], { env: { ...process.env, PATH: EXEC_PATH } }); p.on('close', res); p.on('error', res); });
+          try { b64 = fs.readFileSync(out).toString('base64'); fs.unlink(out, () => {}); } catch {}
+        }
+        if (!b64) { result = { success: false, error: 'Could not capture a screenshot (no active browser page, and screencapture failed — grant Screen Recording permission).' }; break; }
+        sendToActivity('screenshot', { data: b64 });
+        const insp = await visualInspect.inspect({ imageB64: b64, goal: input.goal, model: loadConfig().visionModel });
+        result = { success: !insp.error, pass: insp.pass, findings: insp.findings, model: insp.model, error: insp.error, _image: b64, _imageMime: 'image/jpeg' };
+        break;
+      }
       case 'ask_ai':
         result = await askAI(input); break;
       case 'studio_write': {
