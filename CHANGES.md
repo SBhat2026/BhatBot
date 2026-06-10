@@ -505,3 +505,7 @@ User decisions: TTS=add `say` for tiny replies (kept advanced TTS); BUILD=media 
 - **Prompt:** new 3D PRINTING section routes print intent to `make_printable` (extrude/relief/convert) vs `generate_3d` (AI textured GLB).
 - **Tested:** extrude (icon → watertight STL), relief/lithophane (watertight), convert (GLB→STL watertight) all verified live; viewer modules import + run clean in Electron (WebGL only unavailable under headless SwiftShader — fine on real GPU). Rebuilt + reinstalled /Applications + relaunched.
 - mesh-venv lives under ~/.bhatbot (not committed); `scripts/mesh_tool.py`, `src/viewer.html`, `src/preload-viewer.js` committed.
+
+### Pass 31.1 — fix blank 3D viewer (vendored three.js for packaged app)
+- **Bug:** viewer window opened but stayed black in the packaged app. Two causes: (1) electron-builder prunes `three/examples/jsm/` from node_modules → STL/GLTF/OrbitControls loaders 404; (2) modern `three.module.js` re-exports from `three.core.js`. Both made the ES module silently fail to load → only static HTML showed.
+- **Fix:** vendored three into `src/vendor/three/` (three.module.js + three.core.js + the jsm addon tree) — under my own source so it's always packaged; repointed viewer.html importmap to `./vendor/three/`. Verified end-to-end: imports resolve and the trophy STL renders (165k non-bg px) from the freshly installed /Applications bundle on real GPU.
