@@ -24,6 +24,10 @@ contextBridge.exposeInMainWorld('bhatbot', {
   openTerminal: () => ipcRenderer.invoke('open-terminal'),
   onWakeCommand: (cb) => ipcRenderer.on('wake-command', (_e, d) => cb(d.text)),
   onBargeIn: (cb) => ipcRenderer.on('barge-in', (_e, d) => cb(d)),
+  sendGuidance: (text) => ipcRenderer.send('agent-guidance', { text }),
+  listNotes: () => ipcRenderer.invoke('list-notes'),
+  endSession: () => ipcRenderer.send('end-session'),
+  onSessionNote: (cb) => ipcRenderer.on('session-note', (_e, n) => cb(n)),
   onToolUpdate: (cb) => ipcRenderer.on('tool-update', (_e, u) => cb(u)),
   removeToolUpdateListener: () => ipcRenderer.removeAllListeners('tool-update')
 });

@@ -74,6 +74,7 @@ let browser = null;
 let page = null;
 let recordingSteps = null;   // array while recording a browser workflow, else null
 const WORKFLOW_DIR = path.join(os.homedir(), '.bhatbot', 'workflows');
+const NOTES_DIR = path.join(os.homedir(), '.bhatbot', 'notes');
 const pendingConfirms = new Map();
 let pendingGuidance = [];   // live feedback queued mid-task (steering)
 let nexusWindow = null, studioWindow = null, terminalWindow = null;
@@ -1949,8 +1950,10 @@ function startWakeHelper() {
   if (!fs.existsSync(script)) return;
   try {
     const wc = loadConfig();
+    // VAD barge-in defaults OFF: wake word ("Jarvis") is the interrupt/inject trigger, which
+    // avoids background voices false-triggering. Enable energy VAD only if explicitly set.
     const wakeEnv = { ...process.env, PATH: EXEC_PATH,
-      BHATBOT_BARGE: wc.bargeIn === false ? '0' : '1',
+      BHATBOT_BARGE: wc.bargeIn === true ? '1' : '0',
       BHATBOT_BARGE_THRESH: String(wc.bargeInThreshold || 0.085) };
     wakeProc = require('child_process').spawn(resolvePython(), ['-u', script], { env: wakeEnv });
     let buf = '';
@@ -2282,18 +2285,18 @@ function makeSpeakStream(seq) {
         display += pending.slice(0, i); pending = pending.slice(i + OPEN.length); inside = true; sawTag = true;
       } else {
         const j = pending.indexOf(CLOSE);
-        if (j === -1) { const keep = partialTagTail(pending, CLOSE); const emit = pending.slice(0, pending.length - keep); if (emit) { ttsStreamFeed(seq, emit); display += emit; } pending = pending.slice(pending.length - keep); break; }
-        const segq = pending.slice(0, j); if (segq) { ttsStreamFeed(seq, segq); display += segq; } pending = pending.slice(j + CLOSE.length); inside = false;
+        if (j === -1) { const keep = partialTagTail(pending, CLOSE); const emit = pending.slice(0, pending.length - keep); if (emit) { ttsStreamFeed(seq, emit); recordSpoken(emit); display += emit; } pending = pending.slice(pending.length - keep); break; }
+        const segq = pending.slice(0, j); if (segq) { ttsStreamFeed(seq, segq); recordSpoken(segq); display += segq; } pending = pending.slice(j + CLOSE.length); inside = false;
       }
     }
     return display;
   }
   function finish() {
     let display = pending.replace(/<\/?speak>/g, '');
-    if (inside && display) ttsStreamFeed(seq, display);
+    if (inside && display) { ttsStreamFeed(seq, display); recordSpoken(display); }
     pending = '';
     // No <speak> at all but a short reply → speak it (model likely just didn't wrap a quick answer).
-    if (!sawTag) { const f = full.replace(/<\/?speak>/g, '').trim(); if (f && f.length <= 160) ttsStreamFeed(seq, f); }
+    if (!sawTag) { const f = full.replace(/<\/?speak>/g, '').trim(); if (f && f.length <= 160) { ttsStreamFeed(seq, f); recordSpoken(f); } }
     ttsStreamFlush(seq);
     return { sawTag, display };
   }
@@ -2308,6 +2311,66 @@ function maybeAck(seq, userText) {
   if (c.instantAck === false || c.ttsEnabled === false) return;
   if (!ACTION_RE.test(userText || '')) return;     // only acknowledge action requests, not idle chat
   ttsStreamFeed(seq, ACKS[Math.floor(Math.random() * ACKS.length)]);
+}
+
+// ---------------------------------------------------------------------------
+// Voice-first session notes. Bhatbot is a voice interface that keeps notes: it
+// accumulates what was actually SPOKEN this session (the <speak> content, minus throwaway
+// acks), and on session end (30s silence / "wrap up" / space) a Haiku call turns that
+// spoken transcript into a structured markdown note — saved to ~/.bhatbot/notes/ and shown
+// as a dated card. Summarizing the spoken words (not raw tool output) yields clean,
+// debrief-quality notes. See the voice-first product vision.
+// ---------------------------------------------------------------------------
+let sessionSpoken = [];          // meaningful spoken lines this session
+let sessionSilenceTimer = null;
+let sessionGenerating = false;
+const SESSION_SILENCE_MS = 30000;
+function recordSpoken(text) {
+  const t = String(text || '').trim();
+  if (t && t.length > 1) { sessionSpoken.push(t); noteActivity(); }
+}
+function noteActivity() {
+  // Reset the 30s silence → end-session timer on any spoken/user activity.
+  if (sessionSilenceTimer) clearTimeout(sessionSilenceTimer);
+  if (loadConfig().sessionNotes === false) return;
+  sessionSilenceTimer = setTimeout(() => { endSession('silence'); }, SESSION_SILENCE_MS);
+}
+function slugify(s) { return String(s || 'session').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 50) || 'session'; }
+async function endSession(trigger) {
+  if (sessionSilenceTimer) { clearTimeout(sessionSilenceTimer); sessionSilenceTimer = null; }
+  const spoken = sessionSpoken.slice(); sessionSpoken = [];
+  if (sessionGenerating || spoken.length < 1) return;          // nothing worth a note
+  const transcript = spoken.join('\n');
+  if (transcript.replace(/\s/g, '').length < 40) return;       // too little said
+  sessionGenerating = true;
+  try {
+    const sys = 'You convert a spoken assistant transcript into a concise session note (a project debrief, not a chat log). Output GitHub markdown: a single "# " title line (5-8 words, specific), then short sections only if they apply: **Decisions**, **Done**, **Next**. Bullets, terse. Ignore filler acknowledgements. No preamble.';
+    const r = await callClaude([{ role: 'user', content: 'Spoken transcript of this session:\n\n' + transcript.slice(0, 6000) + '\n\nWrite the session note.' }], getApiKey(), MODEL_HAIKU);
+    let md = (r.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim();
+    if (!md) { sessionGenerating = false; return; }
+    const titleM = md.match(/^#\s+(.+)$/m);
+    const title = titleM ? titleM[1].trim() : 'Session ' + new Date().toLocaleTimeString();
+    const now = new Date();
+    const stamp = now.toISOString().slice(0, 16).replace(/[:T]/g, '-');
+    const file = path.join(NOTES_DIR, `${stamp}-${slugify(title)}.md`);
+    const body = `---\ndate: ${now.toISOString()}\ntrigger: ${trigger}\n---\n\n${md}\n`;
+    fs.mkdirSync(NOTES_DIR, { recursive: true });
+    fs.writeFileSync(file, body);
+    const note = { file, title, date: now.toISOString(), trigger, markdown: md };
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('session-note', note);
+    sendToActivity('tool-update', { type: 'thinking', text: '📝 session note: ' + title });
+  } catch (e) { console.warn('[notes] generation failed:', e.message); }
+  finally { sessionGenerating = false; }
+}
+function listNotes(limit = 50) {
+  try {
+    return fs.readdirSync(NOTES_DIR).filter((f) => f.endsWith('.md')).sort().reverse().slice(0, limit).map((f) => {
+      const raw = fs.readFileSync(path.join(NOTES_DIR, f), 'utf8');
+      const md = raw.replace(/^---[\s\S]*?---\n+/, '');
+      const dateM = raw.match(/date:\s*(.+)/); const titleM = md.match(/^#\s+(.+)$/m);
+      return { file: path.join(NOTES_DIR, f), title: titleM ? titleM[1].trim() : f, date: dateM ? dateM[1].trim() : '', markdown: md };
+    });
+  } catch { return []; }
 }
 
 // Critique → memory reflection. Pure upside: fires ONLY when the user's message reads as a
@@ -2532,9 +2595,19 @@ ipcMain.handle('pick-media', async () => {
 ipcMain.handle('chat', async (event, { history }) => {
   const apiKey = getApiKey();
   if (!apiKey) return { error: 'No ANTHROPIC_API_KEY in env or ~/.bhatbot/config.json' };
-  try { return await agentLoop(history, apiKey, (event && event.sender ? event : { sender: { send() {} } }), { stream: true }); }
+  noteActivity();                                  // user spoke/typed → keep the session alive
+  // "wrap up" / "that's all" ends the session (note generated after the reply lands).
+  const ut = lastUserText(history);
+  const wrap = /\b(wrap up|wrap it up|that'?s all|we'?re done|end session|close out|debrief)\b/i.test(ut);
+  try {
+    const res = await agentLoop(history, apiKey, (event && event.sender ? event : { sender: { send() {} } }), { stream: true });
+    if (wrap) setTimeout(() => endSession('wrap-up'), 1200);
+    return res;
+  }
   catch (e) { return { error: String(e && e.message ? e.message : e) }; }
 });
+ipcMain.handle('list-notes', () => listNotes());
+ipcMain.on('end-session', () => endSession('manual'));
 ipcMain.on('agent-pause', () => { if (agentState === 'running') agentState = 'paused'; });
 ipcMain.on('agent-resume', () => { if (agentState === 'paused') agentState = 'running'; });
 ipcMain.on('agent-stop', () => { agentState = 'stopped'; });

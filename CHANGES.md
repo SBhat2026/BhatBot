@@ -2,6 +2,29 @@
 
 What was built differently from `BHATBOT_MEGAPROMPT.md`, and why. For reference.
 
+## Pass 27 — Mid-task voice steering + voice-first session notes
+
+- **Barge-in = inject mid-task instructions (not just stop):** while the agent is WORKING,
+  saying "Jarvis, also …" routes the spoken instruction into the running task via the
+  existing live-guidance path (`agent-guidance` → `pendingGuidance`, folded into the next
+  tool turn) instead of starting a new request. Renderer `submitVoice()` checks `busy` →
+  `sendGuidance` vs `send`. Wake word during playback also interrupts TTS.
+- **VAD barge-in default OFF:** wake word ("Jarvis") is the interrupt/inject trigger now —
+  avoids background voices false-triggering (per Siddhant's clarification). Energy VAD is
+  opt-in (`bargeIn:true`).
+- **Voice-first session notes (project log):** Bhatbot accumulates what it actually SPOKE
+  (the <speak> content via `recordSpoken`, excluding acks) into a session buffer. On session
+  end — "wrap up"/"that's all" (detected in chat), space key, or 30s silence — a Haiku call
+  turns the spoken transcript into a structured markdown debrief (title + Decisions/Done/Next)
+  saved to `~/.bhatbot/notes/<date>-<slug>.md` and streamed into a Notes panel as a dated card.
+  Summarizing spoken words (not tool output) yields clean notes. Verified end-to-end: real
+  transcript → titled debrief card → saved markdown file.
+- New: `NOTES_DIR`, `recordSpoken`/`noteActivity`/`endSession`/`listNotes`, IPC
+  `list-notes`/`end-session`/`session-note`, preload `sendGuidance`/`listNotes`/`endSession`/
+  `onSessionNote`, Notes panel + cards in the HUD (📝 Notes tab). Config `sessionNotes` (def on).
+- FIRST CUT of the single-window voice-first refactor: the Notes panel + pipeline is the
+  durable core; full "tokens never render as text" voice-first view is the next step.
+
 ## Pass 26 — Barge-in (interrupt TTS by speaking)
 
 - **Barge-in:** speak over Bhatbot and it stops talking. `listen.py` gained an energy VAD

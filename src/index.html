@@ -230,10 +230,20 @@
     <span class="tag" id="open-nexus" title="Open Nexus research navigator">⚛ Nexus</span>
     <span class="tag" id="open-studio" title="Open live design canvas">▦ Studio</span>
     <span class="tag" id="open-terminal" title="Open embedded Claude Code">⌗ Code</span>
+    <span class="tag" id="open-notes" title="Session notes (project log)">📝 Notes</span>
     <span class="tag ctx" id="ctxtag">⬡ …</span>
   </div>
 
   <div id="chat"></div>
+
+  <!-- Voice-first project log: dated session-note cards (each saved to ~/.bhatbot/notes/). -->
+  <div id="notes-panel" class="hidden" style="position:absolute;inset:64px 0 0 0;background:#070b11;z-index:20;display:flex;flex-direction:column;">
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 16px;border-bottom:1px solid #16202c;">
+      <b style="color:#39d7ff;letter-spacing:.08em;font-size:13px;">PROJECT LOG</b>
+      <span id="notes-close" style="cursor:pointer;color:#5b7187;">✕ close</span>
+    </div>
+    <div id="notes-list" style="overflow:auto;padding:12px 14px;flex:1;"></div>
+  </div>
 
   <div id="chips">
     <span class="chip">Nexus priorities</span>
@@ -631,12 +641,58 @@ document.querySelectorAll('#ctxbar .tag[data-q]').forEach((t) =>
   t.addEventListener('click', () => send(t.getAttribute('data-q')))
 );
 $('#open-nexus').addEventListener('click', () => window.bhatbot.openNexus());
+
+// ===================== session notes (voice-first project log) =====================
+function fmtDate(iso) { try { return new Date(iso).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }); } catch { return ''; } }
+function mdToHtml(md) {
+  return String(md || '')
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/^#\s+(.+)$/m, '')                                   // title shown separately
+    .replace(/\*\*(.+?)\*\*/g, '<b style="color:#9fb4c8">$1</b>')
+    .replace(/^[-*]\s+(.+)$/gm, '<div style="padding:1px 0 1px 12px">• $1</div>')
+    .replace(/\n{2,}/g, '<div style="height:6px"></div>');
+}
+function noteCard(n) {
+  const d = document.createElement('div');
+  d.style.cssText = 'background:#0b1119;border:1px solid #182233;border-radius:8px;padding:12px 14px;margin-bottom:10px;';
+  d.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:baseline;gap:10px">
+      <b style="color:#cfe3f5;font-size:14px">${(n.title || 'Session').replace(/</g,'&lt;')}</b>
+      <span style="color:#5b7187;font-size:11px;white-space:nowrap">${fmtDate(n.date)}</span>
+    </div>
+    <div style="color:#8aa0b4;font-size:12.5px;line-height:1.5;margin-top:6px">${mdToHtml(n.markdown)}</div>`;
+  return d;
+}
+async function loadNotes() {
+  const list = $('#notes-list'); if (!list) return;
+  const notes = await window.bhatbot.listNotes();
+  list.innerHTML = notes.length ? '' : '<div style="color:#5b7187;text-align:center;margin-top:40px">No session notes yet. Talk to Bhatbot, then say "wrap up" or go quiet 30s — a debrief card lands here.</div>';
+  for (const n of notes) list.appendChild(noteCard(n));
+}
+function toggleNotes(show) {
+  const p = $('#notes-panel'); const want = show === undefined ? p.classList.contains('hidden') : show;
+  p.classList.toggle('hidden', !want);
+  if (want) loadNotes();
+}
+$('#open-notes').addEventListener('click', () => toggleNotes());
+$('#notes-close').addEventListener('click', () => toggleNotes(false));
+window.bhatbot.onSessionNote((n) => {
+  const list = $('#notes-list');
+  if (list) { const ph = list.querySelector('div[style*="text-align:center"]'); if (ph) ph.remove(); const card = noteCard(n); list.insertBefore(card, list.firstChild); }
+  $('#open-notes').style.color = '#39d7ff';                      // pulse the tab to signal a new note
+  setTimeout(() => { $('#open-notes').style.color = ''; }, 4000);
+});
+// Space ends the session (generate the note now) — only when not typing in the input box.
+document.addEventListener('keydown', (e) => {
+  if (e.code === 'Space' && document.activeElement !== $('#ta')) {
+    e.preventDefault(); window.bhatbot.endSession();
+  }
+});
 $('#open-studio').addEventListener('click', () => window.bhatbot.openStudio());
 $('#open-terminal').addEventListener('click', () => window.toggleCodePanel && window.toggleCodePanel());
 // Vosk listener heard "bhatbot …": run the command, or arm voice if none.
 window.bhatbot.onWakeCommand((text) => {
-  if (text && text.trim()) send(text.trim());     // "bhatbot do X" → execute in Bhatbot
-  else if (!recording) startVoice();              // bare "hey bhatbot" → arm Whisper capture
+  if (text && text.trim()) submitVoice(text.trim());  // "jarvis do X" → execute, or steer if busy
+  else if (!recording) startVoice();                  // bare "jarvis" → arm Whisper capture
 });
 // Barge-in: user spoke over Bhatbot → main already stopped the TTS; arm capture so their
 // interrupting words become the next command.
@@ -758,8 +814,17 @@ async function onRecStop() {
   tbar.classList.add('on'); tbar.textContent = '⏳ transcribing…';
   const res = await window.bhatbot.transcribeAudio({ audioBuffer: Array.from(new Uint8Array(buf)), mimeType: 'audio/webm' });
   tbar.classList.remove('on'); tbar.textContent = '';
-  if (res && res.text) { ta.value = res.text; autoresize(); setTimeout(() => send(res.text), 150); }
+  if (res && res.text) submitVoice(res.text);
   else if (res && res.error) addErr('STT: ' + res.error);
+}
+// Voice input router: while the agent is WORKING, a spoken instruction is injected as live
+// guidance into the running task (barge-in steering) instead of starting a new request.
+function submitVoice(text) {
+  const t = (text || '').trim(); if (!t) return;
+  if (busy) {
+    window.bhatbot.sendGuidance(t);
+    addThought('↳ steering (mid-task): ' + t);
+  } else { ta.value = t; autoresize(); setTimeout(() => send(t), 150); }
 }
 
 // ---- Fallback STT: Web Speech (only if no OpenAI key) ----
@@ -778,7 +843,7 @@ function startWebSpeech() {
   recog.onerror = (e) => { tbar.textContent = '🎙 ' + e.error; if (['not-allowed', 'service-not-allowed', 'audio-capture'].includes(e.error)) { manualStop = true; recording = false; } };
   recog.onend = () => {
     if (recording && !manualStop) { clearTimeout(restartTimer); restartTimer = setTimeout(() => { if (recording && !manualStop && !starting) { starting = true; try { recog.start(); } catch { starting = false; } } }, 250); }
-    else { setMicRecording(false); const t = finalText.trim(); finalText = ''; if (t) setTimeout(() => send(t), 150); }
+    else { setMicRecording(false); const t = finalText.trim(); finalText = ''; if (t) submitVoice(t); }
   };
   setMicRecording(true); tbar.textContent = '🎙 listening… (click mic to send)';
   starting = true; try { recog.start(); } catch { starting = false; }
