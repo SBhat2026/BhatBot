@@ -1,6 +1,6 @@
 'use strict';
 
-const { app, BrowserWindow, globalShortcut, ipcMain, shell, dialog, screen } = require('electron');
+const { app, BrowserWindow, globalShortcut, ipcMain, shell, dialog, screen, webContents } = require('electron');
 // Electron/Chromium blocks audio autoplay after async calls → desktop TTS was silent.
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
 const path = require('path');
@@ -1201,13 +1201,18 @@ async function ensureBrowser() {
   if (browserLaunching) return browserLaunching;     // de-dupe concurrent launches (race → 2 browsers)
   browserLaunching = (async () => {
     const { chromium } = require('playwright');
-    // --no-sandbox: Chromium often fails to start from a packaged/Finder-launched Electron
-    // app without it (the real "browsing doesn't work in Bhatbot" cause). Realistic UA +
-    // viewport reduce bot-blocking that makes pages look broken/empty.
-    browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-blink-features=AutomationControlled', '--disable-dev-shm-usage'] });
+    // Browser is now its OWN dedicated, visible desktop window (headless:false) — NOT fullscreen,
+    // sized 1280x800 and positioned on the desktop. --no-sandbox: Chromium often fails to start
+    // from a packaged/Finder-launched Electron app without it. Realistic UA + viewport reduce
+    // bot-blocking that makes pages look broken/empty.
+    browser = await chromium.launch({
+      headless: false,
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-blink-features=AutomationControlled',
+             '--disable-dev-shm-usage', '--window-size=1280,860', '--window-position=140,120'],
+    });
     const context = await browser.newContext({
       userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-      viewport: { width: 1280, height: 800 }, locale: 'en-US',
+      viewport: null, locale: 'en-US',          // viewport:null → page fills the real window
     });
     page = await context.newPage();
   })();
@@ -1499,6 +1504,106 @@ async function delegateProject(input) {
     state: wsState.open(w.dir).digest(), steps };
 }
 
+// ---------------------------------------------------------------------------
+// 3D generation (TRELLIS via Replicate). Hardened: downscales oversized inputs
+// (Replicate rejects very large data URLs), no fragile Prefer:wait, a real
+// ~5-min poll budget (Trellis cold-boot can take 2-3 min), robust output parsing,
+// and progress surfaced to the Activity log.
+// ---------------------------------------------------------------------------
+async function generate3D(input) {
+  const cfg = loadConfig();
+  if (!cfg.replicateKey) return { success: false, error: 'No replicateKey in ~/.bhatbot/config.json. Get one free at replicate.com.' };
+  if (!input.image_path || !fs.existsSync(input.image_path)) return { success: false, error: `Image not found: ${input.image_path}` };
+
+  // Load + downscale to max 1024px and re-encode PNG (smaller, consistent payload).
+  let dataUrl;
+  try {
+    const { nativeImage } = require('electron');
+    let img = nativeImage.createFromPath(input.image_path);
+    if (img.isEmpty()) throw new Error('unreadable image');
+    const sz = img.getSize();
+    const max = 1024;
+    if (sz.width > max || sz.height > max) {
+      const scale = max / Math.max(sz.width, sz.height);
+      img = img.resize({ width: Math.round(sz.width * scale), height: Math.round(sz.height * scale), quality: 'best' });
+    }
+    dataUrl = 'data:image/png;base64,' + img.toPNG().toString('base64');
+  } catch (e) {
+    // Fallback: send the raw bytes as-is.
+    const mime = input.image_path.toLowerCase().endsWith('.png') ? 'image/png' : 'image/jpeg';
+    dataUrl = `data:${mime};base64,${fs.readFileSync(input.image_path).toString('base64')}`;
+  }
+
+  const outDir = (cfg.imageOutputDir || '~/.bhatbot/generated').replace(/^~/, os.homedir());
+  fs.mkdirSync(outDir, { recursive: true });
+  const fname = (input.filename || `3d_${Date.now()}`).replace(/[^\w.-]/g, '_');
+
+  // firtoz/trellis is a COMMUNITY model → must create predictions via the versioned
+  // /v1/predictions endpoint (the /models/.../predictions route is official-models-only and
+  // 404s here — that was the long-standing "Trellis doesn't work" bug). Resolve the latest
+  // version dynamically, falling back to a known-good pinned hash.
+  const PINNED_VERSION = 'e8f6c45206993f297372f5436b90350817bd9b4a0d52d2a76df50c1c8afa2b3c';
+  let version = cfg.trellisVersion || PINNED_VERSION;
+  try {
+    const mr = await fetch('https://api.replicate.com/v1/models/firtoz/trellis', { headers: { 'Authorization': 'Bearer ' + cfg.replicateKey }, signal: AbortSignal.timeout(15000) });
+    if (mr.ok) { const mj = await mr.json(); if (mj.latest_version && mj.latest_version.id) version = mj.latest_version.id; }
+  } catch { /* offline → use pinned */ }
+
+  const body = { version, input: {
+    images: [dataUrl],
+    texture_size: input.texture_size || 1024,
+    mesh_simplify: 0.9,                 // less aggressive → cleaner geometry
+    generate_color: true, generate_model: true, generate_normal: false,
+    save_gaussian_ply: false, return_no_background: true,
+    ss_sampling_steps: 12, slat_sampling_steps: 12,
+    ss_guidance_strength: 7.5, slat_guidance_strength: 3,
+    randomize_seed: true,
+  } };
+
+  let pred;
+  try {
+    const cr = await fetch('https://api.replicate.com/v1/predictions', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + cfg.replicateKey, 'Content-Type': 'application/json' },
+      body: JSON.stringify(body), signal: AbortSignal.timeout(30000),
+    });
+    if (cr.status === 422) return { success: false, error: 'Replicate 422 (bad input — image may be too large/unreadable, or bad version): ' + (await cr.text()).slice(0, 200) };
+    if (cr.status === 401) return { success: false, error: 'Replicate 401 — invalid replicateKey.' };
+    if (cr.status === 402) return { success: false, error: 'Replicate is out of credit. Add credit at replicate.com/account/billing, then retry (wait a few minutes after purchase).' };
+    if (!cr.ok) return { success: false, error: `Replicate ${cr.status}: ${(await cr.text()).slice(0, 300)}` };
+    pred = await cr.json();
+  } catch (e) { return { success: false, error: 'Replicate request failed: ' + e.message }; }
+
+  // Poll up to ~5 min.
+  const getUrl = pred.urls && pred.urls.get;
+  let tries = 0; const MAX = 100;
+  while (pred.status && !['succeeded', 'failed', 'canceled'].includes(pred.status) && tries < MAX) {
+    await sleep(3000); tries++;
+    if (tries % 5 === 0) sendToActivity('tool-update', { type: 'thinking', text: `🧊 3D generating… ${tries * 3}s (${pred.status})` });
+    try {
+      const pr = await fetch(getUrl || `https://api.replicate.com/v1/predictions/${pred.id}`, { headers: { 'Authorization': 'Bearer ' + cfg.replicateKey }, signal: AbortSignal.timeout(20000) });
+      pred = await pr.json();
+    } catch { /* transient network — keep polling */ }
+  }
+  if (pred.status !== 'succeeded') {
+    const logTail = (pred.logs || '').split('\n').filter(Boolean).slice(-3).join(' | ');
+    return { success: false, error: `3D ${pred.status || 'timeout'}: ${pred.error || logTail || 'no detail'}` };
+  }
+
+  // Output shapes seen: {model_file}, {glb}, or a bare URL / array.
+  const o = pred.output || {};
+  const glbUrl = o.model_file || o.glb || o.model || (typeof o === 'string' ? o : null) || (Array.isArray(o) ? o.find((x) => String(x).includes('.glb')) : null);
+  if (!glbUrl) return { success: false, error: 'No GLB URL in output: ' + JSON.stringify(o).slice(0, 200) };
+  try {
+    const gr = await fetch(glbUrl, { signal: AbortSignal.timeout(60000) });
+    if (!gr.ok) return { success: false, error: `GLB download failed: ${gr.status}` };
+    const gbuf = Buffer.from(await gr.arrayBuffer());
+    const outPath = path.join(outDir, `${fname}.glb`);
+    fs.writeFileSync(outPath, gbuf);
+    return { success: true, path: outPath, size_mb: (gbuf.length / 1048576).toFixed(2), seconds: tries * 3, message: `3D model → ${outPath}. Import into Blender, Unity, or Three.js.` };
+  } catch (e) { return { success: false, error: 'GLB download error: ' + e.message }; }
+}
+
 async function executeTool(name, input) {
   let result;
   // Resolve CRED_REF_* handles to real secrets just before the tool runs. The audit log
@@ -1576,13 +1681,19 @@ async function executeTool(name, input) {
       case 'studio_write': {
         fs.mkdirSync(STUDIO_DIR, { recursive: true });
         fs.writeFileSync(STUDIO_INDEX, input.html);
-        const fresh = !studioWindow || studioWindow.isDestroyed();
-        openStudioWindow();
-        // Let the DOM (and any reload) settle, then capture what rendered so Claude can SEE it.
-        await sleep(fresh ? 1200 : 700);
+        // Studio is an in-window webview panel now. Surface it, reload the guest, then capture
+        // the webview's own webContents so Claude can SEE what rendered.
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.show();
+          mainWindow.webContents.send('show-panel', 'studio');
+          mainWindow.webContents.send('studio-reload');
+        }
+        await sleep(900);
         let shot = null;
         try {
-          if (studioWindow && !studioWindow.isDestroyed()) {
+          const sw = studioWebContents();
+          if (sw) { const img = await sw.capturePage(); if (img && !img.isEmpty()) shot = img.resize({ width: 1200 }).toJPEG(75).toString('base64'); }
+          if (!shot && studioWindow && !studioWindow.isDestroyed()) {     // legacy fallback
             const img = await studioWindow.webContents.capturePage();
             shot = img.resize({ width: 1200 }).toJPEG(75).toString('base64');
           }
@@ -1637,35 +1748,7 @@ async function executeTool(name, input) {
         break;
       }
       case 'generate_3d': {
-        const cfg = loadConfig();
-        if (!cfg.replicateKey) { result = { success: false, error: 'No replicateKey in ~/.bhatbot/config.json. Get one free at replicate.com.' }; break; }
-        if (!fs.existsSync(input.image_path)) { result = { success: false, error: `Image not found: ${input.image_path}` }; break; }
-        const mime = input.image_path.toLowerCase().endsWith('.png') ? 'image/png' : 'image/jpeg';
-        const dataUrl = `data:${mime};base64,${fs.readFileSync(input.image_path).toString('base64')}`;
-        const outDir = (cfg.imageOutputDir || '~/.bhatbot/generated').replace(/^~/, os.homedir());
-        fs.mkdirSync(outDir, { recursive: true });
-        const fname = (input.filename || `3d_${Date.now()}`).replace(/[^\w.-]/g, '_');
-        const cr = await fetch('https://api.replicate.com/v1/models/firtoz/trellis/predictions', {
-          method: 'POST', headers: { 'Authorization': 'Bearer ' + cfg.replicateKey, 'Content-Type': 'application/json', 'Prefer': 'wait' },
-          body: JSON.stringify({ input: { images: [dataUrl], texture_size: input.texture_size || 1024, mesh_simplify: 0.95, generate_color: true, generate_model: true, generate_normal: true, ss_sampling_steps: 12, slat_sampling_steps: 12, ss_guidance_strength: 7.5, slat_guidance_strength: 3 } }),
-          signal: AbortSignal.timeout(120000)
-        });
-        if (!cr.ok) { result = { success: false, error: `Replicate ${cr.status}: ${(await cr.text()).slice(0, 300)}` }; break; }
-        let pred = await cr.json();
-        let tries = 0;
-        while (pred.status !== 'succeeded' && pred.status !== 'failed' && pred.status !== 'canceled' && tries < 40) {
-          await sleep(3000);
-          const pr = await fetch(`https://api.replicate.com/v1/predictions/${pred.id}`, { headers: { 'Authorization': 'Bearer ' + cfg.replicateKey } });
-          pred = await pr.json(); tries++;
-        }
-        if (pred.status !== 'succeeded') { result = { success: false, error: `3D failed: ${pred.error || pred.status}` }; break; }
-        const glbUrl = pred.output?.model_file || pred.output?.glb || (Array.isArray(pred.output) ? pred.output[0] : null);
-        if (!glbUrl) { result = { success: false, error: 'No GLB URL in output: ' + JSON.stringify(pred.output).slice(0, 200) }; break; }
-        const gr = await fetch(glbUrl);
-        const gbuf = Buffer.from(await gr.arrayBuffer());
-        const outPath = path.join(outDir, `${fname}.glb`);
-        fs.writeFileSync(outPath, gbuf);
-        result = { success: true, path: outPath, size_mb: (gbuf.length / 1048576).toFixed(2), message: `3D model → ${outPath}. Import into Blender, Unity, or Three.js.` };
+        result = await generate3D(input);
         break;
       }
       default:
@@ -1686,6 +1769,9 @@ function sendToAll(chatEvent, channel, data) {
   sendToActivity(channel, data);
 }
 function sendToActivity(channel, data) {
+  // Activity is now an in-window panel → route to the main window. (Legacy separate window
+  // still fed if one happens to be open.)
+  try { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, data); } catch {}
   try { if (activityWindow && !activityWindow.isDestroyed()) activityWindow.webContents.send(channel, data); } catch {}
 }
 
@@ -1961,22 +2047,25 @@ function createWindow() {
     width: 430, height: 650, x: width - 450, y: 50,
     frame: false, fullscreen: true, alwaysOnTop: false, skipTaskbar: false, resizable: true, maximizable: true,
     minWidth: 360, minHeight: 400, backgroundColor: '#090d13',
-    webPreferences: { nodeIntegration: false, contextIsolation: true, preload: path.join(__dirname, 'preload.js') }
+    webPreferences: { nodeIntegration: false, contextIsolation: true, webviewTag: true, preload: path.join(__dirname, 'preload.js') }
   });
   mainWindow.loadFile(path.join(__dirname, 'src', 'index.html'));
   mainWindow.setFullScreen(true);   // always open fullscreen (still resizable — can exit via ⌃⌘F)
 }
 
-function openActivityWindow() {
-  if (activityWindow && !activityWindow.isDestroyed()) { activityWindow.show(); return; }
-  const { width } = screen.getPrimaryDisplay().workAreaSize;
-  activityWindow = new BrowserWindow({
-    width: 500, height: 700, x: Math.max(20, width - 1000), y: 50,
-    resizable: true, maximizable: true, minWidth: 360, minHeight: 320,
-    title: 'Bhatbot Activity', frame: true, alwaysOnTop: false, backgroundColor: '#090d13',
-    webPreferences: { nodeIntegration: false, contextIsolation: true, preload: path.join(__dirname, 'preload-activity.js') }
-  });
-  activityWindow.loadFile(path.join(__dirname, 'src', 'activity.html'));
+// Activity is now an in-window panel (#activity-panel in index.html). This is a no-op kept so
+// existing call sites (e.g. browserAction) don't break; activity events route to mainWindow.
+function openActivityWindow() {}
+
+// The <webview> guest hosting Studio lives inside mainWindow; find its WebContents so we can
+// capturePage() it for the design vision-feedback loop.
+function studioWebContents() {
+  try {
+    if (!mainWindow || mainWindow.isDestroyed()) return null;
+    return webContents.getAllWebContents().find((wc) => {
+      try { return wc.hostWebContents && wc.hostWebContents.id === mainWindow.webContents.id && /studio/.test(wc.getURL()); } catch { return false; }
+    }) || null;
+  } catch { return null; }
 }
 
 function toggleWindow() {
@@ -2124,9 +2213,30 @@ ipcMain.handle('get-api-key', () => getApiKey());
 ipcMain.handle('save-api-key', (_e, key) => { saveConfig({ apiKey: key }); return true; });
 ipcMain.handle('get-context-path', () => resolveContextPath());
 ipcMain.handle('get-memory-path', () => MEMORY_PATH);
-ipcMain.handle('open-nexus', () => { openNexusWindow(); return true; });
-ipcMain.handle('open-studio', () => { openStudioWindow(); return true; });
-ipcMain.handle('open-terminal', () => { openTerminalWindow(); return true; });
+// Nexus + Studio are now in-window webview panels; the renderer switches to them. We just
+// return the URLs and make sure the Studio file watcher is live so edits hot-reload the guest.
+ipcMain.handle('open-nexus', () => { if (mainWindow) mainWindow.webContents.send('show-panel', 'nexus'); return true; });
+ipcMain.handle('open-studio', () => { ensureStudio(); ensureStudioWatcher(); if (mainWindow) mainWindow.webContents.send('show-panel', 'studio'); return true; });
+ipcMain.handle('open-terminal', () => { if (mainWindow) mainWindow.webContents.send('show-panel', 'code'); return true; });
+ipcMain.handle('get-panel-urls', () => { ensureStudio(); return { nexus: NEXUS_URL, studio: 'file://' + STUDIO_INDEX }; });
+// Agent browser is its own desktop Chromium window — launch it if needed and raise it.
+ipcMain.handle('focus-browser', async () => {
+  try { await ensureBrowser(); if (page) { try { await page.bringToFront(); } catch {} if (!page.url() || page.url() === 'about:blank') await page.goto('https://www.google.com', { waitUntil: 'domcontentloaded' }).catch(() => {}); } return { ok: true }; }
+  catch (e) { return { ok: false, error: e.message }; }
+});
+
+// Studio file watcher → hot-reload the in-window webview when ~/.bhatbot/studio/index.html changes.
+let studioPanelWatcher = null;
+function ensureStudioWatcher() {
+  if (studioPanelWatcher) return;
+  try {
+    let deb = null;
+    studioPanelWatcher = fs.watch(STUDIO_DIR, () => {
+      clearTimeout(deb);
+      deb = setTimeout(() => { try { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('studio-reload'); } catch {} }, 200);
+    });
+  } catch {}
+}
 ipcMain.on('pty-start', (_e, { cols, rows }) => startPty(cols, rows));
 ipcMain.on('pty-input', (_e, data) => { try { ptyProc && ptyProc.write(data); } catch {} });
 ipcMain.on('pty-resize', (_e, { cols, rows }) => { try { ptyProc && ptyProc.resize(cols, rows); } catch {} });
