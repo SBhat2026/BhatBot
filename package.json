@@ -16,6 +16,7 @@
     "node-pty": "^1.1.0",
     "node-telegram-bot-api": "^0.67.0",
     "playwright": "^1.60.0",
+    "twilio": "^6.0.2",
     "zod": "^4.4.3"
   },
   "devDependencies": {
@@ -27,7 +28,10 @@
     "appId": "com.siddhant.bhatbot",
     "productName": "Bhatbot",
     "asar": false,
-    "directories": { "output": "dist", "buildResources": "build" },
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
     "files": [
       "**/*",
       "!dist/**",
@@ -38,7 +42,9 @@
     ],
     "mac": {
       "category": "public.app-category.productivity",
-      "target": ["dir"],
+      "target": [
+        "dir"
+      ],
       "icon": "build/icon.png",
       "hardenedRuntime": false,
       "gatekeeperAssess": false,
