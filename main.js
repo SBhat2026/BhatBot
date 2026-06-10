@@ -397,9 +397,46 @@ function memoryRetrieve(query, k = 14) {
   const byH = {}; for (const { e } of top) (byH[e.heading] = byH[e.heading] || []).push(e.text);
   return Object.entries(byH).map(([h, ts]) => (h ? '### ' + h + '\n' : '') + ts.join('\n')).join('\n\n');
 }
+// ===========================================================================
+// 3-tier memory. Tier 1 = working (this session's spoken/learned scratchpad, ephemeral).
+// Tier 2 = episodic (past session notes in ~/.bhatbot/notes/, recalled by relevance).
+// Tier 3 = semantic/long-term (curated memory.md via the lexical retrieval above).
+// buildMemoryBlock merges all three into the (uncached) memory system block per query.
+// ===========================================================================
+const MEM_STOP = new Set(['the', 'and', 'for', 'are', 'was', 'how', 'does', 'did', 'with', 'this', 'that', 'you', 'your', 'can', 'will', 'work', 'works', 'have', 'has', 'what', 'when', 'where', 'why', 'who', 'use', 'using', 'get', 'got', 'make', 'made', 'want', 'need', 'should', 'would', 'into', 'from', 'about', 'also', 'than', 'then', 'them', 'they', 'its', 'bhatbot']);
+function memTerms(query) { return ((query || '').toLowerCase().match(/[a-z0-9]{4,}/g) || []).filter((t) => !MEM_STOP.has(t)); }
+
+// Tier 2 — recall the most relevant PAST session notes for this query (idf-weighted overlap).
+function recallEpisodic(query, k = 3) {
+  try {
+    const terms = memTerms(query); if (!terms.length) return '';
+    if (!fs.existsSync(NOTES_DIR)) return '';
+    const files = fs.readdirSync(NOTES_DIR).filter((f) => f.endsWith('.md'));
+    if (files.length < 2) return '';                 // nothing worth recalling yet
+    const docs = files.map((f) => { try { return { f, txt: fs.readFileSync(path.join(NOTES_DIR, f), 'utf8') }; } catch { return null; } }).filter(Boolean);
+    const df = {}; for (const t of terms) df[t] = docs.reduce((n, d) => n + (d.txt.toLowerCase().includes(t) ? 1 : 0), 0) || 1;
+    const scored = docs.map((d) => { const hay = d.txt.toLowerCase(); let s = 0; for (const t of terms) if (hay.includes(t)) s += 1 / df[t]; return { d, s }; })
+      .filter((x) => x.s > 0).sort((a, b) => b.s - a.s).slice(0, k);
+    if (!scored.length) return '';
+    return scored.map(({ d }) => {
+      const title = (d.txt.match(/^#\s+(.+)$/m) || [])[1] || d.f.replace(/\.md$/, '');
+      const body = d.txt.split('\n').filter((l) => l.trim() && !/^#/.test(l)).slice(0, 4).join(' ').replace(/\s+/g, ' ').slice(0, 280);
+      return `- (${title}) ${body}`;
+    }).join('\n');
+  } catch { return ''; }
+}
+
 function buildMemoryBlock(query) {
-  const m = memoryRetrieve(query, (loadConfig().memoryTopK) || 14);
-  return m ? redactSecrets('\n\n---\n## RELEVANT MEMORY\n\n' + m) : '';
+  const cfg = loadConfig();
+  const longTerm = memoryRetrieve(query, cfg.memoryTopK || 14);                              // tier 3
+  const episodic = cfg.episodicRecall === false ? '' : recallEpisodic(query, cfg.episodicK || 3);  // tier 2
+  const working = (sessionSpoken && sessionSpoken.length)                                     // tier 1
+    ? sessionSpoken.slice(-6).map((s) => '- ' + String(s).slice(0, 160)).join('\n') : '';
+  let out = '';
+  if (longTerm) out += '\n\n---\n## RELEVANT MEMORY (long-term)\n\n' + longTerm;
+  if (episodic) out += '\n\n## RECALLED FROM PAST SESSIONS (episodic)\n\n' + episodic;
+  if (working) out += '\n\n## THIS SESSION SO FAR (working)\n\n' + working;
+  return out ? redactSecrets(out) : '';
 }
 // Two-block system: [cached static] + [small retrieved memory]. Returns the Anthropic
 // system array; flattened string form (buildSystemPrompt) is used by ollama/estimate.
@@ -484,6 +521,18 @@ function rateBudget() {
 // Estimated input tokens a Claude request would cost (system + tools + trimmed messages).
 function requestTokenEstimate(messages) {
   return estimateTokens({ system: buildSystemPrompt(lastUserText(messages)), tools: TOOLS, messages: capTokens(messages) });
+}
+// Token-budget hardening: the per-minute cap is a ROLLING 60s window, so if a step would
+// exceed it we can just wait for old usage to age out, then continue — turning a hard abort
+// into a brief pause. Returns true once `need` tokens are free (or false on timeout).
+async function waitForBudget(need, maxWaitMs = 75000) {
+  const start = Date.now(); let announced = false;
+  while (Date.now() - start < maxWaitMs) {
+    if (rateBudget().free >= need) return true;
+    if (!announced) { sendToActivity('tool-update', { type: 'thinking', text: `⏳ pacing for the token rate limit — continuing in a moment (${Math.round(need / 1000)}k needed)` }); announced = true; }
+    await sleep(3000);
+  }
+  return rateBudget().free >= need;
 }
 async function ollamaUp() {
   try { const r = await fetch(`${OLLAMA_URL}/api/tags`, { signal: AbortSignal.timeout(700) }); return r.ok; } catch { return false; }
@@ -670,22 +719,37 @@ async function callModel(messages, apiKey, allowDarkbloom, onText) {
   // Preflight rate-limit check: if this request would blow the per-minute token budget,
   // either run it on a local Ollama model (free, no quota) or — if local is unavailable
   // / mode='notify' — abort with a clear message so the caller can reset for next task.
-  const est = requestTokenEstimate(messages);
-  const budget = rateBudget();
+  let est = requestTokenEstimate(messages);
+  let budget = rateBudget();
   if (est > budget.free) {
     const mode = cfg.rateLimitMode || 'local';
-    // Local fallback only on the FIRST turn (allowDarkbloom) — Ollama can't run tools, so
-    // hijacking a mid-task tool loop would break it. Mid-loop over-budget → notify + reset.
-    if (mode !== 'notify' && allowDarkbloom && await ollamaUp()) {
+    // First-turn simple queries → answer locally on Ollama (free, no quota). Not mid-task
+    // (Ollama can't run tools, so hijacking a tool loop would break it).
+    if (mode === 'local' && allowDarkbloom && await ollamaUp()) {
       try {
         const lm = cfg.localModel || 'qwen3:latest';
         const text = (await ollamaChat(messages, buildSystemPrompt(lastUserText(messages)), lm) || '').trim();
         if (text) { if (onText) try { onText(text); } catch {} return { content: [{ type: 'text', text }], stop_reason: 'end_turn', _provider: 'ollama', _model: lm, _rateFallback: true }; }
       } catch (e) { console.warn('[rate] ollama fallback failed:', e.message); }
     }
-    const err = new Error(`⚠ This would exceed your per-minute token limit (needs ~${Math.round(est / 1000)}k, only ~${Math.round(budget.free / 1000)}k free this minute). I've reset the context — try again in ~a minute${mode === 'notify' ? '' : ' (Ollama can auto-answer simple turns when you\'re over budget)'}.`);
-    err.rateBudget = true;
-    throw err;
+    // HARDENING: if the step fits within the per-minute cap, WAIT for the rolling window to
+    // drain and then continue — long multi-step tasks pause ~a minute instead of aborting.
+    if (est <= budget.safe) {
+      if (await waitForBudget(est)) { budget = rateBudget(); }
+    }
+    // If still over (request alone bigger than the whole cap, or wait timed out) → trim the
+    // context harder and re-estimate before giving up.
+    if (est > rateBudget().free) {
+      messages = capTokens(messages, Math.max(6000, Math.floor(budget.safe * 0.5)));
+      est = requestTokenEstimate(messages);
+      if (est <= budget.safe) await waitForBudget(est);
+    }
+    budget = rateBudget();
+    if (est > budget.free) {
+      const err = new Error(`⚠ This step needs ~${Math.round(est / 1000)}k tokens, over your ~${Math.round(budget.safe / 1000)}k/min cap even after pacing. I've reset the context — retry in a minute, or raise rateLimitTokens in config if your Anthropic tier is higher.`);
+      err.rateBudget = true;
+      throw err;
+    }
   }
 
   const claudeModel = (route === 'sonnet' || route === 'db_directive') ? MODEL_SONNET : MODEL_HAIKU;
