@@ -569,6 +569,18 @@ $('#attach').addEventListener('click', async () => {
   $('#attach').classList.remove('busy');
 });
 
+// Drag-and-drop files anywhere on the chat → attach as vision/text blocks for the next msg.
+const chatEl = $('#chat');
+['dragover', 'dragenter'].forEach((ev) => chatEl.addEventListener(ev, (e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; chatEl.style.outline = '1.5px dashed var(--accent, #39d7ff)'; }));
+['dragleave', 'dragend'].forEach((ev) => chatEl.addEventListener(ev, () => { chatEl.style.outline = ''; }));
+chatEl.addEventListener('drop', async (e) => {
+  e.preventDefault(); chatEl.style.outline = '';
+  const paths = Array.from(e.dataTransfer.files).map((f) => f.path).filter(Boolean);
+  if (!paths.length) return;
+  const r = await window.bhatbot.attachPaths(paths);
+  if (r && r.blocks && r.blocks.length) { pendingAtt.push({ name: (r.names || ['files']).join(', '), blocks: r.blocks }); renderAtt(); }
+});
+
 async function send(text) {
   text = (text || $('#ta').value).trim();
   const atts = pendingAtt.flatMap((a) => a.blocks);

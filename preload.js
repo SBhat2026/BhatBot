@@ -28,6 +28,10 @@ contextBridge.exposeInMainWorld('bhatbot', {
   listNotes: () => ipcRenderer.invoke('list-notes'),
   endSession: () => ipcRenderer.send('end-session'),
   onSessionNote: (cb) => ipcRenderer.on('session-note', (_e, n) => cb(n)),
+  attachPaths: (paths) => ipcRenderer.invoke('attach-paths', paths),
+  credStore: (c) => ipcRenderer.invoke('cred-store', c),
+  credList: () => ipcRenderer.invoke('cred-list'),
+  credRemove: (ref) => ipcRenderer.invoke('cred-remove', { ref }),
   onToolUpdate: (cb) => ipcRenderer.on('tool-update', (_e, u) => cb(u)),
   removeToolUpdateListener: () => ipcRenderer.removeAllListeners('tool-update')
 });

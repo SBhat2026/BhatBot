@@ -9,6 +9,7 @@ const os = require('os');
 const { exec, spawn, spawnSync } = require('child_process');
 const crypto = require('crypto');
 const darkbloom = require('./darkbloom');
+const credentials = require('./lib/credentials');
 const { classify } = require('./taskClassifier');
 const { startMcpServer, stopMcpServer } = require('./mcp-server');
 // Workspace multi-agent stack (Architecture v2) — orchestrator delegates big projects to
@@ -195,7 +196,8 @@ PERSONALITY — you are J.A.R.V.I.S., not a chatbot:
   actions: just do them.
 - Reference past work and what you know about Siddhant when relevant ("like the FABLE
   retrieval refactor", "same pattern as PRISM") — be the assistant that remembers, not
-  one that responds cold. Address him as Siddhant occasionally, never effusive, dry wit ok.
+  one that responds cold. Address him as "sir" (not by name, not "master"), used naturally
+  and sparingly — "On it, sir." — never effusive, dry wit ok.
 
 TOOLS: Use them proactively. When given a path — read it. When asked to run
 something — run it. Don't narrate what you're about to do, just do it.
@@ -280,6 +282,8 @@ function redactSecrets(s) {
     .replace(/sk-(?:ant-|proj-)?[A-Za-z0-9_\-]{20,}/g, '[REDACTED_KEY]')
     .replace(/AIza[0-9A-Za-z_\-]{20,}/g, '[REDACTED_KEY]')
     .replace(/\bgsk_[A-Za-z0-9]{20,}/g, '[REDACTED_KEY]')
+    .replace(/\br8_[A-Za-z0-9]{20,}/g, '[REDACTED_KEY]')                     // Replicate
+    .replace(/\bxox[bps]-[A-Za-z0-9-]{10,}/g, '[REDACTED_KEY]')              // Slack
     .replace(/\b([a-z]{4}\s){3}[a-z]{4}\b/gi, '[REDACTED_APP_PW]')           // gmail app-pw shape
     .replace(/\b(?=[A-Za-z0-9_\-]{40,}\b)(?=[A-Za-z0-9_\-]*[A-Za-z])(?=[A-Za-z0-9_\-]*[0-9])[A-Za-z0-9_\-]+/g, '[REDACTED_TOKEN]');
 }
@@ -506,7 +510,12 @@ async function anthropicStream(body, apiKey, onText, { retries = 3 } = {}) {
         const data = line.slice(5).trim();
         if (!data || data === '[DONE]') continue;
         let ev; try { ev = JSON.parse(data); } catch { continue; }
-        if (ev.type === 'message_start') { usage = (ev.message && ev.message.usage) || usage; }
+        if (ev.type === 'message_start') {
+          usage = (ev.message && ev.message.usage) || usage;
+          const cr = usage.cache_read_input_tokens || 0;
+          if (cr > 0) console.log('[CACHE HIT]', cr, 'tokens read from cache');
+          else if ((usage.input_tokens || 0) > 800) console.warn('[CACHE MISS] check cache_control placement');
+        }
         else if (ev.type === 'content_block_start') {
           const b = ev.content_block;
           blocks[ev.index] = b.type === 'tool_use' ? { type: 'tool_use', id: b.id, name: b.name, _json: '' } : { type: 'text', text: '' };
@@ -1170,7 +1179,7 @@ async function browserAction(input) {
         return { success: true, note: 'Screenshot captured.', _image: await shot() };
       case 'get_text': {
         const txt = await page.innerText(input.selector || 'body');
-        return { success: true, text: txt.slice(0, 10 * 1024) };
+        return { success: true, text: txt.slice(0, 6 * 1024) };
       }
       case 'evaluate':
         rec({ action: 'evaluate', js: input.js });
@@ -1421,6 +1430,10 @@ async function delegateProject(input) {
 
 async function executeTool(name, input) {
   let result;
+  // Resolve CRED_REF_* handles to real secrets just before the tool runs. The audit log
+  // (below) records `input` with the handles intact, never the decrypted secret.
+  const auditInput = input;
+  if (credentials.hasRef(input)) { try { input = credentials.resolveRefs(input); } catch {} }
   try {
     switch (name) {
       case 'read_file': {
@@ -1449,7 +1462,7 @@ async function executeTool(name, input) {
         const t = setTimeout(() => ctrl.abort(), 15000);
         try {
           const res = await fetch(input.url, { signal: ctrl.signal });
-          result = { success: res.ok, status: res.status, content: (await res.text()).slice(0, 50 * 1024) };
+          result = { success: res.ok, status: res.status, content: (await res.text()).slice(0, 8 * 1024) };
         } finally { clearTimeout(t); }
         break;
       }
@@ -1588,7 +1601,7 @@ async function executeTool(name, input) {
   } catch (e) {
     result = { success: false, error: String(e && e.message ? e.message : e) };
   }
-  auditLog(name, input, result);
+  auditLog(name, auditInput, result);   // log handles, never resolved secrets
   return result;
 }
 
@@ -1674,7 +1687,7 @@ async function agentLoop(history, apiKey, event, opts = {}) {
           { type: 'image', source: { type: 'base64', media_type: _imageMime || 'image/jpeg', data: _image } }
         ];
       } else {
-        trContent = JSON.stringify(result).slice(0, 100 * 1024);
+        trContent = JSON.stringify(result).slice(0, 24 * 1024);   // cap tool_result tokens (was 100KB)
       }
       toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: trContent, is_error: result.success === false });
     }
@@ -2304,7 +2317,7 @@ function makeSpeakStream(seq) {
 }
 // Instant verbal acknowledgments — spoken the moment a task starts (before the model even
 // responds) so perceived spoken latency ≈ 0. JARVIS pattern: ack → work → result.
-const ACKS = ['On it.', 'On it, Siddhant.', 'Right away.', 'Got it.', 'Working on it.', 'Sure thing.'];
+const ACKS = ['On it, sir.', 'Right away, sir.', 'On it.', 'Got it.', 'Working on it.', 'Of course, sir.'];
 const ACTION_RE = /\b(open|launch|play|pause|skip|run|build|fix|check|create|make|find|search|deploy|write|send|close|quit|set|update|install|delete|remove|pull up|show me|navigate|go to|download|generate|render|start|stop|turn)\b/i;
 function maybeAck(seq, userText) {
   const c = loadConfig();
@@ -2608,6 +2621,16 @@ ipcMain.handle('chat', async (event, { history }) => {
 });
 ipcMain.handle('list-notes', () => listNotes());
 ipcMain.on('end-session', () => endSession('manual'));
+// Encrypted credential vault (safeStorage). The model never calls these — user-driven only.
+ipcMain.handle('cred-store', (_e, { label, domain, username, secret }) => { try { return { ref: credentials.store(label, domain, username, secret) }; } catch (e) { return { error: e.message }; } });
+ipcMain.handle('cred-list', () => credentials.list());
+ipcMain.handle('cred-remove', (_e, { ref }) => { credentials.remove(ref); return { ok: true }; });
+// Drag-dropped / picked file paths → vision/text blocks for the next message.
+ipcMain.handle('attach-paths', async (_e, paths) => {
+  const blocks = [], names = [];
+  for (const p of (paths || [])) { try { blocks.push(...await mediaFileToBlocks(p)); names.push(path.basename(p)); } catch {} }
+  return { blocks, names };
+});
 ipcMain.on('agent-pause', () => { if (agentState === 'running') agentState = 'paused'; });
 ipcMain.on('agent-resume', () => { if (agentState === 'paused') agentState = 'running'; });
 ipcMain.on('agent-stop', () => { agentState = 'stopped'; });

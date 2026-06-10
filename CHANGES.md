@@ -2,6 +2,29 @@
 
 What was built differently from `BHATBOT_MEGAPROMPT.md`, and why. For reference.
 
+## Pass 28 — Upgrade-prompt reconciliation: "sir", creds vault, token trims, drag-drop
+
+Most of the 7-phase upgrade_prompt.md was already shipped (Passes 22-27). This pass closes
+the genuinely-new gaps + the requested address change:
+- **Address as "sir"** (not name/master): personality prompt + ACKS updated ("On it, sir.").
+- **Encrypted credential vault (Phase 6.4):** `lib/credentials.js` — secrets encrypted via
+  Electron safeStorage (Keychain) under opaque `CRED_REF_*` handles. `executeTool` resolves
+  handles to real secrets ~ms before a tool runs; the audit log records the HANDLE, never the
+  secret (`auditInput`). IPC cred-store/list/remove + preload. `resolveRefs` unit-tested
+  (resolves nested refs, leaves input immutable). redactSecrets extended for Replicate (r8_)
+  + Slack tokens.
+- **Token trims (Phase 1.4):** tool_result cap 100KB→24KB, fetch_url 50KB→8KB, browser
+  get_text 10KB→6KB. (Kept read_file generous — 8KB would break coding; deviation noted.)
+- **Cache verification (Phase 1.6):** anthropicStream logs [CACHE HIT]/[CACHE MISS] from
+  message_start usage.
+- **File drag-and-drop (Phase 6.2):** drop files on the chat → attach as vision/text blocks
+  (new `attach-paths` IPC reuses mediaFileToBlocks).
+- DECLINED Phase 2 (Kokoro-only): Siddhant previously rejected Kokoro ("Stephen Hawking") and
+  chose ElevenLabs Daniel; single-voice already achieved via ElevenLabs flash. Keeping it.
+- DEFERRED (heavy/large): Phase 5 single-window panel merge (~1 day, risky IPC refactor),
+  Phase 6.1 Resemblyzer speaker ID (pip + model), Phase 7.1 trellis-mac (5GB model +
+  xcodebuild MetalToolchain), Phase 7.4/7.5 ambient + proactive screen (needs OmniParser).
+
 ## Pass 27 — Mid-task voice steering + voice-first session notes
 
 - **Barge-in = inject mid-task instructions (not just stop):** while the agent is WORKING,
