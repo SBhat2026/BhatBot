@@ -33,7 +33,7 @@ const AUDIT_PATH = path.join(os.homedir(), '.bhatbot', 'audit.log');
 const HOTKEY = 'CommandOrControl+Shift+B';
 const MODEL_SONNET = 'claude-sonnet-4-6';      // corrected from stale spec id
 const MODEL_HAIKU = 'claude-haiku-4-5';        // corrected from stale spec id
-const MAX_AGENT_ITERATIONS = 12;
+const MAX_AGENT_ITERATIONS = 20;   // step ceiling; complex tasks need headroom to retry/replan
 const EXEC_PATH = `${process.env.PATH || ''}:/usr/local/bin:/opt/homebrew/bin:/Library/Frameworks/Python.framework/Versions/Current/bin:/Library/Frameworks/Python.framework/Versions/3.13/bin`;
 // In a packaged .app, files live inside app.asar (a virtual archive). Electron patches
 // fs reads to see into it, but a spawned process (python) opens the path itself and
@@ -347,6 +347,34 @@ Automation permission for Bhatbot (tell Siddhant to grant it if a call is blocke
 BROWSER WORKFLOWS: For repeated multi-step web tasks, use browser_workflow:
 start_recording, perform the browser steps, save_workflow{name}; later replay_workflow{name}.
 Prefer replaying a saved workflow over re-deriving selectors.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+EXECUTION & PERSISTENCE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PLAN before complex work. For anything beyond one step, take a beat to map the path:
+the goal, the 2-5 concrete steps to reach it, and what could go wrong. Hold the plan in
+mind (or state it in ONE short line) and then execute it end to end. Don't lay out a plan
+and stop — the plan is for you; the deliverable is the finished work. As you go, adapt the
+plan when reality differs from your assumptions instead of forcing the original steps.
+
+PERSIST through failures. A tool error is information, not a stop sign. When something fails:
+1. Read the ACTUAL error. Diagnose WHY (wrong path? missing dependency? bad selector?
+   transient timeout? wrong tool for the job? needs a permission/credential?).
+2. Fix the cause, then retry — or take a genuinely different approach. Timeout → retry.
+   Missing file → search for the real path (list_directory / run_shell find). Failed
+   selector → screenshot, re-read the page, try another. Blocked command → find the allowed
+   equivalent. Tool A can't → reach the goal with tool B.
+3. Try at least 2-3 DIFFERENT approaches before concluding a path is blocked. Never abandon
+   a task after a single failure, and never report "I couldn't" while obvious alternatives
+   remain untried. Don't repeat the exact same failing call expecting a different result —
+   change something each attempt.
+Only stop to ask when GENUINELY blocked: a missing secret, a Level-3/4 decision, or a true
+dead end after real attempts. Then say precisely what you tried, why each failed, and the
+single thing you need to proceed.
+
+FINISH the job. Keep working until the task is actually done — don't hand back a half-done
+result with "let me know if you want me to continue." Continue. If the work is long, narrate
+progress in your tool-call arguments (the activity log) rather than pausing for approval.
 
 PHONE (TELEGRAM / SMS): Messages prefixed [TELEGRAM] or [SMS] arrive from Siddhant's
 phone — no activity window there. [SMS] replies are texts back to a notify_user prompt,
@@ -2060,12 +2088,25 @@ function makePrintable(input) {
   });
 }
 
+// Transient failure signatures worth one automatic retry (network/load races, not logic errors).
+const TRANSIENT_RE = /(timeout|timed out|ETIMEDOUT|ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|socket hang up|network|Target closed|Execution context|navigation|detached|not attached|temporarily|overloaded|try again|\b50[234]\b|\b429\b)/i;
+// Only auto-retry IDEMPOTENT reads — never an action with side effects (a double click /
+// submit / write / shell could do real damage). Pure fetches and page reads are safe.
+function isRetryableTool(name, input) {
+  if (name === 'fetch_url' || name === 'ui_inspect' || name === 'vision_local') return true;
+  if (name === 'read_file' || name === 'list_directory') return true;
+  if (name === 'browser') return ['navigate', 'get_text', 'screenshot'].includes(input && input.action);
+  return false;
+}
+
 async function executeTool(name, input) {
   let result;
   // Resolve CRED_REF_* handles to real secrets just before the tool runs. The audit log
   // (below) records `input` with the handles intact, never the decrypted secret.
   const auditInput = input;
   if (credentials.hasRef(input)) { try { input = credentials.resolveRefs(input); } catch {} }
+  const maxAttempts = isRetryableTool(name, input) ? 2 : 1;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
   try {
     switch (name) {
       case 'read_file': {
@@ -2234,6 +2275,14 @@ async function executeTool(name, input) {
   } catch (e) {
     result = { success: false, error: String(e && e.message ? e.message : e) };
   }
+    // Auto-retry once on a transient failure of an idempotent read (network blip, page race).
+    if (result && result.success === false && attempt < maxAttempts && TRANSIENT_RE.test(String(result.error || ''))) {
+      sendToActivity('tool-update', { type: 'thinking', text: `↻ ${name}: transient error, retrying…` });
+      await sleep(500 * attempt);
+      continue;
+    }
+    break;
+  }
   // P0.4 — sanitize EXTERNAL content before it can enter model context. Internal tool
   // output (our own files, vault, notion) is trusted; web/shell/page text is not.
   try {
@@ -2349,7 +2398,10 @@ async function agentLoop(history, apiKey, event, opts = {}) {
     return { text: String(text || '').replace(/<\/?speak>/g, '').trim(), history, _streamed: stream };
   };
 
-  while (iterations < MAX_AGENT_ITERATIONS) {
+  // Step budget: headroom for complex tasks that diagnose + retry across several approaches.
+  // Configurable (agentMaxSteps); never below the default so a stale low value can't throttle.
+  const maxIters = Math.max(Number(loadConfig().agentMaxSteps) || 0, MAX_AGENT_ITERATIONS);
+  while (iterations < maxIters) {
     if (agentState === 'stopped') return finish('⏹ Stopped.');
     while (agentState === 'paused') await sleep(300);
 
@@ -2416,7 +2468,15 @@ async function agentLoop(history, apiKey, event, opts = {}) {
     history = [...history, { role: 'user', content: toolResults }];
     iterations++;
   }
-  return finish('⚠ Max iterations reached.');
+  // Budget exhausted — don't dead-end. One final tool-less turn so the user gets a concrete
+  // progress report + the next action instead of a bare "max iterations" stub.
+  history = [...history, { role: 'user', content: '[You have reached the step budget for this turn. Do NOT call any more tools. In one or two short sentences (spoken) plus a brief on-screen list, tell me concretely: what you accomplished, what remains, and the single next action to finish it.]' }];
+  try {
+    const r = await callModel(history, apiKey, false, onText);
+    history = [...history, { role: 'assistant', content: r.content }];
+    const text = r.content.filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim();
+    return finish(text || '⚠ Reached the step budget for this turn — partial progress above.');
+  } catch { return finish('⚠ Reached the step budget for this turn.'); }
 }
 
 // ===========================================================================
