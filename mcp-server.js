@@ -7,7 +7,7 @@
 
 let httpServer = null;
 
-async function startMcpServer({ port, token, runAgent, transcribe, synthesize, summarize, media, voiceTurn, endVoiceCall, getActivity, nexusUrl }) {
+async function startMcpServer({ port, token, runAgent, transcribe, synthesize, summarize, media, voiceTurn, endVoiceCall, getActivity, nexusUrl, ownerPhone, jobs, control, screenshot }) {
   if (httpServer) return httpServer;
   const express = require('express');
   const fs = require('fs');
@@ -38,6 +38,18 @@ async function startMcpServer({ port, token, runAgent, transcribe, synthesize, s
 
   const app = express();
   app.use(express.json({ limit: '16mb' }));
+
+  // CORS: the native app loads a BUNDLED copy of the UI (origin "null" / app scheme) and
+  // calls these endpoints cross-origin. Access is already gated by the secret token in the
+  // path and there are no cookies, so a permissive origin is safe here. Answer preflights.
+  app.use((req, res, next) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    res.setHeader('Access-Control-Max-Age', '86400');
+    if (req.method === 'OPTIONS') return res.sendStatus(204);
+    next();
+  });
 
   const guard = (req, res, next) => {
     if (req.params.token !== token) return res.status(401).json({ error: 'unauthorized' });
@@ -183,6 +195,41 @@ self.addEventListener('fetch', (e) => {
   app.get('/api/:token/config', guard, (_req, res) => { noStore(res); res.json({ nexusUrl: nexusUrl || '' }); });
 
   // -------------------------------------------------------------------------
+  // Phone Control tab — full desktop control over the same token-gated funnel.
+  // Background jobs (view/cancel/steer), a whitelisted tool passthrough (system/
+  // media/shell — the chat endpoint already grants the agent all of these, so no
+  // new exposure), and a live desktop screenshot.
+  // -------------------------------------------------------------------------
+  app.get('/api/:token/jobs', guard, (_req, res) => {
+    noStore(res); res.json({ jobs: jobs ? jobs.list().slice(-40) : [] });
+  });
+  app.post('/api/:token/jobs/:id/cancel', guard, (req, res) => {
+    if (!jobs) return res.status(501).json({ error: 'jobs unavailable' });
+    res.json({ ok: jobs.requestCancel(req.params.id) });
+  });
+  app.post('/api/:token/jobs/:id/guide', guard, (req, res) => {
+    if (!jobs) return res.status(501).json({ error: 'jobs unavailable' });
+    const j = jobs.get(req.params.id);
+    if (!j) return res.status(404).json({ error: 'unknown job' });
+    const target = j.kind === 'task' && j.parent ? j.parent : j.id;   // steering rides on the project
+    res.json({ ok: jobs.addGuidance(target, String((req.body || {}).text || '')) , target });
+  });
+  app.post('/api/:token/control', guard, async (req, res) => {
+    try {
+      if (!control) return res.status(501).json({ error: 'control unavailable' });
+      const { tool, input } = req.body || {};
+      res.json(await control(String(tool || ''), input || {}));
+    } catch (e) { res.status(500).json({ error: String(e && e.message ? e.message : e) }); }
+  });
+  app.get('/api/:token/screen', guard, async (_req, res) => {
+    try {
+      if (!screenshot) return res.status(501).json({ error: 'screenshot unavailable' });
+      const r = await screenshot();
+      noStore(res); res.json(r);
+    } catch (e) { res.status(500).json({ error: String(e && e.message ? e.message : e) }); }
+  });
+
+  // -------------------------------------------------------------------------
   // Twilio two-way voice — webhook-driven phone CONVERSATION in the JARVIS voice.
   // Twilio POSTs urlencoded; these routes return TwiML. Synthesized clips are
   // cached briefly and served via <Play> so the call uses BhatBot's own TTS.
@@ -228,11 +275,20 @@ self.addEventListener('fetch', (e) => {
     res.set('Content-Type', c.mime).set('Cache-Control', 'no-store').send(c.buf);
   });
 
-  // First leg: greet (msg from query) then listen.
+  // First leg: greet (msg from query) then listen. With AMD enabled on the outbound call,
+  // AnsweredBy tells us WHO answered: a machine_end_* value means we're at the voicemail
+  // BEEP → leave the message in the JARVIS voice and hang up (no gather — nobody's there).
   app.post('/voice/:token/incoming', guard, form, async (req, res) => {
     try {
       const callSid = req.body.CallSid || '';
+      const answeredBy = String(req.body.AnsweredBy || '');
       const greeting = req.query.msg || 'Good evening, sir. How may I help?';
+      if (/^(machine|fax)/.test(answeredBy)) {
+        const vm = `Good evening, sir. BhatBot here — you missed my call. ${greeting} The details are also in writing on your phone. That is all. Goodbye.`;
+        const play = await sayElement(req, vm);
+        if (endVoiceCall) endVoiceCall(callSid);
+        return res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?><Response>${play}<Hangup/></Response>`);
+      }
       const r = voiceTurn ? await voiceTurn(callSid, '', greeting) : { text: greeting };
       const play = await sayElement(req, r.text);
       res.type('text/xml').send(gatherTwiml(req, play, r.hangup));
@@ -263,6 +319,26 @@ self.addEventListener('fetch', (e) => {
   app.post('/voice/:token/status', guard, form, (req, res) => {
     try { if (endVoiceCall && (req.body.CallStatus === 'completed' || req.body.CallStatus === 'failed')) endVoiceCall(req.body.CallSid); } catch {}
     res.status(204).end();
+  });
+
+  // -------------------------------------------------------------------------
+  // Inbound SMS — you text the BhatBot number, it runs the agent and texts back the
+  // reply (TwiML <Message>). Closes the two-way loop so you can answer a notify_user
+  // prompt ("retry the deploy?" → "yes") and unblock a task. Owner number gated.
+  // (Twilio TRIAL note: receiving works once SMS is enabled on the number; sending the
+  //  reply on an unregistered US 10DLC number may be filtered — upgrade + register A2P.)
+  // -------------------------------------------------------------------------
+  app.post('/sms/:token/incoming', guard, form, async (req, res) => {
+    const reply = (xml) => res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?><Response>${xml}</Response>`);
+    try {
+      const text = String(req.body.Body || '').trim();
+      const from = req.body.From || '';
+      if (ownerPhone && from && from !== ownerPhone) return reply(`<Message>Unauthorized.</Message>`);
+      if (!text) return res.status(204).end();
+      const r = runAgent ? await runAgent('[SMS] ' + text, {}) : { text: 'Agent unavailable.' };
+      const out = (r.error ? ('Error: ' + r.error) : (r.text || '(no output)')).replace(/<\/?speak>/gi, '').trim().slice(0, 1500);
+      reply(`<Message>${xmlEsc(out)}</Message>`);
+    } catch (e) { reply(`<Message>Error: ${xmlEsc(String(e && e.message || e)).slice(0, 300)}</Message>`); }
   });
 
   await new Promise((resolve) => { httpServer = app.listen(port, '127.0.0.1', resolve); });

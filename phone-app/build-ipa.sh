@@ -12,8 +12,9 @@ set -e
 cd "$(dirname "$0")"
 
 command -v xcodegen >/dev/null 2>&1 || { echo "Installing xcodegen…"; brew install xcodegen; }
+mkdir -p Web && cp ../src/mobile.html Web/mobile.html   # sync the bundled offline-fallback UI
 xcodegen generate >/dev/null
-echo "✓ project generated"
+echo "✓ project generated (bundled UI synced)"
 
 DD=/tmp/bb-dev
 rm -rf "$DD"

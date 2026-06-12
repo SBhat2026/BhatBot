@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		0F969A760D18B7EF576A0DA2 /* mobile.html in Resources */ = {isa = PBXBuildFile; fileRef = AFE63E986E98D097AE0EB524 /* mobile.html */; };
 		757615CA15F2F9473FFC6983 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = D09CE2B27727B9A966898F10 /* Assets.xcassets */; };
 		BDC46E673BC618EEB26DE684 /* App.swift in Sources */ = {isa = PBXBuildFile; fileRef = 85988305F95AE15207355B11 /* App.swift */; };
 		EE1619ACA9B3F50AFCA2F469 /* Config.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9FF902AD41391FD78E11BE1D /* Config.swift */; };
@@ -17,6 +18,7 @@
 		4077DCFD52BB50AF7CD6854A /* BhatBot.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = BhatBot.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		85988305F95AE15207355B11 /* App.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App.swift; sourceTree = "<group>"; };
 		9FF902AD41391FD78E11BE1D /* Config.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Config.swift; sourceTree = "<group>"; };
+		AFE63E986E98D097AE0EB524 /* mobile.html */ = {isa = PBXFileReference; lastKnownFileType = text.html; path = mobile.html; sourceTree = "<group>"; };
 		D09CE2B27727B9A966898F10 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -32,6 +34,14 @@
 			path = Sources;
 			sourceTree = "<group>";
 		};
+		AFDD5F344DB8A539EA4FDE3C /* Web */ = {
+			isa = PBXGroup;
+			children = (
+				AFE63E986E98D097AE0EB524 /* mobile.html */,
+			);
+			path = Web;
+			sourceTree = "<group>";
+		};
 		B641CF653E2F786BCD670891 /* Products */ = {
 			isa = PBXGroup;
 			children = (
@@ -44,6 +54,7 @@
 			isa = PBXGroup;
 			children = (
 				6569AA95D5EDEE78223A679F /* Sources */,
+				AFDD5F344DB8A539EA4FDE3C /* Web */,
 				B641CF653E2F786BCD670891 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -105,6 +116,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				757615CA15F2F9473FFC6983 /* Assets.xcassets in Resources */,
+				0F969A760D18B7EF576A0DA2 /* mobile.html in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
