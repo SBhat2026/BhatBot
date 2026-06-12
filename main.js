@@ -492,8 +492,15 @@ function jobsStatusBlock() {
 // Four-block system: [cached static] + [mode prompt] + [small retrieved memory] + [live jobs].
 // The mode block goes AFTER the cache_control block so prompt-cache hits survive mode switches
 // (system blocks concatenate, so this is semantically identical to prepending).
+// Live date/time — AFTER the cached static block so the prompt cache survives, giving the
+// tool-less fast path accurate temporal grounding (was answering with a stale date).
+function nowBlock() {
+  try { return 'Current date & time: ' + new Date().toLocaleString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short' }) + '.'; }
+  catch { return ''; }
+}
 function systemBlocks(query) {
   const blocks = [{ type: 'text', text: buildStaticPrompt(), cache_control: { type: 'ephemeral' } }];
+  const nb = nowBlock(); if (nb) blocks.push({ type: 'text', text: nb });
   const modeP = modePrompts.selectModePrompt({ suggestedMode: currentMode });
   if (modeP) blocks.push({ type: 'text', text: modeP });
   const mem = buildMemoryBlock(query || '');
@@ -1465,18 +1472,37 @@ async function browserAction(input) {
         // CRED_REF auto-resolution before we get here; never logged or recorded.
         if (input.url) await page.goto(input.url, { waitUntil: 'domcontentloaded', timeout: 30000 });
         const pw = String(input.credRef || input.password || '');
-        const userField = await page.$('input[type="email"], input[autocomplete="username"], input[name*="user" i], input[name*="email" i], input[id*="user" i], input[id*="email" i], input[type="text"]:not([type="hidden"])');
-        const passField = await page.$('input[type="password"]');
-        if (!passField) return { success: false, error: 'No password field found on the page.', _image: await shot() };
-        if (input.username && userField) { await userField.fill(String(input.username)); }
+        const USER_SEL = 'input[type="email"], input[autocomplete="username"], input[name*="user" i], input[name*="email" i], input[id*="user" i], input[id*="email" i], input[type="text"]:not([type="hidden"])';
+        const NEXT_SEL = 'button[type="submit"], input[type="submit"], button[id*="next" i], button[id*="continue" i], button[name*="next" i], [aria-label*="next" i], button:has-text("Next"), button:has-text("Continue"), button:has-text("Sign in")';
+        const SUBMIT_SEL = 'button[type="submit"], input[type="submit"], button[name*="log" i], button[id*="log" i], button[name*="sign" i], button:has-text("Sign in"), button:has-text("Log in")';
+        let passField = await page.$('input[type="password"]:not([type="hidden"])');
+        // Two-step flow (Google / Microsoft / GitHub-style): the password field isn't on the
+        // first page — fill the username, click Next/Continue, then wait for it to appear.
+        if (!passField && input.username) {
+          const uf = await page.$(USER_SEL);
+          if (uf) {
+            await uf.fill(String(input.username));
+            const next = await page.$(NEXT_SEL);
+            if (next) await next.click().catch(() => {}); else await uf.press('Enter').catch(() => {});
+            // Password field can render on a new page or be revealed in place.
+            passField = await page.waitForSelector('input[type="password"]:not([type="hidden"])', { state: 'visible', timeout: 12000 }).catch(() => null);
+          }
+        }
+        if (!passField) return { success: false, error: 'No password field found (single- or two-step). The page may use a captcha, passkey, or an unrecognized form.', _image: await shot() };
+        // Single-step page that still has a username field → fill it before the password.
+        if (input.username) { const uf2 = await page.$(USER_SEL); if (uf2) { const v = await uf2.inputValue().catch(() => ''); if (!v) await uf2.fill(String(input.username)).catch(() => {}); } }
         await passField.fill(pw);
         let submitted = false;
-        const btn = await page.$('button[type="submit"], input[type="submit"], button[name*="log" i], button[id*="log" i], button[name*="sign" i]');
+        const btn = await page.$(SUBMIT_SEL);
         if (btn) { await btn.click().catch(() => {}); submitted = true; }
         else { await passField.press('Enter').catch(() => {}); submitted = true; }
         await page.waitForLoadState('domcontentloaded', { timeout: 15000 }).catch(() => {});
+        // Heuristic success check: a remaining visible password field usually means the
+        // credentials were rejected (or a 2FA/captcha step is now required).
+        const stillPw = await page.$('input[type="password"]:not([type="hidden"])').catch(() => null);
+        const likelyFailed = !!stillPw;
         // Do NOT rec() — would persist the secret into a workflow file.
-        return { success: true, submitted, url: page.url(), title: await page.title().catch(() => ''), _image: await shot() };
+        return { success: true, submitted, loginLikelyComplete: !likelyFailed, note: likelyFailed ? 'A password field is still visible — login may have failed, or a 2FA/captcha step is now required (try generate_totp).' : undefined, url: page.url(), title: await page.title().catch(() => ''), _image: await shot() };
       }
       default:
         return { success: false, error: 'Unknown browser action' };
