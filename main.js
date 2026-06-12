@@ -238,6 +238,18 @@ goes on screen, what you say aloud stays brief. Brief acknowledgment, execute,
 brief result. Don't narrate the middle. Reference past work when relevant ("like
 the FABLE retrieval refactor", "same pattern as PRISM").
 
+Sound like a person, not a manual. Use contractions, vary sentence length, let the
+rhythm breathe — a short punchy line after a longer one. Plain words over jargon when
+either works. Avoid stock AI tics: "Let me…", "I'll go ahead and…", "It's worth noting",
+"In summary", "Feel free to". Just say the thing.
+
+SPOKEN replies especially: write them the way you'd SAY them. No markdown, no bullets, no
+raw code, paths, or URLs in anything that gets read aloud — say "the main file" or "your
+config", not "tilde slash dot bhatbot slash main dot js". Read money and numbers naturally
+("about five dollars", "roughly twenty percent", "version one point two"). If a detailed
+answer has code or paths, put the full thing on screen and wrap a clean spoken summary in
+<speak>…</speak>.
+
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 KNOWLEDGE POSTURE
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -3575,8 +3587,8 @@ async function kokoroSynth(text, opts = {}) {
   const c = loadConfig();
   const id = kokoroNextId++;
   const voice = (opts.voice && KOKORO_VOICES.includes(opts.voice)) ? opts.voice : (c.kokoroVoice || 'bm_george');
-  let speed = Number(opts.speed != null ? opts.speed : (c.kokoroSpeed != null ? c.kokoroSpeed : 1.0));
-  if (!isFinite(speed)) speed = 1.0;
+  let speed = Number(opts.speed != null ? opts.speed : (c.kokoroSpeed != null ? c.kokoroSpeed : (c.ttsSpeed != null ? c.ttsSpeed : 1.08)));
+  if (!isFinite(speed)) speed = 1.08;
   speed = Math.max(0.6, Math.min(1.4, speed));   // clamp to a sane, non-robotic range
   const req = { id, text: String(text).slice(0, 2000), voice, speed, lang: c.kokoroLang || 'en-gb' };
   const msg = await new Promise((resolve) => {
@@ -3605,7 +3617,7 @@ async function elevenLabsSynth(t, c) {
   const model = c.ttsModel || 'eleven_flash_v2_5';
   const r = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}?output_format=mp3_44100_128&optimize_streaming_latency=3`, {
     method: 'POST', headers: { 'xi-api-key': c.elevenLabsKey, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text: t, model_id: model, voice_settings: { stability: 0.4, similarity_boost: 0.75, style: 0.2, use_speaker_boost: false } })
+    body: JSON.stringify({ text: t, model_id: model, voice_settings: { stability: 0.4, similarity_boost: 0.75, style: 0.2, use_speaker_boost: false, speed: Math.max(0.7, Math.min(1.2, Number(c.ttsSpeed) || 1.08)) } })
   });
   if (r.ok) { const buf = Buffer.from(await r.arrayBuffer()); return { success: true, audio: buf.toString('base64'), mimeType: 'audio/mpeg', via: 'elevenlabs' }; }
   const errText = (await r.text()).slice(0, 200);
@@ -3625,11 +3637,55 @@ async function openaiSynth(t, c) {
   return { success: true, audio: buf.toString('base64'), mimeType: 'audio/mpeg', via: 'openai' };
 }
 
+// Make text sound HUMAN when spoken: expand symbols to words, say filenames/domains with
+// "dot", reduce paths to their basename, strip markdown/code/URLs that read as gibberish.
+// Applied ONLY on the audio path (synthesizeSpeech) — the on-screen text keeps its symbols.
+function normalizeForSpeech(input) {
+  let s = String(input || '');
+  // 1. Things that should never be read aloud.
+  s = s.replace(/```[\s\S]*?```/g, ' ');                       // fenced code blocks
+  s = s.replace(/`([^`]+)`/g, '$1');                           // inline code → its text
+  s = s.replace(/!?\[([^\]]+)\]\([^)]+\)/g, '$1');             // [label](url) / ![alt](src) → label
+  s = s.replace(/https?:\/\/\S+/gi, ' ').replace(/\bwww\.\S+/gi, ' ');   // bare URLs (visual, not spoken)
+  // 2. Markdown emphasis / structure → plain text.
+  s = s.replace(/(\*\*|__)(.*?)\1/g, '$2');                    // bold
+  s = s.replace(/(\*|_)(?=\S)(.*?)(?<=\S)\1/g, '$2');          // italic
+  s = s.replace(/^\s{0,3}#{1,6}\s+/gm, '');                    // headers
+  s = s.replace(/^\s*>\s?/gm, '');                             // blockquote
+  s = s.replace(/^\s*([-*•]|\d+\.)\s+/gm, '');                 // list markers (-, *, •, 1.)
+  // 3. File paths → just the basename ("~/.bhatbot/main.js" → "main.js"); the dirs are noise.
+  //    Anchored to ~, .. or / after whitespace/start so dates like 6/12/2026 aren't mangled.
+  s = s.replace(/(^|\s)((?:~|\.\.?)?\/(?:[\w.@%+-]+\/)+[\w.@%+-]*)/g, (_m, pre, p) => pre + (p.replace(/\/+$/, '').split('/').pop() || ''));
+  // 4. Common abbreviations → spoken form.
+  s = s.replace(/\be\.g\.,?/gi, 'for example,').replace(/\bi\.e\.,?/gi, 'that is,')
+       .replace(/\betc\.?/gi, 'etcetera').replace(/\bvs\.?/gi, 'versus')
+       .replace(/\bw\/\s/gi, 'with ').replace(/\baka\b/gi, 'also known as');
+  // 5. Currency: "$5"→"5 dollars", "$5.99"→"5 dollars and 99 cents", "$1,200"→"1200 dollars".
+  s = s.replace(/\$\s?(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d{2}))?/g, (_m, dollars, cents) => {
+    const d = dollars.replace(/,/g, '');
+    return d + (d === '1' ? ' dollar' : ' dollars') + (cents ? ' and ' + cents + ' cents' : '');
+  });
+  // 6. In-token dots → "dot" (filenames/domains: "main.js"→"main dot js"); decimals like 3.5
+  //    stay as digits (TTS says "three point five") and sentence-ending periods stay as pauses.
+  s = s.replace(/([A-Za-z])\.([A-Za-z0-9])/g, '$1 dot $2');
+  // 7. Symbols → words.
+  s = s.replace(/&/g, ' and ').replace(/%/g, ' percent')
+       .replace(/(\S)@(\S)/g, '$1 at $2').replace(/\s@\s/g, ' at ')
+       .replace(/#(\d+)/g, 'number $1').replace(/#/g, ' hash ')
+       .replace(/\s\+\s/g, ' plus ').replace(/(\w)\s*=\s*(\w)/g, '$1 equals $2')
+       .replace(/([A-Za-z])\/([A-Za-z])/g, '$1 slash $2')      // TCP/IP, and/or
+       .replace(/°/g, ' degrees').replace(/\$(?=[A-Za-z])/g, '')
+       .replace(/[~^|<>*$]/g, ' ');                            // leftover markup → space
+  // 8. Tidy whitespace; keep ., ! ? ; : for natural pausing.
+  s = s.replace(/[ \t]{2,}/g, ' ').replace(/\s+([.,!?;:])/g, '$1').trim();
+  return s || String(input || '').trim();
+}
+
 // Multi-provider TTS — kokoro (local neural, default), elevenlabs (cloud JARVIS), openai (onyx), piper (offline)
 // Plain function so both the IPC handler (desktop HUD) and the express server (phone PWA) can call it.
 async function synthesizeSpeech(text, opts = {}) {
   const c = loadConfig();
-  const t = (text || '').trim();
+  const t = normalizeForSpeech((text || '').trim());   // humanize symbols/markdown for the spoken audio
   if (!t) return { error: 'empty text' };
   // Default to local Kokoro when installed (free, offline); honor explicit ttsProvider otherwise.
   const provider = c.ttsProvider || (kokoroAvailable() ? 'kokoro' : (c.elevenLabsKey ? 'elevenlabs' : (c.openaiKey ? 'openai' : (c.piperBin ? 'piper' : null))));
