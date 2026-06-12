@@ -1,0 +1,18 @@
+# Fly.io deploy config. `fly launch --no-deploy` then `fly deploy`. Set secrets with:
+#   fly secrets set BHATBOT_TOKEN=... ANTHROPIC_API_KEY=... ELEVENLABS_API_KEY=... OPENAI_API_KEY=...
+# Free-tier friendly: 1 shared-cpu machine, scales to zero when idle (first request wakes it).
+app = "bhatbot-cloud"
+primary_region = "ewr"  # Newark — close to NJ
+
+[build]
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"
