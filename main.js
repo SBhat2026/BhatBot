@@ -3741,10 +3741,20 @@ function setTtsActive(on) {
   ttsActive = on;
   try { if (wakeProc && wakeProc.stdin && wakeProc.stdin.writable) wakeProc.stdin.write(on ? 'TTS 1\n' : 'TTS 0\n'); } catch {}
 }
+// Self-wake guard: when BhatBot's OWN speech contains a wake word ("Jarvis"/"BhatBot"),
+// the mic hears it through the speakers and self-triggers. While such a clip plays we tell
+// the listener to ignore wake hits (the listener also adds a short trailing grace for the
+// echo tail). Energy-VAD barge-in is unaffected — Siddhant can still talk over it; only the
+// wake WORD is suppressed, and only for clips that actually say the name.
+const WAKE_WORD_RE = /\b(jarvis|bhat[\s-]?bot)\b/i;
+function setWakeMute(on) {
+  try { if (wakeProc && wakeProc.stdin && wakeProc.stdin.writable) wakeProc.stdin.write(on ? 'MUTE 1\n' : 'MUTE 0\n'); } catch {}
+}
 function stopDesktopTTS() {
   ttsPlaySeq++;
   if (ttsPlayProc) { try { ttsPlayProc.kill(); } catch {} ttsPlayProc = null; }
   setTtsActive(false);
+  setWakeMute(false);   // clear any name-clip wake suppression on interrupt
 }
 // Sentence chunks for streaming speech (synth one, play it while the next synthesizes).
 function splitForSpeech(text) {
@@ -3755,14 +3765,16 @@ function splitForSpeech(text) {
   if (buf) out.push(buf);
   return out.filter((s) => s.length);
 }
-function playFile(file, seq) {
+function playFile(file, seq, text) {
   return new Promise((res) => {
     if (seq !== ttsPlaySeq) return res();
     ttsLastAudioSeq = seq;                               // ack watchdog: audio reached the speaker for this turn
     latMark('first-audio-playing');
     setTtsActive(true);                                  // arm barge-in for the duration of this clip
+    const sayingName = WAKE_WORD_RE.test(String(text || ''));
+    if (sayingName) setWakeMute(true);                   // don't let BhatBot's own "Jarvis" self-trigger the wake word
     ttsPlayProc = spawn('afplay', [file], { env: { ...process.env, PATH: EXEC_PATH } });
-    const done = () => { fs.unlink(file, () => {}); if (seq === ttsPlaySeq) setTtsActive(false); res(); };
+    const done = () => { fs.unlink(file, () => {}); if (seq === ttsPlaySeq) setTtsActive(false); if (sayingName) setWakeMute(false); res(); };
     ttsPlayProc.on('close', done);
     ttsPlayProc.on('error', done);
   });
@@ -3795,7 +3807,7 @@ async function speakDesktop(text, opts = {}) {
     const ext = (r.mimeType || '').includes('wav') ? 'wav' : 'mp3';
     const out = path.join(os.tmpdir(), `bhatbot-say-${seq}-${i}.${ext}`);
     try { fs.writeFileSync(out, Buffer.from(r.audio, 'base64')); } catch { continue; }
-    await playFile(out, seq);
+    await playFile(out, seq, chunks[i]);
     if (seq !== ttsPlaySeq) return { success: false, superseded: true };
   }
   return { success: true, via: 'tts' };
@@ -4008,7 +4020,7 @@ async function ttsStreamDrain(seq) {
       const ext = (r.mimeType || '').includes('wav') ? 'wav' : 'mp3';
       const out = path.join(os.tmpdir(), `bb-stream-${seq}-${Math.random().toString(36).slice(2)}.${ext}`);
       try { fs.writeFileSync(out, Buffer.from(r.audio, 'base64')); } catch { continue; }
-      await playFile(out, seq);
+      await playFile(out, seq, s);
     }
   } finally { ttsStreamDraining = false; }
 }

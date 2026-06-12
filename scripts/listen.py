@@ -38,17 +38,29 @@ BARGE = os.environ.get("BHATBOT_BARGE", "1") == "1"
 BARGE_THRESH = float(os.environ.get("BHATBOT_BARGE_THRESH", "0.085"))
 BARGE_FRAMES = int(os.environ.get("BHATBOT_BARGE_FRAMES", "3"))  # ~240ms sustained (80ms/frame)
 _tts_active = False
+# Wake suppression: main sends "MUTE 1" while BhatBot is SPEAKING a clip that contains its
+# own name ("Jarvis"/"BhatBot"), so the mic echo of that name doesn't self-trigger the wake
+# word. "MUTE 0" lifts it, plus a short trailing grace for the buffered echo tail. Energy-VAD
+# barge-in is untouched — the user can still talk over playback; only the wake WORD is gated.
+_wake_muted = False
+_wake_mute_grace_until = 0.0
+WAKE_MUTE_GRACE = 0.6  # seconds after a name clip ends to keep ignoring wake (echo tail)
 
 
 def _stdin_reader():
-    # Main process tells us when TTS is playing so VAD only arms then.
-    global _tts_active
+    # Main process tells us when TTS is playing / saying its own name.
+    global _tts_active, _wake_muted, _wake_mute_grace_until
     for line in sys.stdin:
         s = line.strip()
         if s == "TTS 1":
             _tts_active = True
         elif s == "TTS 0":
             _tts_active = False
+        elif s == "MUTE 1":
+            _wake_muted = True
+        elif s == "MUTE 0":
+            _wake_muted = False
+            _wake_mute_grace_until = time.time() + WAKE_MUTE_GRACE
 
 # In-vocab homophones for "hey bhatbot" (Vosk small can't say "bhatbot").
 # Confirmed-working set: "hey bhatbot" reliably lands as one of these two.
@@ -123,6 +135,11 @@ def main():
         nonlocal last_wake
         now = time.time()
         if now - last_wake < DEBOUNCE:
+            return
+        # Suppress while BhatBot is saying its own name (or just finished) — that's its own
+        # voice echoing back, not Siddhant. Only HE should be able to wake it.
+        if _wake_muted or now < _wake_mute_grace_until:
+            derr("WAKE suppressed (self-name) via", why)
             return
         last_wake = now
         derr("WAKE via", why)
