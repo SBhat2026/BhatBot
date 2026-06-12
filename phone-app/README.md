@@ -8,12 +8,35 @@ Mic, wake word, the Chat/Activity/Nexus tabs, and voice replies all work inside 
 The only thing baked into the binary is the funnel URL + token (`Sources/Config.swift`).
 Edit that one line if the host/token ever changes, then rebuild once.
 
-## Build it (one time)
+## Can you install an app on iPhone without the App Store? Yes.
 
+iOS only *runs* apps that are **code-signed**. The App Store is one signer; it is not the
+only one. The three legitimate ways to sign + install your own app on your own phone:
+
+| Path | Cost | Signing | Expires? | Best for |
+|------|------|---------|----------|----------|
+| **AltStore / SideStore** | free | re-signs on-device with your free Apple ID, automatically over Wi-Fi | **no** (auto-renews) | "install it and forget it" ★ |
+| **Xcode direct (⌘R)** | free | your free Apple ID, once | every **7 days** (press ⌘R again) | quick, if you have the phone plugged in |
+| **Apple Developer Program** | $99/yr | real dev/distribution cert | 1 year | zero re-signing, optional TestFlight |
+
+The one thing that *cannot* happen headlessly is the signing itself — Apple ties the
+signature to **your** Apple ID, which only you can log into. So this repo builds the app
+right up to that last step and hands you a ready-to-sign `.ipa`.
+
+## Build it
+
+**Fastest — the AltStore/SideStore path (recommended, no expiry):**
+```bash
+bash ~/bhatbot/phone-app/build-ipa.sh
+```
+Produces `phone-app/dist/BhatBot-unsigned.ipa` (already pre-built for you). AirDrop or
+open that file in AltStore/SideStore on the iPhone — it signs + installs it, and re-signs
+it automatically every few days so it stays put.
+
+**Or the Xcode path:**
 ```bash
 bash ~/bhatbot/phone-app/build.sh
 ```
-
 That installs `xcodegen` (if needed), generates `BhatBot.xcodeproj`, and opens Xcode.
 
 ## Install on your iPhone — pick ONE path
