@@ -13,6 +13,7 @@
 // always-on. Config via env (.env.example). No dependency on the desktop main.js.
 // ===========================================================================
 const express = require('express');
+const notion = require('./notion');   // shared Notion memory bank (no-ops if NOTION_TOKEN unset)
 
 const PORT = process.env.PORT || 8790;
 const TOKEN = process.env.BHATBOT_TOKEN || '';
@@ -52,7 +53,7 @@ function normalizeForSpeech(input) {
 }
 
 // ---- Anthropic (no SDK; plain fetch with backoff) ----
-async function claude(messages, { retries = 3 } = {}) {
+async function claude(messages, { retries = 3, system = SYSTEM } = {}) {
   let attempt = 0;
   while (true) {
     let r;
@@ -60,7 +61,7 @@ async function claude(messages, { retries = 3 } = {}) {
       r = await fetch('https://api.anthropic.com/v1/messages', {
         method: 'POST',
         headers: { 'content-type': 'application/json', 'x-api-key': ANTHROPIC_KEY, 'anthropic-version': '2023-06-01' },
-        body: JSON.stringify({ model: MODEL, max_tokens: 1024, system: SYSTEM, messages })
+        body: JSON.stringify({ model: MODEL, max_tokens: 1024, system, messages })
       });
     } catch (e) { if (attempt++ >= retries) throw e; await sleep(800 * attempt); continue; }
     if (r.status === 429 || r.status === 529 || r.status >= 500) {
@@ -123,21 +124,47 @@ app.use((req, res, next) => {
 });
 const guard = (req, res, next) => (req.params.token === TOKEN && TOKEN) ? next() : res.status(401).json({ error: 'unauthorized' });
 
-app.get('/health', (_q, s) => s.json({ ok: true, name: 'bhatbot-cloud', mac: MAC_RELAY_URL ? 'relay-configured' : 'standalone' }));
+app.get('/health', (_q, s) => s.json({ ok: true, name: 'bhatbot-cloud', mac: MAC_RELAY_URL ? 'relay-configured' : 'standalone', memory: notion.configured() ? 'notion' : 'in-process' }));
 
-// rolling conversation per token (in-memory; swap for a DB later for durability across restarts)
+// Rolling conversation per token. In-memory survives between turns within a run; the DURABLE
+// layer is Notion (recall + persisted facts), shared with the Mac and other agents — so memory
+// outlives restarts and is the same bank everywhere.
 const histories = new Map();
+
+// Explicit-memory cue: when Siddhant says "remember …" / "note that …" / "my X is Y", persist
+// the fact to the shared Notion bank so every agent (Mac, cloud, future) sees it.
+const REMEMBER_RE = /\b(remember(?:\s+that)?|note\s+that|don'?t\s+forget|keep\s+in\s+mind|for\s+the\s+record)\b[:,]?\s*(.+)/i;
+function extractFact(text) {
+  const m = text.match(REMEMBER_RE);
+  if (m && m[2] && m[2].trim().length > 3) return m[2].trim().replace(/[.\s]+$/, '');
+  if (/\bmy\s+\w+\s+(is|are|=)\s+\S/i.test(text) && text.length < 200) return text.trim();
+  return null;
+}
+
 app.post('/api/:token/chat', guard, async (req, res) => {
   try {
     const text = String((req.body && req.body.text) || '').trim();
     if (!text) return res.json({ error: 'empty' });
     if (req.body.new_conversation) histories.delete(TOKEN);
     const hist = histories.get(TOKEN) || [];
+
+    // 1) RECALL relevant durable facts from the shared bank and fold them into the system.
+    let sys = SYSTEM;
+    let recalled = [];
+    try { recalled = await notion.recallSmart(text, 5); } catch {}
+    if (recalled.length) sys += '\n\nRELEVANT MEMORY (from Siddhant\'s shared knowledge bank — use silently, do not enumerate):\n' + recalled.map((f) => '- ' + f).join('\n');
+
     hist.push({ role: 'user', content: text });
-    const reply = await claude(hist.slice(-MAX_HISTORY));
+    const reply = await claude(hist.slice(-MAX_HISTORY), { system: sys });
     hist.push({ role: 'assistant', content: reply });
     histories.set(TOKEN, hist.slice(-MAX_HISTORY));
-    res.json({ text: reply, _provider: 'cloud:anthropic' });
+
+    // 2) PERSIST: explicit "remember …" facts as durable memory; every turn as a light daily log.
+    const fact = extractFact(text);
+    if (fact) notion.appendMemory(fact, { tags: ['phone'], source: 'user', confidence: 0.9 }).catch(() => {});
+    notion.logActivity(text.slice(0, 200) + (reply ? ' → ' + reply.slice(0, 120) : '')).catch(() => {});
+
+    res.json({ text: reply, _provider: 'cloud:anthropic', _memory: notion.configured() ? { recalled: recalled.length, saved: !!fact } : undefined });
   } catch (e) { res.json({ error: String(e && e.message || e) }); }
 });
 

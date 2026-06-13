@@ -41,8 +41,28 @@ All read config from env vars / secrets — **never commit real keys**.
 
 Optionally set `MAC_RELAY_URL` to the Mac's tunnel so desktop tools relay through when it's up.
 
+## Shared memory (Notion) — same bank as the Mac & other agents
+With `NOTION_TOKEN` + `NOTION_MEMORY_DB` set, the cloud chat **recalls** relevant durable facts
+before answering and **persists** what you tell it to remember — into the *same* Notion bank the
+desktop BhatBot and any other agent use. So the phone keeps full long-term memory even with the
+Mac asleep, and everything written from any surface is visible everywhere.
+
+1. On the Mac, bootstrap the bank once (creates the databases, writes ids to config):
+   ```bash
+   NOTION_TOKEN=ntn_xxx node ~/bhatbot/scripts/notion-setup.js "<Notion page URL>"
+   ```
+   (See the script header for the 2-minute Notion integration prep.)
+2. Copy the ids it printed (also in `~/.bhatbot/config.json` → `notion.*`) into the cloud env:
+   `NOTION_TOKEN`, `NOTION_MEMORY_DB`, `NOTION_DAILYLOG_DB`. On Fly:
+   ```bash
+   fly secrets set NOTION_TOKEN=ntn_xxx NOTION_MEMORY_DB=… NOTION_DAILYLOG_DB=…
+   ```
+`/health` reports `"memory":"notion"` once it's live (`"in-process"` otherwise). Persistence:
+saying "remember …" / "note that …" / "my X is Y" writes a durable fact; every turn also drops
+a line in the Daily Log.
+
 ## Security note
 This puts your Anthropic / ElevenLabs / OpenAI keys on the host as secrets, and the API is
 gated only by the path token (same model as today). Use a host whose secret store you trust,
-and rotate the token if it leaks. Memory/history is in-process for now (resets on restart) —
-a durable store (Postgres/Redis) is the next increment.
+and rotate the token if it leaks. Conversation turns are in-process (reset on restart), but
+durable long-term memory lives in the shared Notion bank (see above) — same as the Mac.
