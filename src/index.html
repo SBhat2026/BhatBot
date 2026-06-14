@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta http-equiv="Content-Security-Policy"
-  content="default-src 'self' file:; style-src 'self' 'unsafe-inline' file: https://fonts.googleapis.com; font-src https://fonts.gstatic.com; script-src 'self' 'unsafe-inline' file:; connect-src 'self';" />
+  content="default-src 'self' file:; style-src 'self' 'unsafe-inline' file: https://fonts.googleapis.com; font-src https://fonts.gstatic.com; script-src 'self' 'unsafe-inline' file:; img-src 'self' file: data: blob:; connect-src 'self';" />
 <title>Bhatbot</title>
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -103,6 +103,22 @@
   .act-row.ok { border-color: var(--ok); } .act-row.fail { border-color: var(--err); color: #e89; }
   .act-row .t { color: var(--text-dim2); font-size: 11px; margin-right: 6px; }
 
+  /* background job cards — one per delegated agent task, live via job-update IPC */
+  #jobs-board { padding: 10px 14px 0; display: flex; flex-direction: column; gap: 8px; }
+  #jobs-board:empty { display: none; }
+  .job-card { border: 1px solid var(--line); border-left: 3px solid var(--accent-dim); border-radius: 6px; padding: 8px 10px; background: rgba(0,200,255,0.03); animation: slidein .2s ease; }
+  .job-card[data-status="running"] { border-left-color: var(--accent); }
+  .job-card[data-status="done"] { border-left-color: var(--ok); opacity: .72; }
+  .job-card[data-status="failed"] { border-left-color: var(--err); }
+  .job-card[data-status="blocked"] { border-left-color: #e8b339; }
+  .job-card[data-status="cancelled"] { opacity: .45; }
+  .job-head { display: flex; justify-content: space-between; gap: 8px; font-size: 12.5px; }
+  .job-head .jname { color: var(--text); word-break: break-word; }
+  .job-head .jstatus { color: var(--text-dim); font-size: 11px; letter-spacing: .06em; text-transform: uppercase; white-space: nowrap; }
+  .job-bar { height: 3px; background: rgba(255,255,255,0.07); border-radius: 2px; margin: 6px 0 4px; overflow: hidden; }
+  .job-bar i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .4s ease; }
+  .job-note { font-size: 11.5px; color: var(--text-dim2); word-break: break-word; }
+
   /* ---------------- chat ---------------- */
   #chat { flex: 1; overflow-y: auto; padding: 14px 12px; display: flex; flex-direction: column; gap: 12px; }
   #chat::-webkit-scrollbar { width: 7px; }
@@ -125,11 +141,52 @@
   .tool-row.fail .ic { color: var(--err); }
   .tool-row .arg { color: var(--text-dim2); }
 
-  .thinking { align-self: flex-start; display: flex; gap: 4px; padding: 6px 2px; }
-  .thinking span { width: 5px; height: 5px; border-radius: 50%; background: var(--accent); animation: pulse 1.2s infinite; }
-  .thinking span:nth-child(2) { animation-delay: .2s; }
-  .thinking span:nth-child(3) { animation-delay: .4s; }
+  /* arc-reactor processing indicator (J.A.R.V.I.S. core) */
+  .thinking { align-self: flex-start; padding: 4px 2px; }
+  .reactor { position: relative; width: 30px; height: 30px; }
+  .reactor i { position: absolute; inset: 0; border-radius: 50%; border: 1px dashed rgba(0,200,255,.5); }
+  .reactor i.r1 { animation: spin 2.6s linear infinite; }
+  .reactor i.r2 { inset: 5px; border-style: dotted; border-color: rgba(0,200,255,.75); animation: spinrev 1.7s linear infinite; }
+  .reactor i.r3 { inset: 10px; border-color: rgba(150,230,255,.9); animation: spin 1s linear infinite; }
+  .reactor .core { position: absolute; inset: 12px; border-radius: 50%; background: #bdefff;
+    box-shadow: 0 0 10px #00c8ff, 0 0 22px rgba(0,200,255,.55); animation: corepulse 1.4s ease infinite; }
+  @keyframes spinrev { to { transform: rotate(-360deg); } }
+  @keyframes corepulse { 0%,100% { transform: scale(.85); opacity: .8; } 50% { transform: scale(1.12); opacity: 1; } }
   @keyframes pulse { 0%,100% { opacity: .25; transform: scale(.8); } 50% { opacity: 1; transform: scale(1.15); } }
+
+  /* markdown-rendered bot replies */
+  .md-body { white-space: normal; }
+  .md-body .mdh { color: var(--accent); font-weight: 700; letter-spacing: .06em; margin: 8px 0 3px; font-size: 14px; }
+  .md-body .mdli { padding: 1px 0 1px 15px; position: relative; }
+  .md-body .mdli::before { content: '▸'; position: absolute; left: 1px; color: var(--accent-dim); }
+  .md-body .mdli.num::before { content: ''; }
+  .md-body .mdli.num > span { color: var(--accent-dim); }
+  .md-body code.ic { background: rgba(0,200,255,.08); border: 1px solid rgba(0,200,255,.16); border-radius: 3px; padding: 0 4px; font-size: .92em; color: #9fe2ff; }
+  .md-body pre.codeblk { background: #0a1119; border: 1px solid var(--line); border-left: 2px solid var(--accent-dim);
+    border-radius: 6px; padding: 9px 11px; margin: 7px 0; overflow-x: auto; font-size: 13px; line-height: 1.45; color: #a8c5dd; white-space: pre; }
+  .md-body .mdgap { height: 7px; }
+  .md-body .mdlink { color: var(--accent); text-decoration: underline dotted; }
+  .msg.bot.materialize { animation: matz .45s ease; }
+  @keyframes matz { 0% { opacity: 0; filter: brightness(2.4) blur(2px); transform: translateY(6px); }
+    60% { opacity: 1; filter: brightness(1.35) blur(.4px); } 100% { filter: none; transform: none; } }
+
+  /* holographic cards — generated images + spinning 3D models materialize in chat */
+  .holo { align-self: flex-start; width: min(440px, 92%); border: 1px solid rgba(0,200,255,.28); border-radius: 8px;
+    background: linear-gradient(180deg, rgba(0,200,255,.05), rgba(0,40,60,.10)); padding: 8px; position: relative;
+    overflow: hidden; box-shadow: 0 0 18px rgba(0,200,255,.10), inset 0 0 24px rgba(0,200,255,.04); animation: holoin .5s ease; }
+  @keyframes holoin { from { opacity: 0; transform: scale(.96) translateY(8px); filter: brightness(2.2); } to { opacity: 1; } }
+  .holo .hbar { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--accent); letter-spacing: .14em; margin-bottom: 6px; }
+  .holo .hbar::after { content: ''; flex: 1; height: 1px; background: linear-gradient(90deg, rgba(0,200,255,.4), transparent); }
+  .holo img { display: block; max-width: 100%; max-height: 340px; border-radius: 4px; cursor: zoom-in; transition: .2s; }
+  .holo img.zoom { max-height: none; cursor: zoom-out; }
+  .holo .scan { position: absolute; left: 0; right: 0; height: 46px; top: -50px; pointer-events: none;
+    background: linear-gradient(180deg, transparent, rgba(0,220,255,.18), transparent); animation: scanpass 1.1s ease .1s 1 forwards; }
+  @keyframes scanpass { from { top: -50px; } to { top: 110%; } }
+  .holo .h3d { width: 100%; height: 260px; border-radius: 4px; background: radial-gradient(circle at 50% 60%, rgba(0,200,255,.06), transparent 70%); }
+  .holo .h3d canvas { display: block; border-radius: 4px; }
+  .holo .hfoot { font-size: 10.5px; color: var(--text-dim2); margin-top: 6px; display: flex; align-items: center; gap: 10px; }
+  .holo .hbtn { cursor: pointer; color: var(--accent); border: 1px solid var(--accent-dim); border-radius: 4px; padding: 1px 7px; }
+  .holo .hbtn:hover { background: rgba(0,200,255,.1); }
 
   /* ---------------- quick chips ---------------- */
   #chips { display: flex; gap: 6px; flex-wrap: wrap; padding: 0 12px 8px; }
@@ -265,6 +322,7 @@
 
   <div id="activity-panel" class="stage-panel">
     <div class="panel-head"><b>📊 ACTIVITY</b><span class="panel-back" data-back>← Chat</span></div>
+    <div id="jobs-board"></div>
     <div id="activity-list"></div>
   </div>
 
@@ -462,15 +520,35 @@ function addUser(text) {
   chat.appendChild(d);
   scroll();
 }
+// Minimal safe markdown → HTML for bot replies (code blocks, inline code, bold/italic,
+// headers, bullets, numbered lists, links). Everything is HTML-escaped first.
+function mdRender(md) {
+  let s = String(md || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const codeBlocks = [];
+  s = s.replace(/```\w*\n?([\s\S]*?)```/g, (_, code) => { codeBlocks.push(code.replace(/\n$/, '')); return '\u0000B' + (codeBlocks.length - 1) + '\u0000'; });
+  s = s
+    .replace(/`([^`\n]+)`/g, '<code class="ic">$1</code>')
+    .replace(/^#{1,4}\s+(.+)$/gm, '<div class="mdh">$1</div>')
+    .replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>')
+    .replace(/^\s*[-•]\s+(.+)$/gm, '<div class="mdli">$1</div>')
+    .replace(/^\s*(\d+)\.\s+(.+)$/gm, '<div class="mdli num"><span>$1.</span> $2</div>')
+    .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<span class="mdlink" title="$2">$1</span>');
+  s = s.replace(/\n{2,}/g, '<div class="mdgap"></div>').replace(/\n/g, '<br>')
+       .replace(/<\/div><br>/g, '</div>');
+  s = s.replace(/\u0000B(\d+)\u0000(<br>)?/g, (_, i) => `<pre class="codeblk">${codeBlocks[+i]}</pre>`);
+  return s;
+}
 function addBot(text) {
   const d = document.createElement('div');
-  d.className = 'msg bot';
+  d.className = 'msg bot materialize';
   const lbl = document.createElement('span');
   lbl.className = 'label'; lbl.textContent = 'BHATBOT';
   const body = document.createElement('span');
+  body.className = 'md-body';
+  body.innerHTML = mdRender(text || '(no response)');
   d.appendChild(lbl); d.appendChild(body);
   chat.appendChild(d);
-  typeOut(body, text || '(no response)');
+  scroll();
   return d;
 }
 // When a long reply is spoken as a summary, offer a click to hear the whole thing.
@@ -500,8 +578,40 @@ function typeOut(el, text) {
 function addThinking() {
   const d = document.createElement('div');
   d.className = 'thinking'; d.id = 'thinking';
-  d.innerHTML = '<span></span><span></span><span></span>';
+  d.innerHTML = '<div class="reactor"><i class="r1"></i><i class="r2"></i><i class="r3"></i><span class="core"></span></div>';
   chat.appendChild(d); scroll();
+}
+
+// ---- holographic in-chat cards (Jarvis HUD): generated images + spinning 3D models ----
+function addHoloImage(p, label) {
+  const d = document.createElement('div');
+  d.className = 'holo';
+  d.innerHTML = '<div class="hbar">◈ ' + (label || 'VISUAL') + '</div><div class="scan"></div>';
+  const img = document.createElement('img');
+  img.src = 'data:' + (p.mime || 'image/jpeg') + ';base64,' + p.image;
+  img.addEventListener('click', () => img.classList.toggle('zoom'));
+  d.appendChild(img);
+  chat.appendChild(d); scroll();
+}
+async function addHolo3D(modelPath) {
+  const d = document.createElement('div');
+  d.className = 'holo';
+  d.innerHTML = '<div class="hbar">⬡ 3D MODEL · ' + modelPath.split('/').pop().replace(/</g, '&lt;') + '</div><div class="scan"></div>';
+  const mount = document.createElement('div'); mount.className = 'h3d';
+  d.appendChild(mount);
+  const foot = document.createElement('div');
+  foot.className = 'hfoot';
+  foot.innerHTML = '<span class="hbtn">open in viewer</span><span>drag to orbit · auto-spinning</span>';
+  foot.querySelector('.hbtn').addEventListener('click', () => { try { window.bhatbot.open3DViewer(modelPath); } catch {} });
+  d.appendChild(foot);
+  chat.appendChild(d); scroll();
+  try {
+    const m = await window.bhatbot.readModel(modelPath);
+    if (m && window.holoSpin) window.holoSpin(mount, m);
+    else mount.innerHTML = '<div style="color:#46627d;font-size:12px;padding:16px">preview unavailable — use "open in viewer"</div>';
+  } catch {
+    mount.innerHTML = '<div style="color:#46627d;font-size:12px;padding:16px">preview failed — use "open in viewer"</div>';
+  }
 }
 function rmThinking() { const t = $('#thinking'); if (t) t.remove(); }
 
@@ -557,7 +667,12 @@ function closeLiveBubble() { liveBubble = null; }
 window.bhatbot.onToolUpdate((u) => {
   if (u.type === 'token') { rmThinking(); streamedThisTurn = true; liveAppend(u.text); }
   else if (u.type === 'tool_start') { rmThinking(); closeLiveBubble(); toolStart(u); addThinking(); actLog(u.name + ' ' + shortArg(u.name, u.input), 'run'); }
-  else if (u.type === 'tool_done') { toolDone(u); const ok = u.result && u.result.success !== false; actLog((u.name || 'tool') + (ok ? ' ✓' : ' ✗'), ok ? 'ok' : 'fail'); }
+  else if (u.type === 'tool_done') {
+    toolDone(u); const ok = u.result && u.result.success !== false;
+    actLog((u.name || 'tool') + (ok ? ' ✓' : ' ✗'), ok ? 'ok' : 'fail');
+    if (u.preview) addHoloImage(u.preview, u.name === 'generate_image' ? 'GENERATED IMAGE' : u.name === 'studio_write' ? 'STUDIO RENDER' : 'CAPTURE');
+    if (u.model3d) addHolo3D(u.model3d);
+  }
   else if (u.type === 'thinking' && u.text) { rmThinking(); addThought(u.text); addThinking(); actLog('… ' + u.text.slice(0, 120)); }
   else if (u.type === 'provider_used') {
     lastProvider = u.provider === 'darkbloom'
@@ -567,6 +682,28 @@ window.bhatbot.onToolUpdate((u) => {
   else if (u.type === 'guidance_applied') { rmThinking(); addThought('↳ guidance applied: ' + u.text); addThinking(); actLog('↳ guidance: ' + u.text); }
   else if (u.kind === 'notify') { actLog('🔔 notify: ' + (u.text || ''), u.urgency === 'high' ? 'fail' : ''); }
 });
+// Background job cards (one per delegated agent task) + plain-English relay lines in chat.
+const jobCards = {};
+window.bhatbot.onJobUpdate && window.bhatbot.onJobUpdate((j) => {
+  renderJobCard(j);
+  if (j.say) { addThought('🛰 ' + j.say); actLog('🛰 ' + j.say, j.status === 'failed' ? 'fail' : j.status === 'done' ? 'ok' : ''); }
+});
+function renderJobCard(j) {
+  const board = document.getElementById('jobs-board'); if (!board) return;
+  let c = jobCards[j.id];
+  if (!c) {
+    c = document.createElement('div');
+    c.className = 'job-card';
+    c.innerHTML = '<div class="job-head"><span class="jname"></span><span class="jstatus"></span></div><div class="job-bar"><i></i></div><div class="job-note"></div>';
+    board.appendChild(c);
+    jobCards[j.id] = c;
+  }
+  c.dataset.status = j.status;
+  c.querySelector('.jname').textContent = (j.kind === 'project' ? '◈ ' : '') + (j.agent ? '[' + j.agent + '] ' : '') + j.name;
+  c.querySelector('.jstatus').textContent = j.status + (j.status === 'running' && j.progress ? ' · ' + Math.round(j.progress * 100) + '%' : '');
+  c.querySelector('.job-bar i').style.width = Math.round((j.progress || 0) * 100) + '%';
+  c.querySelector('.job-note').textContent = j.note || '';
+}
 // Mirror agent events into the Activity panel feed.
 function actLog(text, cls) {
   const list = document.getElementById('activity-list'); if (!list) return;
@@ -652,9 +789,15 @@ async function send(text) {
       history = res.history;
       lastFullReply = res.text || lastFullReply;
       if (streamedThisTurn && res._streamed) {
-        // Text already rendered live + spoken in main during generation. Just finalize:
-        // snap the last bubble to the authoritative text and offer "read full" for long replies.
-        if (liveBubble) { liveBubble.querySelector('.streambody').textContent = res.text || liveBubble.querySelector('.streambody').textContent; if ((res.text || '').length > 300) addReadFull(liveBubble, res.text); }
+        // Text already rendered live + spoken in main during generation. Finalize: snap the
+        // last bubble to the authoritative text, upgraded to rendered markdown.
+        if (liveBubble) {
+          const body = liveBubble.querySelector('.streambody');
+          const finalText = res.text || body.textContent;
+          body.classList.add('md-body');
+          body.innerHTML = mdRender(finalText);
+          if ((res.text || '').length > 300) addReadFull(liveBubble, res.text);
+        }
         else if (res.text) { const b = addBot(res.text); if (res.text.length > 300) addReadFull(b, res.text); }
         closeLiveBubble();
       } else {
@@ -1021,6 +1164,83 @@ ta.focus();
     window.addEventListener('mouseup', () => { if (dragging) { dragging = false; sync(); } });
   })();
 })();
+</script>
+
+<!-- Holographic in-chat 3D viewer: slow Jarvis-style turntable for generate_3d /
+     make_printable outputs, rendered with the same vendored three.js as viewer.html. -->
+<script type="importmap">
+{ "imports": {
+  "three": "./vendor/three/three.module.js",
+  "three/addons/": "./vendor/three/jsm/"
+} }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { STLLoader } from 'three/addons/loaders/STLLoader.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+const activeViewers = [];   // keep at most 2 spinning; older ones freeze on their last frame
+
+window.holoSpin = function (mount, model) {
+  const W = mount.clientWidth || 400, H = mount.clientHeight || 260;
+  const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+  renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+  renderer.setSize(W, H);
+  mount.appendChild(renderer.domElement);
+
+  const scene = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(40, W / H, 0.01, 1000);
+  scene.add(new THREE.HemisphereLight(0xbfe6ff, 0x07121c, 1.2));
+  const key = new THREE.DirectionalLight(0xffffff, 1.5); key.position.set(1, 1.6, 1); scene.add(key);
+  const rim = new THREE.DirectionalLight(0x00c8ff, 1.2); rim.position.set(-1.2, 0.4, -1); scene.add(rim);
+  const controls = new OrbitControls(camera, renderer.domElement);
+  controls.enableDamping = true; controls.dampingFactor = 0.08; controls.enablePan = false;
+
+  const group = new THREE.Group(); scene.add(group);
+  const bytes = Uint8Array.from(atob(model.data), (c) => c.charCodeAt(0));
+
+  function fit() {
+    const box = new THREE.Box3().setFromObject(group);
+    const size = box.getSize(new THREE.Vector3()); const center = box.getCenter(new THREE.Vector3());
+    group.position.sub(center);
+    const maxDim = Math.max(size.x, size.y, size.z) || 1;
+    camera.position.set(maxDim * 1.4, maxDim * 0.85, maxDim * 1.8);
+    camera.near = maxDim / 100; camera.far = maxDim * 50; camera.updateProjectionMatrix();
+    controls.target.set(0, 0, 0);
+  }
+
+  let raf = 0;
+  const stop = () => cancelAnimationFrame(raf);
+  function spin() {
+    activeViewers.push(stop);
+    while (activeViewers.length > 2) (activeViewers.shift())();
+    const loop = () => {
+      group.rotation.y += 0.006;                 // slow holographic turntable
+      controls.update();
+      renderer.render(scene, camera);
+      raf = requestAnimationFrame(loop);
+    };
+    loop();
+  }
+
+  try {
+    if (model.ext === 'stl') {
+      const geo = new STLLoader().parse(bytes.buffer);
+      geo.computeVertexNormals();
+      const mesh = new THREE.Mesh(geo, new THREE.MeshPhysicalMaterial({
+        color: 0x35c4f0, metalness: 0.1, roughness: 0.35, transparent: true, opacity: 0.92, emissive: 0x06222e
+      }));
+      const wire = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: 0x00c8ff, wireframe: true, transparent: true, opacity: 0.07 }));
+      mesh.rotation.x = -Math.PI / 2; wire.rotation.x = -Math.PI / 2;   // STL z-up → y-up
+      group.add(mesh, wire);
+      fit(); spin();
+    } else {
+      new GLTFLoader().parse(bytes.buffer, '', (g) => { group.add(g.scene); fit(); spin(); },
+        () => { mount.textContent = 'could not parse model'; });
+    }
+  } catch (e) { mount.textContent = 'preview failed: ' + e.message; }
+};
 </script>
 </body>
 </html>

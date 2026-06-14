@@ -2,6 +2,161 @@
 
 What was built differently from `BHATBOT_MEGAPROMPT.md`, and why. For reference.
 
+## Pass 40 — Cross-provider offload + Jarvis voicemail + phone Control tab + timed sweep
+
+- **Cross-provider agent offload (router):** new `openai`/`gemini` rungs in lib/router.js
+  chains — simple/memory escalate ollama→gpt-4o-mini; research/planning escalate
+  ollama→gpt-4o-mini→gemini-flash→claude. Keys + adapters gate each rung (missing → rung
+  skipped). `orchestratorAdapters` gains `openaiChat`/`geminiChat` (plain-text, no tools);
+  base.js routes those providers down the text path. Coding/tool-loop work stays
+  anthropic/ollama (only they have tool-capable callers). 3-parallel agent batches no
+  longer triple the Anthropic per-minute pressure.
+  ⚠️ Tested 2026-06-12: **openai live (~2s)**, **gemini prepaid credits DEPLETED** (instant
+  429 — rung self-revives when topped up; openai ordered first for now).
+- **Jarvis voicemail:** `twilioCall` now sets `machineDetection:'DetectMessageEnd'` — if
+  voicemail answers, the `/voice/incoming` webhook fires at the BEEP with
+  `AnsweredBy=machine_end_*` and leaves the message in the JARVIS voice (`<Play>` clip +
+  `<Hangup/>`, no Gather); humans get the existing two-way conversation (~3-5s AMD delay).
+  Verified via local webhook test (machine → Play+Hangup, human → Gather). Live-call check
+  needs the app + funnel up: `notify_user urgency:'call'` while letting it ring out.
+- **ElevenLabs dead-provider cooldown:** quota/auth failure (tested: account quota is
+  currently EXHAUSTED — 401 in ~250ms) marks EL dead for 10 min so every spoken sentence
+  skips straight to Kokoro/OpenAI instead of paying the doomed round-trip. Live ack path is
+  now local Kokoro: **805ms warm synth → ~1.0s time-to-first-audio** (pre-warmed at boot).
+- **qwen3 `<think>` suppression:** `ollamaChat`/`ollamaGenerate`/`ollamaToolChat` set
+  `think:false` + `/no_think` for qwen3-family models and strip residual think blocks —
+  pure mute latency for assistant replies. Measured: simple reply 13.7s → **5.7s**;
+  3-task background batch 316s → **57s**.
+- **Router classify hard cap:** `routerClassify` now has a 6s timeout — a cold/stuck local
+  router escalates to the cloud path (which streams + already has the ack playing) instead
+  of sitting mute for 16-26s.
+- **Phone Control tab (full desktop control):** new `/api/:token/jobs` (list) +
+  `/jobs/:id/cancel|guide`, `/api/:token/control` (whitelisted passthrough: system_control,
+  media_control, run_shell, manage_jobs — same tools the chat agent already grants, so the
+  token gate stays the real boundary), `/api/:token/screen` (screencapture → ≤1280px JPEG).
+  mobile.html gains a 🖥 Control tab: live desktop screenshot (tap to refresh), background
+  job cards with ✕ cancel / ✎ steer, quick actions (play/pause, next, vol ±, mute,
+  now-playing, sleep display, lock Mac), and a remote shell box. The native phone-app shell
+  (WKWebView → PWA) inherits all of it.
+- **Local simple path now STREAMS** (`ollamaGenerateStream`): tokens render + speak as they
+  generate via the same `makeSpeakStream` parser as the cloud path (the old one-shot code
+  sent the reply on a `chat-token` channel NOTHING listened to — it only appeared when the
+  whole turn returned). Returns `_streamed:true` so the renderer doesn't double-render.
+  Planner: 45s cap + hard failure now escalates to cloud (was: silent slow local fallback);
+  "🧠 planning locally…" feedback line before the 12B loads.
+- **Ollama shared-prefix invariant (THE latency fix, measured):** llama.cpp only reuses the
+  longest common prefix of the previous call, and a num_ctx change restarts the runner — so
+  alternating classify (small system) ↔ answer (8KB persona system) re-prefilled ~23s every
+  turn. Now every router-model call (warm-up, classify, simple answer) shares the IDENTICAL
+  static system (`localSystemPrefix()` = the cached persona) at one `num_ctx`
+  (`CTX_TIERS.local` 8192); per-query memory/jobs/mode blocks ride in the prompt; classifier
+  instructions ride in the prompt under `format:'json'`. Measured after: boot prefill 8.4s
+  (one-time, fire-and-forget at startup), classify **1.2s**, streamed answer first token
+  **0.9s** (full ~2s), alternation holds the cache.
+- **Timed sweep (`scripts/test-pass39.js`):** every feature exercised + timed; spend
+  ~$0.005 total. Steady-state user-facing latencies, all <5s: ack audio ~1.0s, simple-path
+  visible/spoken tokens ~2.1s (classify+stream), haiku 0.7s, gpt-4o-mini 2.2s, openai-TTS
+  fallback 1.9s, kokoro warm synth 0.8s; voicemail/phone endpoints green, 401 gate enforced.
+  Remaining >5s items are one-time boot loads (kokoro worker 8.2s, router prefill 8.4s),
+  both pre-warmed in `app.whenReady`/`warmRouter`.
+
+## Pass 39 — Foreground concierge + background job bus (jobs.js) + voice-within-5s
+
+- **Core unblock — `delegate_project` no longer freezes chat:** it used to `await
+  orchestrator.run()` to completion inside one tool call, so chat was dead for the whole
+  project. Now it creates a `project` job, kicks `runProjectDetached()` (NOT awaited), and
+  returns immediately with a job_id; the tool description instructs the model to confirm
+  launch in one sentence and end its turn. Chat stays a responsive foreground concierge.
+- **`lib/jobs.js` (NEW) — the shared job bus:** in-RAM registry (project + task jobs) with
+  id/name/agent/status/progress/note, EventEmitter fan-out, bounded to 100. Control plane
+  rides the same bus: `requestCancel` (cascades to children; queued dies now, in-flight
+  results are swallowed by a final-status guard) and per-project `addGuidance/takeGuidance`
+  steering notes.
+- **Orchestrator runs up to 3 tasks in parallel:** `orchestrator.run()` now takes batches
+  of ≤`concurrency` (default 3) queued tasks through `Promise.allSettled` (one failure never
+  sinks the batch), then integrates results SEQUENTIALLY (state/tasks.json writes aren't
+  concurrent-safe). New hooks: `onTask(t, queued|start|event|done)` mirrors lifecycle to the
+  job bus, `shouldStop()` polls cancel between batches, `getGuidance()` drains steering notes
+  which become `constraints` on every subsequent task (ctx.assemble already passes them).
+  Verified with stub agents: maxConcurrent=3, ordered integration, cancel + late-result
+  guard + guidance drain all green.
+- **Activity panel job cards:** `#jobs-board` above the activity feed — one card per task
+  (and a ◈ project card): agent, status (color-coded border), live progress bar (coarse:
+  tool events seen), last note. Updates via new `job-update` IPC (`onJobUpdate` in preload).
+- **Plain-English progress relay:** meaningful transitions (task done/failed/blocked,
+  project done/failed/cancelled) become 🛰 lines in chat + the activity log AND are spoken
+  ("Coding agent finished: …. 2 tasks still running.") through a relay queue that waits for
+  the chat voice to go quiet (never talks over a streaming reply; drops to text-only while a
+  turn is active).
+- **Chat model can see + steer background work:** system gains a live `BACKGROUND JOBS`
+  block (ids/status/progress/notes) each call, and a new `manage_jobs` tool —
+  list / cancel(job_id) / guide(job_id, guidance) (guide on a task routes to its parent
+  project) — so "skip the research task" becomes job control, not a passive ack.
+- **Voice within 5s of ANY message:** the chat handler now owns the TTS stream from the
+  first millisecond (`ttsStreamStart` + `maybeAck` BEFORE history validation/trim/router;
+  agentLoop reuses `opts.ttsSeq`). New ack watchdog: if nothing has reached the speaker —
+  and nothing is queued/synthesizing — by 2.5s, it speaks a holding line ("One moment,
+  sir."), covering non-action messages and cold routers. Pipeline paths feed spoken lines
+  into the SAME stream (speakDesktop would have cut the ack off mid-word).
+- **`debugLatency:true` config flag:** per-turn timing waterfall logged once per label —
+  `message-received → ack-queued → tts-synth-start/done → first-audio-playing →
+  first-token → turn-complete`.
+
+## Pass 38 — Security hardening + reply-resume SMS loop + Notion memory + mode prompts + Jarvis HUD
+
+- **`lib/security.js`** (P0.4): `sanitizeExternalContent()` neutralizes prompt-injection
+  shapes (fake tool tags, "ignore previous instructions", ChatML tokens, role hijacks) in
+  ALL external content — web fetches, shell stdout/stderr, browser page text, Telegram/SMS
+  bodies — by escaping + ⟦flagged⟧ marking (never silent drops). Every hit and every
+  notification attempt logs to a daily audit file `~/.bhatbot/audit/{date}.log`. System
+  prompt tells the model to treat flagged text as data, never instructions.
+- **`onepassword_lookup`** tool: `op item get` → vault → CRED_REF_ handle (raw secret never
+  reaches model context). Helpful errors when `op` is missing or signed out.
+- **`notify_user` v2**: urgency `info|low|medium|high|call`; medium respects quiet hours
+  (→Telegram), high always SMS, quiet-hour calls downgrade to "(URGENT)" SMS. New
+  `awaitReply` + `taskId` → pending question stored in `~/.bhatbot/pending_replies.json`;
+  an inbound SMS pops pending questions and attaches them to the agent turn so the task
+  RESUMES with the answer (entries expire after 24h). All attempts audit-logged.
+- **Router → mode link** (P2/P4): pipeline router classification now emits `suggestedMode`
+  (`ops|research|executive`); escalation carries it into agentLoop.
+- **`lib/prompts.js`** (P4): OPS / DEEP WORK / EXECUTIVE mode prompts injected as a second
+  system block AFTER the cached static block (prompt-cache hits survive mode switches —
+  semantically identical to prepending). Cloud path classifies with a zero-cost regex
+  instead of the spec's extra LLM call (streaming starts immediately; deliberate deviation).
+- **`lib/notion.js`** (P3): Memory / Research Hub / Daily Log / Project State / Task Queue
+  databases via @notionhq/client. Tools: `notion_write`, `notion_search`,
+  `notion_log_activity`. Morning briefing prepends open Notion tasks. Every function
+  degrades to `{skipped:true}` when unconfigured — nothing else guards.
+  Daily Log groups entries as bullets under one page per day (spec's per-row properties
+  folded into the bullet line — assumption documented in-module).
+- **Jarvis HUD (desktop chat)**: bot replies render as markdown (code blocks, headers,
+  bullets) with a "materialize" effect; generated images / Studio renders / screenshots
+  appear as holographic scan-reveal cards; `generate_3d`/`make_printable` outputs spin
+  inline as slow-turntable 3D holograms (vendored three.js, orbitable, "open in viewer"
+  hands off to the full window; max 2 spinning at once); thinking dots replaced by an
+  arc-reactor core; CSP gains `img-src data:` for inline previews.
+
+## Pass 37 — Two-way SMS + smart notify routing + Keychain/TOTP/browser-login
+
+- **Inbound SMS** (`/sms/:token/incoming` in mcp-server.js): text the BhatBot number → runs
+  the agent → texts back the reply (TwiML `<Message>`). Owner-number gated. Closes the
+  two-way loop (answer a notify_user question by text). `[SMS]` prefix → phone register in
+  prompt. ⚠️ Twilio TRIAL: receiving needs SMS enabled; replying on an unregistered US
+  10DLC number may be carrier-filtered → upgrade + register A2P.
+- **Smart `notify_user` routing**: low→Telegram, medium→🟡 SMS, high→🔴 SMS, call→voice;
+  calls in quiet hours (23:00–07:00) auto-downgrade to SMS. New `twilioSMS()`. Telegram
+  always keeps a record. Tool schema gains the `medium` level.
+- **Keychain access** via the built-in `security` CLI (NOT keytar — no native module, and
+  keytar can't read Safari/iCloud/Chrome stores anyway): `keychain_lookup` tool reads a
+  login-keychain item, stores it in the vault, returns a CRED_REF_ handle + username (never
+  the password). Honest limits documented (iCloud/Chrome unreadable; macOS may prompt once).
+- **`browser` action `login`**: resolves a credRef in-process (executeTool CRED_REF
+  auto-resolve), auto-detects user/pass fields, fills + submits, screenshots the result.
+  Secret never enters the model context, the audit log, or recorded workflows.
+- **`generate_totp`** tool (otpauth): 6-digit 2FA from a stored TOTP secret handle.
+- Verified live: inbound SMS Q&A + unauthorized-sender reject; keychain_lookup via agent
+  (returned handle only); TOTP unit test.
+
 ## Pass 36 — Standalone iOS app + guaranteed streaming TTS + router warm-up
 
 - **Standalone iPhone app** (`phone-app/`): native WKWebView shell (SwiftUI) loading the

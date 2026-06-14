@@ -47,7 +47,10 @@
   #spk.off { opacity:.4; }
   #send { background:var(--cyan); color:#04222e; border-color:var(--cyan); font-size:17px; }
   @keyframes pulse { 0%,100%{ box-shadow:0 0 0 0 rgba(57,215,255,.5);} 50%{ box-shadow:0 0 0 12px rgba(57,215,255,0);} }
-  .hbtn { width:32px; height:32px; font-size:16px; border-radius:9px; margin-left:8px; }
+  .hbtn { width:32px; height:32px; font-size:15px; border-radius:9px; margin-left:8px; opacity:.75; }
+  #spk.off { opacity:.35; }
+  #wake.wake { opacity:1; color:var(--cyan); border-color:var(--cyan); background:#11242e; }
+  .row .sec { width:40px; height:40px; font-size:17px; opacity:.55; }
   /* voice settings bottom-sheet */
   .modal { position:fixed; inset:0; background:rgba(0,0,0,.55); display:flex; align-items:flex-end; z-index:50; }
   .sheet { width:100%; background:var(--panel); border-top:1px solid var(--line);
@@ -58,6 +61,10 @@
   .sheet select { width:100%; background:var(--bg); color:var(--txt); border:1px solid var(--line);
     border-radius:10px; padding:11px 12px; font:inherit; outline:none; }
   .sheet input[type=range] { width:100%; accent-color:var(--cyan); }
+  .sheet .txtin { width:100%; background:var(--bg); color:var(--txt); border:1px solid var(--line);
+    border-radius:10px; padding:11px 12px; font:inherit; outline:none; }
+  .sheet .txtin:focus { border-color:var(--cyan); }
+  .sh-div { height:1px; background:var(--line); margin:20px 0 4px; }
   .testbtn { width:100%; height:auto; border-radius:12px; padding:12px; margin-top:18px; font-size:15px;
     background:rgba(57,215,255,.1); border:1px solid #1b4a5e; color:var(--cyan); }
   /* tabbed views */
@@ -79,7 +86,10 @@
   #tabs .tab .badge { display:inline-block; min-width:15px; padding:0 4px; margin-left:3px; font-size:10px; color:#04222e; background:var(--cyan); border-radius:8px; vertical-align:top; }
   #mic.wake { background:#1b3a4a; border-color:var(--cyan); color:var(--cyan); }
   /* Control tab — desktop screen, jobs, quick actions */
-  #view-control { overflow-y:auto; -webkit-overflow-scrolling:touch; padding:12px; display:block; }
+  /* NB: no `display` here — that would override .view/.view.on (ID beats class) and pin the
+     Control view permanently on top of Chat. Visibility is governed by .view.on. */
+  #view-control { overflow-y:auto; -webkit-overflow-scrolling:touch; padding:12px; }
+  #view-control.on { display:block; }   /* block (not flex) so sections stack + scroll cleanly */
   .csec { color:var(--dim); font-size:11px; letter-spacing:.12em; margin:14px 2px 7px; }
   #screenwrap { border:1px solid var(--line); border-radius:10px; overflow:hidden; background:#000; position:relative; min-height:90px; }
   #screenimg { display:block; width:100%; transition:opacity .2s; }
@@ -110,7 +120,9 @@
 <header>
   <span class="dot" id="dot"></span><b>BHATBOT</b>
   <small id="net">connecting…</small>
-  <button id="gear" class="hbtn" title="Voice settings">⚙</button>
+  <button id="spk" class="hbtn" title="Voice replies">🔊</button>
+  <button id="wake" class="hbtn" title="Wake word — say &quot;hey BhatBot&quot;">👂</button>
+  <button id="gear" class="hbtn" title="Settings">⚙</button>
 </header>
 <div id="views">
 <section id="view-chat" class="view on">
@@ -119,11 +131,9 @@
   <div id="bar"></div>
   <div id="attbar"></div>
   <div class="row">
-    <button id="spk" title="Voice replies">🔊</button>
-    <button id="wake" title="Wake word — say &quot;hey BhatBot&quot;">👂</button>
+    <button id="attach" class="sec" title="Attach photo / screenshot / screen recording">📎</button>
+    <textarea id="ta" rows="1" placeholder="Message…" enterkeyhint="send"></textarea>
     <button id="mic" title="Hands-free conversation">🎙</button>
-    <button id="attach" title="Attach photo / screenshot / screen recording">📎</button>
-    <textarea id="ta" rows="1" placeholder="Message Bhatbot…" enterkeyhint="send"></textarea>
     <button id="send" title="Send">➤</button>
   </div>
   <input type="file" id="file" accept="image/*,video/*" multiple style="display:none">
@@ -160,7 +170,7 @@
 </nav>
 <div id="settings" class="modal" style="display:none">
   <div class="sheet">
-    <div class="sh-h">Voice <span class="x" id="setclose">✕</span></div>
+    <div class="sh-h">Settings <span class="x" id="setclose">✕</span></div>
     <label for="voicesel">Voice</label>
     <select id="voicesel">
       <optgroup label="British — male">
@@ -183,6 +193,13 @@
     <label for="spdrange">Speed — <span id="spdval">1.0×</span> <span style="color:var(--dim)">(lower = calmer)</span></label>
     <input id="spdrange" type="range" min="0.6" max="1.4" step="0.05" value="1">
     <button id="vtest" class="testbtn">▶ Test voice</button>
+    <div class="sh-div"></div>
+    <label for="srvhost">Server host</label>
+    <input id="srvhost" class="txtin" type="url" placeholder="https://host" autocapitalize="off" autocorrect="off" spellcheck="false">
+    <label for="srvtoken">Token</label>
+    <input id="srvtoken" class="txtin" type="text" placeholder="token" autocapitalize="off" autocorrect="off" spellcheck="false">
+    <button id="srvsave" class="testbtn">Save &amp; reconnect</button>
+    <div id="srvhint" style="color:var(--dim);font-size:11.5px;margin-top:8px">Leave host blank to reset to default. PWA shells load from where they were added — to fully move a home-screen app, re-add it from the new URL.</div>
   </div>
 </div>
 <script>
@@ -192,8 +209,11 @@
 // so a file:// page can target the Mac (or later a cloud backend) by absolute URL. Defaults
 // below keep the existing served path byte-for-byte identical.
 const CFG = (typeof window !== 'undefined' && window.__BHATBOT__) || {};
-const TOKEN = CFG.token || location.pathname.split('/')[2] || '';
-const HOST = String(CFG.host || location.origin).replace(/\/+$/, '');
+// In-page override (Settings → Server) so the backend can be repointed in Safari too, not
+// just the native app's long-press. Order: saved override → injected (native) → same-origin.
+const _ls = (k) => { try { return localStorage.getItem(k); } catch { return null; } };
+const TOKEN = _ls('bb_token') || CFG.token || location.pathname.split('/')[2] || '';
+const HOST = String(_ls('bb_host') || CFG.host || location.origin).replace(/\/+$/, '');
 const API = HOST + '/api/' + TOKEN;
 const APP = HOST + '/app/' + TOKEN;
 const BUILD = '__BUILD__';                       // injected at serve time; drives auto-reload
@@ -360,8 +380,20 @@ spk.addEventListener('click', () => { ttsOn = !ttsOn; spk.classList.toggle('off'
 const settings = document.getElementById('settings'), voicesel = document.getElementById('voicesel');
 const spdrange = document.getElementById('spdrange'), spdval = document.getElementById('spdval');
 voicesel.value = voicePref; spdrange.value = String(speedPref); spdval.textContent = speedPref.toFixed(2) + '×';
-document.getElementById('gear').addEventListener('click', () => { ensureCtx(); settings.style.display = 'flex'; });
+const srvhost = document.getElementById('srvhost'), srvtoken = document.getElementById('srvtoken');
+document.getElementById('gear').addEventListener('click', () => {
+  ensureCtx(); settings.style.display = 'flex';
+  srvhost.value = _ls('bb_host') || HOST; srvtoken.value = _ls('bb_token') || TOKEN;
+});
 document.getElementById('setclose').addEventListener('click', () => settings.style.display = 'none');
+document.getElementById('srvsave').addEventListener('click', () => {
+  const h = srvhost.value.trim().replace(/\/+$/, ''), t = srvtoken.value.trim();
+  try {
+    if (h) localStorage.setItem('bb_host', h); else localStorage.removeItem('bb_host');
+    if (t) localStorage.setItem('bb_token', t); else localStorage.removeItem('bb_token');
+  } catch {}
+  location.reload();
+});
 settings.addEventListener('click', (e) => { if (e.target === settings) settings.style.display = 'none'; });
 voicesel.addEventListener('change', () => { voicePref = voicesel.value; localStorage.setItem('bb_voice', voicePref); });
 spdrange.addEventListener('input', () => { speedPref = parseFloat(spdrange.value); spdval.textContent = speedPref.toFixed(2) + '×'; localStorage.setItem('bb_speed', String(speedPref)); });

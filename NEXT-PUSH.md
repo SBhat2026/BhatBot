@@ -20,7 +20,16 @@ Compact starting point for the next session. State of the world + what's open.
 - ⬜ **Cloud deploy** — `cloud/` ready; user deploys to Fly/Railway + sets secrets (their keys in cloud = their call).
 - ⬜ **Stable tunnel** — Cloudflare named tunnel needs a domain on user's CF account.
 
+## Figures + logins push (DONE 2026-06-14)
+- **`make_figure`** (`lib/figures.js`): data-accurate matplotlib/seaborn from .csv/.tsv/.json/.xlsx. action:analyze (profile + suggest figures = "which stats matter") / render (spec OR custom code; df+plt preloaded). Saves PNG+PDF+SVG, returns PNG as vision block (in showImage list). Verified: analyze, bar/scatter/heatmap/code paths render. ⚠ Deps: installed seaborn+openpyxl into config.pythonBin (3.13 env, had pandas3.0.3+mpl3.10.9). Fixed null→None py-literal bug.
+- **Browser session persists**: storageState save/restore `~/.bhatbot/browser-profile.json` (shipped earlier this session, commit 04f1267).
+- **`smart_login`** + **`manage_logins`** (`lib/logins.js`): domain-keyed profiles (`~/.bhatbot/logins.json`, CRED_REF handles only — manage_logins set uses auditInput so the HANDLE is stored not the resolved secret). smart_login fills first factor → TOTP silent if on file → else **calls + texts** Siddhant and BLOCKS on `awaitTwoFactorCode` (150s) for his phone reply (code or "approved"). 2FA reply routed via `deliverTwoFactorCode` hooked into BOTH Telegram on('message') and SMS runAgentHeadless (before agent). OTP field autodetect + submit.
+- ⚠ "across ALL apps/browsers": smart_login is Playwright-window only (solid). Real Chrome/Safari + native apps = system_control (AppleScript/keystroke) fallback, not yet auto-wired — next step if wanted.
+- ⬜ Takes effect after desktop app rebuild (deploy cycle below).
+
 ## Candidate next-push work (not started)
+- **Real-browser/native-app login** (Chrome/Safari/desktop apps) via system_control keystroke+clipboard, extending smart_login beyond the Playwright window.
+- **W3 watch/wait/learn**: detect Siddhant's mouse in the Playwright window (exposeBinding + agentActing flag), pause agentLoop, learn his actions → Notion macro. (Planned, not built.)
 - Desktop agent **auto-recall from Notion** (currently has tools but recalls manually) — make buildMemoryBlock pull from the shared bank passively. (User was offered this; pending.)
 - Cloud: durable **conversation history** (currently in-process Map; Notion holds facts only).
 - Cloud: wire **MAC_RELAY_URL** end-to-end + test desktop-tool relay when Mac awake.

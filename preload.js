@@ -36,7 +36,10 @@ contextBridge.exposeInMainWorld('bhatbot', {
   credStore: (c) => ipcRenderer.invoke('cred-store', c),
   credList: () => ipcRenderer.invoke('cred-list'),
   credRemove: (ref) => ipcRenderer.invoke('cred-remove', { ref }),
+  readModel: (p) => ipcRenderer.invoke('read-model', p),
+  open3DViewer: (p) => ipcRenderer.invoke('open-3d-viewer', p),
   onToolUpdate: (cb) => ipcRenderer.on('tool-update', (_e, u) => cb(u)),
+  onJobUpdate: (cb) => ipcRenderer.on('job-update', (_e, j) => cb(j)),
   removeToolUpdateListener: () => ipcRenderer.removeAllListeners('tool-update')
 });
 

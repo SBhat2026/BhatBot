@@ -21,6 +21,8 @@ const wsMemory = require('./lib/memory');
 const visualInspect = require('./lib/inspect');
 const security = require('./lib/security');          // P0.4 — injection sanitizer + daily audit
 const notion = require('./lib/notion');               // P3  — Notion long-term memory (degrades gracefully)
+const figures = require('./lib/figures');             // data-accurate matplotlib/seaborn figures
+const logins = require('./lib/logins');               // domain-keyed login profiles (CRED_REF handles)
 const modePrompts = require('./lib/prompts');         // P4  — mode-switching system prompts
 const jobsBus = require('./lib/jobs');                // P5  — background job bus (task cards + spoken relay + steering)
 
@@ -335,6 +337,24 @@ human direction. Prefer SVG via studio_write (free, infinitely scalable,
 editable) for logos, icons, diagrams, and UI. Use generate_image (GPT Image 1,
 ~$0.04/image) only for photorealistic or complex artistic content SVG can't
 express. generate_3d turns any image into a textured GLB via AI (Blender/Unity/Three.js).
+
+FIGURES (data-accurate): For any chart/figure from REAL data or a paper's results, use
+make_figure — NOT generate_image (which invents numbers). Workflow: first call
+make_figure{action:"analyze", data} to profile the data and see suggested figures (this is
+how you decide WHICH statistics matter — look at top_correlations + suggested_figures), then
+make_figure{action:"render", spec|code} to draw it. You SEE the PNG and can re-render with
+fixes (iterate up to 3x). Output pdf/svg too for Overleaf. To plot from a paper on Overleaf:
+use the browser to download the project source/CSV to a local file, then point data at it.
+Save the winning figure recipe to Notion (notion_write) so next time it's instant recall.
+
+LOGINS & 2FA: For sites Siddhant uses often, use smart_login (saved domain profiles) — the
+browser session persists so he's usually already signed in. To set one up: get the password
+into the vault (keychain_lookup / onepassword_lookup → a CRED_REF handle), then
+manage_logins{action:"set", host, username, credRef, totpRef?}. On 2-factor: smart_login
+ALWAYS submits the first factor itself; if a TOTP secret is on file it does the second factor
+SILENTLY; otherwise it CALLS + TEXTS him and waits for his phone reply (a code, or "approved"
+for a push) — he never has to come back to the Mac. Prefer doing both factors without asking
+whenever a TOTP secret exists. Never put a raw password in any field — only CRED_REF handles.
 
 3D PRINTING: For anything meant to be PRINTED, use make_printable (local, free, outputs
 STL), NOT generate_3d. Pick the mode by intent: a flat logo/icon/stamp/keychain/name-plate
@@ -1372,6 +1392,35 @@ const TOOLS = [
       size: { type: 'string', enum: ['1024x1024', '1536x1024', '1024x1536'], description: 'Square for icons/logos; landscape/portrait for illustrations.' },
       filename: { type: 'string', description: 'Optional filename (no extension). Defaults to timestamp.' }
     }, required: ['prompt'] } },
+  { name: 'make_figure', description: 'Render a DATA-ACCURATE figure (matplotlib/seaborn) from a real data file (.csv/.tsv/.json/.xlsx) — for papers, results, analysis. UNLIKE generate_image (which invents pixels), this plots your real numbers. Two modes: action:"analyze" profiles the data (shape, dtypes, summary stats, top correlations) and SUGGESTS the most informative figures — call this FIRST when unsure which figure matters. action:"render" draws it from a high-level `spec` OR custom `code` (your matplotlib using preloaded `df` and `plt`). The PNG is returned as a vision block so you can critique and re-render. Saves PNG+PDF+SVG. To plot from an Overleaf paper: use the browser to download the project source/CSV locally, then point `data` at the file.',
+    input_schema: { type: 'object', properties: {
+      action: { type: 'string', enum: ['analyze', 'render'], description: 'analyze = profile + suggest figures; render = draw one.' },
+      data: { type: 'string', description: 'Absolute path to the data file (.csv/.tsv/.json/.xlsx/.parquet).' },
+      spec: { type: 'object', description: 'For render: {kind:bar|line|scatter|hist|box|violin|heatmap, x, y, hue, title, xlabel, ylabel, width, height}.' },
+      code: { type: 'string', description: 'For render (advanced): custom matplotlib code. `df` (DataFrame) and `plt` are already loaded; just draw — saving is handled. Overrides spec.' },
+      formats: { type: 'array', items: { type: 'string', enum: ['png', 'pdf', 'svg'] }, description: 'Output formats. PNG always included. Default [png]. Use pdf/svg for Overleaf.' },
+      filename: { type: 'string', description: 'Output filename (no extension). Defaults to timestamp.' }
+    }, required: ['action', 'data'] } },
+  { name: 'smart_login', description: 'Sign into a site using a SAVED domain login profile, handling 2-factor automatically. Flow: fills the first factor (username+password from the vault), then for 2FA — if a TOTP secret is on file it generates+enters the code SILENTLY; otherwise it CALLS and TEXTS Siddhant for the code and waits for his phone reply (he replies with the code, or "approved" for a push prompt), then enters it. Pass `url` or `host` to use the saved profile, or inline `username`+`credRef`(+`totpRef`). Uses the dedicated Playwright browser window; sessions persist so most logins are skipped entirely. For a site with no profile yet, save one with manage_logins first.',
+    input_schema: { type: 'object', properties: {
+      url: { type: 'string', description: 'Login page URL (e.g. https://overleaf.com/login). Or use host.' },
+      host: { type: 'string', description: 'Domain key for a saved profile (e.g. "overleaf.com").' },
+      username: { type: 'string', description: 'Override the saved username (optional).' },
+      credRef: { type: 'string', description: 'Override password: a CRED_REF_ handle (resolved in-process; never a raw password).' },
+      totpRef: { type: 'string', description: 'Override TOTP: a CRED_REF_ handle for the base32 2FA secret → silent 2FA.' },
+      twoFactor: { type: 'string', enum: ['auto', 'totp', 'phone', 'none'], description: 'Force the 2FA path. auto=TOTP if available else phone.' },
+      waitMs: { type: 'number', description: 'How long to wait for the phone 2FA reply (default 150000).' }
+    } } },
+  { name: 'manage_logins', description: 'Manage domain-keyed login profiles used by smart_login. action:"set" saves/updates a profile (store the password in the vault first → pass its CRED_REF_ handle as credRef; optionally totpRef for silent 2FA). "list" shows saved sites (never secrets), "get" one, "delete" removes one. Use this to teach BhatBot how to sign into sites you visit often (youtube, overleaf, spotify, …).',
+    input_schema: { type: 'object', properties: {
+      action: { type: 'string', enum: ['set', 'list', 'get', 'delete'] },
+      host: { type: 'string', description: 'Domain (e.g. "overleaf.com"). Required except for list.' },
+      username: { type: 'string' },
+      url: { type: 'string', description: 'Login page URL.' },
+      credRef: { type: 'string', description: 'CRED_REF_ handle for the password (from the vault / keychain_lookup / onepassword_lookup).' },
+      totpRef: { type: 'string', description: 'CRED_REF_ handle for the base32 TOTP secret (enables silent 2FA).' },
+      twoFactor: { type: 'string', enum: ['auto', 'totp', 'phone', 'none'], description: 'Default auto.' }
+    }, required: ['action'] } },
   { name: 'generate_3d', description: 'Convert a 2D image into a textured 3D model (GLB) using Microsoft TRELLIS via Replicate. Input a local PNG/JPG path (from generate_image or the user). Output a GLB with PBR textures saved locally. Takes 30–90s. Requires replicateKey in config. Good for: 3D logos, object prototypes, Skipper assets, structure visualizations.',
     input_schema: { type: 'object', properties: {
       image_path: { type: 'string', description: 'Absolute path to input PNG or JPG.' },
@@ -1621,6 +1670,95 @@ async function browserWorkflow(input) {
     }
     return { success: false, error: `Unknown action: ${a}` };
   } catch (e) { return { success: false, error: e.message }; }
+}
+
+// ---------------------------------------------------------------------------
+// smart_login — domain-keyed sign-in with phone-assisted 2FA.
+//   1. Look up the saved login profile for the host (or use inline username/credRef).
+//   2. Fill + submit the FIRST factor (username + password) via the existing browser login.
+//   3. If a SECOND factor is needed:
+//        • TOTP secret on file  → generate the code, fill it, submit  (no interruption).
+//        • otherwise            → call + text Siddhant, BLOCK for his reply (code or
+//                                  "approved"), then fill the code / re-check the page.
+// Target is the Playwright window (most reliable). Real browsers/native apps fall back to
+// system_control (AppleScript/keystroke) — see the tool description.
+// ---------------------------------------------------------------------------
+const OTP_SEL = 'input[autocomplete="one-time-code"], input[name*="otp" i], input[id*="otp" i], input[name*="code" i], input[id*="code" i], input[name*="token" i], input[name*="2fa" i], input[inputmode="numeric"], input[type="tel"]';
+async function pageNeeds2FA() {
+  try {
+    if (!page) return false;
+    if (await page.$(OTP_SEL)) return true;
+    const body = (await page.innerText('body').catch(() => '')) || '';
+    return /(verification code|2-step|two-?factor|authenticator|one-?time|enter the code|6-digit|approve.*(sign|log)|check your phone)/i.test(body);
+  } catch { return false; }
+}
+async function fillOtpAndSubmit(code) {
+  const f = await page.$(OTP_SEL);
+  if (!f) return false;
+  await f.fill(String(code));
+  const SUBMIT = 'button[type="submit"], input[type="submit"], button:has-text("Verify"), button:has-text("Continue"), button:has-text("Next"), button:has-text("Submit")';
+  const btn = await page.$(SUBMIT);
+  if (btn) await btn.click().catch(() => {}); else await f.press('Enter').catch(() => {});
+  await page.waitForLoadState('domcontentloaded', { timeout: 15000 }).catch(() => {});
+  return true;
+}
+async function smartLogin(input) {
+  // Resolve a saved profile by url/host; inline fields override it.
+  const ref = input.url || input.host;
+  const prof = ref ? logins.get(ref) : null;
+  if (!prof && !input.credRef) return { success: false, error: `No saved login for "${ref}" and no credRef given. Save one with manage_logins{action:"set"} (store the password in the vault first), or pass username+credRef inline.` };
+  const url = input.url || (prof && prof.url);
+  const username = input.username || (prof && prof.username) || '';
+  // credRef fields arrive ALREADY resolved to the real secret (executeTool resolves CRED_REF_*
+  // in the input). For a saved profile, resolve its stored handle here, in-process.
+  let password = input.credRef || '';
+  if (!password && prof && prof.credRef) { try { password = credentials.resolve(prof.credRef); } catch (e) { return { success: false, error: 'could not resolve stored password handle: ' + e.message }; } }
+  if (!password) return { success: false, error: 'no password available (profile has no credRef and none passed inline)' };
+  let totpSecret = input.totpRef || '';
+  if (!totpSecret && prof && prof.totpRef) { try { totpSecret = credentials.resolve(prof.totpRef); } catch {} }
+  const twoFactor = input.twoFactor || (prof && prof.twoFactor) || 'auto';
+
+  // Step 1 — first factor.
+  const first = await browserAction({ action: 'login', url, username, credRef: password });
+  if (!first.success) return first;
+  saveBrowserState();
+  // No 2FA detected and login looks complete → done.
+  if (first.loginLikelyComplete && !(await pageNeeds2FA())) {
+    return { success: true, stage: 'complete', note: 'Logged in (no 2FA needed).', url: page && page.url(), _image: first._image };
+  }
+
+  // Step 2 — second factor.
+  if (twoFactor === 'none') return { success: true, stage: 'first_factor', note: 'First factor submitted; profile says no 2FA.', _image: first._image };
+
+  // (a) Silent TOTP if we have the secret.
+  if (totpSecret && twoFactor !== 'phone') {
+    try {
+      const OTPAuth = require('otpauth');
+      const code = new OTPAuth.TOTP({ secret: OTPAuth.Secret.fromBase32(String(totpSecret).replace(/\s+/g, '').toUpperCase()) }).generate();
+      const filled = await fillOtpAndSubmit(code);
+      if (filled) {
+        saveBrowserState();
+        const stillPw = await page.$('input[type="password"]:not([type="hidden"])').catch(() => null);
+        const ok = !(await pageNeeds2FA()) && !stillPw;
+        return { success: true, stage: ok ? 'complete' : 'twofactor_submitted', note: ok ? 'Logged in (TOTP 2FA done silently).' : 'TOTP submitted; verify the result.', url: page && page.url(), _image: await page.screenshot({ type: 'jpeg', quality: 60 }).then((b) => b.toString('base64')).catch(() => undefined) };
+      }
+    } catch (e) { /* fall through to phone */ }
+  }
+
+  // (b) Phone-assisted: call + text Siddhant, then block for his reply.
+  const site = (() => { try { return new URL(url || page.url()).hostname; } catch { return ref || 'the site'; } })();
+  const ask = `BhatBot is signing you into ${site}. Password is in. It needs the 2FA code — reply with the code (or "approved" if you just tapped a push prompt).`;
+  await notifyUser(ask, 'call', { awaitReply: true, taskId: 'login-2fa' });   // rings + texts (Telegram record)
+  await twilioSMS(ask).catch(() => {});                                        // explicit text too, per request
+  sendToActivity('tool-update', { type: 'thinking', text: `🔐 ${site}: first factor in — waiting for your 2FA code by phone…` });
+  const code = await awaitTwoFactorCode(input.waitMs || 150000);
+  if (!code) return { success: false, stage: 'awaiting_2fa', error: `No 2FA reply within the wait window. Reply with the code and re-run smart_login, or finish in the browser window.`, _image: first._image };
+  if (code !== 'APPROVED') await fillOtpAndSubmit(code);
+  else await page.waitForTimeout(1500).catch(() => {});   // push approval — give the page a beat to advance
+  saveBrowserState();
+  const stillPw2 = await page.$('input[type="password"]:not([type="hidden"])').catch(() => null);
+  const ok2 = !(await pageNeeds2FA()) && !stillPw2;
+  return { success: true, stage: ok2 ? 'complete' : 'twofactor_submitted', note: ok2 ? `Logged into ${site} (phone 2FA done).` : 'Second factor submitted; verify the result.', url: page && page.url(), _image: await page.screenshot({ type: 'jpeg', quality: 60 }).then((b) => b.toString('base64')).catch(() => undefined) };
 }
 
 // ---------------------------------------------------------------------------
@@ -2179,6 +2317,30 @@ async function executeTool(name, input) {
         result = onePasswordLookup(input); break;
       case 'generate_totp':
         result = generateTotp(input); break;
+      case 'make_figure': {
+        const py = resolvePython();
+        result = input.action === 'analyze' ? figures.analyze({ data: input.data, pythonBin: py })
+                                            : figures.render({ data: input.data, spec: input.spec, code: input.code, formats: input.formats, filename: input.filename, pythonBin: py });
+        break;
+      }
+      case 'smart_login':
+        result = await smartLogin(input); break;
+      case 'manage_logins': {
+        try {
+          if (input.action === 'list') result = { success: true, logins: logins.list() };
+          else if (input.action === 'get') result = { success: true, profile: logins.get(input.host || input.url) || null };
+          else if (input.action === 'delete') result = { success: logins.remove(input.host || input.url), removed: input.host };
+          else if (input.action === 'set') {
+            // Use auditInput for the secret fields: executeTool already replaced any CRED_REF_*
+            // in `input` with the real secret — we must persist the HANDLE, not the plaintext.
+            const saved = logins.set({ ...input, credRef: auditInput.credRef, totpRef: auditInput.totpRef });
+            // Mirror to the shared Notion bank (best-effort) so other agents/surfaces know the site is set up.
+            try { notion.appendMemory({ fact: `Login profile saved for ${saved.host} (user ${saved.username || '—'}, 2FA ${saved.twoFactor})`, tags: ['login', saved.host], source: 'agent', confidence: 0.9 }); } catch {}
+            result = { success: true, profile: { host: saved.host, username: saved.username, url: saved.url, twoFactor: saved.twoFactor, hasPassword: !!saved.credRef, hasTotp: !!saved.totpRef } };
+          } else result = { success: false, error: 'unknown action' };
+        } catch (e) { result = { success: false, error: e.message }; }
+        break;
+      }
       case 'notion_write':
         result = await notion.appendMemory(input); break;
       case 'notion_search': {
@@ -2462,7 +2624,7 @@ async function agentLoop(history, apiKey, event, opts = {}) {
       const result = await executeTool(block.name, block.input);
       // Jarvis HUD: surface visuals inline in chat — generated images / design renders /
       // explicit screenshots as holo-cards, and 3D outputs as an in-chat spinning model.
-      const showImage = result._image && (['generate_image', 'studio_write', 'ui_inspect'].includes(block.name)
+      const showImage = result._image && (['generate_image', 'make_figure', 'studio_write', 'ui_inspect'].includes(block.name)
         || (block.name === 'browser' && block.input && block.input.action === 'screenshot'));
       const model3d = (block.name === 'generate_3d' || block.name === 'make_printable') && result.success && result.path ? result.path : undefined;
       sendToAll(event, 'tool-update', {
@@ -2923,6 +3085,8 @@ async function runAgentHeadless(instruction, opts = {}) {
   // Inbound SMS: sanitize the body (P0.4) and, if notify_user(awaitReply) registered
   // pending questions, attach them so the model resumes the right task with this answer.
   if (/^\[SMS\b/i.test(instr)) {
+    // A login is blocking on a 2FA code → route this reply straight to it, don't run the agent.
+    if (deliverTwoFactorCode(instr)) return { text: '✓ 2FA code received — continuing the login.' };
     instr = security.sanitizeExternalContent(instr, 'sms');
     const pend = takePendingReplies();
     if (pend.length) {
@@ -3035,6 +3199,8 @@ function startTelegramBridge() {
       } catch { telegramBot.sendMessage(chatId, '⚠ Voice transcription failed.'); return; }
     }
     if (!userText.trim()) return;
+    // A login is blocking on a 2FA code → route this reply to it instead of the agent.
+    if (deliverTwoFactorCode(userText)) { telegramBot.sendMessage(chatId, '✓ 2FA code received — continuing the login.'); return; }
     userText = security.sanitizeExternalContent(userText, 'telegram');   // P0.4
 
     telegramBot.sendChatAction(chatId, 'typing');
@@ -3233,6 +3399,29 @@ function takePendingReplies() {
     .filter((it) => { const t = Date.parse(it.ts || ''); return !isFinite(t) || t > cutoff; });
   if (Object.keys(p).length) savePendingReplies({});
   return items;
+}
+
+// ---- Two-factor wait: smart_login fills the FIRST factor, then (if the 2FA can't be done
+// silently via TOTP) calls + texts Siddhant and BLOCKS here until his phone reply arrives with
+// the code. Inbound SMS/Telegram are routed to deliverTwoFactorCode() before the normal agent. ----
+let twoFactorWaiter = null;     // { resolve } while a login is awaiting a code, else null
+function awaitTwoFactorCode(timeoutMs = 150000) {
+  return new Promise((resolve) => {
+    twoFactorWaiter = { resolve };
+    setTimeout(() => { if (twoFactorWaiter) { const w = twoFactorWaiter; twoFactorWaiter = null; w.resolve(null); } }, timeoutMs);
+  });
+}
+// Returns true if it consumed the message (a 2FA wait was active). A 4–8 digit run = the code;
+// "approved"/"done"/"yes" = a push-style approval (no code → resolve with the literal token).
+function deliverTwoFactorCode(text) {
+  if (!twoFactorWaiter) return false;
+  const s = String(text || '');
+  const m = s.match(/\b(\d{4,8})\b/);
+  const approve = /\b(approved?|done|yes|ok|confirm(ed)?|tapped|allowed)\b/i.test(s);
+  if (!m && !approve) return false;
+  const w = twoFactorWaiter; twoFactorWaiter = null;
+  w.resolve(m ? m[1] : 'APPROVED');
+  return true;
 }
 
 // Smart channel routing by urgency + time of day (quiet hours 23:00–07:00):
