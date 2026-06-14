@@ -77,7 +77,19 @@ let activityWindow = null;
 let agentState = 'idle'; // 'running' | 'paused' | 'stopped'
 let browser = null;
 let page = null;
+let browserContext = null;   // kept so we can persist cookies/localStorage (storageState) across launches
+const BROWSER_STATE = path.join(os.homedir(), '.bhatbot', 'browser-profile.json');
 let recordingSteps = null;   // array while recording a browser workflow, else null
+
+// Persist the browser session (cookies + localStorage) so logins survive across
+// launches — youtube/overleaf/spotify etc. usually need no re-login at all.
+async function saveBrowserState() {
+  try {
+    if (!browserContext) return;
+    fs.mkdirSync(path.dirname(BROWSER_STATE), { recursive: true });
+    await browserContext.storageState({ path: BROWSER_STATE });
+  } catch (e) { console.error('[browser] state save failed:', e.message); }
+}
 const WORKFLOW_DIR = path.join(os.homedir(), '.bhatbot', 'workflows');
 const NOTES_DIR = path.join(os.homedir(), '.bhatbot', 'notes');
 const pendingConfirms = new Map();
@@ -1457,11 +1469,14 @@ async function ensureBrowser() {
       args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-blink-features=AutomationControlled',
              '--disable-dev-shm-usage', '--window-size=1280,860', '--window-position=140,120'],
     });
-    const context = await browser.newContext({
+    const ctxOpts = {
       userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
       viewport: null, locale: 'en-US',          // viewport:null → page fills the real window
-    });
-    page = await context.newPage();
+    };
+    // Restore a prior session if we have one → cookies/logins persist across launches.
+    if (fs.existsSync(BROWSER_STATE)) ctxOpts.storageState = BROWSER_STATE;
+    browserContext = await browser.newContext(ctxOpts);
+    page = await browserContext.newPage();
   })();
   try { await browserLaunching; } finally { browserLaunching = null; }
 }
@@ -1541,6 +1556,7 @@ async function browserAction(input) {
         // credentials were rejected (or a 2FA/captcha step is now required).
         const stillPw = await page.$('input[type="password"]:not([type="hidden"])').catch(() => null);
         const likelyFailed = !!stillPw;
+        if (!likelyFailed) saveBrowserState();   // persist the session so this login survives next launch
         // Do NOT rec() — would persist the secret into a workflow file.
         return { success: true, submitted, loginLikelyComplete: !likelyFailed, note: likelyFailed ? 'A password field is still visible — login may have failed, or a 2FA/captcha step is now required (try generate_totp).' : undefined, url: page.url(), title: await page.title().catch(() => ''), _image: await shot() };
       }
@@ -1550,7 +1566,7 @@ async function browserAction(input) {
   } catch (e) {
     const msg = String(e && e.message || e);
     // A dead/crashed page can't recover in place — reset so the next call relaunches clean.
-    if (/Target closed|crashed|Browser has been closed|Execution context was destroyed/i.test(msg)) { try { await browser.close(); } catch {} browser = null; page = null; }
+    if (/Target closed|crashed|Browser has been closed|Execution context was destroyed/i.test(msg)) { await saveBrowserState(); try { await browser.close(); } catch {} browser = null; page = null; browserContext = null; }
     return { success: false, error: `Browser ${input.action} failed: ${msg.split('\n')[0]}` };
   }
 }
@@ -4279,6 +4295,7 @@ app.whenReady().then(() => {
 });
 app.on('will-quit', async () => {
   globalShortcut.unregisterAll();
+  try { await saveBrowserState(); } catch {}
   try { if (browser) await browser.close(); } catch {}
   try { if (wakeProc) wakeProc.kill(); } catch {}
   try { if (ptyProc) ptyProc.kill(); } catch {}
