@@ -92,6 +92,89 @@ async function saveBrowserState() {
     await browserContext.storageState({ path: BROWSER_STATE });
   } catch (e) { console.error('[browser] state save failed:', e.message); }
 }
+
+// ---------------------------------------------------------------------------
+// Browser observer (watch-my-mouse): detect when SIDDHANT acts in the Playwright window so
+// the agent (a) WAITS for him to finish before continuing, and (b) LEARNS his steps to reuse.
+// An init script installs capture-phase listeners that forward each user event (with a
+// generalized selector) to Node via an exposed binding. Agent-driven actions set a page flag
+// so they're ignored. Passwords/OTP values are never captured.
+// ---------------------------------------------------------------------------
+let lastUserActivityTs = 0;      // updated on every human event in the browser window
+let userEventBuffer = [];        // recent human steps (learning buffer), generalized selectors
+const OBSERVER_SCRIPT = `(() => {
+  if (window.__bhatbotObserver) return; window.__bhatbotObserver = true;
+  window.__bhatbotAgentActing = window.__bhatbotAgentActing || false;
+  const esc = (s) => { try { return CSS.escape(s); } catch { return String(s).replace(/[^\\w-]/g, '\\\\$&'); } };
+  function sel(el) {
+    if (!el || el.nodeType !== 1) return null;
+    if (el.id) return '#' + esc(el.id);
+    const a = el.getAttribute && (el.getAttribute('data-testid') || el.getAttribute('data-test'));
+    if (a) return '[data-testid="' + a + '"]';
+    const nm = el.getAttribute && el.getAttribute('name'); if (nm) return el.tagName.toLowerCase() + '[name="' + nm + '"]';
+    const al = el.getAttribute && el.getAttribute('aria-label'); if (al) return el.tagName.toLowerCase() + '[aria-label="' + al + '"]';
+    const tag = el.tagName.toLowerCase(), txt = (el.innerText || '').trim().slice(0, 40);
+    if ((tag === 'button' || tag === 'a') && txt) return tag + ':has-text("' + txt.replace(/"/g, '') + '")';
+    let path = [], n = el;
+    while (n && n.nodeType === 1 && path.length < 4) {
+      let s = n.tagName.toLowerCase(), p = n.parentElement;
+      if (p) { const sib = [...p.children].filter((c) => c.tagName === n.tagName); if (sib.length > 1) s += ':nth-of-type(' + (sib.indexOf(n) + 1) + ')'; }
+      path.unshift(s); n = n.parentElement;
+    }
+    return path.join(' > ');
+  }
+  function secretField(t) {
+    const meta = ((t && (t.name || t.id || t.autocomplete || '')) || '').toLowerCase();
+    return (t && t.type === 'password') || /pass|otp|code|cvv|card|secret|token|pin/.test(meta);
+  }
+  function emit(type, e) {
+    if (window.__bhatbotAgentActing) return;       // ignore agent-driven events
+    const t = e.target; if (!t || t.nodeType !== 1) return;
+    try {
+      const d = { type, selector: sel(t), tag: t.tagName.toLowerCase(), url: location.href, ts: Date.now() };
+      if (type === 'input') { const sec = secretField(t); d.secret = sec; if (!sec && t.value != null && String(t.value).length <= 80) d.value = String(t.value); }
+      if (type === 'key') d.key = e.key;
+      if (window.__bhatbotUserEvent) window.__bhatbotUserEvent(d);
+    } catch {}
+  }
+  document.addEventListener('pointerdown', (e) => emit('click', e), true);
+  document.addEventListener('change', (e) => emit('input', e), true);
+  document.addEventListener('keydown', (e) => { if (e.key === 'Enter') emit('key', e); }, true);
+})();`;
+function onUserBrowserEvent(d) {
+  if (!d || !d.selector) return;
+  lastUserActivityTs = Date.now();
+  userEventBuffer.push(d);
+  if (userEventBuffer.length > 200) userEventBuffer.shift();
+  if (recordingSteps) {            // if a workflow is being recorded, capture HIS steps too
+    if (d.type === 'click') recordingSteps.push({ action: 'click', selector: d.selector });
+    else if (d.type === 'input' && d.value != null) recordingSteps.push({ action: 'type', selector: d.selector, text: d.value });
+  }
+  sendToActivity('tool-update', { type: 'thinking', text: `👤 you ${d.type}${d.value != null ? ' "' + String(d.value).slice(0, 20) + '"' : ''} — noting it` });
+}
+// Toggle the page-side flag so the observer ignores the agent's own clicks/types.
+async function agentActing(on) { try { if (page) await page.evaluate((v) => { window.__bhatbotAgentActing = v; }, on); } catch {} }
+// Block until Siddhant has been idle in the browser for idleMs (so we don't fight his cursor).
+async function waitForUserIdle(idleMs = 1500, timeoutMs = 120000) {
+  const start = Date.now(); let waited = false;
+  while (Date.now() - lastUserActivityTs < idleMs) {
+    if (Date.now() - start > timeoutMs) break;
+    if (!waited) { waited = true; sendToActivity('tool-update', { type: 'thinking', text: '⏸ you’re using the browser — waiting for you to finish…' }); }
+    await sleep(300);
+  }
+  return waited;
+}
+// Convert the recent human-event buffer into replayable workflow steps (skips secret inputs).
+function userEventsToSteps(events) {
+  const steps = []; let lastUrl = null;
+  for (const d of events) {
+    if (d.url && d.url !== lastUrl) { steps.push({ action: 'navigate', url: d.url }); lastUrl = d.url; }
+    if (d.type === 'click') steps.push({ action: 'click', selector: d.selector });
+    else if (d.type === 'input' && d.value != null && !d.secret) steps.push({ action: 'type', selector: d.selector, text: d.value });
+  }
+  return steps;
+}
+
 const WORKFLOW_DIR = path.join(os.homedir(), '.bhatbot', 'workflows');
 const NOTES_DIR = path.join(os.homedir(), '.bhatbot', 'notes');
 const pendingConfirms = new Map();
@@ -392,6 +475,13 @@ BROWSER WORKFLOWS: For repeated multi-step web tasks, use browser_workflow:
 start_recording, perform the browser steps, save_workflow{name}; later replay_workflow{name}.
 Prefer replaying a saved workflow over re-deriving selectors.
 
+WATCH-MY-MOUSE: Siddhant may take over the browser window with his own cursor. You AUTO-YIELD
+before each browser action while he is active, so you won't fight him — but if a step seems
+contested, call browser_observe{action:"status"}; if userActive, browser_observe{action:"wait"}
+until he's done, THEN continue. Treat what he does as teaching: after he performs a task you'll
+need to repeat, call browser_observe{action:"learn", name} to save it as a workflow (secrets are
+never captured). This is how you get faster over time — learn his moves, then replay them.
+
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 EXECUTION & PERSISTENCE
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -535,14 +625,36 @@ function recallEpisodic(query, k = 3) {
   } catch { return ''; }
 }
 
+// Tier 4 — the SHARED Notion bank (Mac + cloud + other agents). Fetched async per turn by
+// refreshNotionRecall (Notion's API is async; the memory block is built synchronously) and
+// keyed to the query so a stale result is never shown for a different question.
+let _notionRecall = { key: '', text: '' };
+function notionRecallKey(query) { return (query || '').trim().slice(0, 200); }
+async function refreshNotionRecall(query) {
+  try {
+    if (!notion.isConfigured || !notion.isConfigured()) { _notionRecall = { key: '', text: '' }; return; }
+    const key = notionRecallKey(query);
+    if (!key || key === _notionRecall.key) return;                 // dedupe identical consecutive turns
+    if (!memTerms(key).length) { _notionRecall = { key, text: '' }; return; }
+    const hits = await Promise.race([
+      notion.searchMemory(key, { limit: loadConfig().notionRecallK || 5 }),
+      new Promise((r) => setTimeout(() => r(null), 4000)),          // never block a turn >4s on Notion
+    ]);
+    const arr = Array.isArray(hits) ? hits : [];
+    _notionRecall = { key, text: arr.length ? arr.map((h) => `- ${h.fact}${h.tags ? ` [${h.tags}]` : ''}`).join('\n') : '' };
+  } catch { _notionRecall = { key: query || '', text: '' }; }
+}
+
 function buildMemoryBlock(query) {
   const cfg = loadConfig();
   const longTerm = memoryRetrieve(query, cfg.memoryTopK || 14);                              // tier 3
   const episodic = cfg.episodicRecall === false ? '' : recallEpisodic(query, cfg.episodicK || 3);  // tier 2
   const working = (sessionSpoken && sessionSpoken.length)                                     // tier 1
     ? sessionSpoken.slice(-6).map((s) => '- ' + String(s).slice(0, 160)).join('\n') : '';
+  const shared = (_notionRecall.text && _notionRecall.key === notionRecallKey(query)) ? _notionRecall.text : '';  // tier 4
   let out = '';
   if (longTerm) out += '\n\n---\n## RELEVANT MEMORY (long-term)\n\n' + longTerm;
+  if (shared) out += '\n\n## SHARED BANK (Notion — written by any agent/surface)\n\n' + shared;
   if (episodic) out += '\n\n## RECALLED FROM PAST SESSIONS (episodic)\n\n' + episodic;
   if (working) out += '\n\n## THIS SESSION SO FAR (working)\n\n' + working;
   return out ? redactSecrets(out) : '';
@@ -1322,6 +1434,14 @@ const TOOLS = [
       action: { type: 'string', enum: ['start_recording','save_workflow','cancel_recording','list_workflows','show_workflow','replay_workflow','delete_workflow'] },
       name: { type: 'string' }, description: { type: 'string' }
     }, required: ['action'] } },
+  { name: 'browser_observe', description: 'Watch-my-mouse: see when Siddhant is acting in the browser window, wait for him, and LEARN his steps. action:"status" → is he interacting + the recent steps he took; "wait" → block until he is idle (call this if status shows he is active, so you do not fight his cursor); "learn"{name} → save the steps he just performed as a replayable workflow (secrets excluded). The agent ALSO auto-yields before its own browser actions while he is active — use this tool to inspect/learn explicitly. Only works in the dedicated Playwright window.',
+    input_schema: { type: 'object', properties: {
+      action: { type: 'string', enum: ['status', 'wait', 'learn', 'clear'] },
+      name: { type: 'string', description: 'For learn: workflow name to save under.' },
+      description: { type: 'string' },
+      idleMs: { type: 'number', description: 'How long counts as "idle" (default 1500).' },
+      timeoutMs: { type: 'number', description: 'For wait: max wait (default 120000).' }
+    }, required: ['action'] } },
   { name: 'save_memory', description: `Persist a fact to long-term memory. section ∈ {${MEMORY_SECTIONS.join(', ')}}.`,
     input_schema: { type: 'object', properties: { section: { type: 'string', enum: MEMORY_SECTIONS }, content: { type: 'string' } }, required: ['section', 'content'] } },
   { name: 'browser', description: 'Dedicated headless Playwright browser; you SEE its screenshots (vision). actions: navigate, click, type, screenshot, get_text, evaluate, login. Use action:"login" to sign into a site: pass url, username, and credRef (a CRED_REF_ handle from keychain_lookup / the vault) — it auto-detects the fields, fills them, and submits. The password is resolved in-process; NEVER put a raw password in `text`.',
@@ -1525,6 +1645,12 @@ async function ensureBrowser() {
     // Restore a prior session if we have one → cookies/logins persist across launches.
     if (fs.existsSync(BROWSER_STATE)) ctxOpts.storageState = BROWSER_STATE;
     browserContext = await browser.newContext(ctxOpts);
+    // Watch-my-mouse: forward Siddhant's in-page actions to Node, and install the listeners on
+    // every page/navigation. Best-effort — a failure here must not block the browser.
+    try {
+      await browserContext.exposeBinding('__bhatbotUserEvent', (src, detail) => onUserBrowserEvent(detail));
+      await browserContext.addInitScript(OBSERVER_SCRIPT);
+    } catch (e) { console.error('[browser] observer install failed:', e.message); }
     page = await browserContext.newPage();
   })();
   try { await browserLaunching; } finally { browserLaunching = null; }
@@ -1548,6 +1674,11 @@ async function browserAction(input) {
   };
   // While recording a workflow, capture the replayable mutating steps (not screenshots/reads).
   const rec = (step) => { if (recordingSteps) recordingSteps.push(step); };
+  // Watch-my-mouse: before any action that changes the page, YIELD until Siddhant has finished
+  // interacting, then mark our own action so the observer doesn't log it as his.
+  const isMut = ['navigate', 'click', 'type', 'login', 'evaluate'].includes(input.action);
+  if (isMut && loadConfig().browserYield !== false) await waitForUserIdle(loadConfig().browserYieldMs || 1500);
+  if (isMut) await agentActing(true);
   try {
     switch (input.action) {
       case 'navigate':
@@ -1617,6 +1748,8 @@ async function browserAction(input) {
     // A dead/crashed page can't recover in place — reset so the next call relaunches clean.
     if (/Target closed|crashed|Browser has been closed|Execution context was destroyed/i.test(msg)) { await saveBrowserState(); try { await browser.close(); } catch {} browser = null; page = null; browserContext = null; }
     return { success: false, error: `Browser ${input.action} failed: ${msg.split('\n')[0]}` };
+  } finally {
+    if (isMut) await agentActing(false);
   }
 }
 
@@ -1626,6 +1759,34 @@ async function browserAction(input) {
 // Empirical traces beat the model re-deriving selectors from scratch each time.
 // ---------------------------------------------------------------------------
 function wfPath(name) { return path.join(WORKFLOW_DIR, String(name).replace(/[^\w.-]/g, '_') + '.json'); }
+
+// browser_observe — the watch-my-mouse surface. The agent uses this to check whether Siddhant
+// is interacting, to wait for him, and to LEARN the steps he just performed into a workflow.
+async function browserObserve(input) {
+  const a = input.action || 'status';
+  const idleMs = input.idleMs || 1500;
+  const sinceMs = lastUserActivityTs ? Date.now() - lastUserActivityTs : Infinity;
+  if (a === 'status') {
+    return { success: true, userActive: sinceMs < idleMs, lastActivityMsAgo: isFinite(sinceMs) ? sinceMs : null,
+      bufferedSteps: userEventBuffer.length,
+      recent: userEventBuffer.slice(-8).map((d) => ({ type: d.type, selector: d.selector, value: d.secret ? '«secret»' : d.value })) };
+  }
+  if (a === 'wait') { const waited = await waitForUserIdle(idleMs, input.timeoutMs || 120000); return { success: true, waited, idleNow: (Date.now() - lastUserActivityTs) >= idleMs }; }
+  if (a === 'clear') { userEventBuffer = []; return { success: true, result: 'Observation buffer cleared.' }; }
+  if (a === 'learn') {
+    const steps = userEventsToSteps(userEventBuffer);
+    if (!steps.length) return { success: false, error: 'Nothing observed yet — do the task in the browser window first, then learn.' };
+    if (!input.name) return { success: true, learned: steps.length, steps, note: 'Pass a name to SAVE these as a replayable workflow.' };
+    fs.mkdirSync(WORKFLOW_DIR, { recursive: true });
+    const wf = { name: input.name, description: input.description || 'Learned from Siddhant’s actions', created: new Date().toISOString(), source: 'observed', steps };
+    fs.writeFileSync(wfPath(input.name), JSON.stringify(wf, null, 2));
+    try { notion.appendMemory({ fact: `Learned browser workflow "${input.name}" (${steps.length} steps) from watching Siddhant`, tags: ['workflow', 'observed'], source: 'agent', confidence: 0.85 }); } catch {}
+    const n = steps.length; userEventBuffer = [];
+    return { success: true, result: `Learned + saved workflow "${input.name}" (${n} steps) from your actions. Replay it with browser_workflow{replay_workflow}.` };
+  }
+  return { success: false, error: `unknown action: ${a}` };
+}
+
 async function browserWorkflow(input) {
   const a = input.action;
   try {
@@ -2362,6 +2523,8 @@ async function executeTool(name, input) {
         result = manageJobs(input); break;
       case 'browser_workflow':
         result = await browserWorkflow(input); break;
+      case 'browser_observe':
+        result = await browserObserve(input); break;
       case 'save_memory':
         result = saveMemoryEntry(input.section, input.content); break;
       case 'browser':
@@ -2561,6 +2724,10 @@ async function agentLoop(history, apiKey, event, opts = {}) {
   // the pipeline escalated to us, else the zero-cost regex classifier on the task text.
   currentMode = opts.suggestedMode || modePrompts.classifyMode(lastUserText(history));
   sendToActivity('tool-update', { type: 'thinking', text: '🎛 mode: ' + currentMode });
+
+  // Passive auto-recall from the shared Notion bank — fold relevant facts (written by the Mac,
+  // the cloud backend, or any other agent) into the memory block before we answer. Bounded to 4s.
+  await refreshNotionRecall(lastUserText(history));
 
   // Streaming: emit text deltas to the renderer (live bubble) AND speak each finished
   // sentence as it lands. Only on the desktop chat path (opts.stream); MCP/Telegram stay

@@ -27,10 +27,16 @@ Compact starting point for the next session. State of the world + what's open.
 - ⚠ "across ALL apps/browsers": smart_login is Playwright-window only (solid). Real Chrome/Safari + native apps = system_control (AppleScript/keystroke) fallback, not yet auto-wired — next step if wanted.
 - ⬜ Takes effect after desktop app rebuild (deploy cycle below).
 
+## Build fix (DONE 2026-06-14)
+- `npm run build` was bundling **3.5GB OmniParser** (files:[**/*]+asar:false) → 3.4GB app + apparent hang. Excluded OmniParser/phone-app/cloud/~/*.md/etc → **347MB app, ~6s build**. Added author. OmniParser is NOT referenced by main.js (ui_inspect uses Ollama).
+
+## Watch-my-mouse + Notion auto-recall (DONE 2026-06-14)
+- **`browser_observe`** (watch-my-mouse, Playwright window): `OBSERVER_SCRIPT` init-script + `exposeBinding('__bhatbotUserEvent')` capture Siddhant's click/input/Enter with GENERALIZED selectors (id>data-testid>name>aria-label>text>nth path). `__bhatbotAgentActing` page flag (set via `agentActing()` around mutating browserActions) makes the observer ignore the agent's own events. browserAction auto-`waitForUserIdle()` before navigate/click/type/login/evaluate (config browserYield/browserYieldMs) so it never fights his cursor. User events also append to an active workflow recording. Tool actions: status/wait/learn{name}/clear → learn converts the buffer to replayable steps + saves a workflow + Notion note. **Passwords/OTP NEVER captured** (secret flag, value omitted). Verified E2E with real Playwright nav (capture, selector gen, secret-safety, agent-suppression all ✅). ⚠ init scripts only re-run on real navigations (page.goto), not setContent — fine for real use.
+- **Notion auto-recall**: `refreshNotionRecall(query)` (async, 4s-bounded, dedup by query key) runs at agentLoop entry; `buildMemoryBlock` folds the hits in as a 4th tier "SHARED BANK (Notion)". Config notionRecallK (5). Degrades to no-op if Notion unconfigured.
+
 ## Candidate next-push work (not started)
 - **Real-browser/native-app login** (Chrome/Safari/desktop apps) via system_control keystroke+clipboard, extending smart_login beyond the Playwright window.
-- **W3 watch/wait/learn**: detect Siddhant's mouse in the Playwright window (exposeBinding + agentActing flag), pause agentLoop, learn his actions → Notion macro. (Planned, not built.)
-- Desktop agent **auto-recall from Notion** (currently has tools but recalls manually) — make buildMemoryBlock pull from the shared bank passively. (User was offered this; pending.)
+- 5 power/utility options proposed to user 2026-06-14 (await pick).
 - Cloud: durable **conversation history** (currently in-process Map; Notion holds facts only).
 - Cloud: wire **MAC_RELAY_URL** end-to-end + test desktop-tool relay when Mac awake.
 - Notion: surface **Research/Project/Task** DBs into the phone UI (read views).
