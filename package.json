@@ -2,6 +2,7 @@
   "name": "bhatbot",
   "version": "1.0.0",
   "description": "Personal Jarvis-style desktop agent that reads CLAUDE.md as live context",
+  "author": "Siddhant Bhat",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
@@ -38,10 +39,20 @@
     "files": [
       "**/*",
       "!dist/**",
+      "!OmniParser/**",
+      "!~/**",
+      "!phone-app/**",
+      "!cloud/**",
       "!CHANGES.md",
       "!ADAPTIVE_LEARNING_PLAN.md",
+      "!**/*.md",
       "!.git/**",
-      "!**/*.map"
+      "!**/*.map",
+      "!**/.DS_Store",
+      "!**/__pycache__/**",
+      "!**/*.pyc",
+      "!**/*.ipa",
+      "!**/*.xcodeproj/**"
     ],
     "mac": {
       "category": "public.app-category.productivity",
