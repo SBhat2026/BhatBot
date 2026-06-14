@@ -10,6 +10,6 @@
   "engines": { "node": ">=20" },
   "dependencies": {
     "express": "^4.21.2",
-    "@notionhq/client": "^5.22.0"
+    "@notionhq/client": "^2.2.15"
   }
 }

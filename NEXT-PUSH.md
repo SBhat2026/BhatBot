@@ -16,7 +16,7 @@ Compact starting point for the next session. State of the world + what's open.
 
 ## Open / user-action items
 - ⬜ **SideStore install** — user doing it (instructions in `SIDESTORE-AND-NOTION-SETUP.txt`).
-- ⬜ **Notion go-live** — token `ntn_…` valid but integration was connected to **0 pages**; user must add it to a page (••• → Connections), then run `notion-setup.js`. Then set cloud `NOTION_*` secrets.
+- ✅ **Notion go-live (2026-06-14)** — bootstrapped. 5 DBs created under "Try AI Meeting Notes" page; ids in `~/.bhatbot/config.json` notion.*. **SDK pinned to classic 2.x** (5.x forces data-source model + strips top-level `properties` → broke create/query; 2.3.0 fixes all classic calls). Verified live: cloud recall+persist round-trip across fresh conversations works. Remaining: set cloud `NOTION_TOKEN`/`NOTION_MEMORY_DB`/`NOTION_DAILYLOG_DB` secrets when deploying; restart desktop app to pick up config.
 - ⬜ **Cloud deploy** — `cloud/` ready; user deploys to Fly/Railway + sets secrets (their keys in cloud = their call).
 - ⬜ **Stable tunnel** — Cloudflare named tunnel needs a domain on user's CF account.
 
