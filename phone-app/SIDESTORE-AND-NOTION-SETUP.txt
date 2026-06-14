@@ -1,0 +1,187 @@
+================================================================================
+ BhatBot — Phone App (SideStore) + Shared Notion Memory  ::  Setup Instructions
+ Last updated: 2026-06-14
+================================================================================
+
+This file covers two things:
+  PART 1 — Install BhatBot as a real iPhone app via SideStore (free, permanent).
+  PART 2 — Turn on the shared Notion memory bank.
+Do them in any order; they're independent.
+
+
+################################################################################
+# PART 1 — INSTALL BHATBOT ON IPHONE VIA SIDESTORE
+################################################################################
+
+WHY SIDESTORE (the honest reality):
+  Stock (non-jailbroken) iOS will NOT install a raw .ipa you AirDrop — iOS has no
+  installer for .ipa files. The only ways onto the phone are: App Store, TestFlight
+  ($99/yr), Xcode (⌘R, 7-day), or a sideloader (SideStore/AltStore) that re-signs
+  the app ON-DEVICE with your free Apple ID. SideStore is the closest to
+  "AirDrop-and-run" AND it auto-refreshes the signature over Wi-Fi, so the app
+  stays installed permanently. Content auto-updates regardless — the app is a thin
+  shell that loads the live UI from your backend, so every push shows up with no
+  reinstall.
+
+WHAT YOU NEED:
+  - iPhone 16 + M4 MacBook Air
+  - A free Apple ID (no $99 developer program needed)
+  - Both devices on the same Wi-Fi for refreshes
+  - A USB-C cable for the one-time pairing
+
+--------------------------------------------------------------------------------
+A. ONE-TIME SIDESTORE SETUP
+--------------------------------------------------------------------------------
+  1. Open https://sidestore.io on the Mac and click "Get Started" — follow their
+     current official steps (the exact helper app changes over releases). The flow:
+
+  2. PAIR THE PHONE:
+     - Plug the iPhone into the Mac with USB-C. Unlock it.
+     - Tap "Trust This Computer" on the phone (enter passcode).
+     - Use SideStore's pairing helper (per their site) to generate a pairing file:
+           pairing.mobiledevicepairing
+       (This file lets SideStore talk to the phone over Wi-Fi later.)
+
+  3. INSTALL THE SIDESTORE APP ITSELF onto the phone:
+     - SideStore's site provides the current SideStore.ipa + an install method
+       (often via their web installer or AltServer one time). Follow it to get the
+       SideStore icon onto the home screen.
+
+  4. ACTIVATE SIDESTORE ON THE PHONE:
+     - Open SideStore. It asks for the pairing file → AirDrop pairing.mobiledevice-
+       pairing from the Mac → tap it → "Open in SideStore".
+     - Sign in with your FREE Apple ID when prompted. (Apple may require an
+       app-specific password — SideStore explains how to make one at
+       appleid.apple.com if asked.)
+     - SideStore shows a Refresh screen. It now re-signs your sideloaded apps every
+       7 days AUTOMATICALLY over Wi-Fi. Just keep the phone on the same Wi-Fi as the
+       Mac now and then so a refresh can run.
+
+--------------------------------------------------------------------------------
+B. BUILD + INSTALL THE BHATBOT APP
+--------------------------------------------------------------------------------
+  1. On the Mac, build the latest app shell:
+         bash ~/bhatbot/phone-app/build-ipa.sh
+     → produces: ~/bhatbot/phone-app/dist/BhatBot-unsigned.ipa  (~1.3 MB)
+
+  2. AirDrop that BhatBot-unsigned.ipa file to the iPhone.
+
+  3. On the phone, tap the AirDrop notification → "Open with SideStore"
+     (or in SideStore: My Apps → "+" → choose the .ipa).
+
+  4. SideStore re-signs it with your Apple ID and installs it. The BhatBot icon
+     appears on the home screen.
+
+--------------------------------------------------------------------------------
+C. FIRST LAUNCH — POINT IT AT YOUR BACKEND
+--------------------------------------------------------------------------------
+  1. Open BhatBot.
+  2. LONG-PRESS anywhere on the screen → a settings dialog appears.
+  3. Set HOST and TOKEN:
+       - Mac AWAKE:  your Cloudflare tunnel  https://<name>.trycloudflare.com
+                     (or the Tailscale URL).
+       - Mac ASLEEP / fully independent: the CLOUD backend URL once deployed,
+                     e.g. https://bhatbot-cloud.fly.dev
+       - TOKEN:      your mcpToken (from ~/.bhatbot/config.json).
+  4. Tap Save. The app reconnects.
+
+  Done. It runs without Safari, and UI changes auto-update on every push.
+
+--------------------------------------------------------------------------------
+D. GOTCHAS / MAINTENANCE
+--------------------------------------------------------------------------------
+  - Free Apple ID limits: max 3 sideloaded apps + 7-day signature. SideStore's
+    auto-refresh keeps BhatBot alive — just don't leave the phone off the Mac's
+    Wi-Fi for more than ~7 days, or it'll need a manual refresh (open SideStore →
+    Refresh) and possibly a re-pair.
+  - First open: if iOS warns about an untrusted developer, go to
+        Settings → General → VPN & Device Management → (your Apple ID) → Trust.
+  - Rebuilding: you only need to re-AirDrop the .ipa if you changed the NATIVE
+    shell (Swift in phone-app/). Plain UI changes (src/mobile.html) auto-update
+    with no reinstall.
+  - To repoint at a different backend later: long-press → change Host/Token → Save.
+    No rebuild needed.
+
+
+################################################################################
+# PART 2 — TURN ON THE SHARED NOTION MEMORY BANK
+################################################################################
+
+WHAT THIS GIVES YOU:
+  A single, organized, larger long-term memory bank on Notion that the Mac
+  BhatBot, the cloud backend, and any other agent all read from and write to. The
+  phone keeps full memory even with the Mac asleep (the cloud backend recalls from
+  + persists to the same bank).
+
+THE 5 DATABASES IT CREATES (under one parent page):
+  - Memory        — durable facts (the main recall/store bank)
+  - Research Hub  — saved research pages with findings + source URLs
+  - Daily Log     — one page per day, each activity appended as a bullet
+  - Project State — per-project status + running notes/blockers
+  - Task Queue    — open tasks with priority/due/project
+
+--------------------------------------------------------------------------------
+A. ONE-TIME NOTION PREP (~2 min)  [REQUIRED — the token alone isn't enough]
+--------------------------------------------------------------------------------
+  Your integration token already exists ("BhatBot Memory Page"), but an integration
+  must be explicitly CONNECTED to a page before it can create anything.
+
+  1. In Notion, open (or create) the page that will hold the memory, e.g.
+     "BhatBot Memory".
+  2. Top-right "•••" menu → scroll to "Connections" (or "+ Add connections").
+  3. Search for "BhatBot Memory Page" → click it → Confirm.
+     (This grants the integration write access to that page and its sub-pages.)
+
+--------------------------------------------------------------------------------
+B. BOOTSTRAP THE BANK (one command on the Mac)
+--------------------------------------------------------------------------------
+  Run:
+      NOTION_TOKEN=ntn_xxx node ~/bhatbot/scripts/notion-setup.js "<page URL>"
+
+  - <page URL> is the share link of the page you connected in step A.
+  - If you've connected the integration to exactly one page, you can omit the URL
+    and the setup will auto-detect it.
+  - The script creates the 5 databases, writes their ids into
+    ~/.bhatbot/config.json under "notion", and verifies with a real write+read.
+  - It is idempotent: re-running reuses existing databases, won't duplicate them.
+
+  Then RESTART BhatBot. notion_write / notion_search / daily log / project state /
+  task queue go live.
+
+--------------------------------------------------------------------------------
+C. SHARE THE BANK WITH THE CLOUD BACKEND (so the phone has memory, Mac asleep)
+--------------------------------------------------------------------------------
+  The setup script prints the database ids (also in ~/.bhatbot/config.json →
+  notion.*). Give the cloud backend the same token + ids as env vars / secrets:
+
+      NOTION_TOKEN        = your ntn_ token
+      NOTION_MEMORY_DB    = config.notion.memoryDbId
+      NOTION_DAILYLOG_DB  = config.notion.dailyLogDbId   (optional)
+
+  On Fly.io:
+      fly secrets set NOTION_TOKEN=ntn_xxx \
+                      NOTION_MEMORY_DB=<id> \
+                      NOTION_DAILYLOG_DB=<id>
+
+  Verify: GET /health on the cloud backend should report  "memory":"notion"
+  (it says "in-process" when Notion isn't configured).
+
+--------------------------------------------------------------------------------
+D. HOW MEMORY BEHAVES
+--------------------------------------------------------------------------------
+  - RECALL: before answering, the cloud chat pulls the most relevant durable facts
+    from the Memory db (title match + word-overlap fallback) and uses them silently.
+  - PERSIST: saying "remember ...", "note that ...", "don't forget ...", or
+    "my X is Y" writes a durable fact. Every turn also drops a line in the Daily Log.
+  - Degrades safely: with no NOTION_TOKEN everything no-ops; the server still runs.
+
+================================================================================
+ QUICK REFERENCE
+================================================================================
+  Build app .ipa ............ bash ~/bhatbot/phone-app/build-ipa.sh
+  Signed device install ..... bash ~/bhatbot/phone-app/install-device.sh  (Xcode path)
+  Bootstrap Notion .......... NOTION_TOKEN=ntn_xxx node ~/bhatbot/scripts/notion-setup.js "<url>"
+  Cloud health .............. curl https://<your-cloud>/health
+  Full app install guide .... ~/bhatbot/phone-app/INSTALL.md
+  Cloud backend docs ........ ~/bhatbot/cloud/README.md
+================================================================================
