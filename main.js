@@ -475,6 +475,13 @@ BROWSER WORKFLOWS: For repeated multi-step web tasks, use browser_workflow:
 start_recording, perform the browser steps, save_workflow{name}; later replay_workflow{name}.
 Prefer replaying a saved workflow over re-deriving selectors.
 
+VISION CONTROL (any app, not just web): To operate a NATIVE Mac app that has no DOM (Spotify,
+Finder, System Settings, any GUI), use screen_parse{target:"screen"} → it returns on-screen
+elements with labels + click coords; pick the right one and vision_click{x,y,target:"screen"}.
+Re-parse after a click to see the new state (a see→click→verify loop). Prefer system_control
+(AppleScript) or the browser tools when they fit — vision control is the fallback for GUIs they
+can't reach. Default to fast parsing; set semantics:true only when icon captions are essential.
+
 WATCH-MY-MOUSE: Siddhant may take over the browser window with his own cursor. You AUTO-YIELD
 before each browser action while he is active, so you won't fight him — but if a step seems
 contested, call browser_observe{action:"status"}; if userActive, browser_observe{action:"wait"}
@@ -1488,6 +1495,18 @@ const TOOLS = [
     input_schema: { type: 'object', properties: { prompt: { type: 'string', description: 'What to ask about the page' } } } },
   { name: 'ui_inspect', description: 'Capture a screenshot (target:"browser" = current Playwright page, target:"screen" = the whole Mac screen) and get STRUCTURED visual QA findings from a local vision model: {pass, findings:[{severity,where,issue,fix_hint}]}. The screenshot is attached so you can also see it yourself. Use in a build → launch → inspect → fix loop to visually verify a UI and decide whether to keep iterating.',
     input_schema: { type: 'object', properties: { target: { type: 'string', enum: ['browser', 'screen'] }, goal: { type: 'string', description: 'what to check for / acceptance criteria' } } } },
+  { name: 'screen_parse', description: 'VISION-DRIVEN CONTROL of ANY app (not just web): capture the Mac screen (target:"screen") or the Playwright page (target:"browser") and run OmniParser to get a structured map of on-screen ELEMENTS — each with type (text/icon), its label/content, and ready-to-use click coordinates. Use this to operate native desktop apps that have no DOM (Spotify, Finder, Preferences, any GUI). Then call vision_click with an element’s click.x/click.y. Pass query to filter to elements whose label contains a string. semantics:true also AI-captions icons (richer but ~60s slower; default false ≈ 5s). The screenshot is returned so you also see it. Requires the local OmniParser install.',
+    input_schema: { type: 'object', properties: {
+      target: { type: 'string', enum: ['screen', 'browser'], description: 'screen = whole Mac (native apps); browser = Playwright page.' },
+      query: { type: 'string', description: 'Only return elements whose label contains this text (e.g. "Sign in").' },
+      semantics: { type: 'boolean', description: 'Caption icons too (slower). Default false.' }
+    } } },
+  { name: 'vision_click', description: 'Click at coordinates from screen_parse (vision-driven control). For target:"screen" the coords are Mac screen points and the click is delivered via the OS (needs Accessibility permission); for target:"browser" it clicks in the Playwright page. Use after screen_parse to actuate a native-app element. double:true for a double-click.',
+    input_schema: { type: 'object', properties: {
+      x: { type: 'number' }, y: { type: 'number' },
+      target: { type: 'string', enum: ['screen', 'browser'], description: 'Must match the screen_parse target the coords came from.' },
+      double: { type: 'boolean' }
+    }, required: ['x', 'y'] } },
   { name: 'ask_ai', description: 'Query ANOTHER AI model for research, a second opinion, or to cross-check. Providers: claude (Sonnet), openai (GPT), gemini (Google), local (your Ollama models). Use when you want an independent answer or to compare models.',
     input_schema: { type: 'object', properties: {
       provider: { type: 'string', enum: ['claude', 'openai', 'gemini', 'local'] },
@@ -2547,6 +2566,10 @@ async function executeTool(name, input) {
         result = { success: !insp.error, pass: insp.pass, findings: insp.findings, model: insp.model, error: insp.error, _image: b64, _imageMime: 'image/jpeg' };
         break;
       }
+      case 'screen_parse':
+        result = await screenParse(input); break;
+      case 'vision_click':
+        result = await visionClick(input); break;
       case 'ask_ai':
         result = await askAI(input); break;
       case 'studio_write': {
@@ -2848,7 +2871,7 @@ async function agentLoop(history, apiKey, event, opts = {}) {
       const result = await executeTool(block.name, block.input);
       // Jarvis HUD: surface visuals inline in chat — generated images / design renders /
       // explicit screenshots as holo-cards, and 3D outputs as an in-chat spinning model.
-      const showImage = result._image && (['generate_image', 'make_figure', 'studio_write', 'ui_inspect'].includes(block.name)
+      const showImage = result._image && (['generate_image', 'make_figure', 'studio_write', 'ui_inspect', 'screen_parse', 'vision_click'].includes(block.name)
         || (block.name === 'browser' && block.input && block.input.action === 'screenshot'));
       const model3d = (block.name === 'generate_3d' || block.name === 'make_printable') && result.success && result.path ? result.path : undefined;
       sendToAll(event, 'tool-update', {
@@ -4005,6 +4028,102 @@ function kokoroStart() {
     }
   });
   return kokoroReady;
+}
+
+// ---------------------------------------------------------------------------
+// OmniParser worker (vision-driven desktop control, item 2). Persistent like kokoro: load the
+// detection model once, then parse screenshots into a structured element map (type + caption +
+// bbox) and click elements by coordinate. Runs under OmniParser's OWN venv (heavy ML deps),
+// NOT resolvePython. The dir is external (excluded from the app bundle).
+// ---------------------------------------------------------------------------
+function omniDir() { return (loadConfig().omniparserDir || path.join(os.homedir(), 'bhatbot', 'OmniParser')); }
+function omniPython() { return loadConfig().omniparserPython || path.join(omniDir(), '.venv', 'bin', 'python3'); }
+function omniAvailable() { try { return fs.existsSync(path.join(omniDir(), 'weights', 'icon_detect', 'model.pt')) && fs.existsSync(omniPython()); } catch { return false; } }
+let omniProc = null, omniReady = null, omniBuf = '', omniNextId = 1;
+const omniPending = new Map();
+function omniStart() {
+  if (omniReady) return omniReady;
+  omniReady = new Promise((resolve, reject) => {
+    if (!omniAvailable()) { omniReady = null; return reject(new Error('OmniParser not installed (need ' + omniDir() + ' + its .venv)')); }
+    const worker = unpacked(path.join(__dirname, 'scripts', 'omniparser_worker.py'));
+    let settled = false;
+    omniProc = spawn(omniPython(), [worker, omniDir()], { env: { ...process.env, PATH: EXEC_PATH } });
+    omniProc.on('error', (e) => { if (!settled) { settled = true; reject(e); } cleanup(e); });
+    omniProc.stderr.on('data', () => {});   // library noise → ignore
+    omniProc.stdout.on('data', (d) => {
+      omniBuf += d.toString();
+      let nl;
+      while ((nl = omniBuf.indexOf('\n')) >= 0) {
+        const line = omniBuf.slice(0, nl).trim(); omniBuf = omniBuf.slice(nl + 1);
+        if (!line) continue;
+        let msg; try { msg = JSON.parse(line); } catch { continue; }
+        if (msg.event === 'started' && !settled) { settled = true; resolve(); continue; }
+        const p = omniPending.get(msg.id);
+        if (p) { omniPending.delete(msg.id); p(msg); }
+      }
+    });
+    omniProc.on('close', () => cleanup(new Error('omniparser worker exited')));
+    function cleanup(err) { for (const [, p] of omniPending) p({ ok: false, error: err.message }); omniPending.clear(); omniProc = null; omniReady = null; omniBuf = ''; }
+  });
+  return omniReady;
+}
+function omniRequest(req, timeoutMs = 120000) {
+  return new Promise(async (resolve) => {
+    try { await omniStart(); } catch (e) { return resolve({ ok: false, error: e.message }); }
+    if (!omniProc) return resolve({ ok: false, error: 'omniparser worker unavailable' });
+    const id = omniNextId++;
+    const timer = setTimeout(() => { omniPending.delete(id); resolve({ ok: false, error: 'omniparser timeout' }); }, timeoutMs);
+    omniPending.set(id, (m) => { clearTimeout(timer); resolve(m); });
+    omniProc.stdin.write(JSON.stringify({ id, ...req }) + '\n');
+  });
+}
+// Capture full-screen PNG (no downscale) for OmniParser. screencapture -x = silent main display.
+function captureScreenPng() {
+  return new Promise((resolve) => {
+    const out = path.join(os.tmpdir(), `bb-omni-${Date.now()}.png`);
+    exec(`screencapture -x -t png "${out}"`, { timeout: 8000 }, (err) => {
+      if (err) return resolve({ error: err.message });
+      try { const b64 = fs.readFileSync(out).toString('base64'); fs.unlink(out, () => {}); resolve({ b64 }); }
+      catch (e) { resolve({ error: e.message }); }
+    });
+  });
+}
+// Logical screen size in POINTS (CGEvent click space). Retina-independent of capture pixels.
+function screenPoints() { try { const { screen } = require('electron'); const s = screen.getPrimaryDisplay().size; return { w: s.width, h: s.height }; } catch { return { w: 0, h: 0 }; } }
+
+async function screenParse(input) {
+  const target = input.target === 'browser' ? 'browser' : 'screen';
+  let b64, space;
+  if (target === 'browser') {
+    try { await ensureBrowser(); const buf = await page.screenshot({ type: 'png' }); b64 = buf.toString('base64'); const vp = page.viewportSize() || await page.evaluate(() => ({ width: innerWidth, height: innerHeight })); space = { w: vp.width, h: vp.height }; }
+    catch (e) { return { success: false, error: 'browser capture failed: ' + e.message }; }
+  } else {
+    const cap = await captureScreenPng();
+    if (cap.error) return { success: false, error: 'screen capture failed (' + cap.error + ') — grant Screen Recording permission to BhatBot.' };
+    b64 = cap.b64; space = screenPoints();
+  }
+  const res = await omniRequest({ cmd: 'parse', image_b64: b64, semantics: !!input.semantics }, input.semantics ? 180000 : 60000);
+  if (!res.ok) return { success: false, error: 'parse failed: ' + (res.error || 'unknown') + (omniAvailable() ? '' : ' (OmniParser not installed)') };
+  // Attach click coordinates in the right space (screen points / browser CSS px).
+  let elements = (res.elements || []).map((e) => ({ i: e.i, type: e.type, content: e.content, interactive: e.interactivity,
+    click: { x: Math.round(e.center[0] * space.w), y: Math.round(e.center[1] * space.h) } }));
+  if (input.query) { const q = String(input.query).toLowerCase(); elements = elements.filter((e) => (e.content || '').toLowerCase().includes(q)); }
+  const trimmed = elements.filter((e) => e.content || e.interactive).slice(0, 60);
+  return { success: true, target, space, count: trimmed.length, elements: trimmed,
+    note: `Parsed ${res.elements.length} elements. To click one, call vision_click with its click.x/click.y (target:"${target}").`,
+    _image: b64, _imageMime: 'image/png' };
+}
+async function visionClick(input) {
+  const target = input.target === 'browser' ? 'browser' : 'screen';
+  const x = Number(input.x), y = Number(input.y);
+  if (!isFinite(x) || !isFinite(y)) return { success: false, error: 'numeric x,y required (from screen_parse click coords)' };
+  if (target === 'browser') {
+    try { await ensureBrowser(); if (input.double) await page.mouse.dblclick(x, y); else await page.mouse.click(x, y); await page.waitForLoadState('domcontentloaded', { timeout: 8000 }).catch(() => {}); return { success: true, clicked: { x, y }, target, _image: await page.screenshot({ type: 'jpeg', quality: 60 }).then((b) => b.toString('base64')).catch(() => undefined), _imageMime: 'image/jpeg' }; }
+    catch (e) { return { success: false, error: 'browser click failed: ' + e.message }; }
+  }
+  const res = await omniRequest({ cmd: 'click', x, y, double: !!input.double }, 10000);
+  if (!res.ok) return { success: false, error: 'click failed: ' + (res.error || 'unknown') + ' — grant Accessibility permission to BhatBot.' };
+  return { success: true, clicked: { x, y }, target };
 }
 
 // Allowed Kokoro voices (guards against junk from the phone). British male/female first.
