@@ -2712,6 +2712,48 @@ function getPublicHost() {
   return '';
 }
 
+// ---------------------------------------------------------------------------
+// Fast planning preamble. For a non-trivial action request, BhatBot quickly drafts a short
+// plan, SPEAKS a one-line summary of it (read-out), shows the full checklist in the activity
+// window, and then EXECUTES immediately — Siddhant can steer in real time via the guidance box
+// (pendingGuidance, folded into each step) without ever having to approve first.
+// ---------------------------------------------------------------------------
+const PLAN_VERBS = /\b(open|launch|run|build|fix|create|make|find|search|deploy|write|send|set|update|install|delete|remove|download|generate|render|automate|sign ?in|log ?in|login|organi[sz]e|refactor|analy[sz]e|set up|configure|integrate|wire|implement|migrate|test|schedule|scrape|extract|summari[sz]e|plot|chart|figure)\b/i;
+function needsPlan(text) {
+  if (loadConfig().planPreamble === false) return false;
+  const t = (text || '').trim();
+  if (t.length < 35) return false;                                   // trivial / chit-chat
+  if (/^\s*(what|why|who|when|where|which|how|is|are|can|could|do|does|did)\b/i.test(t) && t.length < 90) return false; // a plain question
+  const verbs = (t.match(new RegExp(PLAN_VERBS.source, 'gi')) || []).length;
+  const multi = /\b(and then|after that|then|next|also)\b/i.test(t) || /[;,].*\b\w+\b.*[;,]/.test(t) || verbs >= 2;
+  return verbs >= 1 && (multi || t.length > 120);
+}
+function parseJsonLoose(s) { const m = String(s || '').match(/\{[\s\S]*\}/); if (!m) return null; try { return JSON.parse(m[0]); } catch { return null; } }
+async function quickPlan(taskText, apiKey) {
+  const system = `You are BhatBot's fast planner. Draft a SHORT execution plan for Siddhant's request.
+Return ONLY JSON: {"steps":["<imperative action>", ...3-6 items],"spoken":"<=2 sentences, plain spoken English summarizing your approach — no markdown, no numbered list>"}
+Steps = concrete actions/tools BhatBot will take, each under 12 words. No preamble, JSON only.`;
+  try {
+    const r = await anthropicRequest({ model: MODEL_HAIKU, max_tokens: 400,
+      system: [{ type: 'text', text: system }],
+      messages: [{ role: 'user', content: String(taskText || '').slice(0, 2000) }] }, apiKey, { retries: 1 });
+    const txt = (r.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('');
+    const j = parseJsonLoose(txt);
+    if (!j || !Array.isArray(j.steps) || !j.steps.length) return null;
+    return { steps: j.steps.slice(0, 6).map((s) => String(s).slice(0, 120)), spoken: String(j.spoken || '').slice(0, 320) };
+  } catch { return null; }
+}
+function appendToLastUser(history, text) {
+  for (let i = history.length - 1; i >= 0; i--) {
+    if (history[i].role !== 'user') continue;
+    const c = history[i].content;
+    if (typeof c === 'string') history[i] = { role: 'user', content: c + '\n\n' + text };
+    else if (Array.isArray(c)) history[i] = { role: 'user', content: [...c, { type: 'text', text }] };
+    return true;
+  }
+  return false;
+}
+
 async function agentLoop(history, apiKey, event, opts = {}) {
   agentState = 'running';
   pendingGuidance = [];          // fresh per task
@@ -2744,6 +2786,21 @@ async function agentLoop(history, apiKey, event, opts = {}) {
     const disp = speakParser ? speakParser.feed(delta) : delta;
     if (disp) sendToAll(event, 'tool-update', { type: 'token', text: disp });
   } : undefined;
+
+  // Fast plan + read-out (desktop voice path). Draft a quick plan, SPEAK a summary, show the
+  // checklist, and inject it as execution context — then run without waiting for approval.
+  // Siddhant steers live via the guidance box (folded into each step below).
+  if (stream && !opts.suggestedMode && needsPlan(lastUserText(history))) {
+    try {
+      const plan = await quickPlan(lastUserText(history), apiKey);
+      if (plan) {
+        sendToAll(event, 'tool-update', { type: 'plan', steps: plan.steps, spoken: plan.spoken });
+        sendToActivity('plan', { steps: plan.steps, spoken: plan.spoken });
+        if (ttsSeq != null) ttsStreamFeed(ttsSeq, plan.spoken);   // read the plan aloud
+        appendToLastUser(history, `[EXECUTION PLAN — you have ALREADY spoken this summary to Siddhant aloud; do NOT re-read or restate it. Execute these steps now, in order, and incorporate any "[Live guidance from Siddhant]" notes as they arrive. Keep spoken output to brief progress + the final result.]\n` + plan.steps.map((s, i) => `${i + 1}. ${s}`).join('\n'));
+      }
+    } catch { /* planning is best-effort; never block execution */ }
+  }
 
   // All exits go through here so live guidance can be offered for learning (2a).
   const finish = (text) => {

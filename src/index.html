@@ -679,6 +679,12 @@ window.bhatbot.onToolUpdate((u) => {
       ? 'darkbloom · ' + (u.model || '')
       : 'anthropic · ' + String(u.model || '').replace('claude-', '');
   }
+  else if (u.type === 'plan' && Array.isArray(u.steps)) {
+    rmThinking();
+    addThought('📋 Plan: ' + u.steps.map((s, i) => (i + 1) + ') ' + s).join('  '));
+    addThinking();
+    actLog('📋 plan (' + u.steps.length + ' steps) — executing; type in the steer box anytime to adjust');
+  }
   else if (u.type === 'guidance_applied') { rmThinking(); addThought('↳ guidance applied: ' + u.text); addThinking(); actLog('↳ guidance: ' + u.text); }
   else if (u.kind === 'notify') { actLog('🔔 notify: ' + (u.text || ''), u.urgency === 'high' ? 'fail' : ''); }
 });
