@@ -441,6 +441,11 @@ ALWAYS submits the first factor itself; if a TOTP secret is on file it does the 
 SILENTLY; otherwise it CALLS + TEXTS him and waits for his phone reply (a code, or "approved"
 for a push) — he never has to come back to the Mac. Prefer doing both factors without asking
 whenever a TOTP secret exists. Never put a raw password in any field — only CRED_REF handles.
+smart_login works ACROSS apps + real browsers, not just the Playwright window: pass
+target:"chrome"|"safari"|"arc"|… to sign in inside his everyday browser, or target:"app"+app:
+"<Name>" for a native Mac app (it types via the clipboard, then wipes it, vision-focusing the
+right field). Same phone/TOTP 2FA either way. Native modes need Accessibility (+ Screen
+Recording for vision); if a native attempt fails for permissions, fall back to the window.
 
 3D PRINTING: For anything meant to be PRINTED, use make_printable (local, free, outputs
 STL), NOT generate_3d. Pick the mode by intent: a flat logo/icon/stamp/keychain/name-plate
@@ -1562,10 +1567,14 @@ const TOOLS = [
       announce: { type: 'boolean', description: 'Speak the result aloud (default true).' },
       notify: { type: 'boolean', description: 'Text the result to Telegram (default true).' }
     }, required: ['action'] } },
-  { name: 'smart_login', description: 'Sign into a site using a SAVED domain login profile, handling 2-factor automatically. Flow: fills the first factor (username+password from the vault), then for 2FA — if a TOTP secret is on file it generates+enters the code SILENTLY; otherwise it CALLS and TEXTS Siddhant for the code and waits for his phone reply (he replies with the code, or "approved" for a push prompt), then enters it. Pass `url` or `host` to use the saved profile, or inline `username`+`credRef`(+`totpRef`). Uses the dedicated Playwright browser window; sessions persist so most logins are skipped entirely. For a site with no profile yet, save one with manage_logins first.',
+  { name: 'smart_login', description: 'Sign into a site/app using a SAVED domain login profile, handling 2-factor automatically. Fills the first factor (username+password from the vault), then for 2FA — if a TOTP secret is on file it generates+enters the code SILENTLY; otherwise it CALLS and TEXTS Siddhant for the code and waits for his phone reply (code, or "approved" for a push prompt), then enters it. Pass `url`/`host` for a saved profile, or inline `username`+`credRef`(+`totpRef`). TWO MODES via `target`: omit (default) = the dedicated Playwright browser window (sessions persist → most logins skipped). target:"chrome"|"safari"|"edge"|"arc"|"firefox"|"brave" = sign in inside that REAL browser by opening the url and typing (vision-assisted) — for sites that must run in your everyday browser. target:"app" + app:"<App Name>" = sign into a NATIVE Mac app. Native modes type the password via clipboard (then wipe it) and need Accessibility (+ Screen Recording for vision field-focus). For a new site, save a profile with manage_logins first.',
     input_schema: { type: 'object', properties: {
       url: { type: 'string', description: 'Login page URL (e.g. https://overleaf.com/login). Or use host.' },
       host: { type: 'string', description: 'Domain key for a saved profile (e.g. "overleaf.com").' },
+      target: { type: 'string', enum: ['window', 'chrome', 'safari', 'edge', 'arc', 'firefox', 'brave', 'app'], description: 'Where to log in. Default (omitted/"window") = Playwright window. A browser name = that real browser. "app" = a native Mac app (set `app`).' },
+      app: { type: 'string', description: 'For target:"app": the native app name (e.g. "Slack", "Discord").' },
+      browser: { type: 'string', description: 'Alternative to target for naming a real browser (e.g. "Google Chrome").' },
+      vision: { type: 'boolean', description: 'For native modes: use OmniParser to focus the right field (default true; set false to use plain Tab order).' },
       username: { type: 'string', description: 'Override the saved username (optional).' },
       credRef: { type: 'string', description: 'Override password: a CRED_REF_ handle (resolved in-process; never a raw password).' },
       totpRef: { type: 'string', description: 'Override TOTP: a CRED_REF_ handle for the base32 2FA secret → silent 2FA.' },
@@ -1904,7 +1913,109 @@ async function fillOtpAndSubmit(code) {
   await page.waitForLoadState('domcontentloaded', { timeout: 15000 }).catch(() => {});
   return true;
 }
+// --- Native typing helpers (for app / real-browser logins, outside the Playwright window) ---
+// Secrets are typed via the clipboard (Cmd+V) — reliable for ANY character, no AppleScript
+// keystroke escaping pitfalls — then the clipboard is wiped immediately so the secret doesn't
+// linger on the pasteboard.
+const appStr = (s) => '"' + String(s == null ? '' : s).replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
+async function nativePaste(text) {
+  await osa(['-e', 'set the clipboard to ' + appStr(text)]);
+  await sleep(150);
+  await osa(['-e', 'tell application "System Events" to keystroke "v" using {command down}']);
+  await sleep(150);
+}
+async function nativeKey(code) { await osa(['-e', 'tell application "System Events" to key code ' + code]); }   // 48=Tab 36=Return 53=Esc
+async function nativeClearClipboard() { await osa(['-e', 'set the clipboard to ""']); }
+const BROWSER_APPS = { chrome: 'Google Chrome', safari: 'Safari', edge: 'Microsoft Edge', arc: 'Arc', firefox: 'Firefox', brave: 'Brave Browser' };
+
+// Universal login for NATIVE apps and REAL browsers (Chrome/Safari/Arc/…), i.e. ANY app — not
+// just the Playwright window. Opens the target, types credentials via the clipboard, then runs
+// the SAME phone-assisted 2FA flow as smart_login. Best-effort: when OmniParser is available it
+// uses vision (screen_parse → vision_click) to focus the right field; otherwise it falls back to
+// the universal username → Tab → password → Enter pattern that fits the vast majority of forms.
+async function nativeLogin(input) {
+  const ref = input.url || input.host;
+  const prof = ref ? logins.get(ref) : null;
+  const username = input.username || (prof && prof.username) || '';
+  let password = input.credRef || '';
+  if (!password && prof && prof.credRef) { try { password = credentials.resolve(prof.credRef); } catch (e) { return { success: false, error: 'could not resolve stored password handle: ' + e.message }; } }
+  if (!password) return { success: false, error: 'no password available (profile has no credRef and none passed inline)' };
+  let totpSecret = input.totpRef || '';
+  if (!totpSecret && prof && prof.totpRef) { try { totpSecret = credentials.resolve(prof.totpRef); } catch {} }
+  const twoFactor = input.twoFactor || (prof && prof.twoFactor) || 'auto';
+  const url = input.url || (prof && prof.url);
+
+  // 1) Launch the target.
+  let opened;
+  if (input.target === 'app' || input.target === 'native') {
+    if (!input.app) return { success: false, error: 'target "app" needs app:"<App Name>"' };
+    opened = await systemControl({ action: 'open_app', app: input.app });
+    if (opened && opened.success === false) return opened;
+  } else {
+    const key = String(input.browser || input.target || 'chrome').toLowerCase();
+    const app = BROWSER_APPS[key] || input.browser || 'Google Chrome';
+    if (!url) return { success: false, error: 'need a url to open in the browser' };
+    opened = await new Promise((res) => { const p = spawn('open', ['-a', app, url], { env: { ...process.env, PATH: EXEC_PATH } }); p.on('error', (e) => res({ success: false, error: 'could not open ' + app + ': ' + e.message })); p.on('close', (c) => res({ success: c === 0, app })); });
+    if (opened.success === false) return opened;
+  }
+  await sleep(input.loadMs || 3000);
+
+  // 2) Vision-assisted focus of the username/email field (skip silently if unavailable).
+  if (omniAvailable() && input.vision !== false) {
+    try {
+      const parsed = await screenParse({ target: 'screen', semantics: false });
+      if (parsed.success) {
+        const el = (parsed.elements || []).find((e) => /e-?mail|user\s?name|username|phone|account|sign ?in|log ?in/i.test(e.content || ''));
+        if (el && el.click) { await visionClick({ target: 'screen', x: el.click.x, y: el.click.y }); await sleep(450); }
+      }
+    } catch {}
+  }
+
+  // 3) Type credentials: username → Tab → password → Enter.
+  if (username) { await nativePaste(username); await sleep(200); await nativeKey(48); await sleep(300); }
+  await nativePaste(password);
+  await nativeClearClipboard();
+  await sleep(250);
+  await nativeKey(36);                       // Return → submit first factor
+  await sleep(input.afterSubmitMs || 3500);
+
+  // 4) Second factor.
+  if (twoFactor === 'none') return { success: true, stage: 'first_factor', note: 'First factor entered; profile says no 2FA. Verify on screen.' };
+
+  // (a) Silent TOTP.
+  if (totpSecret && twoFactor !== 'phone') {
+    try {
+      const OTPAuth = require('otpauth');
+      const code = new OTPAuth.TOTP({ secret: OTPAuth.Secret.fromBase32(String(totpSecret).replace(/\s+/g, '').toUpperCase()) }).generate();
+      await nativePaste(code); await nativeClearClipboard(); await sleep(150); await nativeKey(36);
+      await sleep(2500);
+      return { success: true, stage: 'complete', note: 'Logged in (TOTP 2FA entered silently). Verify on screen.' };
+    } catch { /* fall through to phone */ }
+  }
+
+  // (b) Decide whether 2FA is needed (vision OCR), then phone-assist.
+  let needs = twoFactor === 'phone';
+  if (!needs && omniAvailable() && input.vision !== false) {
+    try { const p2 = await screenParse({ target: 'screen', semantics: false }); if (p2.success) needs = (p2.elements || []).some((e) => /(verification|2-step|two-?factor|authenticat|one-?time|enter.*code|6-digit|check your phone|approve)/i.test(e.content || '')); } catch {}
+  }
+  if (!needs && twoFactor === 'auto') return { success: true, stage: 'complete', note: 'Credentials entered; no 2FA prompt detected. Verify on screen.' };
+
+  const site = (() => { try { return new URL(url || '').hostname; } catch { return input.app || ref || 'the app'; } })();
+  const ask = `BhatBot is signing you into ${site}. Password is in. It needs the 2FA code — reply with the code (or "approved" if you just tapped a push prompt).`;
+  await notifyUser(ask, 'call', { awaitReply: true, taskId: 'login-2fa' });
+  await twilioSMS(ask).catch(() => {});
+  sendToActivity('tool-update', { type: 'thinking', text: `🔐 ${site}: first factor in — waiting for your 2FA code by phone…` });
+  const code = await awaitTwoFactorCode(input.waitMs || 150000);
+  if (!code) return { success: false, stage: 'awaiting_2fa', error: 'No 2FA reply within the wait window. Reply with the code and re-run, or finish in the app.' };
+  if (code !== 'APPROVED') { await nativePaste(code); await nativeClearClipboard(); await sleep(150); await nativeKey(36); }
+  await sleep(2000);
+  return { success: true, stage: 'complete', note: `Signed into ${site} (phone 2FA). Verify on screen.` };
+}
+
+const NATIVE_LOGIN_TARGET = /^(app|native|chrome|safari|edge|arc|firefox|brave)$/i;
 async function smartLogin(input) {
+  // Native app / real browser → keystroke-driven login (vision-assisted) instead of Playwright.
+  if (input.target && NATIVE_LOGIN_TARGET.test(input.target)) return nativeLogin(input);
   // Resolve a saved profile by url/host; inline fields override it.
   const ref = input.url || input.host;
   const prof = ref ? logins.get(ref) : null;
