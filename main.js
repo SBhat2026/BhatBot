@@ -26,6 +26,7 @@ const logins = require('./lib/logins');               // domain-keyed login prof
 const modePrompts = require('./lib/prompts');         // P4  — mode-switching system prompts
 const jobsBus = require('./lib/jobs');                // P5  — background job bus (task cards + spoken relay + steering)
 const scheduler = require('./lib/scheduler');         // proactive scheduler (recurring/one-off autonomous tasks)
+const simulate = require('./lib/simulate');           // physics/chem/math simulation sandbox (scipy/sympy/rdkit/openmm/pyscf…)
 
 const DB_MODELS = { db_speech: 'gpt-oss-20b', db_directive: 'gemma-4-26b' };
 
@@ -421,6 +422,14 @@ human direction. Prefer SVG via studio_write (free, infinitely scalable,
 editable) for logos, icons, diagrams, and UI. Use generate_image (GPT Image 1,
 ~$0.04/image) only for photorealistic or complex artistic content SVG can't
 express. generate_3d turns any image into a textured GLB via AI (Blender/Unity/Three.js).
+
+SIMULATION: For any real physics/chemistry/math modeling — solving ODEs/PDEs, dynamical
+systems, optimization, symbolic derivations, molecular properties/reactions, molecular dynamics,
+quantum chemistry, 2D/3D physics, network models — use the simulate tool (sandboxed scientific
+Python: scipy/sympy/numpy/networkx/pint/numba/pymunk/rdkit/ase/pybullet/openmm/pyscf), NOT
+run_shell or made-up numbers. Call simulate{action:"capabilities"} if unsure what's installed;
+then simulate{action:"run", code} — emit(...) returns results, matplotlib figures come back so
+you can verify. Plot results with make_figure when you have a data file.
 
 FIGURES (data-accurate): For any chart/figure from REAL data or a paper's results, use
 make_figure — NOT generate_image (which invents numbers). FAST PATH: make_figure{action:
@@ -1550,6 +1559,12 @@ const TOOLS = [
       formats: { type: 'array', items: { type: 'string', enum: ['png', 'pdf', 'svg'] }, description: 'Output formats. PNG always included. Default [png]. Use pdf/svg for Overleaf.' },
       filename: { type: 'string', description: 'Output filename (no extension). Defaults to timestamp.' }
     }, required: ['action', 'data'] } },
+  { name: 'simulate', description: 'Run a PHYSICS, CHEMISTRY, or MATH-MODELING simulation in a sandboxed scientific Python env. Available libraries (the actual projects, pre-installed): scipy (ODE/PDE via integrate.solve_ivp, optimize, linalg, stats), sympy (symbolic math/CAS, sympy.physics.mechanics), numpy, networkx (network models), pint (units), numba (JIT speed), pymunk (2D physics), rdkit (cheminformatics: molecules/reactions/descriptors), ase (atomistic), pybullet (3D physics), openmm (molecular dynamics), pyscf (quantum chemistry HF/DFT). Usage: action:"capabilities" lists what is actually installed + what each does (call this first if unsure). action:"run" executes your Python `code` in that env — call emit(key=value) to return structured results, and use matplotlib (the figure is auto-saved and returned as a vision block so you SEE it). `np`, `plt`, `math`, `json` are preloaded; import the rest. Long sims: raise timeoutMs (max 600000). Use this — NOT plain run_shell — for any real numerical/scientific simulation.',
+    input_schema: { type: 'object', properties: {
+      action: { type: 'string', enum: ['run', 'capabilities'], description: 'run = execute code (default); capabilities = list installed libraries.' },
+      code: { type: 'string', description: 'Python source to run in the simulation sandbox. Preloaded: np, plt, math, json, emit(). Import scipy/sympy/rdkit/etc as needed. Call emit(name=value) for JSON results; draw with matplotlib to return a figure.' },
+      timeoutMs: { type: 'number', description: 'Max run time in ms (default 120000, max 600000). Raise for heavy MD/quantum runs.' }
+    }, required: ['action'] } },
   { name: 'manage_schedule', description: 'Schedule BhatBot to do things PROACTIVELY/AUTONOMOUSLY — reminders, recurring checks, "every morning brief me", "in 30 minutes do X", "every Monday at 9am". Each schedule runs the given `prompt` through the full agent at its time (no one watching), then speaks the result aloud and texts it to Telegram. Use this whenever Siddhant asks for something to happen later or repeatedly. Actions: add (create), list, remove{id}, enable{id}, disable{id}, run{id} (fire now). For timing pass ONE of: kind:"daily"+at:"HH:MM" / kind:"weekly"+at:"HH:MM"+dow(0=Sun) / kind:"interval"+everyMinutes|everyHours / kind:"once"+runAt(ISO), OR the shortcuts inMinutes / inHours / everyMinutes / everyHours.',
     input_schema: { type: 'object', properties: {
       action: { type: 'string', enum: ['add', 'list', 'remove', 'enable', 'disable', 'run'], description: 'What to do.' },
@@ -2646,6 +2661,11 @@ async function executeTool(name, input) {
         else result = figures.render({ data: input.data, spec: input.spec, code: input.code, formats: input.formats, filename: input.filename, pythonBin: py });
         break;
       }
+      case 'simulate': {
+        if ((input.action || 'run') === 'capabilities') result = simulate.capabilities();
+        else result = await simulate.run({ code: input.code, timeoutMs: input.timeoutMs });
+        break;
+      }
       case 'manage_schedule': {
         const act = input.action || 'list';
         if (act === 'list') result = { success: true, schedules: scheduler.list().map((s) => ({ id: s.id, title: s.title, kind: s.kind, at: s.at, everyMs: s.everyMs, runAt: s.runAt, nextRun: s.nextRun ? new Date(s.nextRun).toISOString() : null, enabled: s.enabled, lastRun: s.lastRun })) };
@@ -3036,7 +3056,7 @@ async function agentLoop(history, apiKey, event, opts = {}) {
       const result = await executeTool(block.name, block.input);
       // Jarvis HUD: surface visuals inline in chat — generated images / design renders /
       // explicit screenshots as holo-cards, and 3D outputs as an in-chat spinning model.
-      const showImage = result._image && (['generate_image', 'make_figure', 'studio_write', 'ui_inspect', 'screen_parse', 'vision_click'].includes(block.name)
+      const showImage = result._image && (['generate_image', 'make_figure', 'simulate', 'studio_write', 'ui_inspect', 'screen_parse', 'vision_click'].includes(block.name)
         || (block.name === 'browser' && block.input && block.input.action === 'screenshot'));
       const model3d = (block.name === 'generate_3d' || block.name === 'make_printable') && result.success && result.path ? result.path : undefined;
       sendToAll(event, 'tool-update', {
