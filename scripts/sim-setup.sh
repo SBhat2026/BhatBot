@@ -35,7 +35,8 @@ grp rdkit                        # cheminformatics
 grp ase                          # atomistic / materials
 
 if [ "$TIER" = "phys3d" ] || [ "$TIER" = "full" ]; then
-  grp pybullet                   # 3D rigid-body / robotics (builds from source — slow)
+  grp mujoco                     # 3D rigid-body / contact / robotics (DeepMind; prebuilt wheels)
+  grp pybullet                   # 3D physics (optional; may fail to build on newer macOS SDK)
 fi
 if [ "$TIER" = "full" ]; then
   grp openmm                     # molecular dynamics
@@ -46,7 +47,7 @@ fi
 "$PY" - <<'PYEOF' 2>&1 | tee -a "$LOG"
 import json, importlib
 mods = ["numpy","scipy","sympy","networkx","pandas","matplotlib","pint","mendeleev",
-        "numba","pymunk","rdkit","ase","pybullet","openmm","pyscf"]
+        "numba","pymunk","rdkit","ase","mujoco","pybullet","openmm","pyscf"]
 ok = {}
 for m in mods:
     try:
