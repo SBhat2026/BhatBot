@@ -36,7 +36,10 @@ grp ase                          # atomistic / materials
 
 if [ "$TIER" = "phys3d" ] || [ "$TIER" = "full" ]; then
   grp mujoco                     # 3D rigid-body / contact / robotics (DeepMind; prebuilt wheels)
-  grp pybullet                   # 3D physics (optional; may fail to build on newer macOS SDK)
+  # NOTE: pybullet dropped — won't build on current macOS SDK + MuJoCo is faster/higher-fidelity.
+fi
+if [ "$TIER" = "full" ]; then
+  grp smolagents litellm         # code-first agent for complex math reasoning (uses sim libs)
 fi
 if [ "$TIER" = "full" ]; then
   grp openmm                     # molecular dynamics
@@ -47,7 +50,7 @@ fi
 "$PY" - <<'PYEOF' 2>&1 | tee -a "$LOG"
 import json, importlib
 mods = ["numpy","scipy","sympy","networkx","pandas","matplotlib","pint","mendeleev",
-        "numba","pymunk","rdkit","ase","mujoco","pybullet","openmm","pyscf"]
+        "numba","pymunk","rdkit","ase","mujoco","openmm","pyscf","smolagents"]
 ok = {}
 for m in mods:
     try:

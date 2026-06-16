@@ -429,7 +429,9 @@ quantum chemistry, 2D/3D physics, network models — use the simulate tool (sand
 Python: scipy/sympy/numpy/networkx/pint/numba/pymunk/rdkit/ase/mujoco/openmm/pyscf), NOT
 run_shell or made-up numbers. Call simulate{action:"capabilities"} if unsure what's installed;
 then simulate{action:"run", code} — emit(...) returns results, matplotlib figures come back so
-you can verify. Plot results with make_figure when you have a data file.
+you can verify. Plot results with make_figure when you have a data file. For a HARD multi-step
+math/quantitative problem (derivations, tricky algebra/calculus/probability/optimization), use
+math_reason{task} — a code-first agent that computes a VERIFIED answer instead of guessing.
 
 FIGURES (data-accurate): For any chart/figure from REAL data or a paper's results, use
 make_figure — NOT generate_image (which invents numbers). FAST PATH: make_figure{action:
@@ -1565,6 +1567,13 @@ const TOOLS = [
       code: { type: 'string', description: 'Python source to run in the simulation sandbox. Preloaded: np, plt, math, json, emit(). Import scipy/sympy/rdkit/etc as needed. Call emit(name=value) for JSON results; draw with matplotlib to return a figure.' },
       timeoutMs: { type: 'number', description: 'Max run time in ms (default 120000, max 600000). Raise for heavy MD/quantum runs.' }
     }, required: ['action'] } },
+  { name: 'math_reason', description: 'Solve a COMPLEX, multi-step MATH / quantitative-reasoning problem with a code-first agent (smolagents) that writes and EXECUTES Python (numpy/sympy/scipy authorized) to compute a verifiable answer — not a guessed one. Use for hard algebra/calculus/number-theory/probability/optimization word problems, derivations, or anything where step-by-step computation beats mental math. Returns the final answer plus the code it ran. Runs in the simulation sandbox; needs scripts/sim-setup.sh.',
+    input_schema: { type: 'object', properties: {
+      task: { type: 'string', description: 'The math/reasoning problem, in full. Ask for the final numeric/closed-form answer explicitly.' },
+      model: { type: 'string', description: 'Reasoning model (default claude-sonnet-4-6). Use a stronger model for harder problems.' },
+      maxSteps: { type: 'number', description: 'Max reasoning steps (default 6, max 12).' },
+      timeoutMs: { type: 'number', description: 'Max run time ms (default 180000, max 600000).' }
+    }, required: ['task'] } },
   { name: 'manage_schedule', description: 'Schedule BhatBot to do things PROACTIVELY/AUTONOMOUSLY — reminders, recurring checks, "every morning brief me", "in 30 minutes do X", "every Monday at 9am". Each schedule runs the given `prompt` through the full agent at its time (no one watching), then speaks the result aloud and texts it to Telegram. Use this whenever Siddhant asks for something to happen later or repeatedly. Actions: add (create), list, remove{id}, enable{id}, disable{id}, run{id} (fire now). For timing pass ONE of: kind:"daily"+at:"HH:MM" / kind:"weekly"+at:"HH:MM"+dow(0=Sun) / kind:"interval"+everyMinutes|everyHours / kind:"once"+runAt(ISO), OR the shortcuts inMinutes / inHours / everyMinutes / everyHours.',
     input_schema: { type: 'object', properties: {
       action: { type: 'string', enum: ['add', 'list', 'remove', 'enable', 'disable', 'run'], description: 'What to do.' },
@@ -2664,6 +2673,11 @@ async function executeTool(name, input) {
       case 'simulate': {
         if ((input.action || 'run') === 'capabilities') result = simulate.capabilities();
         else result = await simulate.run({ code: input.code, timeoutMs: input.timeoutMs });
+        break;
+      }
+      case 'math_reason': {
+        const m = input.model && /sonnet|haiku|opus/.test(input.model) ? 'anthropic/' + input.model : input.model;
+        result = await simulate.mathReason({ task: input.task || input.problem, model: m, maxSteps: input.maxSteps, apiKey: getApiKey(), timeoutMs: input.timeoutMs });
         break;
       }
       case 'manage_schedule': {
