@@ -1,7 +1,14 @@
 # BhatBot — Next Big Push (handoff)
-_Updated 2026-06-14_
+_Updated 2026-06-16_
 
 Compact starting point for the next session. State of the world + what's open.
+
+## Sim + agents + eval (DONE 2026-06-15/16)
+- **simulate tool** (`lib/simulate.js` + `scripts/sim-setup.sh`): sandbox venv `~/.bhatbot/sim-venv` (py3.11). 16 libs: numpy scipy sympy networkx pandas matplotlib pint mendeleev numba pymunk rdkit ase **mujoco openmm pyscf smolagents**. action run/capabilities; emit()+auto-figure. Verified: scipy ODE, rdkit aspirin, pyscf H2 −1.1168 Ha.
+- **pybullet DROPPED** (macOS SDK build fail) → MuJoCo is the 3D engine (user pref: faster/higher-fidelity).
+- **math_reason tool** (`scripts/smol_agent.py`): smolagents CodeAgent, computed math answers. Verified Σroots²=14.
+- **Figure recipe cache self-prunes** (`figures.pruneRecipes`, every write): dedupe identical specs + drop stale/unused + cap 24.
+- **PERF EVAL** (`scripts/perf-eval.js` + `lib/eval.js`): in-process Node harness + Claude G-Eval judge (chose this over DeepEval/LangSmith/Phoenix — see PERF-EVAL.md). Routing 9/9, args 3/3, healing 3/3 (100%); judge: honest align 0.95/concise 0.9/halluc 0, catches hallucinated+noisy. Fixed inferAgent render/STL mis-route → creative. Traces → ~/.bhatbot/eval/. NEXT fidelity: live end-to-end agentLoop eval (harness ready).
 
 ## Where things stand (DONE + pushed)
 - **Fast chat**: quickRoute + fastReply (streaming Haiku, server-cached system, ~0.6s first token); dispatchTurn unified entry. Config `fastChat`.
