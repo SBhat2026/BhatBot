@@ -16,3 +16,13 @@ primary_region = "ewr"  # Newark — close to NJ
 [[vm]]
   size = "shared-cpu-1x"
   memory = "256mb"
+
+# Durable conversation history. Create the volume once (same region as the app):
+#   fly volumes create bhatbot_data --region ewr --size 1
+# Without a volume the app still runs (history persists only within a machine's lifetime).
+[mounts]
+  source = "bhatbot_data"
+  destination = "/data"
+
+[env]
+  DATA_DIR = "/data"

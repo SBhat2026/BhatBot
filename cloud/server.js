@@ -13,6 +13,8 @@
 // always-on. Config via env (.env.example). No dependency on the desktop main.js.
 // ===========================================================================
 const express = require('express');
+const fs = require('fs');
+const path = require('path');
 const notion = require('./notion');   // shared Notion memory bank (no-ops if NOTION_TOKEN unset)
 
 const PORT = process.env.PORT || 8790;
@@ -75,14 +77,28 @@ async function claude(messages, { retries = 3, system = SYSTEM } = {}) {
 }
 const sleep = (ms) => new Promise(res => setTimeout(res, ms));
 
+// Cadence humanization (mirror of desktop). flash/turbo v2.5 honor SSML <break>; cap usage.
+const DISCOURSE_LEAD = /^(right|so|well|now|look|listen|honestly|actually|alright|okay|ok|hmm|ah|oh|sure|of course|indeed|very well|certainly)\b[,]?\s+/i;
+function humanizeCadence(input) {
+  let s = String(input || '');
+  if (!s || !/flash|turbo/i.test(EL_MODEL)) return s;
+  s = s.replace(DISCOURSE_LEAD, (m) => m.replace(/[,\s]+$/, '') + '<break time="0.25s"/> ');
+  s = s.replace(/\s*\.\.\.+\s*/g, ' <break time="0.45s"/> ');
+  s = s.replace(/\s*[—–]\s*/g, ' <break time="0.25s"/> ').replace(/\s+-\s+/g, ' <break time="0.25s"/> ');
+  let n = (s.match(/<break/g) || []).length; const MAX = 6;
+  s = s.replace(/([.!?])\s+(?=[A-Z0-9])/g, (m, p) => (n++ < MAX ? p + ' <break time="0.3s"/> ' : m));
+  let count = 0; s = s.replace(/<break[^>]*>/g, (t) => (++count > MAX ? '' : t));
+  return s.replace(/[ \t]{2,}/g, ' ').trim();
+}
+
 // ---- ElevenLabs TTS (Jarvis voice) ----
 async function tts(text) {
-  const t = normalizeForSpeech(text);
+  const t = humanizeCadence(normalizeForSpeech(text));
   if (!t) return { error: 'empty' };
   if (!EL_KEY) return { error: 'no ELEVENLABS_API_KEY' };
   const r = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${EL_VOICE}?output_format=mp3_44100_128&optimize_streaming_latency=3`, {
     method: 'POST', headers: { 'xi-api-key': EL_KEY, 'content-type': 'application/json' },
-    body: JSON.stringify({ text: t, model_id: EL_MODEL, voice_settings: { stability: 0.4, similarity_boost: 0.75, style: 0.2, use_speaker_boost: false, speed: TTS_SPEED } })
+    body: JSON.stringify({ text: t, model_id: EL_MODEL, voice_settings: { stability: 0.38, similarity_boost: 0.75, style: 0.35, use_speaker_boost: true, speed: TTS_SPEED } })
   });
   if (!r.ok) return { error: 'elevenlabs ' + r.status + ': ' + (await r.text()).slice(0, 160) };
   const buf = Buffer.from(await r.arrayBuffer());
@@ -126,10 +142,32 @@ const guard = (req, res, next) => (req.params.token === TOKEN && TOKEN) ? next()
 
 app.get('/health', (_q, s) => s.json({ ok: true, name: 'bhatbot-cloud', mac: MAC_RELAY_URL ? 'relay-configured' : 'standalone', memory: notion.configured() ? 'notion' : 'in-process' }));
 
-// Rolling conversation per token. In-memory survives between turns within a run; the DURABLE
-// layer is Notion (recall + persisted facts), shared with the Mac and other agents — so memory
-// outlives restarts and is the same bank everywhere.
+// Rolling conversation per token. DURABLE: the transcript is persisted to disk so it survives
+// restarts/redeploys (on Fly/Railway, mount a volume at DATA_DIR for true persistence; without
+// one it still survives in-machine restarts). Notion remains the durable FACT layer (recall +
+// persisted facts), shared with the Mac and other agents. This adds turn-by-turn continuity so
+// a phone conversation isn't reset every time the cloud machine sleeps/wakes.
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
+const HISTORY_FILE = path.join(DATA_DIR, 'history.json');
 const histories = new Map();
+(function loadHistories() {
+  try {
+    const raw = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8'));
+    for (const [k, v] of Object.entries(raw)) if (Array.isArray(v)) histories.set(k, v);
+    console.log(`[bhatbot-cloud] restored ${histories.size} conversation(s) from disk`);
+  } catch { /* no prior history — fresh start */ }
+})();
+let _saveTimer = null;
+function saveHistories() {
+  if (_saveTimer) return;            // debounce bursty turns into one write
+  _saveTimer = setTimeout(() => {
+    _saveTimer = null;
+    try {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+      fs.writeFileSync(HISTORY_FILE, JSON.stringify(Object.fromEntries(histories)));
+    } catch (e) { console.warn('[bhatbot-cloud] history save failed:', e.message); }
+  }, 1500);
+}
 
 // Explicit-memory cue: when Siddhant says "remember …" / "note that …" / "my X is Y", persist
 // the fact to the shared Notion bank so every agent (Mac, cloud, future) sees it.
@@ -145,7 +183,7 @@ app.post('/api/:token/chat', guard, async (req, res) => {
   try {
     const text = String((req.body && req.body.text) || '').trim();
     if (!text) return res.json({ error: 'empty' });
-    if (req.body.new_conversation) histories.delete(TOKEN);
+    if (req.body.new_conversation) { histories.delete(TOKEN); saveHistories(); }
     const hist = histories.get(TOKEN) || [];
 
     // 1) RECALL relevant durable facts from the shared bank and fold them into the system.
@@ -158,6 +196,7 @@ app.post('/api/:token/chat', guard, async (req, res) => {
     const reply = await claude(hist.slice(-MAX_HISTORY), { system: sys });
     hist.push({ role: 'assistant', content: reply });
     histories.set(TOKEN, hist.slice(-MAX_HISTORY));
+    saveHistories();                  // persist transcript so it outlives restarts/redeploys
 
     // 2) PERSIST: explicit "remember …" facts as durable memory; every turn as a light daily log.
     const fact = extractFact(text);

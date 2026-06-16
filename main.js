@@ -25,6 +25,7 @@ const figures = require('./lib/figures');             // data-accurate matplotli
 const logins = require('./lib/logins');               // domain-keyed login profiles (CRED_REF handles)
 const modePrompts = require('./lib/prompts');         // P4  — mode-switching system prompts
 const jobsBus = require('./lib/jobs');                // P5  — background job bus (task cards + spoken relay + steering)
+const scheduler = require('./lib/scheduler');         // proactive scheduler (recurring/one-off autonomous tasks)
 
 const DB_MODELS = { db_speech: 'gpt-oss-20b', db_directive: 'gemma-4-26b' };
 
@@ -422,13 +423,15 @@ editable) for logos, icons, diagrams, and UI. Use generate_image (GPT Image 1,
 express. generate_3d turns any image into a textured GLB via AI (Blender/Unity/Three.js).
 
 FIGURES (data-accurate): For any chart/figure from REAL data or a paper's results, use
-make_figure — NOT generate_image (which invents numbers). Workflow: first call
-make_figure{action:"analyze", data} to profile the data and see suggested figures (this is
-how you decide WHICH statistics matter — look at top_correlations + suggested_figures), then
-make_figure{action:"render", spec|code} to draw it. You SEE the PNG and can re-render with
-fixes (iterate up to 3x). Output pdf/svg too for Overleaf. To plot from a paper on Overleaf:
-use the browser to download the project source/CSV to a local file, then point data at it.
-Save the winning figure recipe to Notion (notion_write) so next time it's instant recall.
+make_figure — NOT generate_image (which invents numbers). FAST PATH: make_figure{action:
+"oneshot", data, goal} profiles the data, auto-picks the most informative figures for your
+goal, renders them, AND caches the working recipe — one call instead of analyze→decide→render
+(recurring data shapes come back instantly via the recipe cache, mirrored to Notion). Use
+oneshot by default. Manual path when you need control: make_figure{action:"analyze", data}
+to see top_correlations + suggested_figures (decide WHICH stats matter), then make_figure
+{action:"render", spec|code} to draw it. You SEE the PNG and can re-render with fixes (iterate
+up to 3x). Output pdf/svg too for Overleaf. To plot from a paper on Overleaf: use the browser
+to download the project source/CSV to a local file, then point data at it.
 
 LOGINS & 2FA: For sites Siddhant uses often, use smart_login (saved domain profiles) — the
 browser session persists so he's usually already signed in. To set one up: get the password
@@ -1531,15 +1534,34 @@ const TOOLS = [
       size: { type: 'string', enum: ['1024x1024', '1536x1024', '1024x1536'], description: 'Square for icons/logos; landscape/portrait for illustrations.' },
       filename: { type: 'string', description: 'Optional filename (no extension). Defaults to timestamp.' }
     }, required: ['prompt'] } },
-  { name: 'make_figure', description: 'Render a DATA-ACCURATE figure (matplotlib/seaborn) from a real data file (.csv/.tsv/.json/.xlsx) — for papers, results, analysis. UNLIKE generate_image (which invents pixels), this plots your real numbers. Two modes: action:"analyze" profiles the data (shape, dtypes, summary stats, top correlations) and SUGGESTS the most informative figures — call this FIRST when unsure which figure matters. action:"render" draws it from a high-level `spec` OR custom `code` (your matplotlib using preloaded `df` and `plt`). The PNG is returned as a vision block so you can critique and re-render. Saves PNG+PDF+SVG. To plot from an Overleaf paper: use the browser to download the project source/CSV locally, then point `data` at the file.',
+  { name: 'make_figure', description: 'Render a DATA-ACCURATE figure (matplotlib/seaborn) from a real data file (.csv/.tsv/.json/.xlsx) — for papers, results, analysis. UNLIKE generate_image (which invents pixels), this plots your real numbers. Modes: action:"oneshot" (DEFAULT, fastest) — profile + auto-pick the most informative figures for `goal` + render them + cache the recipe, in one call (recurring data shapes return instantly from cache, mirrored to Notion). action:"analyze" profiles the data and SUGGESTS figures without drawing. action:"render" draws one from a high-level `spec` OR custom `code` (preloaded `df` and `plt`). The PNG is returned as a vision block so you can critique and re-render. Saves PNG+PDF+SVG. To plot from an Overleaf paper: use the browser to download the project source/CSV locally, then point `data` at the file.',
     input_schema: { type: 'object', properties: {
-      action: { type: 'string', enum: ['analyze', 'render'], description: 'analyze = profile + suggest figures; render = draw one.' },
+      action: { type: 'string', enum: ['oneshot', 'analyze', 'render'], description: 'oneshot = auto-pick + render best figures + cache recipe (default); analyze = profile + suggest only; render = draw one explicit figure.' },
       data: { type: 'string', description: 'Absolute path to the data file (.csv/.tsv/.json/.xlsx/.parquet).' },
+      goal: { type: 'string', description: 'For oneshot: what you want to show (e.g. "distribution of accuracy", "correlation between metrics", "compare groups"). Steers which figures are chosen.' },
+      n: { type: 'number', description: 'For oneshot: how many figures to produce (default 3).' },
       spec: { type: 'object', description: 'For render: {kind:bar|line|scatter|hist|box|violin|heatmap, x, y, hue, title, xlabel, ylabel, width, height}.' },
       code: { type: 'string', description: 'For render (advanced): custom matplotlib code. `df` (DataFrame) and `plt` are already loaded; just draw — saving is handled. Overrides spec.' },
       formats: { type: 'array', items: { type: 'string', enum: ['png', 'pdf', 'svg'] }, description: 'Output formats. PNG always included. Default [png]. Use pdf/svg for Overleaf.' },
       filename: { type: 'string', description: 'Output filename (no extension). Defaults to timestamp.' }
     }, required: ['action', 'data'] } },
+  { name: 'manage_schedule', description: 'Schedule BhatBot to do things PROACTIVELY/AUTONOMOUSLY — reminders, recurring checks, "every morning brief me", "in 30 minutes do X", "every Monday at 9am". Each schedule runs the given `prompt` through the full agent at its time (no one watching), then speaks the result aloud and texts it to Telegram. Use this whenever Siddhant asks for something to happen later or repeatedly. Actions: add (create), list, remove{id}, enable{id}, disable{id}, run{id} (fire now). For timing pass ONE of: kind:"daily"+at:"HH:MM" / kind:"weekly"+at:"HH:MM"+dow(0=Sun) / kind:"interval"+everyMinutes|everyHours / kind:"once"+runAt(ISO), OR the shortcuts inMinutes / inHours / everyMinutes / everyHours.',
+    input_schema: { type: 'object', properties: {
+      action: { type: 'string', enum: ['add', 'list', 'remove', 'enable', 'disable', 'run'], description: 'What to do.' },
+      id: { type: 'string', description: 'Schedule id (for remove/enable/disable/run).' },
+      title: { type: 'string', description: 'Short label for the schedule.' },
+      prompt: { type: 'string', description: 'The task to run at the scheduled time, phrased as an instruction to yourself (e.g. "Check git status of ~/bhatbot and report anything uncommitted").' },
+      kind: { type: 'string', enum: ['daily', 'weekly', 'interval', 'once'], description: 'Recurrence type.' },
+      at: { type: 'string', description: 'For daily/weekly: time "HH:MM" (24h, local).' },
+      dow: { type: 'number', description: 'For weekly: day of week 0=Sun..6=Sat.' },
+      runAt: { type: 'string', description: 'For once: ISO datetime to fire.' },
+      inMinutes: { type: 'number', description: 'Shortcut: fire once N minutes from now.' },
+      inHours: { type: 'number', description: 'Shortcut: fire once N hours from now.' },
+      everyMinutes: { type: 'number', description: 'Shortcut: repeat every N minutes.' },
+      everyHours: { type: 'number', description: 'Shortcut: repeat every N hours.' },
+      announce: { type: 'boolean', description: 'Speak the result aloud (default true).' },
+      notify: { type: 'boolean', description: 'Text the result to Telegram (default true).' }
+    }, required: ['action'] } },
   { name: 'smart_login', description: 'Sign into a site using a SAVED domain login profile, handling 2-factor automatically. Flow: fills the first factor (username+password from the vault), then for 2FA — if a TOTP secret is on file it generates+enters the code SILENTLY; otherwise it CALLS and TEXTS Siddhant for the code and waits for his phone reply (he replies with the code, or "approved" for a push prompt), then enters it. Pass `url` or `host` to use the saved profile, or inline `username`+`credRef`(+`totpRef`). Uses the dedicated Playwright browser window; sessions persist so most logins are skipped entirely. For a site with no profile yet, save one with manage_logins first.',
     input_schema: { type: 'object', properties: {
       url: { type: 'string', description: 'Login page URL (e.g. https://overleaf.com/login). Or use host.' },
@@ -2499,8 +2521,40 @@ async function executeTool(name, input) {
         result = generateTotp(input); break;
       case 'make_figure': {
         const py = resolvePython();
-        result = input.action === 'analyze' ? figures.analyze({ data: input.data, pythonBin: py })
-                                            : figures.render({ data: input.data, spec: input.spec, code: input.code, formats: input.formats, filename: input.filename, pythonBin: py });
+        if (input.action === 'analyze') result = figures.analyze({ data: input.data, pythonBin: py });
+        else if (input.action === 'oneshot' || input.action === 'auto') {
+          result = figures.oneShot({ data: input.data, goal: input.goal, n: input.n, formats: input.formats, pythonBin: py });
+          // Mirror the working recipe to the shared Notion bank (fire-and-forget) so it's durable
+          // and visible to every agent — the "Notion recipe cache" surface.
+          if (result && result.success && !result.recipeHit && notion.isConfigured()) {
+            const kinds = (result.specs || []).map((s) => s.kind).join(', ');
+            const cols = (result.figures && result.figures[0] && result.figures[0].spec) ? Object.values(result.figures[0].spec).filter(Boolean).join('/') : '';
+            notion.appendMemory({ fact: `Figure recipe [${result.signature}]: ${kinds} for ${input.goal || 'data'} (${cols})`, tags: ['figure-recipe'], source: 'tool', confidence: 0.7 }).catch(() => {});
+          }
+        }
+        else result = figures.render({ data: input.data, spec: input.spec, code: input.code, formats: input.formats, filename: input.filename, pythonBin: py });
+        break;
+      }
+      case 'manage_schedule': {
+        const act = input.action || 'list';
+        if (act === 'list') result = { success: true, schedules: scheduler.list().map((s) => ({ id: s.id, title: s.title, kind: s.kind, at: s.at, everyMs: s.everyMs, runAt: s.runAt, nextRun: s.nextRun ? new Date(s.nextRun).toISOString() : null, enabled: s.enabled, lastRun: s.lastRun })) };
+        else if (act === 'remove') result = scheduler.remove(input.id);
+        else if (act === 'enable') result = scheduler.setEnabled(input.id, true);
+        else if (act === 'disable') result = scheduler.setEnabled(input.id, false);
+        else if (act === 'run') {
+          const s = scheduler.list().find((x) => x.id === input.id);
+          if (!s) result = { error: 'no schedule with id ' + input.id };
+          else { runScheduledTask(s); result = { success: true, started: s.id }; }
+        } else if (act === 'add') {
+          const p = { ...input };
+          // Convenience: "in N minutes/hours" → a one-off runAt; everyMinutes/everyHours → interval.
+          if (input.inMinutes != null) { p.kind = 'once'; p.runAt = new Date(Date.now() + Number(input.inMinutes) * 60000).toISOString(); }
+          else if (input.inHours != null) { p.kind = 'once'; p.runAt = new Date(Date.now() + Number(input.inHours) * 3600000).toISOString(); }
+          if (input.everyMinutes != null) { p.kind = 'interval'; p.everyMs = Number(input.everyMinutes) * 60000; }
+          else if (input.everyHours != null) { p.kind = 'interval'; p.everyMs = Number(input.everyHours) * 3600000; }
+          result = scheduler.add(p);
+          if (result.success) startScheduler();   // ensure the tick loop is live
+        } else result = { error: 'unknown action: ' + act };
         break;
       }
       case 'smart_login':
@@ -3769,6 +3823,45 @@ Flag anything urgent with ⚠.`;
 }
 
 // ---------------------------------------------------------------------------
+// Proactive scheduler — ticks every 30s, runs any due schedule through the agent
+// headlessly (like the briefing), then announces/notifies + reschedules. This is what lets
+// BhatBot act on its own: reminders, recurring checks, "do X every morning / in 30 min".
+// ---------------------------------------------------------------------------
+let schedulerTimer = null, schedulerRunning = new Set();
+function startScheduler() {
+  if (schedulerTimer) return;
+  schedulerTimer = setInterval(tickScheduler, 30000);
+  console.log('[scheduler] started (30s tick), ' + scheduler.list().length + ' schedule(s) loaded');
+  setTimeout(tickScheduler, 4000);   // catch anything already overdue shortly after boot
+}
+async function tickScheduler() {
+  let due = [];
+  try { due = scheduler.due(Date.now()); } catch { return; }
+  for (const s of due) {
+    if (schedulerRunning.has(s.id)) continue;   // don't overlap a long-running task with its next tick
+    schedulerRunning.add(s.id);
+    runScheduledTask(s).finally(() => schedulerRunning.delete(s.id));
+  }
+}
+async function runScheduledTask(s) {
+  try {
+    sendToActivity('tool-update', { type: 'thinking', text: '⏰ running scheduled: ' + s.title });
+    const prompt = `[Scheduled task "${s.title}"] ${s.prompt}\n\nThis is a proactive/autonomous run (no one is watching the screen). Do the task, then reply with a SHORT spoken-style summary of what you did or found.`;
+    const res = await agentLoop([{ role: 'user', content: prompt }], getApiKey(), { sender: { send() {} } });
+    const text = (res && res.text) || 'done';
+    if (s.announce !== false) { try { sayLocal(text.slice(0, 600)); } catch {} }
+    if (s.notify !== false) { try { telegramNotify('⏰ ' + s.title + ':\n\n' + text); } catch {} }
+    sendToActivity('tool-update', { type: 'thinking', text: '⏰ ' + s.title + ' → ' + text.slice(0, 200) });
+    try { notion.logActivity({ event: 'scheduled: ' + s.title, tool: 'scheduler', result: text.slice(0, 200) }); } catch {}
+  } catch (e) {
+    console.error('[scheduler] task failed:', s.id, e.message);
+    try { telegramNotify('⚠️ Scheduled task "' + s.title + '" failed: ' + e.message); } catch {}
+  } finally {
+    scheduler.markRan(s.id, Date.now());   // advance/disable AFTER running so a crash mid-run retries next tick
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Windows
 // ---------------------------------------------------------------------------
 function createWindow() {
@@ -4156,16 +4249,33 @@ async function kokoroSynth(text, opts = {}) {
 // — but that's 250ms added to EVERY spoken sentence before the fallback kicks in. Mark the
 // provider dead for 10 min on quota/auth failures and skip straight to Kokoro/OpenAI.
 let _elDeadUntil = 0;
-async function elevenLabsSynth(t, c) {
+async function elevenLabsSynth(t, c, opts = {}) {
   if (!c.elevenLabsKey) return { error: 'no elevenLabsKey' };
   if (Date.now() < _elDeadUntil) return { error: 'elevenlabs cooling down (quota/auth)', cooldown: true };
   const voiceId = c.ttsVoice || c.elevenLabsVoiceId || 'pNInz6obpgDQGcFmaJgB';
   // flash_v2_5 = ElevenLabs' lowest-latency model (~75ms vs turbo's ~250-400ms), same
   // voices. optimize_streaming_latency=3 trims first-byte time further. Big speaking-speed win.
   const model = c.ttsModel || 'eleven_flash_v2_5';
+  // (1) Cadence: flash/turbo v2.5 honor SSML <break>; v3 does not, so gate on the model.
+  const supportsBreaks = c.ttsCadence !== false && /flash|turbo/i.test(model);
+  const text = humanizeCadence(t, { breaks: supportsBreaks });
+  // (3) Tuned conversational delivery — lower stability + a touch of style = livelier prosody
+  // variation (less monotone); speaker_boost adds presence/warmth. All config-overridable.
+  const vs = {
+    stability: c.ttsStability != null ? c.ttsStability : 0.38,
+    similarity_boost: c.ttsSimilarity != null ? c.ttsSimilarity : 0.75,
+    style: c.ttsStyle != null ? c.ttsStyle : 0.35,
+    use_speaker_boost: c.ttsSpeakerBoost != null ? c.ttsSpeakerBoost : true,
+    speed: Math.max(0.7, Math.min(1.2, Number(c.ttsSpeed) || 1.06))
+  };
+  const body = { text, model_id: model, voice_settings: vs };
+  // (2) Request stitching — give the model the surrounding sentences so prosody flows across
+  // streamed chunks instead of resetting (no choppy "new sentence, fresh intonation" feel).
+  if (opts.previousText) body.previous_text = String(opts.previousText).slice(-400);
+  if (opts.nextText) body.next_text = String(opts.nextText).slice(0, 400);
   const r = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}?output_format=mp3_44100_128&optimize_streaming_latency=3`, {
     method: 'POST', headers: { 'xi-api-key': c.elevenLabsKey, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text: t, model_id: model, voice_settings: { stability: 0.4, similarity_boost: 0.75, style: 0.2, use_speaker_boost: false, speed: Math.max(0.7, Math.min(1.2, Number(c.ttsSpeed) || 1.08)) } })
+    body: JSON.stringify(body)
   });
   if (r.ok) { const buf = Buffer.from(await r.arrayBuffer()); return { success: true, audio: buf.toString('base64'), mimeType: 'audio/mpeg', via: 'elevenlabs' }; }
   const errText = (await r.text()).slice(0, 200);
@@ -4229,6 +4339,40 @@ function normalizeForSpeech(input) {
   return s || String(input || '').trim();
 }
 
+// Cadence humanization — make spoken delivery feel like a person talking, not a reader.
+// `breaks` = true emits ElevenLabs SSML <break> tags (flash/turbo v2.5 support up to 3s; v3
+// does NOT, so it's gated). breaks = false (kokoro/openai) leans on punctuation, which every
+// neural TTS already interprets as timing. Kept CONSERVATIVE: ElevenLabs warns that excessive
+// <break> use destabilizes prosody, so we cap how many we inject. Voice-cadence research:
+// ellipses/dashes = micro-pauses, a beat after an opening discourse marker ("Right, …") reads
+// as natural breathing, and a slightly longer beat between sentences mimics a real speaker.
+const DISCOURSE_LEAD = /^(right|so|well|now|look|listen|honestly|actually|alright|okay|ok|hmm|ah|oh|sure|of course|indeed|very well|certainly)\b[,]?\s+/i;
+function humanizeCadence(input, { breaks = false } = {}) {
+  let s = String(input || '');
+  if (!s) return s;
+  const SHORT = breaks ? '<break time="0.25s"/>' : ',';
+  const MED = breaks ? '<break time="0.45s"/>' : ' …';
+  // Opening discourse marker → a brief beat after it ("Right, on it." → "Right,⟨beat⟩ on it.")
+  s = s.replace(DISCOURSE_LEAD, (m) => m.replace(/[,\s]+$/, '') + (breaks ? SHORT + ' ' : ', '));
+  // Ellipses = a trailing-off pause; em/en dashes and " - " = a mid-thought beat.
+  s = s.replace(/\s*\.\.\.+\s*/g, breaks ? ' ' + MED + ' ' : ' … ');
+  s = s.replace(/\s*[—–]\s*/g, breaks ? ' ' + SHORT + ' ' : ', ');
+  s = s.replace(/\s+-\s+/g, breaks ? ' ' + SHORT + ' ' : ', ');
+  if (breaks) {
+    // Cap injected breaks (incl. the ones above) to avoid the documented instability.
+    let n = (s.match(/<break/g) || []).length;
+    const MAX = 6;
+    // A gentle beat between sentences, but only while under the cap.
+    s = s.replace(/([.!?])\s+(?=[A-Z0-9])/g, (m, p) => (n++ < MAX ? p + ' <break time="0.3s"/> ' : m));
+    if ((s.match(/<break/g) || []).length > MAX) {
+      // Trim from the end if we somehow blew the cap (defensive).
+      let count = 0;
+      s = s.replace(/<break[^>]*>/g, (t) => (++count > MAX ? '' : t));
+    }
+  }
+  return s.replace(/[ \t]{2,}/g, ' ').trim();
+}
+
 // Multi-provider TTS — kokoro (local neural, default), elevenlabs (cloud JARVIS), openai (onyx), piper (offline)
 // Plain function so both the IPC handler (desktop HUD) and the express server (phone PWA) can call it.
 async function synthesizeSpeech(text, opts = {}) {
@@ -4237,18 +4381,20 @@ async function synthesizeSpeech(text, opts = {}) {
   if (!t) return { error: 'empty text' };
   // Default to local Kokoro when installed (free, offline); honor explicit ttsProvider otherwise.
   const provider = c.ttsProvider || (kokoroAvailable() ? 'kokoro' : (c.elevenLabsKey ? 'elevenlabs' : (c.openaiKey ? 'openai' : (c.piperBin ? 'piper' : null))));
+  const stitch = { previousText: opts.previousText, nextText: opts.nextText };
   try {
     if (provider === 'kokoro') {
-      const r = await kokoroSynth(t, opts);
+      // kokoro can't parse SSML, but it does honor punctuation timing → punctuation-cadence.
+      const r = await kokoroSynth(c.ttsCadence !== false ? humanizeCadence(t, { breaks: false }) : t, opts);
       if (r.success) return r;
       // worker died / not installed → fall back to cloud so voice never goes silent
       console.error('[tts] kokoro failed, falling back:', r.error);
-      if (c.elevenLabsKey) { const e = await elevenLabsSynth(t, c); if (e.success) return e; }
+      if (c.elevenLabsKey) { const e = await elevenLabsSynth(t, c, stitch); if (e.success) return e; }
       if (c.openaiKey) return await openaiSynth(t, c);
       return { error: 'kokoro failed and no cloud fallback: ' + r.error };
     }
     if (provider === 'elevenlabs') {
-      const e = await elevenLabsSynth(t, c);
+      const e = await elevenLabsSynth(t, c, stitch);
       if (e.success) return e;
       // EL failed (quota/auth/rate/network) → fall back to free local Kokoro, then OpenAI,
       // so the voice never dies even when the ElevenLabs free tier is exhausted.
@@ -4556,12 +4702,16 @@ function ttsStreamEnqueue(seq, sentence) {
 }
 async function ttsStreamDrain(seq) {
   ttsStreamDraining = true;
+  let prevSpoken = '';
   try {
     while (ttsStreamQ.length) {
       if (seq !== ttsStreamSeq) break;
       const s = ttsStreamQ.shift();
       latMark('tts-synth-start');
-      const r = await synthesizeSpeech(s).catch(() => null);
+      // Request stitching: hand the synth the sentence just spoken + the one queued next so
+      // prosody flows continuously across the stream instead of resetting each chunk.
+      const r = await synthesizeSpeech(s, { previousText: prevSpoken, nextText: ttsStreamQ[0] || '' }).catch(() => null);
+      prevSpoken = s;
       latMark('tts-synth-done');
       if (seq !== ttsStreamSeq) break;
       if (!r || !r.success) continue;
@@ -4820,6 +4970,7 @@ app.whenReady().then(() => {
     initMcpServer();
     startTelegramBridge();
     scheduleBriefing();
+    startScheduler();   // proactive recurring/one-off tasks
     // Pre-warm local Kokoro TTS so the first spoken reply isn't cold (~0.8s load).
     if (kokoroAvailable()) kokoroStart().then(() => console.log('[tts] kokoro warm (local)')).catch((e) => console.error('[tts] kokoro warmup failed:', e.message));
   } catch (e) { console.error('Startup error:', e); }
