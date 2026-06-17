@@ -217,10 +217,52 @@
   #send.busy { opacity: .4; pointer-events: none; }
   #mic.rec { border-color: var(--err); }
   .ibtn.rec { border-color: var(--accent); color: var(--accent); box-shadow: 0 0 8px rgba(0,200,255,.4) inset; }
-  /* voice-first: dim the transcript surface to signal "spoken, not printed" */
-  body.voicefirst #chat .msg.bot, body.voicefirst #chat .streambody { opacity: .5; }
   body.convo #transcript { display: block; border-top-color: var(--accent); }
   body.convo #dot { box-shadow: 0 0 10px var(--accent); }
+
+  /* ===== voice-first stage ===== */
+  #vstage { display: none; flex: 1; min-height: 0; flex-direction: column; align-items: center;
+    justify-content: center; gap: 22px; padding: 18px 20px; position: relative; }
+  #txbtn { display: none; }
+  body.voicefirst #txbtn { display: flex; }
+  body.voicefirst.show-transcript #txbtn { color: var(--accent); border-color: var(--accent); }
+  /* #vstage / #chat visibility is driven by applyStageVisibility() in JS so it cooperates
+     with the tab/panel switcher (which sets inline display). */
+
+  /* BhatBot orb: concentric rings + hex core + equalizer (idle / thinking / speaking) */
+  #orb { position: relative; width: 168px; height: 168px; flex-shrink: 0; }
+  #orb .ring { position: absolute; border-radius: 50%; border: 1px solid rgba(0,200,255,.22); }
+  #orb .ring.r1 { inset: 0; border-style: dashed; animation: spin 16s linear infinite; }
+  #orb .ring.r2 { inset: 22px; border-style: dotted; border-color: rgba(0,200,255,.4); animation: spinrev 11s linear infinite; }
+  #orb .ring.r3 { inset: 44px; border-color: rgba(120,220,255,.55); animation: spin 7s linear infinite; }
+  #orb .hex { position: absolute; inset: 58px; background:
+      conic-gradient(from 0deg, rgba(0,200,255,.0), rgba(0,200,255,.45), rgba(0,200,255,.0), rgba(0,200,255,.45), rgba(0,200,255,.0));
+      clip-path: polygon(25% 5%, 75% 5%, 100% 50%, 75% 95%, 25% 95%, 0 50%); animation: spin 5s linear infinite; filter: blur(.3px); }
+  #orb .core { position: absolute; inset: 70px; border-radius: 50%; background: radial-gradient(circle, #d8f4ff, #29a8d8 60%, transparent 75%);
+      box-shadow: 0 0 26px 6px rgba(0,200,255,.55); animation: corepulse 3s ease-in-out infinite; }
+  #orb .eq { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; gap: 4px; }
+  #orb .eq i { width: 4px; height: 10px; background: #7fe3ff; border-radius: 2px; box-shadow: 0 0 8px rgba(0,200,255,.7); }
+  /* thinking: rings accelerate, core flickers */
+  #orb[data-state="thinking"] .ring.r1 { animation-duration: 3.2s; }
+  #orb[data-state="thinking"] .ring.r2 { animation-duration: 2.2s; }
+  #orb[data-state="thinking"] .ring.r3 { animation-duration: 1.3s; border-color: rgba(150,230,255,.85); }
+  #orb[data-state="thinking"] .core { animation: corepulse 1s ease-in-out infinite; }
+  /* speaking: equalizer takes over, core swells */
+  #orb[data-state="speaking"] .hex { display: none; }
+  #orb[data-state="speaking"] .core { inset: 76px; }
+  #orb[data-state="speaking"] .eq { display: flex; }
+  #orb[data-state="speaking"] .eq i { animation: veq .7s ease-in-out infinite; }
+  #orb[data-state="speaking"] .eq i:nth-child(1){ animation-delay:0s } #orb[data-state="speaking"] .eq i:nth-child(2){ animation-delay:.12s }
+  #orb[data-state="speaking"] .eq i:nth-child(3){ animation-delay:.24s } #orb[data-state="speaking"] .eq i:nth-child(4){ animation-delay:.36s }
+  #orb[data-state="speaking"] .eq i:nth-child(5){ animation-delay:.48s }
+  @keyframes veq { 0%,100% { height: 8px; opacity: .6; } 50% { height: 34px; opacity: 1; } }
+  #vcap { max-width: 600px; text-align: center; color: var(--text); font-size: 15px; line-height: 1.55; min-height: 1.2em;
+    transition: opacity .3s; }
+  #vcap:empty { opacity: 0; }
+  #vhint { font-size: 11px; color: var(--text-dim2); letter-spacing: .04em; }
+  #vvis { width: min(560px, 94%); display: flex; flex-direction: column; gap: 10px; max-height: 40vh; overflow-y: auto; }
+  #vvis:empty { display: none; }
+  #vvis .holo { width: 100%; }
   /* read-full-reply control under a summarized bot bubble */
   #attachbar { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 4px 6px; }
   #attachbar:empty { display: none; }
@@ -315,6 +357,19 @@
 
   <div id="chat"></div>
 
+  <!-- ===== voice-first stage: BhatBot orb + inline visuals + shortened caption.
+       Shown instead of the transcript when 🎧 is on; transcript is one click away. ===== -->
+  <div id="vstage">
+    <div id="orb" data-state="idle">
+      <i class="ring r1"></i><i class="ring r2"></i><i class="ring r3"></i>
+      <span class="hex"></span><span class="core"></span>
+      <span class="eq"><i></i><i></i><i></i><i></i><i></i></span>
+    </div>
+    <div id="vvis"></div>
+    <div id="vcap"></div>
+    <div id="vhint">say "Jarvis" — or just talk · 📄 for transcript</div>
+  </div>
+
   <!-- ===== swappable stage panels (one visible at a time; Chat is default) ===== -->
   <div id="nexus-panel" class="stage-panel">
     <div class="panel-head"><b>⚛ NEXUS</b><span class="panel-back" data-back>← Chat</span></div>
@@ -355,6 +410,7 @@
     <button class="ibtn" id="mic" title="Voice">🎙</button>
     <button class="ibtn" id="spk" title="Speak replies (Jarvis voice)">🔊</button>
     <button class="ibtn" id="vfirst" title="Voice-first: speak replies, don't print them">🎧</button>
+    <button class="ibtn" id="txbtn" title="Show / hide the full transcript">📄</button>
     <button class="ibtn" id="send" title="Send">▶</button>
   </div>
 
@@ -375,6 +431,9 @@
 'use strict';
 const $ = (s) => document.querySelector(s);
 const chat = $('#chat');
+// In voice-first mode, visuals (graphs/images/3D) pop onto the orb stage instead of the
+// (hidden) transcript, so you see them without opening another window.
+function visTarget() { return (typeof voiceFirst !== 'undefined' && voiceFirst) ? $('#vvis') : chat; }
 let history = [];
 let busy = false;
 let exchanges = 0;
@@ -597,7 +656,7 @@ function addHoloImage(p, label) {
   img.src = 'data:' + (p.mime || 'image/jpeg') + ';base64,' + p.image;
   img.addEventListener('click', () => img.classList.toggle('zoom'));
   d.appendChild(img);
-  chat.appendChild(d); scroll();
+  const tgt = visTarget(); tgt.appendChild(d); if (tgt === chat) scroll();
 }
 async function addHolo3D(modelPath) {
   const d = document.createElement('div');
@@ -610,7 +669,7 @@ async function addHolo3D(modelPath) {
   foot.innerHTML = '<span class="hbtn">open in viewer</span><span>drag to orbit · auto-spinning</span>';
   foot.querySelector('.hbtn').addEventListener('click', () => { try { window.bhatbot.open3DViewer(modelPath); } catch {} });
   d.appendChild(foot);
-  chat.appendChild(d); scroll();
+  const tgt = visTarget(); tgt.appendChild(d); if (tgt === chat) scroll();
   try {
     const m = await window.bhatbot.readModel(modelPath);
     if (m && window.holoSpin) window.holoSpin(mount, m);
@@ -671,7 +730,7 @@ function liveAppend(delta) {
 }
 function closeLiveBubble() { liveBubble = null; }
 window.bhatbot.onToolUpdate((u) => {
-  if (u.type === 'token') { rmThinking(); streamedThisTurn = true; if (!voiceFirst) liveAppend(u.text); else setSpeaking(true); }
+  if (u.type === 'token') { rmThinking(); streamedThisTurn = true; if (!voiceFirst) liveAppend(u.text); else { setSpeaking(true); setOrbState('speaking'); } }
   else if (u.type === 'tool_start') { rmThinking(); closeLiveBubble(); toolStart(u); addThinking(); actLog(u.name + ' ' + shortArg(u.name, u.input), 'run'); }
   else if (u.type === 'tool_done') {
     toolDone(u); const ok = u.result && u.result.success !== false;
@@ -793,6 +852,7 @@ async function send(text) {
   setBusy(true);
   streamedThisTurn = false; liveBubble = null;
   ttsIdle = false;                 // turn in flight; conversation mode re-arms on tts-idle
+  setOrbState('thinking');
   addThinking();
   try {
     const res = await window.bhatbot.chat({ history });
@@ -802,11 +862,16 @@ async function send(text) {
       history = res.history;
       lastFullReply = res.text || lastFullReply;
       if (voiceFirst) {
-        // Voice-first: nothing printed. Main is already speaking the streamed reply; for the
-        // non-streaming path, speak it here. Conversation mode re-arms on tts-idle / here.
+        // Voice-first: speak first, render nothing live. After the turn we (a) show a SHORTENED
+        // caption on the orb stage and (b) write the full reply into the hidden transcript (one
+        // render, off the critical path) so it's there if you click 📄. The streamed path is
+        // already being spoken by main; the non-streamed fallback is spoken here.
         closeLiveBubble();
-        if (!(streamedThisTurn && res._streamed) && res.text) speak(res.text);
-        if (!(streamedThisTurn && res._streamed)) { ttsIdle = true; maybeRearm(); }
+        if (res.text) { addBot(res.text); showCaption(res.text); }   // hidden transcript + caption
+        if (!(streamedThisTurn && res._streamed) && res.text) {
+          setOrbState('speaking');
+          speak(res.text).finally(() => { ttsIdle = true; setOrbState('idle'); maybeRearm(); });
+        }
       } else if (streamedThisTurn && res._streamed) {
         // Text already rendered live + spoken in main during generation. Finalize: snap the
         // last bubble to the authoritative text, upgraded to rendered markdown.
@@ -872,12 +937,20 @@ async function initStudio() { if (studioLoaded) return; const u = await ensurePa
 function reloadStudio() { const wv = document.querySelector('#studio-panel webview'); if (wv) { try { wv.reload(); } catch {} } }
 
 let curPanel = 'chat';
+// Chat tab shows either the text transcript (#chat) or the voice-first orb stage (#vstage).
+// Centralized so it cooperates with the panel switcher's inline display writes.
+function applyStageVisibility() {
+  const onChat = curPanel === 'chat';
+  const showStage = onChat && voiceFirst && !document.body.classList.contains('show-transcript');
+  $('#vstage').style.display = showStage ? 'flex' : 'none';
+  $('#chat').style.display = (onChat && !showStage) ? 'flex' : 'none';
+}
 function showPanel(id) {
   // Code is a docked bottom-overlay terminal, not a full stage swap — open it over whatever
   // surface is showing and don't disturb the stage/tab selection.
   if (id === 'code') { window.toggleCodePanel && window.toggleCodePanel(true); return; }
   curPanel = id;
-  $('#chat').style.display = id === 'chat' ? 'flex' : 'none';
+  applyStageVisibility();
   document.querySelectorAll('.stage-panel').forEach((p) => p.classList.toggle('active', p.id === id + '-panel'));
   $('#chips').style.display = id === 'chat' ? '' : 'none';
   document.querySelectorAll('#ctxbar .tab').forEach((t) => t.classList.toggle('active', t.dataset.panel === id));
@@ -956,7 +1029,7 @@ function maybeRearm() {
   if (!convoMode || busy || recording || !ttsIdle) return;
   setTimeout(() => { if (convoMode && !busy && !recording && ttsIdle) startVoice(); }, 450);
 }
-window.bhatbot.onTtsIdle(() => { ttsIdle = true; setSpeaking(false); maybeRearm(); });
+window.bhatbot.onTtsIdle(() => { ttsIdle = true; setSpeaking(false); setOrbState('idle'); maybeRearm(); });
 
 // Vosk listener heard "bhatbot …": run the command, or arm voice if none. Either way, a wake
 // word opens conversation mode so BhatBot keeps listening until told it's done.
@@ -1037,6 +1110,7 @@ function setVoiceFirstUI() {
   vfBtn.classList.toggle('rec', voiceFirst);
   vfBtn.title = voiceFirst ? 'Voice-first ON — replies are spoken, not printed (click for text)' : 'Voice-first OFF — replies print as text (click to go voice-only)';
   document.body.classList.toggle('voicefirst', voiceFirst);
+  if (typeof applyStageVisibility === 'function') applyStageVisibility();
 }
 if (vfBtn) vfBtn.addEventListener('click', () => {
   voiceFirst = !voiceFirst;
@@ -1044,8 +1118,29 @@ if (vfBtn) vfBtn.addEventListener('click', () => {
   try { localStorage.setItem('voiceFirst', voiceFirst ? '1' : '0'); } catch {}
   setVoiceFirstUI();
   tbar.textContent = voiceFirst ? '🎧 voice-first: I\'ll speak, not print' : '💬 text replies back on';
+  if (!voiceFirst) document.body.classList.remove('show-transcript');
 });
 setVoiceFirstUI();
+
+// ---- orb state (idle / thinking / speaking) drives the voice-stage animation ----
+const orb = $('#orb');
+function setOrbState(s) { if (orb) orb.dataset.state = s; }
+// ---- shortened caption: first sentence (or ~180 chars) of the spoken reply ----
+function shorten(text) {
+  let s = String(text || '').replace(/```[\s\S]*?```/g, ' ').replace(/[*_`#>]/g, '').replace(/\[([^\]]+)\]\([^)]+\)/g, '$1').replace(/\s+/g, ' ').trim();
+  const m = s.match(/^.*?[.!?](\s|$)/);
+  let out = m ? m[0].trim() : s;
+  if (out.length > 180) out = out.slice(0, 177).trim() + '…';
+  return out;
+}
+function showCaption(text) { const c = $('#vcap'); if (c) c.textContent = shorten(text); }
+// ---- transcript: hidden by default in voice-first, one click to reveal ----
+const txbtn = $('#txbtn');
+if (txbtn) txbtn.addEventListener('click', () => {
+  if (!voiceFirst) { voiceFirst = true; try { localStorage.setItem('voiceFirst', '1'); } catch {} setVoiceFirstUI(); }
+  document.body.classList.toggle('show-transcript');
+  applyStageVisibility();
+});
 
 function setMicRecording(on) {
   mic.classList.toggle('rec', on);
