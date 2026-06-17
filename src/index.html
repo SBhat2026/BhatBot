@@ -216,6 +216,11 @@
   .ibtn:hover { border-color: var(--accent); color: var(--accent); }
   #send.busy { opacity: .4; pointer-events: none; }
   #mic.rec { border-color: var(--err); }
+  .ibtn.rec { border-color: var(--accent); color: var(--accent); box-shadow: 0 0 8px rgba(0,200,255,.4) inset; }
+  /* voice-first: dim the transcript surface to signal "spoken, not printed" */
+  body.voicefirst #chat .msg.bot, body.voicefirst #chat .streambody { opacity: .5; }
+  body.convo #transcript { display: block; border-top-color: var(--accent); }
+  body.convo #dot { box-shadow: 0 0 10px var(--accent); }
   /* read-full-reply control under a summarized bot bubble */
   #attachbar { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 4px 6px; }
   #attachbar:empty { display: none; }
@@ -349,6 +354,7 @@
     <button class="ibtn" id="attach" title="Attach screenshot / photo / screen recording">📎</button>
     <button class="ibtn" id="mic" title="Voice">🎙</button>
     <button class="ibtn" id="spk" title="Speak replies (Jarvis voice)">🔊</button>
+    <button class="ibtn" id="vfirst" title="Voice-first: speak replies, don't print them">🎧</button>
     <button class="ibtn" id="send" title="Send">▶</button>
   </div>
 
@@ -665,7 +671,7 @@ function liveAppend(delta) {
 }
 function closeLiveBubble() { liveBubble = null; }
 window.bhatbot.onToolUpdate((u) => {
-  if (u.type === 'token') { rmThinking(); streamedThisTurn = true; liveAppend(u.text); }
+  if (u.type === 'token') { rmThinking(); streamedThisTurn = true; if (!voiceFirst) liveAppend(u.text); else setSpeaking(true); }
   else if (u.type === 'tool_start') { rmThinking(); closeLiveBubble(); toolStart(u); addThinking(); actLog(u.name + ' ' + shortArg(u.name, u.input), 'run'); }
   else if (u.type === 'tool_done') {
     toolDone(u); const ok = u.result && u.result.success !== false;
@@ -786,6 +792,7 @@ async function send(text) {
   pendingAtt = []; renderAtt();
   setBusy(true);
   streamedThisTurn = false; liveBubble = null;
+  ttsIdle = false;                 // turn in flight; conversation mode re-arms on tts-idle
   addThinking();
   try {
     const res = await window.bhatbot.chat({ history });
@@ -794,7 +801,13 @@ async function send(text) {
     else {
       history = res.history;
       lastFullReply = res.text || lastFullReply;
-      if (streamedThisTurn && res._streamed) {
+      if (voiceFirst) {
+        // Voice-first: nothing printed. Main is already speaking the streamed reply; for the
+        // non-streaming path, speak it here. Conversation mode re-arms on tts-idle / here.
+        closeLiveBubble();
+        if (!(streamedThisTurn && res._streamed) && res.text) speak(res.text);
+        if (!(streamedThisTurn && res._streamed)) { ttsIdle = true; maybeRearm(); }
+      } else if (streamedThisTurn && res._streamed) {
         // Text already rendered live + spoken in main during generation. Finalize: snap the
         // last bubble to the authoritative text, upgraded to rendered markdown.
         if (liveBubble) {
@@ -809,7 +822,7 @@ async function send(text) {
       } else {
         // Non-streaming path (fallback providers): render + speak as before.
         const bubble = addBot(res.text);
-        speak(res.text);
+        speak(res.text).finally(() => { ttsIdle = true; maybeRearm(); });
         if ((res.text || '').length > 300) addReadFull(bubble, res.text);
       }
       exchanges++; $('#count').textContent = exchanges + ' exchanges';
@@ -925,8 +938,30 @@ document.addEventListener('keydown', (e) => {
     e.preventDefault(); window.bhatbot.endSession();
   }
 });
-// Vosk listener heard "bhatbot …": run the command, or arm voice if none.
+// ===================== conversation mode (hands-free until dismissed) =====================
+// One wake word opens a CONVERSATION: after each spoken reply the mic re-arms automatically,
+// so you keep talking without re-saying "Jarvis". It stays open until you say a stop phrase
+// ("that's all", "we're done", "go to sleep", "stop listening", "dismissed", "goodbye").
+let convoMode = false;
+let ttsIdle = true;            // true once main signals speech has fully drained for the turn
+const STOP_RE = /^\s*(thanks[, ]*)?(that'?s (all|it|everything)|that'?ll be all|that will be all|we'?re done|we are done|i'?m done|all done|done for now|go to sleep|goto sleep|stop listening|stop the conversation|stand down|dismissed|good\s?bye|bye( bhatbot| jarvis)?|you can stop|that is all)\.?\s*$/i;
+function setConvo(on) {
+  convoMode = on;
+  document.body.classList.toggle('convo', on);
+  if (mic) mic.title = on ? 'Conversation mode ON — say "that\'s all" to stop' : 'Voice';
+  if (on) tbar.textContent = '🎧 conversation open — talk freely, say "that\'s all" to end';
+}
+// Re-arm the mic for the next turn once: nothing is busy/recording and speech has drained.
+function maybeRearm() {
+  if (!convoMode || busy || recording || !ttsIdle) return;
+  setTimeout(() => { if (convoMode && !busy && !recording && ttsIdle) startVoice(); }, 450);
+}
+window.bhatbot.onTtsIdle(() => { ttsIdle = true; setSpeaking(false); maybeRearm(); });
+
+// Vosk listener heard "bhatbot …": run the command, or arm voice if none. Either way, a wake
+// word opens conversation mode so BhatBot keeps listening until told it's done.
 window.bhatbot.onWakeCommand((text) => {
+  setConvo(true);
   if (text && text.trim()) submitVoice(text.trim());  // "jarvis do X" → execute, or steer if busy
   else if (!recording) startVoice();                  // bare "jarvis" → arm Whisper capture
 });
@@ -990,6 +1025,28 @@ spk.addEventListener('click', () => {
   ttsOn = !ttsOn; if (!ttsOn) stopSpeaking(); setSpkUI();
 });
 
+// ---- voice-first mode: speak replies, don't print the assistant prose on screen ----
+// (Typing still works; tool activity + visual artifacts still show — only the spoken reply
+// text is suppressed from the chat transcript.) Persisted across launches.
+let voiceFirst = false;
+try { voiceFirst = localStorage.getItem('voiceFirst') === '1'; } catch {}
+const vfBtn = $('#vfirst');
+function setVoiceFirstUI() {
+  if (!vfBtn) return;
+  vfBtn.style.opacity = voiceFirst ? '1' : '0.4';
+  vfBtn.classList.toggle('rec', voiceFirst);
+  vfBtn.title = voiceFirst ? 'Voice-first ON — replies are spoken, not printed (click for text)' : 'Voice-first OFF — replies print as text (click to go voice-only)';
+  document.body.classList.toggle('voicefirst', voiceFirst);
+}
+if (vfBtn) vfBtn.addEventListener('click', () => {
+  voiceFirst = !voiceFirst;
+  if (voiceFirst && !ttsOn && voiceCfg.hasTTS) { ttsOn = true; setSpkUI(); }   // voice-first implies speaking
+  try { localStorage.setItem('voiceFirst', voiceFirst ? '1' : '0'); } catch {}
+  setVoiceFirstUI();
+  tbar.textContent = voiceFirst ? '🎧 voice-first: I\'ll speak, not print' : '💬 text replies back on';
+});
+setVoiceFirstUI();
+
 function setMicRecording(on) {
   mic.classList.toggle('rec', on);
   mic.innerHTML = on ? '<span class="wave"><i></i><i></i><i></i><i></i><i></i></span>' : '🎙';
@@ -1044,7 +1101,7 @@ async function onRecStop() {
   setMicRecording(false);
   try { micStream && micStream.getTracks().forEach((t) => t.stop()); } catch {}
   try { audioCtx && audioCtx.close(); } catch {}
-  if (!audioChunks.length) { tbar.classList.remove('on'); return; }
+  if (!audioChunks.length) { tbar.classList.remove('on'); if (convoMode) { ttsIdle = true; maybeRearm(); } return; }
   const blob = new Blob(audioChunks, { type: 'audio/webm' });
   const buf = await blob.arrayBuffer();
   tbar.classList.add('on'); tbar.textContent = '⏳ transcribing…';
@@ -1057,10 +1114,12 @@ async function onRecStop() {
 // guidance into the running task (barge-in steering) instead of starting a new request.
 function submitVoice(text) {
   const t = (text || '').trim(); if (!t) return;
+  // In conversation mode a stop phrase closes the loop instead of becoming a query.
+  if (convoMode && STOP_RE.test(t)) { setConvo(false); tbar.textContent = '🎧 conversation closed'; try { window.bhatbot.sayLocal('Going quiet. Say Jarvis when you need me.'); } catch {} return; }
   if (busy) {
     window.bhatbot.sendGuidance(t);
     addThought('↳ steering (mid-task): ' + t);
-  } else { ta.value = t; autoresize(); setTimeout(() => send(t), 150); }
+  } else { ta.value = t; autoresize(); ttsIdle = false; setTimeout(() => send(t), 150); }
 }
 
 // ---- Fallback STT: Web Speech (only if no OpenAI key) ----

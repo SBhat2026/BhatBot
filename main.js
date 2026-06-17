@@ -1,6 +1,6 @@
 'use strict';
 
-const { app, BrowserWindow, globalShortcut, ipcMain, shell, dialog, screen, webContents } = require('electron');
+const { app, BrowserWindow, globalShortcut, ipcMain, shell, dialog, screen, webContents, systemPreferences, desktopCapturer } = require('electron');
 // Electron/Chromium blocks audio autoplay after async calls → desktop TTS was silent.
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
 const path = require('path');
@@ -1574,6 +1574,7 @@ const TOOLS = [
       maxSteps: { type: 'number', description: 'Max reasoning steps (default 6, max 12).' },
       timeoutMs: { type: 'number', description: 'Max run time ms (default 180000, max 600000).' }
     }, required: ['task'] } },
+  { name: 'request_permissions', description: 'Trigger the macOS Screen Recording + Accessibility permission prompts for BhatBot and open the matching System Settings → Privacy panes so Siddhant can toggle the app on. Use when vision_click / screen_parse / native login / AppleScript fail for permissions, or when he asks to "grant permissions" / "fix permissions".', input_schema: { type: 'object', properties: {} } },
   { name: 'manage_schedule', description: 'Schedule BhatBot to do things PROACTIVELY/AUTONOMOUSLY — reminders, recurring checks, "every morning brief me", "in 30 minutes do X", "every Monday at 9am". Each schedule runs the given `prompt` through the full agent at its time (no one watching), then speaks the result aloud and texts it to Telegram. Use this whenever Siddhant asks for something to happen later or repeatedly. Actions: add (create), list, remove{id}, enable{id}, disable{id}, run{id} (fire now). For timing pass ONE of: kind:"daily"+at:"HH:MM" / kind:"weekly"+at:"HH:MM"+dow(0=Sun) / kind:"interval"+everyMinutes|everyHours / kind:"once"+runAt(ISO), OR the shortcuts inMinutes / inHours / everyMinutes / everyHours.',
     input_schema: { type: 'object', properties: {
       action: { type: 'string', enum: ['add', 'list', 'remove', 'enable', 'disable', 'run'], description: 'What to do.' },
@@ -2678,6 +2679,11 @@ async function executeTool(name, input) {
       case 'math_reason': {
         const m = input.model && /sonnet|haiku|opus/.test(input.model) ? 'anthropic/' + input.model : input.model;
         result = await simulate.mathReason({ task: input.task || input.problem, model: m, maxSteps: input.maxSteps, apiKey: getApiKey(), timeoutMs: input.timeoutMs });
+        break;
+      }
+      case 'request_permissions': {
+        const p = await ensurePermissions({ openSettings: true, force: true });
+        result = { success: true, screenRecording: p.screen, accessibility: p.accessibility, allGranted: p.ok, note: p.ok ? 'Both granted.' : 'Opened System Settings → Privacy. Toggle BhatBot on for the missing ones.' };
         break;
       }
       case 'manage_schedule': {
@@ -4865,7 +4871,13 @@ async function ttsStreamDrain(seq) {
       try { fs.writeFileSync(out, Buffer.from(r.audio, 'base64')); } catch { continue; }
       await playFile(out, seq, s);
     }
-  } finally { ttsStreamDraining = false; }
+  } finally {
+    ttsStreamDraining = false;
+    // Tell the renderer speech has drained for this turn → conversation mode re-arms the mic.
+    if (seq === ttsStreamSeq && !ttsStreamQ.length) {
+      try { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('tts-idle', { seq }); } catch {}
+    }
+  }
 }
 
 // History integrity guard. Agent histories must alternate user/assistant and keep every
@@ -5104,6 +5116,52 @@ ipcMain.handle('read-model', (_e, p) => {
 ipcMain.handle('open-3d-viewer', (_e, p) => { openInteractive3D(p); return true; });
 
 // ---------------------------------------------------------------------------
+// macOS privacy permissions (Screen Recording + Accessibility)
+// ---------------------------------------------------------------------------
+// Native control (vision_click / native login / AppleScript) needs Accessibility, and
+// vision (screen_parse) needs Screen Recording. macOS only surfaces an app in System
+// Settings → Privacy once the app actually *asks*. So we ask: Accessibility via the
+// official prompt API, Screen Recording by attempting a 1px capture (which trips the
+// TCC prompt the first time). If a permission is already denied (user said no earlier,
+// so no prompt re-appears), we deep-link straight to the right Settings pane.
+function permStatus() {
+  if (process.platform !== 'darwin') return { ok: true, screen: 'granted', accessibility: true };
+  let screenStat = 'unknown';
+  try { screenStat = systemPreferences.getMediaAccessStatus('screen'); } catch {}
+  let acc = false;
+  try { acc = systemPreferences.isTrustedAccessibilityClient(false); } catch {}
+  return { ok: screenStat === 'granted' && acc, screen: screenStat, accessibility: acc };
+}
+const SETTINGS_SCREEN = 'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture';
+const SETTINGS_ACCESS = 'x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility';
+let permRequestedOnce = false;
+async function ensurePermissions({ openSettings = false, force = false } = {}) {
+  if (process.platform !== 'darwin') return { ok: true };
+  const before = permStatus();
+  if (before.ok && !force) return { ...before, alreadyGranted: true };
+  // Accessibility: the `true` arg makes macOS pop the system prompt (and list the app).
+  let accNow = before.accessibility;
+  if (!accNow) { try { accNow = systemPreferences.isTrustedAccessibilityClient(true); } catch {} }
+  // Screen Recording: a real capture attempt triggers the first-run TCC prompt.
+  if (before.screen !== 'granted') {
+    try {
+      await desktopCapturer.getSources({ types: ['screen'], thumbnailSize: { width: 1, height: 1 } });
+    } catch {}
+  }
+  const after = permStatus();
+  // If still denied (prompt won't re-show after a prior "Don't Allow"), or caller asked,
+  // jump the user to the exact Settings panes so the toggle is one click away.
+  if (openSettings || (!after.accessibility && before.accessibility === after.accessibility && permRequestedOnce)) {
+    try { if (after.screen !== 'granted') shell.openExternal(SETTINGS_SCREEN); } catch {}
+    try { if (!after.accessibility) setTimeout(() => shell.openExternal(SETTINGS_ACCESS), 600); } catch {}
+  }
+  permRequestedOnce = true;
+  return after;
+}
+ipcMain.handle('ensure-permissions', (_e, opts) => ensurePermissions(opts || { openSettings: true }));
+ipcMain.handle('perm-status', () => permStatus());
+
+// ---------------------------------------------------------------------------
 // Lifecycle
 // ---------------------------------------------------------------------------
 app.whenReady().then(() => {
@@ -5112,6 +5170,10 @@ app.whenReady().then(() => {
     mainWindow.show();
     if (!globalShortcut.register(HOTKEY, toggleWindow)) console.warn('Hotkey failed — may be claimed by another app.');
     startWakeHelper();
+    // Ask for Screen Recording + Accessibility on launch so they appear in System Settings.
+    // Deferred 1.5s so it doesn't fight the window-show animation. Opens the Settings pane
+    // only if a permission is missing AND the silent prompt couldn't surface it.
+    setTimeout(() => { ensurePermissions({ openSettings: false }).then((p) => { if (!p.ok) ensurePermissions({ openSettings: true }); }).catch(() => {}); }, 1500);
     initMcpServer();
     startTelegramBridge();
     scheduleBriefing();
