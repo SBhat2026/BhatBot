@@ -301,6 +301,13 @@
   #dot.busy { background: var(--warn); }
   @keyframes dotpulse { 0%,100% { box-shadow: 0 0 0 0 rgba(47,224,138,.5); } 50% { box-shadow: 0 0 0 4px rgba(47,224,138,0); } }
   #count { margin-left: auto; color: var(--text-dim2); }
+  /* always-visible status-bar controls (reachable even when the chat bar is hidden) */
+  .sbtn { width: 26px; height: 22px; border: 1px solid var(--line); background: var(--bg); color: var(--text-dim);
+    cursor: pointer; border-radius: 5px; font-size: 12px; display: flex; align-items: center; justify-content: center; transition: .12s; }
+  .sbtn:hover { border-color: var(--accent); color: var(--accent); }
+  .sbtn.rec { border-color: var(--accent); color: var(--accent); box-shadow: 0 0 6px rgba(0,200,255,.4) inset; }
+  /* ambient mode: pure voice surface — no chat bar, no chips, no attach tray */
+  body.ambient #inputbar, body.ambient #attachbar, body.ambient #chips { display: none !important; }
 
   /* ---------------- boot overlay ---------------- */
   #boot {
@@ -410,13 +417,14 @@
     <button class="ibtn" id="mic" title="Voice">🎙</button>
     <button class="ibtn" id="spk" title="Speak replies (Jarvis voice)">🔊</button>
     <button class="ibtn" id="vfirst" title="Voice-first: speak replies, don't print them">🎧</button>
-    <button class="ibtn" id="txbtn" title="Show / hide the full transcript">📄</button>
     <button class="ibtn" id="send" title="Send">▶</button>
   </div>
 
   <div id="statusbar">
     <span id="dot"></span><span id="status">ONLINE</span>
     <span id="count">0 exchanges</span>
+    <button class="sbtn" id="kb" title="Show / hide the text chat bar">⌨️</button>
+    <button class="sbtn" id="txbtn" title="Show / hide the full transcript">📄</button>
   </div>
 </div>
 
@@ -1098,29 +1106,56 @@ spk.addEventListener('click', () => {
   ttsOn = !ttsOn; if (!ttsOn) stopSpeaking(); setSpkUI();
 });
 
-// ---- voice-first mode: speak replies, don't print the assistant prose on screen ----
-// (Typing still works; tool activity + visual artifacts still show — only the spoken reply
-// text is suppressed from the chat transcript.) Persisted across launches.
-let voiceFirst = false;
-try { voiceFirst = localStorage.getItem('voiceFirst') === '1'; } catch {}
+// ---- voice-first + ambient mode ----
+// ambient  = pure voice surface: input bar hidden, orb stage, wake-word listening only.
+//            DEFAULT ON (first launch). Hidden bar forces voice-first (spoken, not printed).
+// vfPref   = the user's manual 🎧 choice (only takes effect when the chat bar is shown).
+// voiceFirst (effective) = ambient || vfPref. Everything downstream reads `voiceFirst`.
+let vfPref = false;
+try { vfPref = localStorage.getItem('voiceFirst') === '1'; } catch {}
+let ambient = true;
+try { const a = localStorage.getItem('ambient'); ambient = a === null ? true : a === '1'; } catch {}
+let voiceFirst = ambient || vfPref;
 const vfBtn = $('#vfirst');
+const kbBtn = $('#kb');
 function setVoiceFirstUI() {
-  if (!vfBtn) return;
-  vfBtn.style.opacity = voiceFirst ? '1' : '0.4';
-  vfBtn.classList.toggle('rec', voiceFirst);
-  vfBtn.title = voiceFirst ? 'Voice-first ON — replies are spoken, not printed (click for text)' : 'Voice-first OFF — replies print as text (click to go voice-only)';
   document.body.classList.toggle('voicefirst', voiceFirst);
+  if (vfBtn) {
+    vfBtn.style.opacity = voiceFirst ? '1' : '0.4';
+    vfBtn.classList.toggle('rec', voiceFirst);
+    vfBtn.title = voiceFirst ? 'Voice-first ON — replies are spoken, not printed (click for text)' : 'Voice-first OFF — replies print as text (click to go voice-only)';
+  }
   if (typeof applyStageVisibility === 'function') applyStageVisibility();
 }
-if (vfBtn) vfBtn.addEventListener('click', () => {
-  voiceFirst = !voiceFirst;
-  if (voiceFirst && !ttsOn && voiceCfg.hasTTS) { ttsOn = true; setSpkUI(); }   // voice-first implies speaking
-  try { localStorage.setItem('voiceFirst', voiceFirst ? '1' : '0'); } catch {}
+// Recompute effective voice-first from ambient + manual pref, sync TTS + UI.
+function recomputeVoiceFirst() {
+  voiceFirst = ambient || vfPref;
+  if (voiceFirst && !ttsOn && voiceCfg.hasTTS) { ttsOn = true; setSpkUI(); }   // voice replies imply speaking
   setVoiceFirstUI();
+}
+// Ambient = no chat bar. kb button is lit when the bar IS showing (ambient off).
+function applyAmbientUI() {
+  document.body.classList.toggle('ambient', ambient);
+  if (kbBtn) { kbBtn.classList.toggle('rec', !ambient); kbBtn.title = ambient ? 'Show the text chat bar' : 'Hide the text chat bar (go ambient)'; }
+}
+if (vfBtn) vfBtn.addEventListener('click', () => {
+  vfPref = !vfPref;
+  try { localStorage.setItem('voiceFirst', vfPref ? '1' : '0'); } catch {}
+  recomputeVoiceFirst();
   tbar.textContent = voiceFirst ? '🎧 voice-first: I\'ll speak, not print' : '💬 text replies back on';
   if (!voiceFirst) document.body.classList.remove('show-transcript');
 });
-setVoiceFirstUI();
+if (kbBtn) kbBtn.addEventListener('click', () => {
+  ambient = !ambient;
+  try { localStorage.setItem('ambient', ambient ? '1' : '0'); } catch {}
+  applyAmbientUI();
+  if (ambient) document.body.classList.remove('show-transcript');   // ambient = stage, transcript collapses
+  recomputeVoiceFirst();
+  if (!ambient) { const ta = $('#ta'); if (ta) ta.focus(); }
+  tbar.textContent = ambient ? '🌙 ambient — say "Jarvis"' : '⌨️ text bar shown';
+});
+applyAmbientUI();
+recomputeVoiceFirst();
 
 // ---- orb state (idle / thinking / speaking) drives the voice-stage animation ----
 const orb = $('#orb');
@@ -1134,11 +1169,13 @@ function shorten(text) {
   return out;
 }
 function showCaption(text) { const c = $('#vcap'); if (c) c.textContent = shorten(text); }
-// ---- transcript: hidden by default in voice-first, one click to reveal ----
+// ---- transcript: hidden behind the orb stage in voice-first/ambient, one tap to reveal ----
 const txbtn = $('#txbtn');
 if (txbtn) txbtn.addEventListener('click', () => {
-  if (!voiceFirst) { voiceFirst = true; try { localStorage.setItem('voiceFirst', '1'); } catch {} setVoiceFirstUI(); }
-  document.body.classList.toggle('show-transcript');
+  // Only meaningful when the stage is covering the transcript (voice-first/ambient).
+  if (!voiceFirst) { vfPref = true; try { localStorage.setItem('voiceFirst', '1'); } catch {} recomputeVoiceFirst(); }
+  const on = document.body.classList.toggle('show-transcript');
+  txbtn.classList.toggle('rec', on);
   applyStageVisibility();
 });
 

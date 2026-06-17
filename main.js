@@ -5178,8 +5178,13 @@ app.whenReady().then(() => {
     startTelegramBridge();
     scheduleBriefing();
     startScheduler();   // proactive recurring/one-off tasks
-    // Pre-warm local Kokoro TTS so the first spoken reply isn't cold (~0.8s load).
-    if (kokoroAvailable()) kokoroStart().then(() => console.log('[tts] kokoro warm (local)')).catch((e) => console.error('[tts] kokoro warmup failed:', e.message));
+    // Pre-warm local Kokoro TTS so the first spoken reply isn't cold (~0.8s load), then give a
+    // short spoken "ready" confirmation once warm (ambient mode has no visual chat affordance,
+    // so the greeting tells you BhatBot is live and listening). Fires once.
+    let greeted = false;
+    const greet = () => { if (greeted) return; greeted = true; try { speakDesktop('BhatBot online. Say Jarvis when you need me.', { full: true }); } catch {} };
+    if (kokoroAvailable()) kokoroStart().then(() => { console.log('[tts] kokoro warm (local)'); greet(); }).catch((e) => { console.error('[tts] kokoro warmup failed:', e.message); greet(); });
+    else setTimeout(greet, 900);   // cloud TTS (ElevenLabs/OpenAI): no local warmup needed
   } catch (e) { console.error('Startup error:', e); }
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 });
