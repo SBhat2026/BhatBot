@@ -4983,13 +4983,24 @@ async function summarizeForSpeech(text) {
 }
 ipcMain.handle('summarize-for-speech', (_e, { text }) => summarizeForSpeech(text));
 
-// Free local TTS (macOS `say`) — used by the desktop HUD for ultra-short replies
-// (<80 chars) to avoid an API call. Default voice Daniel = British (Jarvis-ish).
+// Spoken output for direct callers (briefing, scheduled tasks, greeting, MCP/phone relays).
+// ONE consistent voice: route through speakDesktop → the configured provider (ElevenLabs
+// "Jarvis"). This also SERIALIZES with all other speech (speakDesktop cancels in-flight audio),
+// so a briefing announce can't talk over the greeting. macOS `say` is a last resort only when
+// no real TTS provider is configured or TTS is muted — it was the rogue second/third voice and
+// ran as its own process that stopDesktopTTS couldn't cancel (→ overlapping voices).
 function sayLocal(text) {
   const c = loadConfig();
-  const v = c.ttsLocalVoice || 'Daniel';
-  const t = String(text || '').slice(0, 400);
+  const t = String(text || '').slice(0, 600);
   if (!t.trim()) return { success: false };
+  const hasProvider = c.ttsProvider || c.elevenLabsKey || c.openaiKey || c.piperBin || kokoroAvailable();
+  if (c.ttsEnabled !== false && hasProvider) {
+    speakDesktop(t, { full: true }).catch(() => {
+      try { const p = spawn('say', ['-v', c.ttsLocalVoice || 'Daniel', t]); p.on('error', () => {}); } catch {}
+    });
+    return { success: true };
+  }
+  const v = c.ttsLocalVoice || 'Daniel';
   try {
     const p = spawn('say', ['-v', v, t]);
     p.on('error', () => { try { spawn('say', [t]); } catch {} });   // voice missing → default
