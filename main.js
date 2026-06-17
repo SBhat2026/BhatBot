@@ -4547,11 +4547,14 @@ async function synthesizeSpeech(text, opts = {}) {
     if (provider === 'elevenlabs') {
       const e = await elevenLabsSynth(t, c, stitch);
       if (e.success) return e;
-      // EL failed (quota/auth/rate/network) → fall back to free local Kokoro, then OpenAI,
-      // so the voice never dies even when the ElevenLabs free tier is exhausted.
-      console.error('[tts] elevenlabs failed, falling back:', e.error);
-      if (kokoroAvailable()) { const k = await kokoroSynth(t); if (k.success) return k; }
-      if (c.openaiKey) return await openaiSynth(t, c);
+      console.error('[tts] elevenlabs failed:', e.error);
+      // STRICT (default): ElevenLabs-or-nothing — never substitute a different voice (user pays
+      // for the EL subscription and wants exactly one voice). Set ttsStrict:false in config to
+      // re-enable the Kokoro→OpenAI fallback if quota/network ever takes EL down.
+      if (c.ttsStrict === false) {
+        if (kokoroAvailable()) { const k = await kokoroSynth(t); if (k.success) return k; }
+        if (c.openaiKey) return await openaiSynth(t, c);
+      }
       return { error: e.error };
     }
     if (provider === 'piper') {
