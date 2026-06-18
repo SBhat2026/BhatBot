@@ -1777,7 +1777,18 @@ function isAutonomous() {
   const c = loadConfig();
   return c.autonomousMode !== false;   // default ON
 }
+// Remote-execution guard. Incremented while a turn is driven from the phone / Tailscale
+// funnel (headless, no human at the keyboard). Destructive shell (rm/rmdir/trash) is then
+// NEVER auto-approved — even with autonomousMode on — because nobody is present to confirm.
+// Local desktop use is unaffected. Set config.remoteAllowDestructive:true to opt back in.
+let remoteDepth = 0;
+function isRemote() { return remoteDepth > 0; }
 function requestConfirm(command, reason) {
+  if (isRemote() && loadConfig().remoteAllowDestructive !== true) {
+    try { fs.appendFileSync(AUDIT_PATH, JSON.stringify({ ts: new Date().toISOString(), remoteDenied: command.slice(0, 200), reason }) + '\n'); } catch {}
+    sendToActivity('tool-update', { type: 'thinking', text: '⛔ remote destructive command denied (no human to confirm): ' + reason });
+    return Promise.resolve(false);
+  }
   if (isAutonomous()) {
     try { fs.appendFileSync(AUDIT_PATH, JSON.stringify({ ts: new Date().toISOString(), autoApproved: command.slice(0, 200), reason }) + '\n'); } catch {}
     sendToActivity('tool-update', { type: 'thinking', text: '⚡ auto-approved: ' + reason });
@@ -3687,6 +3698,7 @@ async function runAgentHeadless(instruction, opts = {}) {
   const blocks = Array.isArray(opts.blocks) ? opts.blocks : [];
   mcpHistory.push({ role: 'user', content: blocks.length ? [{ type: 'text', text: instr }, ...blocks] : instr });
   sendToActivity('tool-update', { type: 'thinking', text: '📱 remote task: ' + instr.slice(0, 200) });
+  remoteDepth++;                                       // mark this as a no-human-present remote turn
   try {
     const ev = { sender: { send() {} } };
     const res = await dispatchTurn(mcpHistory, apiKey, ev, {});
@@ -3695,6 +3707,8 @@ async function runAgentHeadless(instruction, opts = {}) {
     return { text: res.text };
   } catch (e) {
     return { error: String(e && e.message ? e.message : e) };
+  } finally {
+    remoteDepth--;
   }
 }
 
@@ -3720,9 +3734,11 @@ async function captureScreenJpeg() {
 // Phone control passthrough — same tools the agent already has via /chat, so the token
 // gate (not this list) is the real boundary; the list just keeps the surface explicit.
 const PHONE_CONTROL_TOOLS = new Set(['system_control', 'media_control', 'run_shell', 'manage_jobs']);
-function phoneControl(tool, input) {
-  if (!PHONE_CONTROL_TOOLS.has(tool)) return Promise.resolve({ success: false, error: `tool not allowed from phone control: ${tool}` });
-  return executeTool(tool, input || {});
+async function phoneControl(tool, input) {
+  if (!PHONE_CONTROL_TOOLS.has(tool)) return { success: false, error: `tool not allowed from phone control: ${tool}` };
+  remoteDepth++;                                       // phone Control tab → no-human-present
+  try { return await executeTool(tool, input || {}); }
+  finally { remoteDepth--; }
 }
 
 async function initMcpServer() {
@@ -3737,7 +3753,7 @@ async function initMcpServer() {
       port, token, runAgent: runAgentHeadless, transcribe: transcribeAudio,
       synthesize: synthesizeSpeech, summarize: summarizeForSpeech, media: mediaBytesToBlocks,
       voiceTurn, endVoiceCall, getActivity, nexusUrl: NEXUS_URL, ownerPhone: c.myPhone,
-      jobs: jobsBus, control: phoneControl, screenshot: captureScreenJpeg
+      twilioAuthToken: c.twilioToken, jobs: jobsBus, control: phoneControl, screenshot: captureScreenJpeg
     });
     console.log(`[mcp] listening on http://127.0.0.1:${port}/mcp/${token}`);
     console.log(`[app] phone PWA at  http://127.0.0.1:${port}/app/${token}`);

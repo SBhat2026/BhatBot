@@ -218,6 +218,23 @@ const API = HOST + '/api/' + TOKEN;
 const APP = HOST + '/app/' + TOKEN;
 const BUILD = '__BUILD__';                       // injected at serve time; drives auto-reload
 const BUNDLED = !!CFG.bundled || location.protocol === 'file:';   // native app's local fallback
+// Security: send the token as an Authorization: Bearer header on every API call (the server
+// accepts header OR the path token). Keeps the secret out of access logs/referrers where
+// possible; the path token remains only as the bootstrap fallback.
+(() => {
+  const _f = window.fetch.bind(window);
+  window.fetch = (url, opts = {}) => {
+    try {
+      const u = typeof url === 'string' ? url : (url && url.url) || '';
+      if (TOKEN && (u.startsWith(HOST) || u.startsWith('/'))) {
+        const h = new Headers(opts.headers || (typeof url !== 'string' && url.headers) || {});
+        if (!h.has('Authorization')) h.set('Authorization', 'Bearer ' + TOKEN);
+        opts = { ...opts, headers: h };
+      }
+    } catch {}
+    return _f(url, opts);
+  };
+})();
 document.getElementById('manifest').href = APP + '/manifest.webmanifest';
 document.getElementById('touchicon').href = APP + '/icon-192.png';
 

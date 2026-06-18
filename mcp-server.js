@@ -7,12 +7,27 @@
 
 let httpServer = null;
 
-async function startMcpServer({ port, token, runAgent, transcribe, synthesize, summarize, media, voiceTurn, endVoiceCall, getActivity, nexusUrl, ownerPhone, jobs, control, screenshot }) {
+async function startMcpServer({ port, token, runAgent, transcribe, synthesize, summarize, media, voiceTurn, endVoiceCall, getActivity, nexusUrl, ownerPhone, twilioAuthToken, jobs, control, screenshot }) {
   if (httpServer) return httpServer;
   const express = require('express');
   const fs = require('fs');
   const path = require('path');
+  const crypto = require('crypto');
   const { z } = require('zod');
+
+  // Constant-time token compare — avoids leaking match progress via response timing.
+  const tokenBuf = Buffer.from(String(token));
+  const safeEq = (cand) => {
+    const b = Buffer.from(String(cand || ''));
+    return b.length === tokenBuf.length && crypto.timingSafeEqual(b, tokenBuf);
+  };
+  // Accept the token from the Authorization: Bearer header (preferred — stays out of URLs,
+  // logs, history) OR the URL path (fallback the PWA bootstrap + manifest/SW still need).
+  const presentedToken = (req) => {
+    const h = req.get('authorization') || '';
+    const m = /^Bearer\s+(.+)$/i.exec(h);
+    return (m && m[1]) || req.params.token || (req.query && req.query.token) || '';
+  };
   const { McpServer } = await import('@modelcontextprotocol/sdk/server/mcp.js');
   const { StreamableHTTPServerTransport } = await import('@modelcontextprotocol/sdk/server/streamableHttp.js');
 
@@ -52,8 +67,24 @@ async function startMcpServer({ port, token, runAgent, transcribe, synthesize, s
   });
 
   const guard = (req, res, next) => {
-    if (req.params.token !== token) return res.status(401).json({ error: 'unauthorized' });
+    if (!safeEq(presentedToken(req))) return res.status(401).json({ error: 'unauthorized' });
     next();
+  };
+  // Twilio webhook authenticity: verify X-Twilio-Signature (HMAC-SHA1 of the full URL +
+  // sorted POST params, keyed by the Twilio auth token). Blocks spoofed webhook POSTs even
+  // from someone who learned the token URL. Skipped only if no auth token is configured.
+  const twilioVerified = (req) => {
+    if (!twilioAuthToken) return true;                 // can't verify → don't hard-block (Serve-only setups)
+    try {
+      const sig = req.get('x-twilio-signature') || '';
+      const url = `https://${req.get('host')}${req.originalUrl}`;
+      const params = req.body || {};
+      let data = url;
+      for (const k of Object.keys(params).sort()) data += k + params[k];
+      const expected = crypto.createHmac('sha1', twilioAuthToken).update(Buffer.from(data, 'utf-8')).digest('base64');
+      const a = Buffer.from(sig), b = Buffer.from(expected);
+      return a.length === b.length && crypto.timingSafeEqual(a, b);
+    } catch { return false; }
   };
 
   // Stateless Streamable HTTP: one transport per request.
@@ -69,7 +100,9 @@ async function startMcpServer({ port, token, runAgent, transcribe, synthesize, s
     }
   });
   app.get('/mcp/:token', guard, (_req, res) => res.status(405).json({ error: 'method not allowed (stateless)' }));
-  app.get('/health', (_req, res) => res.json({ ok: true, name: 'bhatbot-mcp' }));
+  // Health is token-gated now (no unauthenticated "a BhatBot lives here" disclosure). Probe
+  // with: curl -H "Authorization: Bearer <token>" .../health  (serve-remote.sh does this).
+  app.get('/health', guard, (_req, res) => res.json({ ok: true }));
 
   // -------------------------------------------------------------------------
   // Phone PWA — a real app you "Add to Home Screen". Same express app, same
@@ -280,6 +313,9 @@ self.addEventListener('fetch', (e) => {
   // BEEP → leave the message in the JARVIS voice and hang up (no gather — nobody's there).
   app.post('/voice/:token/incoming', guard, form, async (req, res) => {
     try {
+      if (!twilioVerified(req)) return res.status(403).type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Reject/></Response>');
+      const from = req.body.From || '';
+      if (ownerPhone && from && from !== ownerPhone) return res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Say>Unauthorized.</Say><Hangup/></Response>');
       const callSid = req.body.CallSid || '';
       const answeredBy = String(req.body.AnsweredBy || '');
       const greeting = req.query.msg || 'Good evening, sir. How may I help?';
@@ -300,6 +336,9 @@ self.addEventListener('fetch', (e) => {
   // Subsequent legs: user spoke → agent turn → speak reply → listen again.
   app.post('/voice/:token/gather', guard, form, async (req, res) => {
     try {
+      if (!twilioVerified(req)) return res.status(403).type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Reject/></Response>');
+      const from = req.body.From || '';
+      if (ownerPhone && from && from !== ownerPhone) return res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Say>Unauthorized.</Say><Hangup/></Response>');
       const callSid = req.body.CallSid || '';
       const speech = req.body.SpeechResult || '';
       if (!speech.trim()) {
@@ -317,6 +356,7 @@ self.addEventListener('fetch', (e) => {
   });
 
   app.post('/voice/:token/status', guard, form, (req, res) => {
+    if (!twilioVerified(req)) return res.status(403).end();
     try { if (endVoiceCall && (req.body.CallStatus === 'completed' || req.body.CallStatus === 'failed')) endVoiceCall(req.body.CallSid); } catch {}
     res.status(204).end();
   });
@@ -331,6 +371,7 @@ self.addEventListener('fetch', (e) => {
   app.post('/sms/:token/incoming', guard, form, async (req, res) => {
     const reply = (xml) => res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?><Response>${xml}</Response>`);
     try {
+      if (!twilioVerified(req)) return res.status(403).end();
       const text = String(req.body.Body || '').trim();
       const from = req.body.From || '';
       if (ownerPhone && from && from !== ownerPhone) return reply(`<Message>Unauthorized.</Message>`);
