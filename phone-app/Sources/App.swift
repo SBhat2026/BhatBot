@@ -1,14 +1,30 @@
 import SwiftUI
 import WebKit
+import AVFoundation
 
 @main
 struct BhatBotApp: App {
+    init() { AudioSession.configure() }
     var body: some Scene {
         WindowGroup {
             WebRoot()
                 .ignoresSafeArea()
                 .preferredColorScheme(.dark)
         }
+    }
+}
+
+// CRITICAL for voice: WKWebView's Web Audio (the AudioContext the page uses for TTS) plays
+// through the app's AVAudioSession. The default category is silenced by the hardware ring/
+// silent switch — so the cloud's audio arrives fine but you hear nothing. .playAndRecord with
+// .defaultToSpeaker plays LOUD through the speaker (ignores the mute switch) while still letting
+// the mic record for hands-free. .spokenAudio + .duckOthers = nice for a voice assistant.
+enum AudioSession {
+    static func configure() {
+        let s = AVAudioSession.sharedInstance()
+        try? s.setCategory(.playAndRecord, mode: .spokenAudio,
+                           options: [.defaultToSpeaker, .allowBluetooth, .allowBluetoothA2DP, .duckOthers])
+        try? s.setActive(true, options: [])
     }
 }
 
@@ -88,8 +104,9 @@ struct WebRoot: UIViewRepresentable {
 
         @objc func pull(_ rc: UIRefreshControl) { loadRemote(); rc.endRefreshing() }
 
-        // On return to foreground, try the live Mac UI again (it may have woken / come back).
-        @objc func foreground() { loadRemote() }
+        // On return to foreground, re-arm audio (iOS can deactivate the session in background)
+        // and try the live UI again (the Mac / cloud may have come back).
+        @objc func foreground() { AudioSession.configure(); loadRemote() }
 
         // Mic/camera auto-grant — the user's own app talking to their own Mac.
         @available(iOS 15.0, *)

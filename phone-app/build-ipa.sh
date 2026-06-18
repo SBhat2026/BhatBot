@@ -18,8 +18,12 @@ mkdir -p Web && cp ../src/mobile.html Web/mobile.html   # sync the bundled offli
 # git — public repo). Restore the placeholder source on exit so the secret never gets committed.
 CFG="$HOME/.bhatbot/config.json"
 TOKEN=$(node -e "try{console.log(require('$CFG').mcpToken||'')}catch{console.log('')}")
-TSBIN="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
-HOST=$("$TSBIN" status --json 2>/dev/null | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{console.log('https://'+JSON.parse(s).Self.DNSName.replace(/\.$/,''))}catch{console.log('')}})" 2>/dev/null)
+# Default host: the CLOUD backend if configured (always-on, no VPN) → else the tailnet host.
+HOST=$(node -e "try{console.log(require('$CFG').cloudUrl||'')}catch{console.log('')}")
+if [ -z "$HOST" ]; then
+  TSBIN="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+  HOST=$("$TSBIN" status --json 2>/dev/null | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{console.log('https://'+JSON.parse(s).Self.DNSName.replace(/\.$/,''))}catch{console.log('')}})" 2>/dev/null)
+fi
 if [ -n "$TOKEN" ] && [ -n "$HOST" ]; then
   cp Sources/Config.swift /tmp/bb-config-orig.swift
   trap 'cp /tmp/bb-config-orig.swift Sources/Config.swift' EXIT

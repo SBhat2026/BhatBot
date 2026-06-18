@@ -391,7 +391,16 @@ async function speak(text, opts = {}) {
   const jobs = chunks.map(ttsOne);
   for (let i = 0; i < jobs.length; i++) { const b = await jobs[i]; if (seq !== ttsSeq) return; if (b) await playBuf(b, seq); if (seq !== ttsSeq) return; }
 }
-spk.addEventListener('click', () => { ttsOn = !ttsOn; spk.classList.toggle('off', !ttsOn); spk.textContent = ttsOn ? '🔊' : '🔇'; if (!ttsOn) stopSpeaking(); });
+// Voice/text mode toggle (voice-first by default): 🔊 = speaks every reply aloud,
+// 💬 = text only (reply still appears in the chat, just not spoken). Tap to switch.
+function setVoiceMode(on) {
+  ttsOn = on; spk.classList.toggle('off', !on);
+  spk.textContent = on ? '🔊' : '💬'; spk.title = on ? 'Voice replies (tap for text only)' : 'Text only (tap for voice)';
+  try { localStorage.setItem('bb_tts', on ? '1' : '0'); } catch {}
+  if (!on) stopSpeaking(); else { bar.textContent = '🔊 voice on'; setTimeout(() => { if (bar.textContent === '🔊 voice on') bar.textContent = ''; }, 1200); }
+}
+spk.addEventListener('click', () => setVoiceMode(!ttsOn));
+setVoiceMode(localStorage.getItem('bb_tts') !== '0');   // default ON (voice-first), remembers your choice
 
 // ---- Voice settings (persisted in localStorage, sent with every /tts) ----
 const settings = document.getElementById('settings'), voicesel = document.getElementById('voicesel');
