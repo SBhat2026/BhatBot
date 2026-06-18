@@ -37,6 +37,9 @@ CREATE TABLE IF NOT EXISTS schedules (
 CREATE TABLE IF NOT EXISTS activity (
   id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT, text TEXT, created_at INTEGER
 );
+CREATE TABLE IF NOT EXISTS meta (
+  key TEXT PRIMARY KEY, value TEXT
+);
 `);
 
 const now = () => Date.now();
@@ -110,8 +113,14 @@ function getActivity(since) {
   return { seq: _actMax.get().m, events: ev.map((e) => ({ id: e.id, kind: e.kind, text: e.text })) };
 }
 
+// ---- meta kv (small settings: last brief day, etc.) ---------------------------
+const _getMeta = db.prepare('SELECT value FROM meta WHERE key=?');
+const _setMeta = db.prepare('INSERT INTO meta (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=?');
+function getMeta(k) { const r = _getMeta.get(k); return r ? r.value : null; }
+function setMeta(k, v) { _setMeta.run(k, String(v), String(v)); }
+
 module.exports = {
-  db, DATA_DIR, today,
+  db, DATA_DIR, today, getMeta, setMeta,
   ensureConversation, addMessage, getHistory, resetConversation,
   saveMemory, recallMemory,
   recordCost, costToday,

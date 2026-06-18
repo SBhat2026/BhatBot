@@ -12,7 +12,7 @@ const { WebSocketServer } = require('ws');
 
 const db = require('./db');
 const voice = require('./voice');
-const { runTurn } = require('./agent');
+const { runTurn, dailyBriefIfDue } = require('./agent');
 const relay = require('./relay');
 const scheduler = require('./scheduler');
 const twilio = require('./twilio');
@@ -66,6 +66,11 @@ app.post('/api/:token/summarize', guard, async (req, res) => {
     const r = await runTurn('summarize', `Condense this into one or two spoken sentences, faithful, no markdown:\n\n${t}`, { reset: true });
     res.json({ text: r.text || t });
   } catch (e) { res.json({ error: String(e && e.message || e) }); }
+});
+
+// ---- first-open-of-the-day brief — the phone/computer calls this on launch -----
+app.get('/api/:token/morning', guard, async (_q, res) => {
+  try { res.json(await dailyBriefIfDue()); } catch (e) { res.json({ fresh: false, error: String(e && e.message || e) }); }
 });
 
 // ---- activity + config --------------------------------------------------------

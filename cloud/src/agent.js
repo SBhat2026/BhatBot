@@ -101,4 +101,17 @@ function maybeShareFact(userText, reply) {
   } catch {}
 }
 
-module.exports = { runTurn };
+// First-open-of-the-day brief. Runs at most once per calendar day — triggered when the phone
+// or computer first opens BhatBot (whichever is first marks the day, so it fires exactly once).
+const BRIEF_PROMPT = 'Give Siddhant a concise spoken morning brief, max 5 short bullets: (1) today date + day; (2) web_fetch https://prism-assembly.prismlab.workers.dev and https://protfunc.prismlab.workers.dev and flag anything not OK; (3) if my computer is online, git status of ~/bhatbot; (4) one useful reminder from stored memory if relevant. Brief and natural; flag anything urgent. Open with a short greeting.';
+async function dailyBriefIfDue() {
+  const day = db.today();
+  if (db.getMeta('lastBriefDay') === day) return { fresh: false };
+  db.setMeta('lastBriefDay', day);                  // mark first so it can't double-fire on concurrent opens
+  try {
+    const r = await runTurn('brief', BRIEF_PROMPT, { reset: true });
+    return { fresh: true, text: r.text };
+  } catch (e) { db.setMeta('lastBriefDay', ''); return { fresh: false, error: e.message }; }
+}
+
+module.exports = { runTurn, dailyBriefIfDue };

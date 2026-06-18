@@ -3761,6 +3761,21 @@ function startCloudBridge() {
     });
   } catch (e) { console.warn('[cloud-bridge] start failed:', e.message); }
 }
+// First-open-of-the-day brief, fetched from the cloud (server-gated to once/day across all
+// surfaces — whichever of phone/computer opens first speaks it). Spoken via the desktop voice.
+async function maybeMorningBrief() {
+  try {
+    const c = loadConfig();
+    if (!c.cloudUrl || !c.cloudToken) return;
+    const r = await fetch(`${c.cloudUrl.replace(/\/+$/, '')}/api/${c.cloudToken}/morning`, {
+      headers: { Authorization: 'Bearer ' + c.cloudToken }, signal: AbortSignal.timeout(45000),
+    }).then((x) => x.json()).catch(() => null);
+    if (r && r.fresh && r.text) {
+      sendToActivity('tool-update', { type: 'thinking', text: '☀️ morning brief:\n' + r.text });
+      try { speakDesktop(r.text, { full: true }); } catch {}
+    }
+  } catch {}
+}
 async function initMcpServer() {
   if (pipelineCfg().enabled) warmRouter();   // preload the local router so the first hop is fast
   const c = loadConfig();
@@ -5387,6 +5402,7 @@ app.whenReady().then(() => {
     setTimeout(() => { try { primeAppAutomation(false); } catch {} }, 3500);
     initMcpServer();
     startCloudBridge();   // connect to the cloud backend as its Mac executor (if configured)
+    setTimeout(() => { maybeMorningBrief(); }, 6000);   // first-open-of-day brief (cloud-gated)
     startTelegramBridge();
     scheduleBriefing();
     startScheduler();   // proactive recurring/one-off tasks

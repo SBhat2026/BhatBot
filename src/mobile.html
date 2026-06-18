@@ -402,6 +402,15 @@ function setVoiceMode(on) {
 spk.addEventListener('click', () => setVoiceMode(!ttsOn));
 setVoiceMode(localStorage.getItem('bb_tts') !== '0');   // default ON (voice-first), remembers your choice
 
+// First open of the day → pull the morning brief from the cloud (server-gated to once/day) and
+// show + speak it. Fires whenever you first open the app on a new day.
+(async () => {
+  try {
+    const r = await fetch(API + '/morning').then(x => x.json());
+    if (r && r.fresh && r.text) { add('bot', '☀️ ' + r.text); if (ttsOn) speak(r.text, { full: true }); }
+  } catch {}
+})();
+
 // ---- Voice settings (persisted in localStorage, sent with every /tts) ----
 const settings = document.getElementById('settings'), voicesel = document.getElementById('voicesel');
 const spdrange = document.getElementById('spdrange'), spdval = document.getElementById('spdval');
