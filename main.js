@@ -720,9 +720,23 @@ function nowBlock() {
   try { return 'Current date & time: ' + new Date().toLocaleString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short' }) + '.'; }
   catch { return ''; }
 }
+// Live API-spend awareness so the model can self-govern (the "calculate cost, then chunk"
+// behaviour Siddhant asked for). Placed AFTER the cached static block so cache hits survive.
+function costBlock() {
+  try {
+    const c = loadConfig(); if (c.costAwareness === false) return '';
+    const t = costToday(); if (!t || !t.calls) return '';
+    const cap = c.dailyBudgetUsd ? ` of a $${c.dailyBudgetUsd} daily budget` : '';
+    const over = c.dailyBudgetUsd && t.usd >= c.dailyBudgetUsd;
+    return `API spend today: $${t.usd.toFixed(3)}${cap} across ${t.calls} calls.`
+      + (over ? ' OVER BUDGET — prefer the local Ollama pipeline and Haiku, batch independent tool calls, skip vision/browser unless essential, and tell Siddhant if a task needs the budget raised.'
+              : ' Size up big tasks before starting: estimate the tool-call/vision load, chunk anything heavy, and batch independent calls.');
+  } catch { return ''; }
+}
 function systemBlocks(query) {
   const blocks = [{ type: 'text', text: buildStaticPrompt(), cache_control: { type: 'ephemeral' } }];
   const nb = nowBlock(); if (nb) blocks.push({ type: 'text', text: nb });
+  const cb = costBlock(); if (cb) blocks.push({ type: 'text', text: cb });
   const modeP = modePrompts.selectModePrompt({ suggestedMode: currentMode });
   if (modeP) blocks.push({ type: 'text', text: modeP });
   const mem = buildMemoryBlock(query || '');
@@ -732,13 +746,14 @@ function systemBlocks(query) {
   return blocks;
 }
 function buildSystemPrompt(query) {
-  return buildStaticPrompt() + '\n\n' + modePrompts.selectModePrompt({ suggestedMode: currentMode }) + buildMemoryBlock(query || '') + jobsStatusBlock();
+  return buildStaticPrompt() + '\n\n' + costBlock() + modePrompts.selectModePrompt({ suggestedMode: currentMode }) + buildMemoryBlock(query || '') + jobsStatusBlock();
 }
 
 // ---------------------------------------------------------------------------
 // Model routing
 // ---------------------------------------------------------------------------
 function chooseModel(lastUserMessage) {
+  if (overBudget()) return MODEL_HAIKU;             // past daily budget → cheapest cloud model
   const sonnet = [
     /write.*prompt/i, /claude.?code/i, /architect/i, /refactor/i, /debug/i,
     /explain.*why/i, /design/i, /strategy/i, /research/i, /paper/i,
@@ -803,6 +818,50 @@ function rateBudget() {
   const used = tokensUsedLastMin();
   return { limit, safe, used, free: Math.max(0, safe - used) };
 }
+// --- Real per-model cost ledger (token→USD), persisted per day in ~/.bhatbot/costs.json ---
+// Unlike the old crude "audit lines × $0.004", this prices ACTUAL usage from each API
+// response (incl. cache read/write tiers), so chooseModel + the cost system-block can make
+// genuine budget-aware decisions ("calculate the cost, then chunk").
+const MODEL_PRICES = {                              // USD / 1M tokens: [input, output, cacheWrite, cacheRead]
+  'claude-opus-4-8':   [15, 75, 18.75, 1.50],
+  'claude-sonnet-4-6': [3, 15, 3.75, 0.30],
+  'claude-haiku-4-5':  [1, 5, 1.25, 0.10],
+};
+const COSTS_PATH = path.join(os.homedir(), '.bhatbot', 'costs.json');
+function priceFor(model) {
+  if (!model) return MODEL_PRICES[MODEL_HAIKU];
+  if (MODEL_PRICES[model]) return MODEL_PRICES[model];
+  const bare = model.replace(/^claude-/, '');
+  const k = Object.keys(MODEL_PRICES).find((m) => m.replace(/^claude-/, '') === bare || model.includes(m.replace(/^claude-/, '')));
+  return MODEL_PRICES[k] || MODEL_PRICES[MODEL_HAIKU];
+}
+function costOf(model, u) {
+  if (!u) return 0;
+  const [pin, pout, pcw, pcr] = priceFor(model);
+  return ((u.input_tokens || 0) * pin + (u.output_tokens || 0) * pout
+    + (u.cache_creation_input_tokens || 0) * pcw + (u.cache_read_input_tokens || 0) * pcr) / 1e6;
+}
+function recordCost(model, usage) {
+  try {
+    const usd = costOf(model, usage); if (!usd) return;
+    let led = {}; try { led = JSON.parse(fs.readFileSync(COSTS_PATH, 'utf8')); } catch {}
+    const d = today();
+    led[d] = led[d] || { usd: 0, calls: 0, byModel: {} };
+    led[d].usd += usd; led[d].calls += 1;
+    const mk = (model || 'unknown').replace(/^claude-/, '');
+    led[d].byModel[mk] = (led[d].byModel[mk] || 0) + usd;
+    const cut = new Date(Date.now() - 60 * 864e5).toISOString().slice(0, 10);   // prune >60d
+    for (const k of Object.keys(led)) if (k < cut) delete led[k];
+    fs.mkdirSync(path.dirname(COSTS_PATH), { recursive: true });
+    fs.writeFileSync(COSTS_PATH, JSON.stringify(led));
+  } catch {}
+}
+function costToday() {
+  try { const led = JSON.parse(fs.readFileSync(COSTS_PATH, 'utf8')); return led[today()] || { usd: 0, calls: 0, byModel: {} }; }
+  catch { return { usd: 0, calls: 0, byModel: {} }; }
+}
+function overBudget() { const c = loadConfig(); return !!(c.dailyBudgetUsd && costToday().usd >= c.dailyBudgetUsd); }
+
 // Estimated input tokens a Claude request would cost (system + tools + trimmed messages).
 function requestTokenEstimate(messages) {
   return estimateTokens({ system: buildSystemPrompt(lastUserText(messages)), tools: TOOLS, messages: capTokens(messages) });
@@ -869,7 +928,7 @@ async function anthropicRequest(body, apiKey, { retries = 5 } = {}) {
     }
     if (res.ok) {
       const j = await res.json();
-      try { const u = j.usage || {}; recordTokens((u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0)); } catch {}
+      try { const u = j.usage || {}; recordTokens((u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0)); recordCost(body.model, u); } catch {}
       return j;
     }
     const retryable = res.status === 429 || res.status === 529 || res.status >= 500;
@@ -962,7 +1021,7 @@ async function anthropicStream(body, apiKey, onText, { retries = 3 } = {}) {
         } else if (ev.type === 'error') { throw new Error('stream error: ' + JSON.stringify(ev.error).slice(0, 200)); }
       }
     }
-    try { recordTokens((usage.input_tokens || 0) + (usage.output_tokens || 0)); } catch {}
+    try { recordTokens((usage.input_tokens || 0) + (usage.output_tokens || 0)); recordCost(body.model, usage); } catch {}
     return {
       content: blocks.filter(Boolean).map((b) => b.type === 'tool_use' ? { type: 'tool_use', id: b.id, name: b.name, input: b.input || {} } : { type: 'text', text: b.text }),
       stop_reason: stop_reason || 'end_turn', usage
@@ -993,8 +1052,13 @@ async function callModel(messages, apiKey, allowDarkbloom, onText) {
   const cfg = loadConfig();
   const route = classify(lastUserText(messages));
   const dbReady = cfg.darkbloomEnabled && cfg.darkbloomKey;
+  // Tool tasks MUST go to Claude — local/Darkbloom providers are single-shot and can't run
+  // tools, so falling back to them on a tool task silently produces tool-less garbage (e.g. a
+  // truncated "<s") and the task never executes. For these, never substitute a local model:
+  // pace-and-wait for the budget instead. (Auto-bypass-Ollama-for-tools, applied at the model layer.)
+  const toolish = looksLikeToolTask(lastUserText(messages));
 
-  if (allowDarkbloom && dbReady && (route === 'db_speech' || route === 'db_directive')) {
+  if (allowDarkbloom && !toolish && dbReady && (route === 'db_speech' || route === 'db_directive')) {
     try {
       const oa = messages.map((m) => ({
         role: m.role === 'assistant' ? 'assistant' : 'user',
@@ -1018,7 +1082,7 @@ async function callModel(messages, apiKey, allowDarkbloom, onText) {
     const mode = cfg.rateLimitMode || 'local';
     // First-turn simple queries → answer locally on Ollama (free, no quota). Not mid-task
     // (Ollama can't run tools, so hijacking a tool loop would break it).
-    if (mode === 'local' && allowDarkbloom && await ollamaUp()) {
+    if (mode === 'local' && allowDarkbloom && !toolish && await ollamaUp()) {
       try {
         const lm = cfg.localModel || 'qwen3:latest';
         const text = (await ollamaChat(messages, buildSystemPrompt(lastUserText(messages)), lm) || '').trim();
@@ -1377,6 +1441,29 @@ async function mediaControl(input) {
     const r = await osa(['-e', `set volume output volume ${vol}`]);
     return r.ok ? { success: true, result: `System volume ${vol}%` } : { success: false, error: osaErr(r) };
   }
+  // Create a playlist (+ optionally fill it) via the Web API. Needs the playlist-modify
+  // scopes — re-run scripts/spotify-auth.js once if the token predates them (→ 403).
+  if (a === 'make_playlist') {
+    if (!c.spotifyRefreshToken) return { success: false, error: 'Spotify not linked — run `node ~/bhatbot/scripts/spotify-auth.js` once (needs Premium) to enable playlists.' };
+    const scopeHint = 'Spotify token is missing playlist scopes — re-run `node ~/bhatbot/scripts/spotify-auth.js` to grant playlist access, then try again.';
+    const me = await spotifyApi(c, 'GET', '/me');
+    if (!me.ok || !me.json) return { success: false, error: me.status === 403 ? scopeHint : connErr(me) };
+    const name = (input.name || q || 'BhatBot Playlist').slice(0, 100);
+    const isPublic = input.public === true;
+    const cr = await spotifyApi(c, 'POST', `/users/${encodeURIComponent(me.json.id)}/playlists`,
+      { name, description: (input.description || 'Made by BhatBot').slice(0, 300), public: isPublic });
+    if (!cr.ok || !cr.json) return { success: false, error: cr.status === 403 ? scopeHint : connErr(cr) };
+    const pid = cr.json.id, url = (cr.json.external_urls || {}).spotify || '';
+    // Resolve each track query → a Spotify URI (tracks: array of "song artist" strings).
+    const seeds = Array.isArray(input.tracks) ? input.tracks : (q && !input.name ? [] : []);
+    const uris = [], missed = [];
+    for (const s of seeds.slice(0, 100)) { const hit = await spotifySearchUri(c, String(s)); if (hit) uris.push(hit.uri); else missed.push(String(s)); }
+    if (uris.length) {
+      const ar = await spotifyApi(c, 'POST', `/playlists/${pid}/tracks`, { uris });
+      if (!ar.ok) return { success: true, result: `Created "${name}" (couldn't add tracks: ${connErr(ar)}). ${url}` };
+    }
+    return { success: true, result: `Created playlist "${name}" with ${uris.length} track(s)${missed.length ? ` (no match: ${missed.join(', ')})` : ''}. ${url}` };
+  }
   // Spotify Connect path (controls any device incl. the phone) when linked AND a device
   // is targeted, device listing/transfer is asked, or Connect is the configured default.
   if (c.spotifyRefreshToken && (input.device || a === 'list_devices' || a === 'transfer' || c.spotifyUseConnect)) {
@@ -1449,12 +1536,16 @@ const TOOLS = [
     input_schema: { type: 'object', properties: { goal: { type: 'string' }, workspace: { type: 'string', description: 'workspace slug/name; omit to use/create the active one' }, max_tasks: { type: 'number' } }, required: ['goal'] } },
   { name: 'manage_jobs', description: 'Inspect and control BACKGROUND jobs (delegated projects and their agent tasks). action "list" = every job with id/status/progress/note — use it to report how background work is going. "cancel" = stop a job and its queued subtasks (needs job_id). "guide" = queue a plain-English steering note that all subsequent tasks of that project must follow (needs job_id + guidance), e.g. "skip the research task" or "use TypeScript" — a task job_id routes to its parent project. Use this — not passive acknowledgment — whenever Siddhant redirects running background work.',
     input_schema: { type: 'object', properties: { action: { type: 'string', enum: ['list', 'cancel', 'guide'] }, job_id: { type: 'string' }, guidance: { type: 'string' } }, required: ['action'] } },
-  { name: 'media_control', description: 'Control Spotify + system audio. Without a device it controls the Mac\'s Spotify via AppleScript. With a `device` (e.g. "phone") it uses Spotify Connect to control THAT device anywhere (needs one-time link + Premium). list_devices = show available Spotify devices; transfer = move playback to a device. set_volume = Spotify volume; set_system_volume = macOS output (0-100).',
+  { name: 'media_control', description: 'Control Spotify + system audio. Without a device it controls the Mac\'s Spotify via AppleScript. With a `device` (e.g. "phone") it uses Spotify Connect to control THAT device anywhere (needs one-time link + Premium). list_devices = show available Spotify devices; transfer = move playback to a device. set_volume = Spotify volume; set_system_volume = macOS output (0-100). make_playlist = CREATE a Spotify playlist and fill it: pass `name` + `tracks` (array of "song artist" strings to search & add). Needs the playlist-modify scopes — if it 403s, re-run scripts/spotify-auth.js once.',
     input_schema: { type: 'object', properties: {
-      action: { type: 'string', enum: ['play_track','pause','resume','next','previous','set_volume','get_now_playing','search_and_play','set_system_volume','list_devices','transfer'] },
+      action: { type: 'string', enum: ['play_track','pause','resume','next','previous','set_volume','get_now_playing','search_and_play','set_system_volume','list_devices','transfer','make_playlist'] },
       query: { type: 'string', description: 'Track/artist for play_track or search_and_play' },
       volume: { type: 'number', description: '0-100 for volume actions' },
-      device: { type: 'string', description: 'Target device name for Spotify Connect, e.g. "phone", "iPhone", "Mac". Omit to control the Mac\'s local Spotify app.' }
+      device: { type: 'string', description: 'Target device name for Spotify Connect, e.g. "phone", "iPhone", "Mac". Omit to control the Mac\'s local Spotify app.' },
+      name: { type: 'string', description: 'make_playlist: the playlist name.' },
+      description: { type: 'string', description: 'make_playlist: optional playlist description.' },
+      tracks: { type: 'array', items: { type: 'string' }, description: 'make_playlist: songs to add, each a search string like "Weightless Marconi Union". Up to 100.' },
+      public: { type: 'boolean', description: 'make_playlist: make it public (default false/private).' }
     }, required: ['action'] } },
   { name: 'system_control', description: 'macOS GUI/system automation via AppleScript + System Events. Control ANY app: open_app/activate_app (launch + focus any app by name, e.g. "Photos", "App Store", "Notes", "Messages", "Claude"), quit_app (close an app), keystroke (type text), shortcut (key+modifiers like command/shift/option/control), menu (click a menu item via app+menuPath e.g. ["File","Save"]), clipboard_get/clipboard_set, notification, or applescript (run raw AppleScript). Use this for things the browser/shell cannot do (launching/quitting apps, clicking native UI, window/menu control, clipboard).',
     input_schema: { type: 'object', properties: {
@@ -5077,8 +5168,9 @@ ipcMain.handle('get-health', async () => {
     const today = new Date().toISOString().slice(0, 10);
     const lines = fs.readFileSync(auditPath, 'utf8').split('\n').filter(Boolean);
     todayEntries = lines.filter((l) => l.includes(today)).length;
-    estimatedCost = todayEntries * 0.004;
   } catch {}
+  const ct = costToday();                              // real token→USD spend, not a flat per-entry guess
+  estimatedCost = ct.usd;
   let memEntries = 0, memKb = 0;
   try {
     const mem = fs.readFileSync(memPath, 'utf8');
@@ -5090,6 +5182,7 @@ ipcMain.handle('get-health', async () => {
   const cfg = loadConfig();
   return {
     todayEntries, estimatedCost: `$${estimatedCost.toFixed(3)}`,
+    costCalls: ct.calls, costByModel: ct.byModel, dailyBudget: cfg.dailyBudgetUsd ?? null,
     memEntries, memKb, ollamaOnline, agentState,
     telegram: !!cfg.telegramToken, briefingHour: cfg.briefingHour ?? null
   };

@@ -16,7 +16,7 @@ const { exec } = require('child_process');
 
 const CONFIG = path.join(os.homedir(), '.bhatbot', 'config.json');
 const REDIRECT = 'http://127.0.0.1:8888/callback';
-const SCOPES = 'user-modify-playback-state user-read-playback-state user-read-currently-playing';
+const SCOPES = 'user-modify-playback-state user-read-playback-state user-read-currently-playing playlist-modify-public playlist-modify-private playlist-read-private';
 
 if (typeof fetch !== 'function') {
   console.error('Node 18+ required (global fetch missing). Your node:', process.version);
