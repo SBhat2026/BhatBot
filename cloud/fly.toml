@@ -11,6 +11,7 @@ primary_region = 'ewr'
 [env]
   DATA_DIR = '/data'
   TZ = 'America/New_York'   # so schedule times like "08:00" mean 8 AM Eastern, not UTC
+  PUBLIC_URL = 'https://bhatbot-cloud.fly.dev'   # for Twilio call/SMS webhooks back to here
 
 [[mounts]]
   source = 'bhatbot_data'

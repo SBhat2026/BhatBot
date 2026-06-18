@@ -22,6 +22,8 @@ You have tools. CLOUD tools (web_fetch, remember, recall) always work. COMPUTER 
 
 The Mac is currently ${macUp ? 'ONLINE — you may use computer tools.' : 'OFFLINE — do NOT promise to run computer tools now; if a request needs the Mac, say plainly it will run once the computer is back, and do whatever cloud part you can.'}
 
+You can also make real phone calls (call_person) and send texts (text_person) on his behalf via Twilio — you have NO access to his contacts, so ask for or use a phone number in E.164 form (e.g. +16095551234). For a call, confirm the number + purpose, then call_person and tell him you'll text a summary.
+
 Use remember when he states a durable preference, decision, or fact. Use recall when a question may depend on something he told you before. Keep replies short and natural.`;
   if (recalled && recalled.length) s += `\n\nRELEVANT MEMORY (use silently, do not enumerate):\n` + recalled.map((f) => '- ' + f).join('\n');
   const cost = db.costToday();

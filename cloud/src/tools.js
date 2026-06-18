@@ -6,6 +6,7 @@
 //     tool names EXACTLY, so the Mac bridge can run them with no translation.
 const db = require('./db');
 const { macExec, macOnline } = require('./relay');
+let twilio = null; try { twilio = require('./twilio'); } catch {}
 
 // ---- cloud-native implementations ---------------------------------------------
 async function webFetch({ url }) {
@@ -35,6 +36,16 @@ const REGISTRY = {
     def: { name: 'recall', description: 'Search long-term memory for facts relevant to a query. Returns matching stored facts.',
       input_schema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] } },
     run: async ({ query }) => ({ success: true, facts: db.recallMemory(query, 8) }),
+  },
+  call_person: {
+    def: { name: 'call_person', description: 'Place a REAL phone call (via Twilio) to a phone number on Siddhant\'s behalf and converse to accomplish a goal, then text him a summary. Use when he asks to call/phone someone. Provide the number in E.164 (e.g. +16095551234) and a clear purpose. Returns immediately; the call runs autonomously.',
+      input_schema: { type: 'object', properties: { to: { type: 'string', description: 'Phone number in E.164, e.g. +16095551234' }, purpose: { type: 'string', description: 'What to accomplish on the call, in plain language.' } }, required: ['to', 'purpose'] } },
+    run: async ({ to, purpose }) => twilio ? twilio.placeCall(to, purpose) : { success: false, error: 'calling not available' },
+  },
+  text_person: {
+    def: { name: 'text_person', description: 'Send an SMS (via Twilio) to a phone number on Siddhant\'s behalf. E.164 number + message.',
+      input_schema: { type: 'object', properties: { to: { type: 'string' }, message: { type: 'string' } }, required: ['to', 'message'] } },
+    run: async ({ to, message }) => { if (!twilio || !twilio.configured()) return { success: false, error: 'texting not available' }; await twilio.sendSMS(to, message); return { success: true, result: `Texted ${to}.` }; },
   },
   // ---- Mac-relay tools (run on the computer when it's awake) -------------------
   run_shell: {

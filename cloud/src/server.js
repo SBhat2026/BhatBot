@@ -15,6 +15,7 @@ const voice = require('./voice');
 const { runTurn } = require('./agent');
 const relay = require('./relay');
 const scheduler = require('./scheduler');
+const twilio = require('./twilio');
 
 const PORT = process.env.PORT || 8790;
 const TOKEN = process.env.BHATBOT_TOKEN || '';
@@ -94,6 +95,10 @@ app.get('/app/:token/bhatbot.ipa', guard, (_q, res) => {
 app.get('/api/:token/schedules', guard, (_q, s) => s.json({ schedules: scheduler.list() }));
 app.post('/api/:token/schedules', guard, (req, res) => res.json(scheduler.add(req.body || {})));
 app.post('/api/:token/schedules/:id/delete', guard, (req, res) => res.json(scheduler.remove(req.params.id)));
+
+// Twilio voice + SMS webhooks (calling people / answering your number in your name). Mounted
+// only if Twilio is configured. urlencoded body parser because Twilio POSTs form-encoded.
+if (twilio.configured()) twilio.mount(app, { token: TOKEN, form: express.urlencoded({ extended: false }) });
 
 const server = http.createServer(app);
 
