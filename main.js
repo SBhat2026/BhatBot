@@ -3741,6 +3741,26 @@ async function phoneControl(tool, input) {
   finally { remoteDepth--; }
 }
 
+// Connect to the cloud backend as its Mac executor. When config.cloudUrl + config.cloudToken
+// are set, the Mac dials out to the cloud over a WebSocket and runs computer-only tools the
+// cloud agent dispatches (shell, AppleScript, browser, screen). This is what makes the phone
+// fully capable while keeping the cloud as the always-on brain. No-op if not configured.
+let _cloudBridge = null;
+function startCloudBridge() {
+  try {
+    const c = loadConfig();
+    if (!c.cloudUrl || !c.cloudToken) return;
+    const bridge = require('./lib/cloud-bridge');
+    _cloudBridge = bridge.start({
+      url: c.cloudUrl,
+      token: c.cloudToken,
+      // Mark cloud-dispatched tools as REMOTE (no human at the keyboard) so the same guard that
+      // protects the phone/funnel path applies — destructive shell won't silently auto-approve.
+      executeTool: async (tool, input) => { remoteDepth++; try { return await executeTool(tool, input); } finally { remoteDepth--; } },
+      log: (m) => { try { console.log(m); sendToActivity('tool-update', { type: 'thinking', text: m }); } catch {} },
+    });
+  } catch (e) { console.warn('[cloud-bridge] start failed:', e.message); }
+}
 async function initMcpServer() {
   if (pipelineCfg().enabled) warmRouter();   // preload the local router so the first hop is fast
   const c = loadConfig();
@@ -5366,6 +5386,7 @@ app.whenReady().then(() => {
     // Surface the Notes/Reminders/Calendar Automation prompts once (so they appear in Settings).
     setTimeout(() => { try { primeAppAutomation(false); } catch {} }, 3500);
     initMcpServer();
+    startCloudBridge();   // connect to the cloud backend as its Mac executor (if configured)
     startTelegramBridge();
     scheduleBriefing();
     startScheduler();   // proactive recurring/one-off tasks
