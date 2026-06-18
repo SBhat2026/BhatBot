@@ -229,33 +229,46 @@
   /* #vstage / #chat visibility is driven by applyStageVisibility() in JS so it cooperates
      with the tab/panel switcher (which sets inline display). */
 
-  /* BhatBot orb: concentric rings + hex core + equalizer (idle / thinking / speaking) */
-  #orb { position: relative; width: 168px; height: 168px; flex-shrink: 0; }
+  /* BhatBot orb: layered reactor — tick ring + concentric rings + dual hex core + equalizer */
+  #orb { position: relative; width: 232px; height: 232px; flex-shrink: 0; filter: drop-shadow(0 0 22px rgba(0,200,255,.22)); }
+  /* outer tick/graduation ring (radial gradient "notches") */
+  #orb .ticks { position: absolute; inset: 0; border-radius: 50%; animation: spin 30s linear infinite;
+    background: repeating-conic-gradient(from 0deg, rgba(0,200,255,.34) 0deg 1.4deg, transparent 1.4deg 9deg);
+    -webkit-mask: radial-gradient(circle, transparent 0 47%, #000 47% 50%, transparent 50.5%);
+            mask: radial-gradient(circle, transparent 0 47%, #000 47% 50%, transparent 50.5%); }
   #orb .ring { position: absolute; border-radius: 50%; border: 1px solid rgba(0,200,255,.22); }
-  #orb .ring.r1 { inset: 0; border-style: dashed; animation: spin 16s linear infinite; }
-  #orb .ring.r2 { inset: 22px; border-style: dotted; border-color: rgba(0,200,255,.4); animation: spinrev 11s linear infinite; }
-  #orb .ring.r3 { inset: 44px; border-color: rgba(120,220,255,.55); animation: spin 7s linear infinite; }
-  #orb .hex { position: absolute; inset: 58px; background:
-      conic-gradient(from 0deg, rgba(0,200,255,.0), rgba(0,200,255,.45), rgba(0,200,255,.0), rgba(0,200,255,.45), rgba(0,200,255,.0));
-      clip-path: polygon(25% 5%, 75% 5%, 100% 50%, 75% 95%, 25% 95%, 0 50%); animation: spin 5s linear infinite; filter: blur(.3px); }
-  #orb .core { position: absolute; inset: 70px; border-radius: 50%; background: radial-gradient(circle, #d8f4ff, #29a8d8 60%, transparent 75%);
-      box-shadow: 0 0 26px 6px rgba(0,200,255,.55); animation: corepulse 3s ease-in-out infinite; }
-  #orb .eq { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; gap: 4px; }
-  #orb .eq i { width: 4px; height: 10px; background: #7fe3ff; border-radius: 2px; box-shadow: 0 0 8px rgba(0,200,255,.7); }
+  #orb .ring.r1 { inset: 14px; border-style: dashed; animation: spin 16s linear infinite; }
+  #orb .ring.r2 { inset: 38px; border-style: dotted; border-width: 1.5px; border-color: rgba(0,200,255,.4); animation: spinrev 11s linear infinite; }
+  #orb .ring.r3 { inset: 64px; border-color: rgba(120,220,255,.55); animation: spin 7s linear infinite; }
+  #orb .ring.r4 { inset: 84px; border-top-color: rgba(180,240,255,.9); border-right-color: rgba(180,240,255,.5);
+    border-bottom-color: transparent; border-left-color: transparent; border-width: 2px; animation: spin 3.4s linear infinite; }
+  #orb .hex { position: absolute; inset: 84px; background:
+      conic-gradient(from 0deg, rgba(0,200,255,0), rgba(0,200,255,.5), rgba(0,200,255,0), rgba(0,200,255,.5), rgba(0,200,255,0));
+      clip-path: polygon(25% 5%, 75% 5%, 100% 50%, 75% 95%, 25% 95%, 0 50%); animation: spin 6s linear infinite; filter: blur(.3px); }
+  #orb .hex.hex2 { inset: 96px; animation: spinrev 4.5s linear infinite; opacity: .7; }
+  #orb .glow { position: absolute; inset: 78px; border-radius: 50%; background: radial-gradient(circle, rgba(0,200,255,.28), transparent 70%); animation: corepulse 3.4s ease-in-out infinite; }
+  #orb .core { position: absolute; inset: 98px; border-radius: 50%;
+      background: radial-gradient(circle at 42% 38%, #ffffff, #6fd6ff 38%, #1f9ed4 66%, transparent 78%);
+      box-shadow: 0 0 34px 10px rgba(0,200,255,.6), inset 0 0 14px rgba(255,255,255,.55); animation: corepulse 3s ease-in-out infinite; }
+  #orb .eq { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; gap: 5px; }
+  #orb .eq i { width: 5px; height: 12px; background: #7fe3ff; border-radius: 3px; box-shadow: 0 0 10px rgba(0,200,255,.8); }
   /* thinking: rings accelerate, core flickers */
   #orb[data-state="thinking"] .ring.r1 { animation-duration: 3.2s; }
   #orb[data-state="thinking"] .ring.r2 { animation-duration: 2.2s; }
   #orb[data-state="thinking"] .ring.r3 { animation-duration: 1.3s; border-color: rgba(150,230,255,.85); }
+  #orb[data-state="thinking"] .ring.r4 { animation-duration: 0.9s; }
   #orb[data-state="thinking"] .core { animation: corepulse 1s ease-in-out infinite; }
+  #orb[data-state="thinking"] .ticks { animation-duration: 8s; }
   /* speaking: equalizer takes over, core swells */
   #orb[data-state="speaking"] .hex { display: none; }
-  #orb[data-state="speaking"] .core { inset: 76px; }
+  #orb[data-state="speaking"] .core { inset: 104px; }
   #orb[data-state="speaking"] .eq { display: flex; }
   #orb[data-state="speaking"] .eq i { animation: veq .7s ease-in-out infinite; }
-  #orb[data-state="speaking"] .eq i:nth-child(1){ animation-delay:0s } #orb[data-state="speaking"] .eq i:nth-child(2){ animation-delay:.12s }
-  #orb[data-state="speaking"] .eq i:nth-child(3){ animation-delay:.24s } #orb[data-state="speaking"] .eq i:nth-child(4){ animation-delay:.36s }
-  #orb[data-state="speaking"] .eq i:nth-child(5){ animation-delay:.48s }
-  @keyframes veq { 0%,100% { height: 8px; opacity: .6; } 50% { height: 34px; opacity: 1; } }
+  #orb[data-state="speaking"] .eq i:nth-child(1){ animation-delay:0s } #orb[data-state="speaking"] .eq i:nth-child(2){ animation-delay:.1s }
+  #orb[data-state="speaking"] .eq i:nth-child(3){ animation-delay:.2s } #orb[data-state="speaking"] .eq i:nth-child(4){ animation-delay:.3s }
+  #orb[data-state="speaking"] .eq i:nth-child(5){ animation-delay:.4s } #orb[data-state="speaking"] .eq i:nth-child(6){ animation-delay:.5s }
+  #orb[data-state="speaking"] .eq i:nth-child(7){ animation-delay:.6s }
+  @keyframes veq { 0%,100% { height: 9px; opacity: .6; } 50% { height: 40px; opacity: 1; } }
   #vcap { max-width: 600px; text-align: center; color: var(--text); font-size: 15px; line-height: 1.55; min-height: 1.2em;
     transition: opacity .3s; }
   #vcap:empty { opacity: 0; }
@@ -368,9 +381,11 @@
        Shown instead of the transcript when 🎧 is on; transcript is one click away. ===== -->
   <div id="vstage">
     <div id="orb" data-state="idle">
-      <i class="ring r1"></i><i class="ring r2"></i><i class="ring r3"></i>
-      <span class="hex"></span><span class="core"></span>
-      <span class="eq"><i></i><i></i><i></i><i></i><i></i></span>
+      <span class="ticks"></span>
+      <i class="ring r1"></i><i class="ring r2"></i><i class="ring r3"></i><i class="ring r4"></i>
+      <span class="hex"></span><span class="hex hex2"></span>
+      <span class="glow"></span><span class="core"></span>
+      <span class="eq"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span>
     </div>
     <div id="vvis"></div>
     <div id="vcap"></div>

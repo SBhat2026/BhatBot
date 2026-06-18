@@ -383,6 +383,18 @@ Four-level autonomy:
   sentence before executing
 - Level 4 (data loss, financial, auth): refuse and ask
 
+COMPLEX-TASK BUDGETING (cost-aware chunking)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Before a big multi-step task, silently size it up: how many tool calls, and is it
+token-heavy (browser/vision/screen-parse dumps and long file reads cost the most).
+The Anthropic key is rate-limited — when you see pacing waits, that budget is tight.
+For anything large (roughly 8+ tool calls, or several vision/browser steps), DON'T try
+to do it all in one turn — it stalls and gets cut off. Instead CHUNK it: do one
+coherent slice, give a one-line progress note, then continue the next slice. Batch
+independent tool calls together, keep tool_results lean, and prefer cheap tools
+(shell/AppleScript) over vision when either works. As you learn Siddhant's recurring
+workflows, pre-plan the chunking for them. Small/simple tasks: just do them in one go.
+
 TOOLS: Use them proactively. When given a path — read it. When asked to run
 something — run it. Don't narrate what you're about to do, just do it.
 - Open/launch a Mac app → system_control open_app (NOT run_shell). Quit → quit_app.
@@ -2683,7 +2695,8 @@ async function executeTool(name, input) {
       }
       case 'request_permissions': {
         const p = await ensurePermissions({ openSettings: true, force: true });
-        result = { success: true, screenRecording: p.screen, accessibility: p.accessibility, allGranted: p.ok, note: p.ok ? 'Both granted.' : 'Opened System Settings → Privacy. Toggle BhatBot on for the missing ones.' };
+        try { primeAppAutomation(true); } catch {}   // re-surface Notes/Reminders/Calendar automation prompts
+        result = { success: true, screenRecording: p.screen, accessibility: p.accessibility, allGranted: p.ok, note: (p.ok ? 'Screen + Accessibility granted. ' : 'Opened System Settings → Privacy; toggle BhatBot on for the missing ones. ') + 'Also re-requested Automation for Notes/Reminders/Calendar — approve the prompts.' };
         break;
       }
       case 'manage_schedule': {
@@ -3184,6 +3197,17 @@ function pipelineCfg() {
   };
 }
 
+// The local Ollama pipeline can't reliably run the desktop tool set (it returned garbage on
+// tool tasks in testing). So it's reserved for SIMPLE work — basic questions / quick fact
+// checks — and ANYTHING that looks like it needs a tool bypasses straight to Claude. Broad on
+// purpose: erring toward Claude is the desired behavior. The local gemma router is no longer
+// trusted to detect tool use.
+function looksLikeToolTask(text) {
+  const t = String(text || '').toLowerCase();
+  if (/[~/][\w.]|\b[\w-]+\.(png|jpe?g|pdf|txt|md|json|csv|js|ts|py|stl|obj|glb|mp3|wav|docx?|xlsx?|key|pages)\b/.test(t)) return true;  // paths / filenames
+  return /\b(open|launch|quit|close|play|pause|skip|resume|search|google|browse|navigate|go to|website|url|click|type|screenshot|screen|capture|delete|remove|create|make|build|write|edit|save|move|rename|copy|file|folder|directory|\bls\b|\bcd\b|run|exec|shell|command|terminal|deploy|install|update|git|commit|push|email|gmail|inbox|send|calendar|event|schedule|remind|reminder|note|notes|message|imessage|text|spotify|playlist|song|music|track|volume|login|log in|sign in|download|upload|generate|image|picture|logo|render|3d|stl|print|figure|plot|graph|chart|simulate|notion|app\b|browser|playwright|spreadsheet|document)\b/.test(t);
+}
+
 // Natural-language toggle for the pipeline, usable from any entry point (desktop,
 // phone, Telegram). Returns a reply string if it handled a toggle, else null.
 function maybeTogglePipeline(text) {
@@ -3390,6 +3414,10 @@ async function runPipeline(history, apiKey, event, opts = {}) {
 
   if (!cfg.enabled || !(await ollamaUp())) return agentLoop(history, apiKey, event, opts);
 
+  // Hard bypass: anything that smells like a tool task goes straight to Claude — don't trust
+  // the local router to catch it (it didn't). Saves the router round-trip too.
+  if (looksLikeToolTask(userMessage)) return escalate('tool task → Claude');
+
   cls = await routerClassify(userMessage);
   sendToActivity('tool-update', { type: 'thinking', text: `🧭 router: ${cls.path} — ${cls.reason || ''}` });
 
@@ -3423,7 +3451,13 @@ async function runPipeline(history, apiKey, event, opts = {}) {
     return escalate('local simple failed');
   }
 
-  // complex (local, no tools) — plan → execute → critic → deliver, escalating on trouble.
+  // Complex work always goes to Claude now (the local plan→execute path was unreliable and the
+  // user wants the pipeline only for simple Q&A / fact checks). Claude also does the cost-aware
+  // chunking for big tasks (see the COMPLEX-TASK BUDGETING note in the system prompt).
+  return escalate('complex → Claude');
+
+  // (Dead code below — kept for reference; the local complex pipeline is intentionally disabled.)
+  // eslint-disable-next-line no-unreachable
   if (!(await checkRamPressure())) return escalate('RAM pressure');
   sendToActivity('tool-update', { type: 'thinking', text: '🧠 planning locally…' });   // visible feedback while the 12B loads
   const plan = await plannerPass(userMessage, cls);
@@ -3503,9 +3537,22 @@ async function fastReply(history, apiKey, event, opts = {}) {
   return { text, history: [...history, { role: 'assistant', content: text }], _provider: 'anthropic', _model: MODEL_HAIKU, _streamed: !!(stream && ttsSeq != null) };
 }
 
+// Serialize ALL turns. agentLoop/pipeline mutate module-level globals (mcpHistory,
+// agentState, currentMode, ttsStream*, pendingGuidance); two turns at once (e.g. an MCP/API
+// task overlapping a wake-word-triggered desktop turn) interleave on those and corrupt the
+// result — the source of the truncated "<s"/"I" replies seen in testing. This chain runs each
+// turn to completion before the next starts; concurrent callers queue instead of clobbering.
+let _turnChain = Promise.resolve();
+function dispatchTurn(history, apiKey, event, opts = {}) {
+  const job = () => _dispatchTurnInner(history, apiKey, event, opts);
+  const p = _turnChain.then(job, job);     // run regardless of how the previous turn settled
+  _turnChain = p.then(() => {}, () => {});  // never let a rejection break the chain
+  return p;
+}
+
 // Single entry point every chat surface (desktop, phone, MCP, Telegram) routes through.
 // quickRoute first (free); only fall to the LLM router/pipeline when genuinely unsure.
-async function dispatchTurn(history, apiKey, event, opts = {}) {
+async function _dispatchTurnInner(history, apiKey, event, opts = {}) {
   const userText = lastUserText(history);
   if (loadConfig().fastChat !== false) {
     const qr = quickRoute(userText, history);
@@ -5175,6 +5222,25 @@ async function ensurePermissions({ openSettings = false, force = false } = {}) {
 ipcMain.handle('ensure-permissions', (_e, opts) => ensurePermissions(opts || { openSettings: true }));
 ipcMain.handle('perm-status', () => permStatus());
 
+// Automation (Apple events) permission for the apps BhatBot scripts. macOS only shows the
+// "BhatBot wants to control Notes" prompt when the app actually sends an event — so we send a
+// harmless one to each (with a short timeout so it can't hang) while the user is watching at
+// launch. Granting these stops the AppleEvent timeouts that blocked Notes/Reminders in testing.
+// Done once (config.automationPrimed) unless forced via the request_permissions tool.
+function primeAppAutomation(force = false) {
+  if (process.platform !== 'darwin') return;
+  const c = loadConfig();
+  if (!force && c.automationPrimed) return;
+  for (const app of ['Notes', 'Reminders', 'Calendar']) {
+    try {
+      const p = spawn('osascript', ['-e', `with timeout of 6 seconds`, '-e', `tell application "${app}" to count (every window)`, '-e', `end timeout`], { env: { ...process.env, PATH: EXEC_PATH } });
+      p.on('error', () => {});
+      setTimeout(() => { try { p.kill(); } catch {} }, 8000);   // never leave a prompt-blocked osascript hanging
+    } catch {}
+  }
+  saveConfig({ automationPrimed: true });
+}
+
 // ---------------------------------------------------------------------------
 // Lifecycle
 // ---------------------------------------------------------------------------
@@ -5188,6 +5254,8 @@ app.whenReady().then(() => {
     // Deferred 1.5s so it doesn't fight the window-show animation. Opens the Settings pane
     // only if a permission is missing AND the silent prompt couldn't surface it.
     setTimeout(() => { ensurePermissions({ openSettings: false }).then((p) => { if (!p.ok) ensurePermissions({ openSettings: true }); }).catch(() => {}); }, 1500);
+    // Surface the Notes/Reminders/Calendar Automation prompts once (so they appear in Settings).
+    setTimeout(() => { try { primeAppAutomation(false); } catch {} }, 3500);
     initMcpServer();
     startTelegramBridge();
     scheduleBriefing();
