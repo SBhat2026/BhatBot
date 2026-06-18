@@ -84,6 +84,11 @@ app.get('/app/:token/manifest.webmanifest', guard, (req, res) => {
 for (const ic of ['icon-192.png', 'icon-512.png']) {
   app.get('/app/:token/' + ic, guard, (_q, res) => { try { res.type('png').send(fs.readFileSync(path.join(PUBLIC, ic))); } catch { res.status(404).end(); } });
 }
+// Download the native .ipa over public HTTPS (no Tailscale) → open in SideStore. Token-gated.
+app.get('/app/:token/bhatbot.ipa', guard, (_q, res) => {
+  try { res.set('Content-Type', 'application/octet-stream').set('Content-Disposition', 'attachment; filename="BhatBot.ipa"').send(fs.readFileSync(path.join(PUBLIC, 'bhatbot.ipa'))); }
+  catch { res.status(404).json({ error: 'ipa not synced — run npm run sync-ui then redeploy' }); }
+});
 
 // ---- schedules (phone/computer can manage proactive tasks) ---------------------
 app.get('/api/:token/schedules', guard, (_q, s) => s.json({ schedules: scheduler.list() }));

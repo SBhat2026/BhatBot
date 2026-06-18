@@ -12,6 +12,9 @@ const copies = [
   [path.join(ROOT, 'src', 'mobile.html'), path.join(PUB, 'mobile.html')],
   [path.join(ROOT, 'src', 'mobile', 'icon-192.png'), path.join(PUB, 'icon-192.png')],
   [path.join(ROOT, 'src', 'mobile', 'icon-512.png'), path.join(PUB, 'icon-512.png')],
+  // The native .ipa, so the cloud can serve a download over public HTTPS (no Tailscale needed).
+  // gitignored (public/) so the token baked into it never lands in the public repo.
+  [path.join(ROOT, 'phone-app', 'dist', 'BhatBot-unsigned.ipa'), path.join(PUB, 'bhatbot.ipa')],
 ];
 let n = 0;
 for (const [src, dst] of copies) {
