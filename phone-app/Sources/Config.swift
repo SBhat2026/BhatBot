@@ -5,8 +5,12 @@ import Foundation
 // app at a new tunnel (Cloudflare) or, later, a cloud backend WITHOUT rebuilding. This is the
 // first step off the hardcoded Tailscale URL.
 enum Config {
-    static let defaultHost = "https://siddhants-macbook-air.tail816be0.ts.net"
-    static let defaultToken = "ece52d3ac6ca1a5c491eb06e53251e555d7953aa84110ea7"
+    // SECURITY: never commit a live token here — this repo is PUBLIC. These defaults are blank;
+    // build-ipa.sh injects the real host+token from ~/.bhatbot/config.json at BUILD time into the
+    // (gitignored) .ipa only, and they're also overridable at runtime via the in-app long-press
+    // settings. So the secret lives in the local binary + UserDefaults, never in git.
+    static let defaultHost = ""
+    static let defaultToken = ""
 
     static var host: String {
         let v = (UserDefaults.standard.string(forKey: "bb_host") ?? defaultHost)

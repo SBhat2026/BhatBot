@@ -13,6 +13,23 @@ cd "$(dirname "$0")"
 
 command -v xcodegen >/dev/null 2>&1 || { echo "Installing xcodegen…"; brew install xcodegen; }
 mkdir -p Web && cp ../src/mobile.html Web/mobile.html   # sync the bundled offline-fallback UI
+
+# Inject the live host+token from local config into the BINARY ONLY (Config.swift stays blank in
+# git — public repo). Restore the placeholder source on exit so the secret never gets committed.
+CFG="$HOME/.bhatbot/config.json"
+TOKEN=$(node -e "try{console.log(require('$CFG').mcpToken||'')}catch{console.log('')}")
+TSBIN="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+HOST=$("$TSBIN" status --json 2>/dev/null | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{console.log('https://'+JSON.parse(s).Self.DNSName.replace(/\.$/,''))}catch{console.log('')}})" 2>/dev/null)
+if [ -n "$TOKEN" ] && [ -n "$HOST" ]; then
+  cp Sources/Config.swift /tmp/bb-config-orig.swift
+  trap 'cp /tmp/bb-config-orig.swift Sources/Config.swift' EXIT
+  sed -i '' "s|static let defaultHost = \"\"|static let defaultHost = \"$HOST\"|" Sources/Config.swift
+  sed -i '' "s|static let defaultToken = \"\"|static let defaultToken = \"$TOKEN\"|" Sources/Config.swift
+  echo "✓ injected host ($HOST) + current token into the build (NOT committed)"
+else
+  echo "⚠ couldn't read token/host — building with blank defaults (set Host+Token in-app via long-press)"
+fi
+
 xcodegen generate >/dev/null
 echo "✓ project generated (bundled UI synced)"
 
