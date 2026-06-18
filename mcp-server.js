@@ -12,6 +12,7 @@ async function startMcpServer({ port, token, runAgent, transcribe, synthesize, s
   const express = require('express');
   const fs = require('fs');
   const path = require('path');
+  const os = require('os');
   const crypto = require('crypto');
   const { z } = require('zod');
 
@@ -162,6 +163,18 @@ self.addEventListener('fetch', (e) => {
 });`);
   });
 
+  // One-tap iOS install: serve the freshly built .ipa over the (tailnet-only) tunnel so the
+  // phone downloads it directly in Safari → SideStore — no AirDrop routing. Token-gated.
+  app.get('/app/:token/bhatbot.ipa', guard, (_req, res) => {
+    const f = [
+      path.join(__dirname, 'phone-app', 'dist', 'BhatBot-unsigned.ipa'),
+      path.join(os.homedir(), 'bhatbot', 'phone-app', 'dist', 'BhatBot-unsigned.ipa'),
+    ].find((p) => { try { return fs.existsSync(p); } catch { return false; } });
+    if (!f) return res.status(404).json({ error: 'ipa not built — run phone-app/build-ipa.sh' });
+    res.set('Content-Type', 'application/octet-stream');
+    res.set('Content-Disposition', 'attachment; filename="BhatBot.ipa"');
+    res.send(fs.readFileSync(f));
+  });
   app.get('/app/:token/icon-192.png', guard, (_req, res) => res.type('png').send(fs.readFileSync(path.join(SRC, 'mobile', 'icon-192.png'))));
   app.get('/app/:token/icon-512.png', guard, (_req, res) => res.type('png').send(fs.readFileSync(path.join(SRC, 'mobile', 'icon-512.png'))));
 
