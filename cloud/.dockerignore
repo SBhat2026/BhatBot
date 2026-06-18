@@ -1,0 +1,10 @@
+# Docker build context excludes. NOTE: unlike .gitignore, we MUST include public/ (the synced
+# phone UI the image serves) and scripts/. We only drop local-only / rebuilt-in-image stuff.
+node_modules/
+.env
+*.log
+data/
+.git
+.gitignore
+fly.toml
+*.md
