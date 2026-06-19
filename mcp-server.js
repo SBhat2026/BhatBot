@@ -60,8 +60,9 @@ async function startMcpServer({ port, token, runAgent, transcribe, synthesize, s
   // path and there are no cookies, so a permissive origin is safe here. Answer preflights.
   app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,DELETE,OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,mcp-session-id,mcp-protocol-version');
+    res.setHeader('Access-Control-Expose-Headers', 'mcp-session-id');
     res.setHeader('Access-Control-Max-Age', '86400');
     if (req.method === 'OPTIONS') return res.sendStatus(204);
     next();
@@ -88,19 +89,40 @@ async function startMcpServer({ port, token, runAgent, transcribe, synthesize, s
     } catch { return false; }
   };
 
-  // Stateless Streamable HTTP: one transport per request.
+  // Session-based Streamable HTTP. A stateless transport (sessionIdGenerator:undefined) breaks
+  // real MCP clients (Claude Code/Claude app): they POST `initialize`, then `tools/list` on the
+  // SAME session — but a per-request server has no memory of the init and rejects with
+  // "Server not initialized". We keep one transport per mcp-session-id and reuse it.
+  const transports = {};                                 // sessionId -> StreamableHTTPServerTransport
+  const isInit = (b) => !!b && (Array.isArray(b) ? b.some((x) => x && x.method === 'initialize') : b.method === 'initialize');
   app.post('/mcp/:token', guard, async (req, res) => {
     try {
-      const server = build();
-      const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-      res.on('close', () => { try { transport.close(); server.close(); } catch {} });
-      await server.connect(transport);
+      const sid = req.get('mcp-session-id');
+      let transport = sid && transports[sid];
+      if (!transport && isInit(req.body)) {
+        transport = new StreamableHTTPServerTransport({
+          sessionIdGenerator: () => crypto.randomUUID(),
+          onsessioninitialized: (id) => { transports[id] = transport; }
+        });
+        transport.onclose = () => { if (transport.sessionId) delete transports[transport.sessionId]; };
+        await build().connect(transport);
+      } else if (!transport) {
+        return res.status(400).json({ jsonrpc: '2.0', id: null, error: { code: -32000, message: 'Bad Request: no valid session id (send initialize first)' } });
+      }
       await transport.handleRequest(req, res, req.body);
     } catch (e) {
       if (!res.headersSent) res.status(500).json({ error: String(e && e.message ? e.message : e) });
     }
   });
-  app.get('/mcp/:token', guard, (_req, res) => res.status(405).json({ error: 'method not allowed (stateless)' }));
+  // GET = server→client SSE stream; DELETE = end the session. Both need an existing session.
+  const sessionStream = async (req, res) => {
+    const sid = req.get('mcp-session-id');
+    const transport = sid && transports[sid];
+    if (!transport) return res.status(400).send('Invalid or missing mcp-session-id');
+    await transport.handleRequest(req, res);
+  };
+  app.get('/mcp/:token', guard, sessionStream);
+  app.delete('/mcp/:token', guard, sessionStream);
   // Health is token-gated now (no unauthenticated "a BhatBot lives here" disclosure). Probe
   // with: curl -H "Authorization: Bearer <token>" .../health  (serve-remote.sh does this).
   app.get('/health', guard, (_req, res) => res.json({ ok: true }));

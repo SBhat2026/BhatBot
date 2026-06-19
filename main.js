@@ -3955,6 +3955,7 @@ async function initMcpServer() {
       voiceTurn, endVoiceCall, getActivity, nexusUrl: NEXUS_URL, ownerPhone: c.myPhone,
       twilioAuthToken: c.twilioToken, jobs: jobsBus, control: phoneControl, screenshot: captureScreenJpeg
     });
+    writeClaudeMcpConfig();                       // so the embedded Claude Code can use BhatBot's MCP tools
     console.log(`[mcp] listening on http://127.0.0.1:${port}/mcp/${token}`);
     console.log(`[app] phone PWA at  http://127.0.0.1:${port}/app/${token}`);
     { const h = getPublicHost(); if (h) console.log(`[sms] Twilio Messaging webhook → https://${h}/sms/${token}/incoming`); }
@@ -4463,12 +4464,31 @@ function openTerminalWindow() {
   });
 }
 
+// Generate a fresh MCP config so the EMBEDDED Claude Code can call BhatBot's own tools (run_task,
+// status) over the local MCP server. Written to ~/.bhatbot (outside the repo → token never leaks);
+// loaded via `claude --mcp-config`. Regenerated each launch so a rotated token always matches.
+const CLAUDE_MCP_CONFIG = path.join(os.homedir(), '.bhatbot', 'claude-mcp.json');
+function writeClaudeMcpConfig() {
+  try {
+    const c = loadConfig();
+    if (c.mcpEnabled === false || !c.mcpToken) return null;
+    const port = c.mcpPort || 8788;
+    const cfg = { mcpServers: { bhatbot: { type: 'http', url: `http://127.0.0.1:${port}/mcp/${c.mcpToken}` } } };
+    fs.mkdirSync(path.dirname(CLAUDE_MCP_CONFIG), { recursive: true });
+    fs.writeFileSync(CLAUDE_MCP_CONFIG, JSON.stringify(cfg, null, 2), { mode: 0o600 });
+    return CLAUDE_MCP_CONFIG;
+  } catch (e) { console.error('[claude-mcp] config write failed:', e.message); return null; }
+}
+
 function startPty(cols, rows) {
   if (ptyProc) { try { ptyProc.kill(); } catch {} ptyProc = null; }
   const pty = require('node-pty');
   const shell = process.env.SHELL || '/bin/zsh';
   const cwd = process.env.BHATBOT_PROJECT || os.homedir();
-  ptyProc = pty.spawn(shell, ['-lc', 'claude || exec ' + shell], {
+  // Launch Claude Code wired to BhatBot's MCP server (falls back to plain claude if unavailable).
+  const mcpCfg = writeClaudeMcpConfig();
+  const claudeCmd = mcpCfg ? `claude --mcp-config ${JSON.stringify(mcpCfg)}` : 'claude';
+  ptyProc = pty.spawn(shell, ['-lc', `${claudeCmd} || exec ` + shell], {
     name: 'xterm-color', cols: cols || 100, rows: rows || 30, cwd,
     env: { ...process.env, PATH: EXEC_PATH, TERM: 'xterm-256color' }
   });
