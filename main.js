@@ -1698,10 +1698,11 @@ const TOOLS = [
     input_schema: { type: 'object', properties: { html: { type: 'string', description: 'Full standalone HTML document' } }, required: ['html'] } },
   { name: 'claude_code', description: 'Delegate a coding/build task to the Claude Code CLI (headless, one-shot, 5min). For larger interactive work, the Claude Code terminal window is better. Returns Claude Code output.',
     input_schema: { type: 'object', properties: { prompt: { type: 'string' }, cwd: { type: 'string', description: 'Project dir (default BHATBOT_PROJECT or home)' } }, required: ['prompt'] } },
-  { name: 'generate_image', description: 'Generate an image with GPT Image 1 (OpenAI). Use for logos, illustrations, diagrams, UI mockups, graphical abstracts, posters — anything raster/photographic that SVG cannot express. The result is returned to you as a vision block so you CAN see it: critique and call again with fixes if needed. Write a precise, detailed prompt (style, composition, colors, mood).',
+  { name: 'generate_image', description: 'Generate an image from a text prompt. PLUGGABLE backend: provider:"openai" = GPT Image (best at following complex instructions/text-in-image; default); "flux" = FLUX Pro via Replicate (highest visual quality/photoreal); "flux-fast" = FLUX schnell (cheap, ~seconds — great for drafts/iteration); "auto" routes by quality (low→fast, high→flux, else openai). Use for logos, illustrations, diagrams, UI mockups, graphical abstracts, posters — anything raster/photographic SVG cannot express. The result is returned to you as a vision block so you CAN see it: critique and call again with fixes. Write a precise, detailed prompt (style, composition, colors, mood).',
     input_schema: { type: 'object', properties: {
       prompt: { type: 'string', description: 'Detailed image prompt — be specific about style, composition, colors, mood.' },
-      quality: { type: 'string', enum: ['low', 'medium', 'high'], description: 'low≈$0.01, medium≈$0.04, high≈$0.08. Default medium.' },
+      provider: { type: 'string', enum: ['auto', 'openai', 'flux', 'flux-fast'], description: 'auto (default) routes by quality. openai=GPT Image. flux=FLUX Pro (best quality, needs replicateKey). flux-fast=FLUX schnell (fast draft).' },
+      quality: { type: 'string', enum: ['low', 'medium', 'high'], description: 'For openai: low≈$0.01, medium≈$0.04, high≈$0.08. Also steers auto routing. Default medium.' },
       size: { type: 'string', enum: ['1024x1024', '1536x1024', '1024x1536'], description: 'Square for icons/logos; landscape/portrait for illustrations.' },
       filename: { type: 'string', description: 'Optional filename (no extension). Defaults to timestamp.' }
     }, required: ['prompt'] } },
@@ -2821,6 +2822,107 @@ async function drainJobRelay() {
 // ---------------------------------------------------------------------------
 // 3D generation (TRELLIS via Replicate). Hardened: downscales oversized inputs
 // (Replicate rejects very large data URLs), no fragile Prefer:wait, a real
+// ---------------------------------------------------------------------------
+// generate_image — PLUGGABLE provider. Routes a prompt to the best backend:
+//   • openai    → GPT Image (best instruction-following; default). Model from cfg.imageGenModel
+//                 (default gpt-image-2, auto-falls back to gpt-image-1 if the account lacks it).
+//   • flux      → Black Forest Labs FLUX Pro via Replicate (highest quality). Needs replicateKey.
+//   • flux-fast → FLUX schnell via Replicate (cheap/fast draft tier).
+// provider:"auto" (default) picks by quality: low→flux-fast, high→flux, else openai — but only
+// uses Replicate when a replicateKey is present, otherwise everything stays on OpenAI.
+// NOTE: Fable-class models intentionally NOT wired here (held back for security); revisit later.
+// ---------------------------------------------------------------------------
+const IMG_ASPECT = { '1024x1024': '1:1', '1536x1024': '3:2', '1024x1536': '2:3' };
+
+async function imageViaOpenAI(cfg, input, quality, size) {
+  let model = cfg.imageGenModel || 'gpt-image-2';
+  const call = (m) => fetch('https://api.openai.com/v1/images/generations', {
+    method: 'POST', headers: { 'Authorization': 'Bearer ' + cfg.openaiKey, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model: m, prompt: input.prompt, n: 1, size, quality }),
+    signal: AbortSignal.timeout(120000)
+  });
+  let ir = await call(model);
+  // Account may not yet have gpt-image-2 access → transparently fall back to gpt-image-1.
+  if (!ir.ok && /gpt-image-2/.test(model) && [400, 403, 404].includes(ir.status)) {
+    model = 'gpt-image-1'; ir = await call(model);
+  }
+  if (!ir.ok) return { error: `OpenAI Images ${ir.status}: ${(await ir.text()).slice(0, 300)}` };
+  const b64 = (await ir.json()).data?.[0]?.b64_json;
+  if (!b64) return { error: 'No image in OpenAI response.' };
+  return { b64, mime: 'image/png', via: 'openai:' + model };
+}
+
+async function imageViaReplicate(cfg, slug, input, size) {
+  if (!cfg.replicateKey) return { error: 'No replicateKey in config — needed for the flux providers. Get one at replicate.com (or use provider:"openai").' };
+  let pred;
+  try {
+    const cr = await fetch(`https://api.replicate.com/v1/models/${slug}/predictions`, {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + cfg.replicateKey, 'Content-Type': 'application/json', 'Prefer': 'wait' },
+      body: JSON.stringify({ input: { prompt: input.prompt, aspect_ratio: IMG_ASPECT[size] || '1:1', output_format: 'png', safety_tolerance: 2, disable_safety_checker: false } }),
+      signal: AbortSignal.timeout(120000)
+    });
+    if (cr.status === 401) return { error: 'Replicate 401 — invalid replicateKey.' };
+    if (cr.status === 402) return { error: 'Replicate is out of credit. Add credit at replicate.com/account/billing.' };
+    if (!cr.ok) return { error: `Replicate ${cr.status}: ${(await cr.text()).slice(0, 300)}` };
+    pred = await cr.json();
+  } catch (e) { return { error: 'Replicate request failed: ' + e.message }; }
+  const getUrl = pred.urls && pred.urls.get;
+  let tries = 0;
+  while (pred.status && !['succeeded', 'failed', 'canceled'].includes(pred.status) && tries < 90) {
+    await sleep(2000); tries++;
+    if (tries % 5 === 0) sendToActivity('tool-update', { type: 'thinking', text: `🎨 image generating… ${tries * 2}s (${pred.status})` });
+    try { pred = await (await fetch(getUrl || `https://api.replicate.com/v1/predictions/${pred.id}`, { headers: { 'Authorization': 'Bearer ' + cfg.replicateKey }, signal: AbortSignal.timeout(20000) })).json(); }
+    catch { /* transient — keep polling */ }
+  }
+  if (pred.status !== 'succeeded') return { error: `Flux ${pred.status || 'timeout'}: ${pred.error || 'no detail'}` };
+  const o = pred.output;
+  const url = Array.isArray(o) ? o[0] : (typeof o === 'string' ? o : (o && (o.image || o.url)));
+  if (!url) return { error: 'No image URL in Replicate output: ' + JSON.stringify(o).slice(0, 200) };
+  try {
+    const gr = await fetch(url, { signal: AbortSignal.timeout(60000) });
+    if (!gr.ok) return { error: `Flux image download failed: ${gr.status}` };
+    return { b64: Buffer.from(await gr.arrayBuffer()).toString('base64'), mime: 'image/png', via: 'replicate:' + slug };
+  } catch (e) { return { error: 'Flux download failed: ' + e.message }; }
+}
+
+async function generateImage(input) {
+  const cfg = loadConfig();
+  const quality = input.quality || cfg.imageGenQuality || 'medium';
+  const size = input.size || cfg.imageGenSize || '1024x1024';
+  const haveFlux = !!cfg.replicateKey;
+  // Resolve provider: explicit → use it; auto → route by quality (Replicate only if keyed).
+  let provider = input.provider || cfg.imageProvider || 'auto';
+  if (provider === 'auto') {
+    if (haveFlux && quality === 'high') provider = 'flux';
+    else if (haveFlux && quality === 'low') provider = 'flux-fast';
+    else provider = 'openai';
+  }
+  if ((provider === 'flux' || provider === 'flux-fast') && !haveFlux) provider = 'openai';
+  if (provider === 'openai' && !cfg.openaiKey) return { success: false, error: 'No openaiKey in config (and no replicateKey for flux).' };
+
+  let r;
+  if (provider === 'flux') r = await imageViaReplicate(cfg, cfg.fluxModel || 'black-forest-labs/flux-1.1-pro', input, size);
+  else if (provider === 'flux-fast') r = await imageViaReplicate(cfg, cfg.fluxFastModel || 'black-forest-labs/flux-schnell', input, size);
+  else r = await imageViaOpenAI(cfg, input, quality, size);
+  if (r.error) return { success: false, error: r.error, provider };
+
+  const fname = (input.filename || `img_${Date.now()}`).replace(/[^\w.-]/g, '_');
+  const outDir = (cfg.imageOutputDir || '~/.bhatbot/generated').replace(/^~/, os.homedir());
+  fs.mkdirSync(outDir, { recursive: true });
+  const ext = r.mime === 'image/png' ? 'png' : 'jpg';
+  const outPath = path.join(outDir, `${fname}.${ext}`);
+  fs.writeFileSync(outPath, Buffer.from(r.b64, 'base64'));
+  if (cfg.imageAutoStudio) {
+    fs.mkdirSync(STUDIO_DIR, { recursive: true });
+    fs.writeFileSync(STUDIO_INDEX, `<!doctype html><html><body style="margin:0;background:#090d13;display:flex;align-items:center;justify-content:center;height:100vh"><img src="file://${outPath}?t=${Date.now()}" style="max-width:100%;max-height:100vh;object-fit:contain"></body></html>`);
+    openStudioWindow();
+  }
+  return { success: true, path: outPath, size, quality, provider, via: r.via, _image: r.b64, _imageMime: r.mime,
+    message: `Generated via ${r.via} → ${outPath}. Inspecting the result; critique and regenerate with fixes if needed.` };
+}
+
+// ---------------------------------------------------------------------------
 // ~5-min poll budget (Trellis cold-boot can take 2-3 min), robust output parsing,
 // and progress surfaced to the Activity log.
 // ---------------------------------------------------------------------------
@@ -3227,33 +3329,8 @@ async function executeTool(name, input) {
         result = { success: true, directive: r.content.filter((b) => b.type === 'text').map((b) => b.text).join('\n'), via: 'claude-sonnet' };
         break;
       }
-      case 'generate_image': {
-        const cfg = loadConfig();
-        if (!cfg.openaiKey) { result = { success: false, error: 'No openaiKey in config.' }; break; }
-        const quality = input.quality || cfg.imageGenQuality || 'medium';
-        const size = input.size || cfg.imageGenSize || '1024x1024';
-        const fname = (input.filename || `img_${Date.now()}`).replace(/[^\w.-]/g, '_');
-        const outDir = (cfg.imageOutputDir || '~/.bhatbot/generated').replace(/^~/, os.homedir());
-        fs.mkdirSync(outDir, { recursive: true });
-        const ir = await fetch('https://api.openai.com/v1/images/generations', {
-          method: 'POST', headers: { 'Authorization': 'Bearer ' + cfg.openaiKey, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ model: cfg.imageGenModel || 'gpt-image-1', prompt: input.prompt, n: 1, size, quality }),
-          signal: AbortSignal.timeout(120000)
-        });
-        if (!ir.ok) { result = { success: false, error: `OpenAI Images ${ir.status}: ${(await ir.text()).slice(0, 300)}` }; break; }
-        const idata = await ir.json();
-        const b64 = idata.data?.[0]?.b64_json;
-        if (!b64) { result = { success: false, error: 'No image in response.' }; break; }
-        const outPath = path.join(outDir, `${fname}.png`);
-        fs.writeFileSync(outPath, Buffer.from(b64, 'base64'));
-        if (cfg.imageAutoStudio) {
-          fs.mkdirSync(STUDIO_DIR, { recursive: true });
-          fs.writeFileSync(STUDIO_INDEX, `<!doctype html><html><body style="margin:0;background:#090d13;display:flex;align-items:center;justify-content:center;height:100vh"><img src="file://${outPath}?t=${Date.now()}" style="max-width:100%;max-height:100vh;object-fit:contain"></body></html>`);
-          openStudioWindow();
-        }
-        result = { success: true, path: outPath, size, quality, _image: b64, _imageMime: 'image/png', message: `Generated → ${outPath}. Inspecting the result; critique and regenerate with fixes if needed.` };
-        break;
-      }
+      case 'generate_image':
+        result = await generateImage(input); break;
       case 'generate_3d': {
         result = await generate3D(input);
         break;
