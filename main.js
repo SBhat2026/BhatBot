@@ -104,6 +104,13 @@ async function saveBrowserState() {
 // ---------------------------------------------------------------------------
 let lastUserActivityTs = 0;      // updated on every human event in the browser window
 let userEventBuffer = [];        // recent human steps (learning buffer), generalized selectors
+// Consented observation window: BhatBot only "watches to learn" during an explicit, time-boxed
+// session the user agreed to (5–10 min). Outside it, human events are still buffered (so the
+// agent can yield to your cursor) but NOT narrated/learned-from.
+let observeUntil = 0;            // ms epoch; > now ⇒ an active consented observation session
+let observeSessionStart = 0;
+let observeTimer = null;
+function observing() { return Date.now() < observeUntil; }
 const OBSERVER_SCRIPT = `(() => {
   if (window.__bhatbotObserver) return; window.__bhatbotObserver = true;
   window.__bhatbotAgentActing = window.__bhatbotAgentActing || false;
@@ -152,7 +159,8 @@ function onUserBrowserEvent(d) {
     if (d.type === 'click') recordingSteps.push({ action: 'click', selector: d.selector });
     else if (d.type === 'input' && d.value != null) recordingSteps.push({ action: 'type', selector: d.selector, text: d.value });
   }
-  sendToActivity('tool-update', { type: 'thinking', text: `👤 you ${d.type}${d.value != null ? ' "' + String(d.value).slice(0, 20) + '"' : ''} — noting it` });
+  // Only narrate while explicitly observing or recording — otherwise this is just cursor-yield bookkeeping.
+  if (observing() || recordingSteps) sendToActivity('tool-update', { type: 'thinking', text: `👤 you ${d.type}${d.value != null ? ' "' + String(d.value).slice(0, 20) + '"' : ''} — noting it` });
 }
 // Toggle the page-side flag so the observer ignores the agent's own clicks/types.
 async function agentActing(on) { try { if (page) await page.evaluate((v) => { window.__bhatbotAgentActing = v; }, on); } catch {} }
@@ -175,6 +183,17 @@ function userEventsToSteps(events) {
     else if (d.type === 'input' && d.value != null && !d.secret) steps.push({ action: 'type', selector: d.selector, text: d.value });
   }
   return steps;
+}
+// Turn the raw human-event buffer into a digest the agent can narrate + ask about: replayable
+// steps, the sites visited (by frequency), and the recent action trace. Secrets are masked.
+function hostOf(u) { try { return new URL(u).host.replace(/^www\./, ''); } catch { return ''; } }
+function summarizeBrowsing(events) {
+  const steps = userEventsToSteps(events);
+  const hostCount = {};
+  for (const d of events) { const h = hostOf(d.url); if (h) hostCount[h] = (hostCount[h] || 0) + 1; }
+  const domains = Object.entries(hostCount).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([host, count]) => ({ host, count }));
+  const recent = events.slice(-40).map((d) => ({ type: d.type, selector: d.selector, value: d.secret ? '«secret»' : d.value, host: hostOf(d.url) }));
+  return { stepCount: steps.length, steps: steps.slice(0, 60), domains, recent };
 }
 
 const WORKFLOW_DIR = path.join(os.homedir(), '.bhatbot', 'workflows');
@@ -505,6 +524,16 @@ Automation permission for Bhatbot (tell Siddhant to grant it if a call is blocke
 BROWSER WORKFLOWS: For repeated multi-step web tasks, use browser_workflow:
 start_recording, perform the browser steps, save_workflow{name}; later replay_workflow{name}.
 Prefer replaying a saved workflow over re-deriving selectors.
+
+LEARNING FROM SIDDHANT'S BROWSING (browser_observe): You can watch how Siddhant himself does
+things in the browser and learn his habits — but only with consent and in short bursts. NEVER
+observe silently or continuously. When it would help to learn his way of doing something, ASK:
+"Want me to watch your browsing for ~5–10 minutes to learn this?" Only on a yes call
+browser_observe{start, minutes}. When he's done, browser_observe{review}, then tell him in plain
+English what you noticed and ASK which parts to remember — save ONLY what he approves with
+browser_observe{save, items:[...]}. Passwords/OTPs are never captured. The browser window is
+movable/resizable and reopens where he left it; it auto-accepts location prompts and cookie
+banners, so "results near me" and consent walls won't block you.
 
 VISION CONTROL (any app, not just web): To operate a NATIVE Mac app that has no DOM (Spotify,
 Finder, System Settings, any GUI), use screen_parse{target:"screen"} → it returns on-screen
@@ -1563,10 +1592,12 @@ const TOOLS = [
       action: { type: 'string', enum: ['start_recording','save_workflow','cancel_recording','list_workflows','show_workflow','replay_workflow','delete_workflow'] },
       name: { type: 'string' }, description: { type: 'string' }
     }, required: ['action'] } },
-  { name: 'browser_observe', description: 'Watch-my-mouse: see when Siddhant is acting in the browser window, wait for him, and LEARN his steps. action:"status" → is he interacting + the recent steps he took; "wait" → block until he is idle (call this if status shows he is active, so you do not fight his cursor); "learn"{name} → save the steps he just performed as a replayable workflow (secrets excluded). The agent ALSO auto-yields before its own browser actions while he is active — use this tool to inspect/learn explicitly. Only works in the dedicated Playwright window.',
+  { name: 'browser_observe', description: 'Watch-my-browsing + learn from it. CONSENT-FIRST: a real observation session is time-boxed and Siddhant must agree — ALWAYS ASK him first ("Mind if I watch your browsing for ~5–10 min to learn how you do this?") before action:"start". Flow: "start"{minutes:5-10} opens the BhatBot browser and captures his steps (passwords/OTPs excluded); when he is done, "review" returns a digest of what he did (sites + steps) — narrate it and ASK which parts to remember; "save"{items:[...plain-English habits he approved], name?} writes ONLY the approved items to long-term memory (optionally also a replayable workflow). "stop" ends a session early. Lighter actions (no session): "status" → is he interacting now + recent steps + whether a session is active; "wait" → block until he is idle so you do not fight his cursor; "learn"{name} → save the buffered steps as a workflow; "clear" → reset the buffer. The agent also auto-yields before its own browser actions while he is active.',
     input_schema: { type: 'object', properties: {
-      action: { type: 'string', enum: ['status', 'wait', 'learn', 'clear'] },
-      name: { type: 'string', description: 'For learn: workflow name to save under.' },
+      action: { type: 'string', enum: ['start', 'stop', 'review', 'save', 'status', 'wait', 'learn', 'clear'] },
+      minutes: { type: 'number', description: 'For start: how long to observe (5–10 typical, max 15).' },
+      items: { type: 'array', items: { type: 'string' }, description: 'For save: the plain-English habits/preferences Siddhant APPROVED remembering.' },
+      name: { type: 'string', description: 'For learn/save: workflow name to also save the steps under.' },
       description: { type: 'string' },
       idleMs: { type: 'number', description: 'How long counts as "idle" (default 1500).' },
       timeoutMs: { type: 'number', description: 'For wait: max wait (default 120000).' }
@@ -1812,6 +1843,73 @@ function runShell(command, cwd, timeoutMs) {
   });
 }
 
+// --- Web-handling helpers: real geolocation, auto-dismiss popups, persist window position ----
+// Real lat/long so "show results near you" / store locators / weather actually localize (Chromium
+// otherwise blocks the geolocation prompt → sites fall back to a wrong/empty location). Cached in
+// config; override by setting config.geo = {latitude,longitude}.
+let _geoCache = null;
+async function browserGeo() {
+  const c = loadConfig();
+  if (c.geo && typeof c.geo.latitude === 'number') return { latitude: c.geo.latitude, longitude: c.geo.longitude };
+  if (_geoCache) return _geoCache;
+  try {
+    const r = await fetch('http://ip-api.com/json/?fields=lat,lon,city', { signal: AbortSignal.timeout(1500) });
+    const j = await r.json();
+    if (j && typeof j.lat === 'number') {
+      _geoCache = { latitude: j.lat, longitude: j.lon };
+      saveConfig({ geo: { latitude: j.lat, longitude: j.lon, city: j.city || '' } });
+      return _geoCache;
+    }
+  } catch {}
+  return null;
+}
+
+// Cookie/consent/GDPR banners that otherwise cover content and break clicks. Best-effort: click the
+// first visible accept/allow control. Disable with config.autoDismissBanners=false.
+const CONSENT_SELECTORS = [
+  '#onetrust-accept-btn-handler', '#truste-consent-button', '.fc-cta-consent', '#sp_message_iframe',
+  '[aria-label="Accept all"]', '[aria-label="Accept all cookies"]', 'button[aria-label*="accept" i]',
+  'button:has-text("Accept all")', 'button:has-text("Allow all")', 'button:has-text("I agree")',
+  'button:has-text("Agree")', 'button:has-text("Got it")', 'button:has-text("Accept cookies")',
+  'button:has-text("Accept")', 'button:has-text("I accept")', 'button:has-text("Continue")',
+];
+async function dismissInterruptions(p) {
+  if (!p || loadConfig().autoDismissBanners === false) return;
+  for (const sel of CONSENT_SELECTORS) {
+    try {
+      const el = await p.$(sel);
+      if (el && await el.isVisible().catch(() => false)) { await el.click({ timeout: 1200 }).catch(() => {}); break; }
+    } catch {}
+  }
+}
+
+// Attach per-page handlers: auto-accept JS dialogs (alert/confirm/beforeunload) so they don't
+// freeze Playwright, and keep the observer flag honest.
+function attachPageHandlers(p) {
+  try {
+    p.on('dialog', async (dlg) => {
+      try { sendToActivity('tool-update', { type: 'thinking', text: `🔔 page dialog (${dlg.type()}): "${(dlg.message() || '').slice(0, 60)}" — auto-accepted` }); } catch {}
+      try { await dlg.accept(); } catch { try { await dlg.dismiss(); } catch {} }
+    });
+  } catch {}
+}
+
+// Persist the browser window's position/size so it reopens where you left it (you can shove it
+// aside while it runs and it stays there). Read via CDP — Chromium owns the real OS window.
+async function saveBrowserBounds() {
+  try {
+    if (!browser || !page || !browserContext) return;
+    const cdp = await browserContext.newCDPSession(page);
+    const { windowId } = await cdp.send('Browser.getWindowForTarget');
+    const { bounds } = await cdp.send('Browser.getWindowBounds', { windowId });
+    await cdp.detach().catch(() => {});
+    if (bounds && bounds.width > 200 && bounds.height > 200 && bounds.windowState !== 'minimized')
+      saveConfig({ browserBounds: { left: bounds.left, top: bounds.top, width: bounds.width, height: bounds.height } });
+  } catch {}
+}
+let _boundsDeb = null;
+function scheduleSaveBounds() { clearTimeout(_boundsDeb); _boundsDeb = setTimeout(() => { saveBrowserBounds(); }, 3000); }
+
 let browserLaunching = null;
 async function ensureBrowser() {
   if (browser && page) return;
@@ -1822,18 +1920,28 @@ async function ensureBrowser() {
     // sized 1280x800 and positioned on the desktop. --no-sandbox: Chromium often fails to start
     // from a packaged/Finder-launched Electron app without it. Realistic UA + viewport reduce
     // bot-blocking that makes pages look broken/empty.
+    // Restore where you last left the window (movable/resizable — shove it aside, it stays put).
+    const sb = loadConfig().browserBounds;
+    const winArgs = (sb && sb.width > 200 && sb.height > 200)
+      ? [`--window-size=${Math.round(sb.width)},${Math.round(sb.height)}`, `--window-position=${Math.round(sb.left)},${Math.round(sb.top)}`]
+      : ['--window-size=1280,860', '--window-position=140,120'];
     browser = await chromium.launch({
       headless: false,
       args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-blink-features=AutomationControlled',
-             '--disable-dev-shm-usage', '--window-size=1280,860', '--window-position=140,120'],
+             '--disable-dev-shm-usage', ...winArgs],
     });
+    const geo = await browserGeo();              // real coords → location-aware results work
     const ctxOpts = {
       userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
       viewport: null, locale: 'en-US',          // viewport:null → page fills the real window
+      permissions: ['geolocation'],             // auto-grant the location prompt instead of stalling
+      ...(geo ? { geolocation: geo } : {}),
     };
     // Restore a prior session if we have one → cookies/logins persist across launches.
     if (fs.existsSync(BROWSER_STATE)) ctxOpts.storageState = BROWSER_STATE;
     browserContext = await browser.newContext(ctxOpts);
+    // Auto-handle JS dialogs on every page/tab (popups otherwise block the agent).
+    browserContext.on('page', (p) => attachPageHandlers(p));
     // Watch-my-mouse: forward Siddhant's in-page actions to Node, and install the listeners on
     // every page/navigation. Best-effort — a failure here must not block the browser.
     try {
@@ -1841,6 +1949,7 @@ async function ensureBrowser() {
       await browserContext.addInitScript(OBSERVER_SCRIPT);
     } catch (e) { console.error('[browser] observer install failed:', e.message); }
     page = await browserContext.newPage();
+    attachPageHandlers(page);
   })();
   try { await browserLaunching; } finally { browserLaunching = null; }
 }
@@ -1868,10 +1977,12 @@ async function browserAction(input) {
   const isMut = ['navigate', 'click', 'type', 'login', 'evaluate'].includes(input.action);
   if (isMut && loadConfig().browserYield !== false) await waitForUserIdle(loadConfig().browserYieldMs || 1500);
   if (isMut) await agentActing(true);
+  scheduleSaveBounds();                          // remember where the window is, debounced
   try {
     switch (input.action) {
       case 'navigate':
         await page.goto(input.url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+        await dismissInterruptions(page);        // clear cookie/consent banners that cover content
         rec({ action: 'navigate', url: input.url });
         return { success: true, url: page.url(), title: await page.title(), _image: await shot() };
       case 'click':
@@ -1957,8 +2068,62 @@ async function browserObserve(input) {
   const sinceMs = lastUserActivityTs ? Date.now() - lastUserActivityTs : Infinity;
   if (a === 'status') {
     return { success: true, userActive: sinceMs < idleMs, lastActivityMsAgo: isFinite(sinceMs) ? sinceMs : null,
+      observing: observing(), observeSecondsLeft: observing() ? Math.round((observeUntil - Date.now()) / 1000) : 0,
       bufferedSteps: userEventBuffer.length,
       recent: userEventBuffer.slice(-8).map((d) => ({ type: d.type, selector: d.selector, value: d.secret ? '«secret»' : d.value })) };
+  }
+  // --- Consented observation session: only run AFTER asking Siddhant for a 5–10 min window. ---
+  if (a === 'start') {
+    let minutes = Number(input.minutes || 7);
+    if (!isFinite(minutes)) minutes = 7;
+    minutes = Math.max(1, Math.min(15, minutes));
+    try { await ensureBrowser(); if (page) await page.bringToFront().catch(() => {}); }
+    catch (e) { return { success: false, error: 'Could not open the browser window: ' + e.message }; }
+    userEventBuffer = [];
+    observeSessionStart = Date.now();
+    observeUntil = Date.now() + minutes * 60 * 1000;
+    if (observeTimer) clearTimeout(observeTimer);
+    observeTimer = setTimeout(() => {
+      observeUntil = 0; observeTimer = null;
+      sendToActivity('tool-update', { type: 'thinking', text: `👀 observation window ended — ${userEventBuffer.length} steps captured. Ask me to review what I learned.` });
+    }, minutes * 60 * 1000);
+    sendToActivity('tool-update', { type: 'thinking', text: `👀 observing your browsing for ${minutes} min — go ahead.` });
+    return { success: true, observing: true, minutes,
+      result: `Watching your browsing for ${minutes} minutes in the BhatBot browser window. Do your normal task — I capture the steps (passwords/OTPs excluded) and will ASK before saving anything. Call browser_observe{review} when done, or {stop} to end early.` };
+  }
+  if (a === 'stop') {
+    const had = observing();
+    observeUntil = 0; if (observeTimer) { clearTimeout(observeTimer); observeTimer = null; }
+    return { success: true, stopped: had, bufferedSteps: userEventBuffer.length,
+      result: had ? `Stopped observing. Captured ${userEventBuffer.length} steps — call review to see them.` : 'No active observation session (buffer still available to review).' };
+  }
+  if (a === 'review') {
+    const digest = summarizeBrowsing(userEventBuffer);
+    if (!digest.stepCount && !digest.domains.length) return { success: true, ...digest, note: 'Nothing captured yet — start an observation session first.' };
+    return { success: true, ...digest, note: 'Narrate these to Siddhant in plain English and ASK which to remember. Then call browser_observe{save, items:[...]} with ONLY the ones he approves.' };
+  }
+  if (a === 'save') {
+    const items = Array.isArray(input.items) ? input.items.filter(Boolean) : (input.item ? [input.item] : []);
+    if (!items.length) return { success: false, error: 'Pass items: an array of approved facts/habits (plain English) to remember.' };
+    const saved = [];
+    for (const it of items.slice(0, 12)) {
+      const r = saveMemoryEntry('Preferences & Patterns', `[browsing] ${String(it).slice(0, 280)}`);
+      if (r.success) saved.push(it);
+      try { notion.appendMemory({ fact: String(it).slice(0, 280), tags: ['browsing', 'observed'], source: 'agent', confidence: 0.8 }); } catch {}
+      try { wsMemory.add && wsMemory.add(String(it), { kind: 'browsing-habit' }); } catch {}
+    }
+    // Optionally also persist the captured steps as a replayable workflow.
+    let wfNote = '';
+    if (input.name) {
+      const steps = userEventsToSteps(userEventBuffer);
+      if (steps.length) {
+        fs.mkdirSync(WORKFLOW_DIR, { recursive: true });
+        fs.writeFileSync(wfPath(input.name), JSON.stringify({ name: input.name, description: input.description || 'Learned from observed browsing', created: new Date().toISOString(), source: 'observed', steps }, null, 2));
+        wfNote = ` Also saved a replayable workflow "${input.name}" (${steps.length} steps).`;
+      }
+    }
+    if (input.clear !== false) userEventBuffer = [];
+    return { success: true, saved, result: `Remembered ${saved.length} habit${saved.length === 1 ? '' : 's'} to long-term memory.${wfNote}` };
   }
   if (a === 'wait') { const waited = await waitForUserIdle(idleMs, input.timeoutMs || 120000); return { success: true, waited, idleNow: (Date.now() - lastUserActivityTs) >= idleMs }; }
   if (a === 'clear') { userEventBuffer = []; return { success: true, result: 'Observation buffer cleared.' }; }
@@ -5418,6 +5583,7 @@ app.whenReady().then(() => {
 });
 app.on('will-quit', async () => {
   globalShortcut.unregisterAll();
+  try { await saveBrowserBounds(); } catch {}
   try { await saveBrowserState(); } catch {}
   try { if (browser) await browser.close(); } catch {}
   try { if (wakeProc) wakeProc.kill(); } catch {}

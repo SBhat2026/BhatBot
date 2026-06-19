@@ -13,6 +13,7 @@ contextBridge.exposeInMainWorld('bhatbot', {
   getContextPath: () => ipcRenderer.invoke('get-context-path'),
   getMemoryPath: () => ipcRenderer.invoke('get-memory-path'),
   getVoiceConfig: () => ipcRenderer.invoke('get-voice-config'),
+  getHealth: () => ipcRenderer.invoke('get-health'),
   transcribeAudio: (data) => ipcRenderer.invoke('transcribe-audio', data),
   synthesizeSpeech: (text) => ipcRenderer.invoke('synthesize-speech', { text }),
   playTTS: (text, full) => ipcRenderer.invoke('play-tts', { text, full }),

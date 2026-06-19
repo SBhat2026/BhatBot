@@ -314,6 +314,12 @@
   #dot.busy { background: var(--warn); }
   @keyframes dotpulse { 0%,100% { box-shadow: 0 0 0 0 rgba(47,224,138,.5); } 50% { box-shadow: 0 0 0 4px rgba(47,224,138,0); } }
   #count { margin-left: auto; color: var(--text-dim2); }
+  /* glance-layer metrics: cost / model / calls / ollama — always visible, no tab switch */
+  #metrics { display: flex; align-items: center; gap: 9px; font-size: 11px; color: var(--text-dim2); letter-spacing: .2px; }
+  #metrics .m { display: inline-flex; align-items: center; gap: 3px; white-space: nowrap; }
+  #metrics .m.warn { color: var(--warn); }
+  #metrics .m.on { color: var(--ok); }
+  #metrics .m.off { color: var(--text-dim2); opacity: .55; }
   /* always-visible status-bar controls (reachable even when the chat bar is hidden) */
   .sbtn { width: 26px; height: 22px; border: 1px solid var(--line); background: var(--bg); color: var(--text-dim);
     cursor: pointer; border-radius: 5px; font-size: 12px; display: flex; align-items: center; justify-content: center; transition: .12s; }
@@ -437,6 +443,7 @@
 
   <div id="statusbar">
     <span id="dot"></span><span id="status">ONLINE</span>
+    <span id="metrics" title="Today's spend · model in use · LLM calls today · local Ollama"></span>
     <span id="count">0 exchanges</span>
     <button class="sbtn" id="kb" title="Show / hide the text chat bar">⌨️</button>
     <button class="sbtn" id="txbtn" title="Show / hide the full transcript">📄</button>
@@ -735,6 +742,26 @@ function scroll() { chat.scrollTop = chat.scrollHeight; }
 
 // ===================== send =====================
 let lastProvider = '';
+// ---- glance-layer status metrics: cost today / model / LLM calls / Ollama (no tab switch) ----
+let curModel = '', lastHealth = null;
+function renderMetrics() {
+  const el = $('#metrics'); if (!el) return;
+  const h = lastHealth || {};
+  const cost = (h.estimatedCost != null ? h.estimatedCost : '$0.000');
+  const overBudget = h.dailyBudget != null && parseFloat(String(cost).replace('$', '')) >= h.dailyBudget;
+  const calls = h.costCalls != null ? h.costCalls : 0;
+  const model = curModel || (h.costByModel && Object.keys(h.costByModel).slice(-1)[0]) || '—';
+  const ol = h.ollamaOnline;
+  el.innerHTML =
+    `<span class="m ${overBudget ? 'warn' : ''}" title="Today's API spend${h.dailyBudget != null ? ' / $' + h.dailyBudget + ' budget' : ''}">💵 ${cost}</span>` +
+    `<span class="m" title="Model in use">🧠 ${model}</span>` +
+    `<span class="m" title="LLM calls today">📞 ${calls}</span>` +
+    `<span class="m ${ol ? 'on' : 'off'}" title="Local Ollama ${ol ? 'online' : 'offline'}">⚡ ${ol ? 'on' : 'off'}</span>`;
+}
+async function refreshMetrics() {
+  try { if (window.bhatbot.getHealth) { lastHealth = await window.bhatbot.getHealth(); renderMetrics(); } } catch {}
+}
+refreshMetrics(); setInterval(refreshMetrics, 8000);
 // Live streaming bubble: tokens append in real time (first word ~0.5s). A new tool call
 // "closes" the current bubble so post-tool text starts a fresh one below the tool rows.
 let liveBubble = null, streamedThisTurn = false;
@@ -766,6 +793,8 @@ window.bhatbot.onToolUpdate((u) => {
     lastProvider = u.provider === 'darkbloom'
       ? 'darkbloom · ' + (u.model || '')
       : 'anthropic · ' + String(u.model || '').replace('claude-', '');
+    curModel = String(u.model || '').replace('claude-', '').replace(/-\d{6,}$/, '') || curModel;
+    renderMetrics();
   }
   else if (u.type === 'plan' && Array.isArray(u.steps)) {
     rmThinking();
