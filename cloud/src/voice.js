@@ -42,7 +42,10 @@ async function tts(text, opts = {}) {
   if (!t) return { error: 'empty' };
   if (!EL_KEY) return { error: 'no ELEVENLABS_API_KEY' };
   const speed = opts.speed != null ? Math.max(0.7, Math.min(1.2, Number(opts.speed))) : TTS_SPEED;
-  const voice = opts.voice || EL_VOICE;
+  // Strict ElevenLabs-only: ignore any client voice that isn't a real EL voice id (20-char
+  // alnum). Phones/old installs send local Kokoro names like "bm_george" → those 404'd on EL
+  // and produced silence. Anything not an EL id falls back to the canonical Jarvis voice.
+  const voice = /^[A-Za-z0-9]{20}$/.test(opts.voice || '') ? opts.voice : EL_VOICE;
   const r = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voice}?output_format=mp3_44100_128&optimize_streaming_latency=3`, {
     method: 'POST', headers: { 'xi-api-key': EL_KEY, 'content-type': 'application/json' },
     body: JSON.stringify({ text: t, model_id: EL_MODEL, voice_settings: { stability: 0.38, similarity_boost: 0.75, style: 0.35, use_speaker_boost: true, speed } })

@@ -359,7 +359,9 @@ function splitSentences(text) {
 function b64ToBuf(b64) { const bin = atob(b64), len = bin.length, u = new Uint8Array(len); for (let i=0;i<len;i++) u[i] = bin.charCodeAt(i); return u.buffer; }
 function stopSpeaking() { ttsSeq++; if (curSrc) { try { curSrc.stop(); } catch {} curSrc = null; } }
 // Voice prefs (persisted) — customizable from the ⚙ settings panel.
-let voicePref = localStorage.getItem('bb_voice') || 'bm_george';
+// Cloud uses ElevenLabs (Jarvis). Don't default to a local Kokoro voice name — it 404s on EL.
+// Only honor a stored voice if it's a real EL voice id (20-char alnum); else let the cloud pick.
+let voicePref = (function(){ const v = localStorage.getItem('bb_voice') || ''; return /^[A-Za-z0-9]{20}$/.test(v) ? v : ''; })();
 let speedPref = parseFloat(localStorage.getItem('bb_speed') || '1');
 async function ttsOne(s) {
   try { const r = await fetch(API + '/tts', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ text: s, voice: voicePref, speed: speedPref }) }).then(x => x.json()); return (r && r.audio) ? b64ToBuf(r.audio) : null; }
