@@ -1985,6 +1985,28 @@ async function ensureBrowser() {
   try { await browserLaunching; } finally { browserLaunching = null; }
 }
 
+// Selector drift is the Achilles' heel of DOM replay. When a learned selector no longer matches,
+// fall back to the vision stack (OmniParser → vision_click) using a text hint mined from the
+// selector — so a stale workflow self-heals instead of silently failing.
+function textHintFromSelector(sel) {
+  if (!sel) return '';
+  const m = sel.match(/:has-text\("([^"]+)"\)/i) || sel.match(/\[aria-label="([^"]+)"\]/i)
+    || sel.match(/\[placeholder="([^"]+)"\]/i) || sel.match(/\[name="([^"]+)"\]/i);
+  if (m) return m[1];
+  if (sel.startsWith('#')) return sel.slice(1).replace(/[-_]/g, ' ');
+  return sel.replace(/[#.\[\]"'=>~]/g, ' ').replace(/\s+/g, ' ').trim();
+}
+async function visionClickByText(hint) {
+  if (!hint || !omniAvailable()) return false;
+  try {
+    const p = await screenParse({ target: 'browser', query: hint, semantics: false });
+    const el = p && p.success && (p.elements || [])[0];
+    if (!el || !el.click) return false;
+    const r = await visionClick({ target: 'browser', x: el.click.x, y: el.click.y });
+    return !!(r && r.success);
+  } catch { return false; }
+}
+
 async function browserAction(input) {
   openActivityWindow();
   try { await ensureBrowser(); }
@@ -2016,14 +2038,27 @@ async function browserAction(input) {
         await dismissInterruptions(page);        // clear cookie/consent banners that cover content
         rec({ action: 'navigate', url: input.url });
         return { success: true, url: page.url(), title: await page.title(), _image: await shot() };
-      case 'click':
-        await page.click(input.selector, { timeout: 15000 });
+      case 'click': {
+        let via;
+        try { await page.click(input.selector, { timeout: 15000 }); }
+        catch (e) {
+          if (!await visionClickByText(textHintFromSelector(input.selector))) throw e;
+          via = 'vision-fallback';                // selector drifted → recovered via OmniParser
+        }
         rec({ action: 'click', selector: input.selector });
-        return { success: true, _image: await shot() };
-      case 'type':
-        await page.fill(input.selector, input.text);
+        return { success: true, via, _image: await shot() };
+      }
+      case 'type': {
+        let via;
+        try { await page.fill(input.selector, input.text); }
+        catch (e) {
+          if (!await visionClickByText(textHintFromSelector(input.selector))) throw e;
+          await page.keyboard.type(String(input.text || ''), { delay: 20 });
+          via = 'vision-fallback';
+        }
         rec({ action: 'type', selector: input.selector, text: input.text });
-        return { success: true, _image: await shot() };
+        return { success: true, via, _image: await shot() };
+      }
       case 'screenshot':
         return { success: true, note: 'Screenshot captured.', _image: await shot() };
       case 'get_text': {

@@ -14,6 +14,8 @@ const SID = process.env.TWILIO_SID || '';
 const AUTH = process.env.TWILIO_TOKEN || '';
 const FROM = process.env.TWILIO_FROM || '';          // your Twilio number (caller ID)
 const OWNER = process.env.OWNER_PHONE || '';         // your real cell (where relays go / TAKE bridges to)
+const CMD_PASS = process.env.COMMAND_PASSPHRASE || '';  // spoken passphrase that unlocks command mode (closes caller-ID spoofing)
+const normPass = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 const PUBLIC_URL = (process.env.PUBLIC_URL || '').replace(/\/+$/, '');
 const configured = () => !!(SID && AUTH && FROM);
 
@@ -69,7 +71,9 @@ async function converse(sid, speech, sysExtra) {
 }
 
 // Siddhant's butler persona for inbound (non-owner) calls + a civility backstop.
-const BUTLER_SYS = "You are Siddhant Bhat's courteous, professional butler answering his phone line (you are his assistant, never him). You already know who is calling and why. Acknowledge them warmly — by name if they gave one — then offer to help on his behalf: answer what you reasonably can, take any details or a message, and assure them you'll pass it along to Siddhant. Speak as a real butler would: gracious, composed, one or two short sentences per turn, no markdown. If the caller is rude, insulting, vulgar, demeaning, or hostile, give exactly ONE polite warning; if the disrespect continues, end the call by appending the literal token [END_CALL] to a final courteous sentence. When their business is clearly concluded, wrap up warmly (you may also use [END_CALL]). Never tolerate abuse, but never be abrupt or impolite yourself.";
+const BUTLER_SYS = "You are BhatBot, Siddhant Bhat's courteous, professional butler answering his phone line (you are his assistant, never him). Identify yourself as BhatBot when it's natural. You have learned who is calling and why. Acknowledge them warmly — by name if they gave one — then offer to help on his behalf: answer what you reasonably can, take details or a message, and assure them you'll pass it along to Siddhant. Speak as a real butler would: gracious, composed, one or two short spoken sentences per turn, no markdown. "
+  + "PROTECT HIS TIME — this is important: only offer to connect a caller directly to Siddhant when BOTH are true: (1) they specifically ask to speak with Siddhant (by name), AND (2) they are clearly a real person with a genuine, legitimate reason — NOT a sales pitch, marketing, robocall, survey, fundraiser, or vague/spammy call. When BOTH hold, tell them you'll try to put them through and append the literal token [PATCH] to that sentence. If they do not ask for Siddhant by name, or the reason looks like spam/sales, do NOT offer to connect them — help them yourself or take a message instead. "
+  + "If the caller is rude, insulting, vulgar, demeaning, or hostile, give exactly ONE polite warning; if the disrespect continues, end the call by appending the literal token [END_CALL] to a final courteous sentence. When their business is clearly concluded, wrap up warmly (you may also use [END_CALL]). Never tolerate abuse, but never be abrupt or impolite yourself.";
 const ABUSE_RE = /\b(f+u+c+k\w*|motherf\w*|sh[i1]t\w*|b[i1]tch\w*|assholes?|c[u]nt\w*|dickheads?|bastards?|shut up|screw you|piss off|go to hell|n[i1]gg\w*|fa[g6]+ots?|slut|whore)\b/i;
 function isAbusive(t) { return ABUSE_RE.test(String(t || '')); }
 
@@ -163,14 +167,20 @@ function mount(app, { token, form }) {
     const sid = req.body.CallSid || ''; const c = getCall(sid); c.dir = 'in'; c.peer = req.body.From || 'caller';
     const host = req.get('host');
     if (OWNER && c.peer === OWNER) {
-      c.owner = true;
-      db.pushActivity('call', '📞← Siddhant calling in (command mode)');
-      const hello = 'Good evening, sir. BhatBot here. What can I do for you?';
-      return res.type('text/xml').send(gather(host, token, await sayEl(host, hello), 'owner'));
+      // Caller-ID alone is spoofable, so command mode (run_shell/system_control/Mac relay) requires
+      // a spoken passphrase when COMMAND_PASSPHRASE is set. Without it, fall back to caller-ID only.
+      if (!CMD_PASS) {
+        c.owner = true;
+        db.pushActivity('call', '📞← Siddhant calling in (command mode — ⚠ no COMMAND_PASSPHRASE set)');
+        return res.type('text/xml').send(gather(host, token, await sayEl(host, 'Good evening, sir. BhatBot here. What can I do for you?'), 'owner'));
+      }
+      c.awaitingAuth = true;
+      db.pushActivity('call', '📞← command-mode call on your number — requesting passphrase');
+      return res.type('text/xml').send(gather(host, token, await sayEl(host, 'Good evening, sir. BhatBot here. Your passphrase, please.'), 'auth'));
     }
     db.pushActivity('call', `📞← incoming from ${c.peer}`);
-    const greet = await converse(sid, '[Incoming call. Greet them as Siddhant\'s assistant and politely ask who is calling and what it\'s regarding.]',
-      'This is an INBOUND call. First find out WHO is calling and WHY (screening), in one short question.');
+    const greet = await converse(sid, '[Incoming call. Greet them, clearly state that this is BhatBot, Siddhant Bhat\'s assistant, then in one short greeting ask who is calling, what it\'s regarding, and who they are hoping to reach.]',
+      'This is an INBOUND call. Open by identifying yourself as "BhatBot, Siddhant\'s assistant." In one short greeting, ask who is calling, why, and who they are hoping to reach.');
     res.type('text/xml').send(gather(host, token, await sayEl(host, greet), 'screen'));
   });
 
@@ -206,6 +216,23 @@ function mount(app, { token, form }) {
       db.pushActivity('call', `🆘 your answer: “${speech.slice(0, 140)}”`);
       return res.type('text/xml').send(hangup(await sayEl(host, 'Thank you, sir — I’ll proceed with that.')));
     }
+    // AUTH leg: verify the spoken passphrase before granting command mode (anti-spoofing gate).
+    if (leg === 'auth') {
+      if (CMD_PASS && normPass(speech) === normPass(CMD_PASS)) {
+        c.owner = true; c.awaitingAuth = false;
+        db.pushActivity('call', '🔓 command mode unlocked (passphrase ok)');
+        return res.type('text/xml').send(gather(host, token, await sayEl(host, 'Verified. What can I do for you, sir?'), 'owner'));
+      }
+      c.authTries = (c.authTries || 0) + 1;
+      if (c.authTries >= 3) {
+        db.pushActivity('call', `🚫 3 bad command-mode passphrase tries from ${c.peer} — dropped to butler`);
+        notifyOwner(`🚫 ${c.authTries} failed command-mode passphrase attempts on a call from ${c.peer}. If that wasn't you, your caller ID may have been spoofed.`);
+        c.dir = 'in'; c.owner = false;   // deny machine access; treat as an unknown caller
+        const greet = await converse(sid, '[The caller failed the passphrase. Treat them as an unknown caller: politely state you are BhatBot, Siddhant\'s assistant, and ask who is calling and why.]', BUTLER_SYS);
+        return res.type('text/xml').send(gather(host, token, await sayEl(host, greet), 'screen'));
+      }
+      return res.type('text/xml').send(gather(host, token, await sayEl(host, 'That didn’t match. Your passphrase, please.'), 'auth'));
+    }
 
     // Inbound BUTLER mode: BhatBot answers as Siddhant's courteous butler. It has learned who/why,
     // texts the owner (who may reply TAKE to jump in), then helps the caller on his behalf and
@@ -236,6 +263,14 @@ function mount(app, { token, form }) {
       }
       // Courteous butler turn: acknowledge, offer help, take details, relay later.
       const r = await converse(sid, speech, BUTLER_SYS);
+      // Patch-through: butler only emits [PATCH] when the caller asked for Siddhant by name AND has
+      // a legitimate reason → try to ring Siddhant; if he doesn't pick up, fall to a message.
+      if (/\[PATCH\]/i.test(r)) {
+        const clean = r.replace(/\[PATCH\]/ig, '').trim() || 'Let me see if I can put you through to Siddhant — one moment.';
+        notifyOwner(`📞 ${c.peer} asked to speak with you (re: ${(c.reason || '').slice(0, 140)}). Patching them through — answer to take it.`);
+        db.pushActivity('call', `🔗 patching ${c.peer} through to Siddhant`);
+        return res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?><Response>${await sayEl(host, clean)}<Dial callerId="${xmlEsc(FROM)}" timeout="25" action="https://${host}/voice/${token}/afterdial" method="POST">${xmlEsc(OWNER)}</Dial></Response>`);
+      }
       if (/\[END_?CALL\]/i.test(r) || /\b(goodbye|good bye|take care|have a (great|good) (day|one)|bye now)\b/i.test(r)) {
         const clean = r.replace(/\[END_?CALL\]/ig, '').trim() || 'Thank you for calling. Good day.';
         relaySummary(sid);
@@ -275,6 +310,16 @@ function mount(app, { token, form }) {
     }
     // keep holding
     res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?><Response><Pause length="5"/><Redirect method="POST">https://${host}/voice/${token}/wait?n=${n + 1}</Redirect></Response>`);
+  });
+
+  // After a patch-through Dial: if Siddhant answered, wrap up; if not, offer to take a message.
+  app.post('/voice/:token/afterdial', form, async (req, res) => {
+    if (!verified(req)) return reject(res);
+    const sid = req.body.CallSid || ''; const c = getCall(sid); const host = req.get('host');
+    if ((req.body.DialCallStatus || '') === 'completed') { relaySummary(sid); return res.type('text/xml').send(hangup(await sayEl(host, 'Thank you — goodbye.'))); }
+    db.pushActivity('call', `📵 patch-through to Siddhant not answered (${c.peer}) — offering message`);
+    const ask = await sayEl(host, 'I’m sorry, I couldn’t reach Siddhant just now. May I take a message and pass it along?');
+    return res.type('text/xml').send(gather(host, token, ask, 'msg'));
   });
 
   // Owner command-mode hold loop — poll for the agent task to finish, then speak the result.
