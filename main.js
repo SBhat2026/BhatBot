@@ -111,6 +111,15 @@ let observeUntil = 0;            // ms epoch; > now ⇒ an active consented obse
 let observeSessionStart = 0;
 let observeTimer = null;
 function observing() { return Date.now() < observeUntil; }
+// Screen-watching session (user-triggered "watch my screen"). Whole-screen, any app. Captures
+// periodic frames, describes each with the LOCAL vision model, and buffers ONLY the text notes —
+// raw screenshots are never persisted and the describer is told to skip passwords/secrets.
+// Nothing reaches long-term memory without explicit approval (action:"save").
+let screenWatchUntil = 0;
+let screenWatchTimer = null;
+let screenWatchTick = null;
+let screenWatchBuffer = [];
+function watchingScreen() { return Date.now() < screenWatchUntil; }
 const OBSERVER_SCRIPT = `(() => {
   if (window.__bhatbotObserver) return; window.__bhatbotObserver = true;
   window.__bhatbotAgentActing = window.__bhatbotAgentActing || false;
@@ -200,11 +209,12 @@ const WORKFLOW_DIR = path.join(os.homedir(), '.bhatbot', 'workflows');
 const NOTES_DIR = path.join(os.homedir(), '.bhatbot', 'notes');
 const pendingConfirms = new Map();
 let pendingGuidance = [];   // live feedback queued mid-task (steering)
-let nexusWindow = null, studioWindow = null, terminalWindow = null;
+let nexusWindow = null, studioWindow = null, terminalWindow = null, chessWindow = null;
 let studioWatcher = null, ptyProc = null, wakeProc = null;
 
 const STUDIO_DIR = path.join(os.homedir(), '.bhatbot', 'studio');
 const STUDIO_INDEX = path.join(STUDIO_DIR, 'index.html');
+const CHESS_HTML = path.join(STUDIO_DIR, 'chess.html');
 const NEXUS_URL = 'https://nexusresearch.xyz';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -534,6 +544,17 @@ English what you noticed and ASK which parts to remember — save ONLY what he a
 browser_observe{save, items:[...]}. Passwords/OTPs are never captured. The browser window is
 movable/resizable and reopens where he left it; it auto-accepts location prompts and cookie
 banners, so "results near me" and consent walls won't block you.
+
+WATCHING THE SCREEN ON COMMAND (screen_observe): When Siddhant TELLS you to watch his screen
+("watch my screen", "start watching", "learn how I do this"), his command IS the consent —
+do NOT ask again, just call screen_observe{start, minutes} right away (covers ANY app, not just
+the browser). It notes his activity every ~25s via the local vision model; no screenshots are
+saved and passwords/codes are skipped. When he's done, screen_observe{review}, narrate what you
+saw, and save ONLY what he approves with screen_observe{save, items:[...]}. Never start a screen
+watch on your own — only on his word.
+
+CHESS: If he wants to play chess, call play_chess (optionally difficulty:easy|medium|hard). It
+opens a full game window — real rules + a Stockfish-backed AI opponent.
 
 VISION CONTROL (any app, not just web): To operate a NATIVE Mac app that has no DOM (Spotify,
 Finder, System Settings, any GUI), use screen_parse{target:"screen"} → it returns on-screen
@@ -1708,6 +1729,15 @@ const TOOLS = [
       maxSteps: { type: 'number', description: 'Max reasoning steps (default 6, max 12).' },
       timeoutMs: { type: 'number', description: 'Max run time ms (default 180000, max 600000).' }
     }, required: ['task'] } },
+  { name: 'play_chess', description: 'Open a playable chess game in its own window for Siddhant. Full rules engine (legal moves, castling, en passant, promotion, check/checkmate/stalemate) with a built-in AI opponent powered by the Stockfish online API at three strengths. Use whenever he wants to play chess. Optional difficulty.',
+    input_schema: { type: 'object', properties: { difficulty: { type: 'string', enum: ['easy', 'medium', 'hard'], description: 'AI strength: easy (casual), medium (depth 8), hard (depth 14). Default medium.' } } } },
+  { name: 'screen_observe', description: 'WATCH SIDDHANT\'S WHOLE SCREEN to learn how he works — use this when he SAYS to (e.g. "watch my screen", "start watching", "learn how I do this"). Covers ANY app, not just the browser (that is browser_observe). His command IS the consent, so you do NOT need to ask again — just start. Flow: action:"start"{minutes:1-30} begins a time-boxed session that notes what he is doing every ~25s via the LOCAL vision model (no screenshots are saved; passwords/codes/cards are skipped). When he is done, action:"review" returns the notes — narrate them and ASK which to remember; action:"save"{items:[...approved plain-English habits]} writes ONLY approved items to long-term memory. "stop" ends early; "status" shows whether active + recent notes; "snapshot" describes the screen once. Never auto-start without his word.',
+    input_schema: { type: 'object', properties: {
+      action: { type: 'string', enum: ['start', 'stop', 'status', 'review', 'save', 'snapshot', 'clear'], description: 'start a watch session, stop it, check status, review the notes, save approved items, take a one-shot snapshot, or clear the buffer.' },
+      minutes: { type: 'number', description: 'For start: session length 1–30 (default 7).' },
+      everySeconds: { type: 'number', description: 'For start: capture interval 10–60s (default 25).' },
+      items: { type: 'array', items: { type: 'string' }, description: 'For save: approved plain-English facts/habits to remember.' }
+    }, required: ['action'] } },
   { name: 'request_permissions', description: 'Trigger the macOS Screen Recording + Accessibility permission prompts for BhatBot and open the matching System Settings → Privacy panes so Siddhant can toggle the app on. Use when vision_click / screen_parse / native login / AppleScript fail for permissions, or when he asks to "grant permissions" / "fix permissions".', input_schema: { type: 'object', properties: {} } },
   { name: 'manage_schedule', description: 'Schedule BhatBot to do things PROACTIVELY/AUTONOMOUSLY — reminders, recurring checks, "every morning brief me", "in 30 minutes do X", "every Monday at 9am". Each schedule runs the given `prompt` through the full agent at its time (no one watching), then speaks the result aloud and texts it to Telegram. Use this whenever Siddhant asks for something to happen later or repeatedly. Actions: add (create), list, remove{id}, enable{id}, disable{id}, run{id} (fire now). For timing pass ONE of: kind:"daily"+at:"HH:MM" / kind:"weekly"+at:"HH:MM"+dow(0=Sun) / kind:"interval"+everyMinutes|everyHours / kind:"once"+runAt(ISO), OR the shortcuts inMinutes / inHours / everyMinutes / everyHours.',
     input_schema: { type: 'object', properties: {
@@ -2138,6 +2168,97 @@ async function browserObserve(input) {
     const n = steps.length; userEventBuffer = [];
     return { success: true, result: `Learned + saved workflow "${input.name}" (${n} steps) from your actions. Replay it with browser_workflow{replay_workflow}.` };
   }
+  return { success: false, error: `unknown action: ${a}` };
+}
+
+// screen_observe — user-triggered "watch my screen". Mirrors browser_observe but for the WHOLE
+// Mac screen (any app). Consent is the spoken/typed command itself. Captures a frame every ~25s,
+// gets a SHORT text description from the local vision model, and buffers it. Raw screenshots are
+// NOT persisted; the describer is told to ignore passwords/secrets. Nothing is written to
+// long-term memory without explicit approval (action:"save").
+async function describeScreenFrame() {
+  const cap = await captureScreenPng();
+  if (cap.error) return { error: cap.error };
+  const model = loadConfig().visionModel || OLLAMA_VISION_MODEL;
+  try {
+    const res = await fetch(`${OLLAMA_URL}/api/generate`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model, stream: false, images: [cap.b64],
+        prompt: 'In ONE concise sentence, describe what the user is doing on screen (active app + task). Do NOT transcribe any passwords, verification codes, card numbers, or personal secrets — describe the activity only.' })
+    });
+    if (!res.ok) return { error: `Ollama ${res.status} (is it running with ${model}?)` };
+    const j = await res.json();
+    return { text: (j.response || '').trim().replace(/\s+/g, ' ').slice(0, 240) };
+  } catch (e) { return { error: e.message }; }
+}
+
+async function screenObserve(input) {
+  const a = input.action || 'status';
+  if (a === 'status') {
+    return { success: true, watching: watchingScreen(),
+      secondsLeft: watchingScreen() ? Math.round((screenWatchUntil - Date.now()) / 1000) : 0,
+      observations: screenWatchBuffer.length, recent: screenWatchBuffer.slice(-6) };
+  }
+  if (a === 'start') {
+    let minutes = Number(input.minutes || 7); if (!isFinite(minutes)) minutes = 7;
+    minutes = Math.max(1, Math.min(30, minutes));
+    const everyMs = Math.max(10, Math.min(60, Number(input.everySeconds || 25))) * 1000;
+    screenWatchBuffer = [];
+    screenWatchUntil = Date.now() + minutes * 60 * 1000;
+    if (screenWatchTimer) clearTimeout(screenWatchTimer);
+    if (screenWatchTick) clearInterval(screenWatchTick);
+    const tick = async () => {
+      if (!watchingScreen()) return;
+      const f = await describeScreenFrame();
+      if (f.text) {
+        screenWatchBuffer.push({ t: new Date().toLocaleTimeString(), text: f.text });
+        sendToActivity('tool-update', { type: 'thinking', text: `🖥️ ${f.text}` });
+      }
+    };
+    screenWatchTick = setInterval(tick, everyMs);
+    tick();
+    screenWatchTimer = setTimeout(() => {
+      screenWatchUntil = 0;
+      if (screenWatchTick) { clearInterval(screenWatchTick); screenWatchTick = null; }
+      sendToActivity('tool-update', { type: 'thinking', text: `🖥️ screen-watch ended — ${screenWatchBuffer.length} notes. Ask me to review what I learned.` });
+    }, minutes * 60 * 1000);
+    sendToActivity('tool-update', { type: 'thinking', text: `🖥️ watching your screen for ${minutes} min — go ahead.` });
+    return { success: true, watching: true, minutes,
+      result: `Watching your whole screen for ${minutes} min — I note what you're doing every ${everyMs / 1000}s (no screenshots saved, passwords/secrets skipped). Call screen_observe{review} when done, or {stop} to end early.` };
+  }
+  if (a === 'stop') {
+    const had = watchingScreen();
+    screenWatchUntil = 0;
+    if (screenWatchTimer) { clearTimeout(screenWatchTimer); screenWatchTimer = null; }
+    if (screenWatchTick) { clearInterval(screenWatchTick); screenWatchTick = null; }
+    return { success: true, stopped: had, observations: screenWatchBuffer.length,
+      result: had ? `Stopped watching. ${screenWatchBuffer.length} notes captured — call review to see them.` : 'No active screen-watch (buffer still reviewable).' };
+  }
+  if (a === 'snapshot') {
+    const f = await describeScreenFrame();
+    if (f.error) return { success: false, error: 'capture/describe failed: ' + f.error };
+    return { success: true, observation: f.text };
+  }
+  if (a === 'review') {
+    if (!screenWatchBuffer.length) return { success: true, observations: 0, note: 'Nothing captured yet — start a screen-watch first.' };
+    return { success: true, observations: screenWatchBuffer.length,
+      notes: screenWatchBuffer.map((o) => `${o.t}: ${o.text}`),
+      note: 'Narrate these to Siddhant in plain English and ASK which to remember. Then call screen_observe{save, items:[...]} with ONLY the ones he approves.' };
+  }
+  if (a === 'save') {
+    const items = Array.isArray(input.items) ? input.items.filter(Boolean) : (input.item ? [input.item] : []);
+    if (!items.length) return { success: false, error: 'Pass items: an array of approved facts/habits (plain English) to remember.' };
+    const saved = [];
+    for (const it of items.slice(0, 12)) {
+      const r = saveMemoryEntry('Preferences & Patterns', `[screen] ${String(it).slice(0, 280)}`);
+      if (r.success) saved.push(it);
+      try { notion.appendMemory({ fact: String(it).slice(0, 280), tags: ['screen', 'observed'], source: 'agent', confidence: 0.8 }); } catch {}
+      try { wsMemory.add && wsMemory.add(String(it), { kind: 'screen-habit' }); } catch {}
+    }
+    if (input.clear !== false) screenWatchBuffer = [];
+    return { success: true, saved, result: `Remembered ${saved.length} thing${saved.length === 1 ? '' : 's'} from watching your screen.` };
+  }
+  if (a === 'clear') { screenWatchBuffer = []; return { success: true, result: 'Screen-watch buffer cleared.' }; }
   return { success: false, error: `unknown action: ${a}` };
 }
 
@@ -3029,6 +3150,13 @@ async function executeTool(name, input) {
         result = await browserWorkflow(input); break;
       case 'browser_observe':
         result = await browserObserve(input); break;
+      case 'screen_observe':
+        result = await screenObserve(input); break;
+      case 'play_chess': {
+        result = openChessWindow(input.difficulty);
+        if (result && result.success) result.result = `Chess board is open${input.difficulty ? ` (${input.difficulty})` : ''} — make your move.`;
+        break;
+      }
       case 'save_memory':
         result = saveMemoryEntry(input.section, input.content); break;
       case 'browser':
@@ -4445,6 +4573,32 @@ function openStudioWindow() {
     deb = setTimeout(() => { try { if (studioWindow && !studioWindow.isDestroyed()) studioWindow.reload(); } catch {} }, 200);
   });
   studioWindow.on('closed', () => { try { studioWatcher && studioWatcher.close(); } catch {} studioWatcher = null; });
+}
+
+// --- Chess (playable game window; rules engine inline, Stockfish online API for the AI) ---
+function openChessWindow(difficulty) {
+  try {
+    fs.mkdirSync(STUDIO_DIR, { recursive: true });
+    const asset = path.join(__dirname, 'assets', 'chess.html');
+    if (fs.existsSync(asset)) fs.copyFileSync(asset, CHESS_HTML);   // keep the playable copy fresh
+  } catch {}
+  if (!fs.existsSync(CHESS_HTML)) return { success: false, error: 'chess.html asset is missing.' };
+  if (chessWindow && !chessWindow.isDestroyed()) { chessWindow.show(); chessWindow.focus(); }
+  else {
+    chessWindow = new BrowserWindow({
+      width: 720, height: 840, resizable: true, maximizable: true, minWidth: 380, minHeight: 480,
+      title: 'BhatBot Chess', backgroundColor: '#0a0f17', webPreferences: { contextIsolation: true }
+    });
+    chessWindow.loadFile(CHESS_HTML);
+    chessWindow.on('closed', () => { chessWindow = null; });
+  }
+  const diff = ['easy', 'medium', 'hard'].includes(difficulty) ? difficulty : null;
+  if (diff) {
+    const wc = chessWindow.webContents;
+    const apply = () => wc.executeJavaScript(`(()=>{const s=document.getElementById('diff'); if(s){s.value=${JSON.stringify(diff)}; s.dispatchEvent(new Event('change'));}})()`).catch(() => {});
+    if (wc.isLoading()) wc.once('did-finish-load', apply); else apply();
+  }
+  return { success: true };
 }
 
 // --- Embedded Claude Code terminal (node-pty + xterm) ---

@@ -88,6 +88,16 @@ const REGISTRY = {
       input_schema: { type: 'object', properties: { action: { type: 'string' }, query: { type: 'string' }, volume: { type: 'number' }, device: { type: 'string' }, name: { type: 'string' }, tracks: { type: 'array', items: { type: 'string' } } }, required: ['action'] } },
     relay: true,
   },
+  play_chess: {
+    def: { name: 'play_chess', description: 'Open a playable chess game (full rules + Stockfish AI opponent) in a window on the Mac. Use when Siddhant wants to play chess. Optional difficulty. Needs the computer awake.',
+      input_schema: { type: 'object', properties: { difficulty: { type: 'string', enum: ['easy', 'medium', 'hard'] } } } },
+    relay: true,
+  },
+  screen_observe: {
+    def: { name: 'screen_observe', description: 'Watch Siddhant\'s whole Mac screen to learn how he works — only when he TELLS you to ("watch my screen"). His command is the consent. action:"start"{minutes} begins; "review" returns notes; "save"{items} stores approved items; "stop" ends. No screenshots saved, secrets skipped. Needs the computer awake.',
+      input_schema: { type: 'object', properties: { action: { type: 'string', enum: ['start', 'stop', 'status', 'review', 'save', 'snapshot', 'clear'] }, minutes: { type: 'number' }, everySeconds: { type: 'number' }, items: { type: 'array', items: { type: 'string' } } }, required: ['action'] } },
+    relay: true,
+  },
 };
 
 function toolDefs() { return Object.values(REGISTRY).map((t) => t.def); }
