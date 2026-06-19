@@ -86,6 +86,36 @@ async function placeCall(to, purpose) {
   } catch (e) { return { success: false, error: e.message }; }
 }
 
+// ---- agent reply → phone-friendly: collapse whitespace, drop markdown noise, cap length -----
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+function condense(t) {
+  let s = String(t == null ? '' : t).replace(/```[\s\S]*?```/g, ' ').replace(/[*_`#>]/g, '').replace(/\s+/g, ' ').trim();
+  if (s.length > 600) s = s.slice(0, 580).replace(/\s+\S*$/, '') + '…';
+  return s || 'Done.';
+}
+
+// ---- outbound: CALL Siddhant for input mid-task, wait for his spoken answer, return it --------
+async function askOwner(question, opts = {}) {
+  if (!configured()) return { success: false, error: 'Twilio not configured' };
+  if (!OWNER) return { success: false, error: 'OWNER_PHONE not set' };
+  if (!PUBLIC_URL) return { success: false, error: 'PUBLIC_URL not set' };
+  const token = process.env.BHATBOT_TOKEN;
+  const timeoutMs = opts.timeoutMs || 150000;
+  let j;
+  try {
+    j = await twilioPost('Calls.json', {
+      To: OWNER, From: FROM,
+      Url: `${PUBLIC_URL}/voice/${token}/ask?q=${enc(question)}`,
+      StatusCallback: `${PUBLIC_URL}/voice/${token}/status`, StatusCallbackEvent: 'completed',
+    });
+  } catch (e) { return { success: false, error: e.message }; }
+  const sid = j.sid; const c = getCall(sid); c.dir = 'ask'; c.peer = OWNER; c.question = question; c.answer = undefined;
+  db.pushActivity('call', `🆘 calling you for input: ${String(question).slice(0, 100)}`);
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) { if (c.answer !== undefined) return { success: true, answer: c.answer, result: `You said: ${c.answer}` }; await sleep(1500); }
+  return { success: true, answer: c.answer ?? null, note: 'no spoken answer captured in time (you may not have answered)' };
+}
+
 // ---- Twilio signature check (defense even though token-gated) ------------------
 const crypto = require('crypto');
 function verified(req) {
@@ -121,14 +151,22 @@ function mount(app, { token, form }) {
     res.type('text/xml').send(gather(req.get('host'), token, await sayEl(req.get('host'), opener), 'out'));
   });
 
-  // INBOUND first leg — screen: who is it + why.
+  // INBOUND first leg. OWNER calling in → COMMAND MODE (his voice = instructions to the full
+  // agent). Anyone else → screen who/why.
   app.post('/voice/:token/incoming', form, async (req, res) => {
     if (!verified(req)) return reject(res);
     const sid = req.body.CallSid || ''; const c = getCall(sid); c.dir = 'in'; c.peer = req.body.From || 'caller';
+    const host = req.get('host');
+    if (OWNER && c.peer === OWNER) {
+      c.owner = true;
+      db.pushActivity('call', '📞← Siddhant calling in (command mode)');
+      const hello = 'Good evening, sir. BhatBot here. What can I do for you?';
+      return res.type('text/xml').send(gather(host, token, await sayEl(host, hello), 'owner'));
+    }
     db.pushActivity('call', `📞← incoming from ${c.peer}`);
     const greet = await converse(sid, '[Incoming call. Greet them as Siddhant\'s assistant and politely ask who is calling and what it\'s regarding.]',
       'This is an INBOUND call. First find out WHO is calling and WHY (screening), in one short question.');
-    res.type('text/xml').send(gather(req.get('host'), token, await sayEl(req.get('host'), greet), 'screen'));
+    res.type('text/xml').send(gather(host, token, await sayEl(host, greet), 'screen'));
   });
 
   // Conversation turns.
@@ -137,6 +175,32 @@ function mount(app, { token, form }) {
     const sid = req.body.CallSid || ''; const c = getCall(sid); const host = req.get('host'); const leg = req.query.leg || 'in';
     const speech = (req.body.SpeechResult || '').trim();
     if (!speech) return res.type('text/xml').send(gather(host, token, await sayEl(host, 'Sorry, I didn’t catch that. Go on.'), leg));
+
+    // OWNER COMMAND MODE: his speech is an instruction → run the FULL agent (tools + Mac relay),
+    // speak the result, loop. Long tasks race an 11s timer so Twilio doesn't time out; if still
+    // running we say "on it" and poll /ownerwait until it finishes.
+    if (leg === 'owner' || c.owner) {
+      if (/\b(that'?s all|nothing else|that is all|we'?re done|hang up|good\s?bye|^bye)\b/i.test(speech)) {
+        relaySummary(sid);
+        return res.type('text/xml').send(hangup(await sayEl(host, 'Very good, sir. Goodbye.')));
+      }
+      db.pushActivity('call', `🗣 Siddhant (call): “${speech.slice(0, 140)}”`);
+      c.history.push({ role: 'user', content: speech });
+      c.pendingResult = undefined;
+      c.pending = require('./agent').runTurn('phone-voice', speech)
+        .then((r) => { c.pendingResult = condense(r && r.text); c.history.push({ role: 'assistant', content: c.pendingResult }); return c.pendingResult; })
+        .catch((e) => { c.pendingResult = 'I hit an error: ' + e.message; return c.pendingResult; });
+      const winner = await Promise.race([c.pending, new Promise((r) => setTimeout(() => r(null), 11000))]);
+      if (winner != null) { c.pendingResult = undefined; return res.type('text/xml').send(gather(host, token, await sayEl(host, winner + ' Anything else, sir?'), 'owner')); }
+      const hold = await sayEl(host, 'On it — one moment.');
+      return res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?><Response>${hold}<Redirect method="POST">https://${host}/voice/${token}/ownerwait?n=0</Redirect></Response>`);
+    }
+    // ASK leg: BhatBot called Siddhant for input → capture his spoken answer + end.
+    if (leg === 'ask') {
+      c.answer = speech;
+      db.pushActivity('call', `🆘 your answer: “${speech.slice(0, 140)}”`);
+      return res.type('text/xml').send(hangup(await sayEl(host, 'Thank you, sir — I’ll proceed with that.')));
+    }
 
     // Inbound screening: after we learn who/why, text the owner the options and put caller on hold.
     if (leg === 'screen' && c.dir === 'in' && !c.screened) {
@@ -181,6 +245,24 @@ function mount(app, { token, form }) {
     res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?><Response><Pause length="5"/><Redirect method="POST">https://${host}/voice/${token}/wait?n=${n + 1}</Redirect></Response>`);
   });
 
+  // Owner command-mode hold loop — poll for the agent task to finish, then speak the result.
+  app.post('/voice/:token/ownerwait', form, async (req, res) => {
+    if (!verified(req)) return reject(res);
+    const sid = req.body.CallSid || ''; const c = getCall(sid); const host = req.get('host'); const n = Number(req.query.n || 0);
+    if (c.pendingResult !== undefined) { const t = c.pendingResult; c.pendingResult = undefined; return res.type('text/xml').send(gather(host, token, await sayEl(host, t + ' Anything else, sir?'), 'owner')); }
+    if (n >= 16) { return res.type('text/xml').send(gather(host, token, await sayEl(host, 'Still working on that — I’ll text you when it’s done. Anything else?'), 'owner')); }
+    res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?><Response><Pause length="3"/><Redirect method="POST">https://${host}/voice/${token}/ownerwait?n=${n + 1}</Redirect></Response>`);
+  });
+
+  // ASK first leg — BhatBot is calling Siddhant for input; ask the question, then listen.
+  app.post('/voice/:token/ask', form, async (req, res) => {
+    if (!verified(req)) return reject(res);
+    const sid = req.body.CallSid || ''; const c = getCall(sid); c.dir = 'ask'; c.peer = req.body.To || OWNER;
+    const host = req.get('host'); const q = req.query.q || c.question || 'I need your input on something.';
+    c.question = q;
+    res.type('text/xml').send(gather(host, token, await sayEl(host, `Good evening, sir. BhatBot here — I need your input. ${q}`), 'ask'));
+  });
+
   // Status callback (call ended) → ensure a summary went out.
   app.post('/voice/:token/status', form, (req, res) => { if (verified(req) && req.body.CallStatus === 'completed') relaySummary(req.body.CallSid || ''); res.status(204).end(); });
 
@@ -213,4 +295,4 @@ function relaySummary(sid) {
   db.pushActivity('call', `${head} summary texted to you`);
 }
 
-module.exports = { mount, placeCall, sendSMS, notifyOwner, configured };
+module.exports = { mount, placeCall, askOwner, sendSMS, notifyOwner, configured };

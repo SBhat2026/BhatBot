@@ -47,6 +47,11 @@ const REGISTRY = {
       input_schema: { type: 'object', properties: { to: { type: 'string' }, message: { type: 'string' } }, required: ['to', 'message'] } },
     run: async ({ to, message }) => { if (!twilio || !twilio.configured()) return { success: false, error: 'texting not available' }; await twilio.sendSMS(to, message); return { success: true, result: `Texted ${to}.` }; },
   },
+  ask_owner: {
+    def: { name: 'ask_owner', description: 'CALL Siddhant on the phone to get a decision or information only HE can provide, when you are genuinely blocked mid-task (e.g. a choice, an approval, a value you do not have). He answers by voice and his spoken reply is returned to you so you can continue. Use sparingly — only when you truly cannot proceed without his input.',
+      input_schema: { type: 'object', properties: { question: { type: 'string', description: 'One clear spoken-style question to ask him.' } }, required: ['question'] } },
+    run: async ({ question }) => twilio ? twilio.askOwner(question) : { success: false, error: 'calling not available' },
+  },
   // ---- Mac-relay tools (run on the computer when it's awake) -------------------
   run_shell: {
     def: { name: 'run_shell', description: 'Run a shell command on Siddhant’s Mac (needs the computer awake + connected). rm/rmdir/trash are blocked from remote for safety.',
