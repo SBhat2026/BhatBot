@@ -68,6 +68,11 @@ async function converse(sid, speech, sysExtra) {
   return reply;
 }
 
+// Siddhant's butler persona for inbound (non-owner) calls + a civility backstop.
+const BUTLER_SYS = "You are Siddhant Bhat's courteous, professional butler answering his phone line (you are his assistant, never him). You already know who is calling and why. Acknowledge them warmly — by name if they gave one — then offer to help on his behalf: answer what you reasonably can, take any details or a message, and assure them you'll pass it along to Siddhant. Speak as a real butler would: gracious, composed, one or two short sentences per turn, no markdown. If the caller is rude, insulting, vulgar, demeaning, or hostile, give exactly ONE polite warning; if the disrespect continues, end the call by appending the literal token [END_CALL] to a final courteous sentence. When their business is clearly concluded, wrap up warmly (you may also use [END_CALL]). Never tolerate abuse, but never be abrupt or impolite yourself.";
+const ABUSE_RE = /\b(f+u+c+k\w*|motherf\w*|sh[i1]t\w*|b[i1]tch\w*|assholes?|c[u]nt\w*|dickheads?|bastards?|shut up|screw you|piss off|go to hell|n[i1]gg\w*|fa[g6]+ots?|slut|whore)\b/i;
+function isAbusive(t) { return ABUSE_RE.test(String(t || '')); }
+
 // ---- outbound: the agent tool calls this -------------------------------------
 async function placeCall(to, purpose) {
   if (!configured()) return { success: false, error: 'Twilio not configured (set TWILIO_SID/TOKEN/FROM secrets).' };
@@ -202,14 +207,41 @@ function mount(app, { token, form }) {
       return res.type('text/xml').send(hangup(await sayEl(host, 'Thank you, sir — I’ll proceed with that.')));
     }
 
-    // Inbound screening: after we learn who/why, text the owner the options and put caller on hold.
-    if (leg === 'screen' && c.dir === 'in' && !c.screened) {
-      c.screened = true; c.reason = speech;
-      await converse(sid, speech, 'Acknowledge warmly and say you\'ll check if Siddhant is available — ask them to hold a moment.');
-      notifyOwner(`📞 Call from ${c.peer}: “${speech.slice(0, 200)}”\nReply TAKE to be connected, HANDLE to let me deal with it, or VM for a message.`);
-      db.pushActivity('call', `🛎 screening ${c.peer}: ${speech.slice(0, 140)} — texted you (TAKE/HANDLE/VM)`);
-      const hold = await sayEl(host, 'One moment please — let me see if Siddhant is available.');
-      return res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?><Response>${hold}<Redirect method="POST">https://${host}/voice/${token}/wait?n=0</Redirect></Response>`);
+    // Inbound BUTLER mode: BhatBot answers as Siddhant's courteous butler. It has learned who/why,
+    // texts the owner (who may reply TAKE to jump in), then helps the caller on his behalf and
+    // relays a summary. Disrespect → one polite warning, then a courteous hang-up.
+    if ((leg === 'screen' || leg === 'butler') && c.dir === 'in') {
+      // Owner texted TAKE → bridge the caller to him right away.
+      if (c.decision === 'take') {
+        const bye = await sayEl(host, 'Of course — connecting you to Siddhant now. One moment.');
+        return res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?><Response>${bye}<Dial callerId="${xmlEsc(FROM)}" timeout="25">${xmlEsc(OWNER)}</Dial></Response>`);
+      }
+      // Civility backstop: obvious abuse → warn once, end politely on a repeat.
+      if (isAbusive(speech)) {
+        c.rude = (c.rude || 0) + 1;
+        if (c.rude >= 2) {
+          db.pushActivity('call', `🚫 ended call from ${c.peer} — disrespectful`);
+          notifyOwner(`🚫 Ended a call from ${c.peer} — the caller was being disrespectful.`);
+          relaySummary(sid);
+          return res.type('text/xml').send(hangup(await sayEl(host, 'I’m sorry, but I won’t be able to continue this call. Good day.')));
+        }
+        const warn = await sayEl(host, 'I’d kindly ask that we keep this respectful. How may I help you on Siddhant’s behalf?');
+        return res.type('text/xml').send(gather(host, token, warn, 'butler'));
+      }
+      // First screening turn → record who/why and quietly notify the owner.
+      if (!c.screened) {
+        c.screened = true; c.reason = speech;
+        notifyOwner(`📞 Call from ${c.peer}: “${speech.slice(0, 200)}”\nReply TAKE to be connected — otherwise I’ll assist them as your butler and text you a summary.`);
+        db.pushActivity('call', `🛎 ${c.peer}: ${speech.slice(0, 140)} — assisting as butler (reply TAKE to jump in)`);
+      }
+      // Courteous butler turn: acknowledge, offer help, take details, relay later.
+      const r = await converse(sid, speech, BUTLER_SYS);
+      if (/\[END_?CALL\]/i.test(r) || /\b(goodbye|good bye|take care|have a (great|good) (day|one)|bye now)\b/i.test(r)) {
+        const clean = r.replace(/\[END_?CALL\]/ig, '').trim() || 'Thank you for calling. Good day.';
+        relaySummary(sid);
+        return res.type('text/xml').send(hangup(await sayEl(host, clean)));
+      }
+      return res.type('text/xml').send(gather(host, token, await sayEl(host, r), 'butler'));
     }
     // Take-a-message leg → store + relay to owner, thank caller, hang up.
     if (leg === 'msg') {
