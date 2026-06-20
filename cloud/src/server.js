@@ -106,6 +106,14 @@ app.post('/api/:token/schedules/:id/delete', guard, (req, res) => res.json(sched
 // only if Twilio is configured. urlencoded body parser because Twilio POSTs form-encoded.
 if (twilio.configured()) twilio.mount(app, { token: TOKEN, form: express.urlencoded({ extended: false }) });
 
+// When the Mac wakes and drains commands queued while it slept, text Siddhant the outcome.
+relay.setDrainNotifier((results) => {
+  try {
+    const ok = results.filter((r) => r.ok).length;
+    twilio.notifyOwner(`🖥 Mac woke — ran ${results.length} queued command(s) (${ok} ok): ${results.map((r) => `${r.ok ? '✓' : '✗'} ${r.tool}`).join(', ')}`);
+  } catch {}
+});
+
 const server = http.createServer(app);
 
 // ---- WebSocket: the Mac executor dials in here --------------------------------

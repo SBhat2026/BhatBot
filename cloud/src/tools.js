@@ -5,7 +5,7 @@
 //     else they return a graceful "computer offline". Names match the desktop's executeTool
 //     tool names EXACTLY, so the Mac bridge can run them with no translation.
 const db = require('./db');
-const { macExec, macOnline } = require('./relay');
+const { macExec, macOnline, queueExec } = require('./relay');
 let twilio = null; try { twilio = require('./twilio'); } catch {}
 
 // ---- cloud-native implementations ---------------------------------------------
@@ -98,6 +98,28 @@ const REGISTRY = {
       input_schema: { type: 'object', properties: { action: { type: 'string', enum: ['start', 'stop', 'status', 'review', 'save', 'snapshot', 'clear'] }, minutes: { type: 'number' }, everySeconds: { type: 'number' }, items: { type: 'array', items: { type: 'string' } } }, required: ['action'] } },
     relay: true,
   },
+  project: {
+    def: { name: 'project', description: 'Open and track a project with a living, auto-updating summary on the Mac. action: open/list/status/note/summary/close. Use "open" when Siddhant starts/switches to a project so BhatBot keeps its context. Needs the computer awake (queues if asleep).',
+      input_schema: { type: 'object', properties: { action: { type: 'string', enum: ['open', 'list', 'status', 'note', 'summary', 'close'] }, name: { type: 'string' }, text: { type: 'string' }, kind: { type: 'string', enum: ['note', 'decision', 'milestone'] } }, required: ['action'] } },
+    relay: true,
+  },
+  ambient: {
+    def: { name: 'ambient', description: 'Inspect/control ambient awareness (proactive Calendar/Mail monitoring) on the Mac. action: scan/status/enable/disable (optional source: calendar|mail). Needs the computer awake.',
+      input_schema: { type: 'object', properties: { action: { type: 'string', enum: ['scan', 'status', 'enable', 'disable'] }, source: { type: 'string', enum: ['calendar', 'mail'] } }, required: ['action'] } },
+    relay: true,
+  },
+  subagent: {
+    def: { name: 'subagent', description: 'Delegate to a persistent specialized sub-agent on the Mac (research/coding/lifeadmin), each with its own memory + scoped tools. action: run/list/history/reset; run{agent,task,background}. Needs the computer awake.',
+      input_schema: { type: 'object', properties: { action: { type: 'string', enum: ['run', 'list', 'history', 'reset'] }, agent: { type: 'string', enum: ['research', 'coding', 'lifeadmin'] }, task: { type: 'string' }, background: { type: 'boolean' } }, required: ['action'] } },
+    relay: true,
+  },
+  wake_mac: {
+    def: { name: 'wake_mac', description: 'Check whether Siddhant\'s Mac is awake/connected and ready for computer tasks. If it\'s asleep, any computer task you then issue is QUEUED and runs automatically the moment it wakes (he gets texted the result). Use when a computer task is needed and you\'re unsure the Mac is up, or when he says "wake my computer".',
+      input_schema: { type: 'object', properties: {} } },
+    run: async () => (macOnline()
+      ? { success: true, awake: true, result: 'Your computer is awake and connected.' }
+      : { success: true, awake: false, result: 'Your computer appears asleep. It stays reachable while plugged in (it keeps itself awake on AC power). Anything you ask me to do on it now will be queued and run the instant it wakes — I\'ll text you the result.' }),
+  },
 };
 
 function toolDefs() { return Object.values(REGISTRY).map((t) => t.def); }
@@ -107,7 +129,7 @@ function isRelay(name) { return !!(REGISTRY[name] && REGISTRY[name].relay); }
 // mode is passphrase-gated (stepped up); SMS is NOT (caller-ID/number is spoofable and there's no
 // passphrase), so high-risk tools are denied over SMS even from the owner number. Phone-channel
 // compromise is a different threat model than physical Mac access — scope tools accordingly.
-const HIGH_RISK = new Set(['run_shell', 'system_control', 'write_file']);
+const HIGH_RISK = new Set(['run_shell', 'system_control', 'write_file', 'subagent']);
 const UNTRUSTED_CHANNELS = new Set(['sms']);
 function channelAllows(name, channel) { return !(HIGH_RISK.has(name) && UNTRUSTED_CHANNELS.has(channel)); }
 
@@ -121,7 +143,13 @@ async function dispatchTool(name, input, source) {
   const start = Date.now();
   let res;
   try {
-    res = t.relay ? await macExec(name, input || {}) : await t.run(input || {});
+    if (t.relay) {
+      res = await macExec(name, input || {});
+      // Mac asleep → don't just fail: queue the command so it runs when the computer wakes.
+      if (res && res.offline) res = queueExec(name, input || {});
+    } else {
+      res = await t.run(input || {});
+    }
   } catch (e) { res = { success: false, error: String(e && e.message ? e.message : e) }; }
   // Append-only audit trail of every tool call (args redacted in db.logTool).
   try {

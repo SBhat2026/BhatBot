@@ -4385,11 +4385,18 @@ async function phoneControl(tool, input) {
 // are set, the Mac dials out to the cloud over a WebSocket and runs computer-only tools the
 // cloud agent dispatches (shell, AppleScript, browser, screen). This is what makes the phone
 // fully capable while keeping the cloud as the always-on brain. No-op if not configured.
-let _cloudBridge = null;
+let _cloudBridge = null, _caffeinate = null;
 function startCloudBridge() {
   try {
     const c = loadConfig();
     if (!c.cloudUrl || !c.cloudToken) return;
+    // Keep the Mac reachable so the phone can always wake/use it: prevent system sleep while
+    // bridged. `caffeinate -s` only holds sleep off on AC power (so it won't drain on battery),
+    // which means "keep it plugged in → phone can always reach it." Disable: cloudKeepAwake:false.
+    if (c.cloudKeepAwake !== false && process.platform === 'darwin' && !_caffeinate) {
+      try { _caffeinate = spawn('caffeinate', ['-s'], { env: { ...process.env, PATH: EXEC_PATH } }); _caffeinate.on('exit', () => { _caffeinate = null; }); }
+      catch {}
+    }
     const bridge = require('./lib/cloud-bridge');
     _cloudBridge = bridge.start({
       url: c.cloudUrl,
