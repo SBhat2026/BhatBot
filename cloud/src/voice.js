@@ -7,11 +7,16 @@ const EL_VOICE = process.env.ELEVENLABS_VOICE_ID || 'EzDG2x1uAnCqbzN9Q0wA';
 // a live call (flash trades quality for the last ~100ms). Override with ELEVENLABS_MODEL.
 const EL_MODEL = process.env.ELEVENLABS_MODEL || 'eleven_turbo_v2_5';
 const TTS_SPEED = Math.max(0.7, Math.min(1.2, parseFloat(process.env.TTS_SPEED) || 1.0));
-// Voice character (all env-tunable so cadence/warmth can be dialed in without a redeploy):
-//  stability ↓ = more expressive/varied (less robotic monotone); style ↑ = more human inflection.
-const EL_STABILITY = clamp01(process.env.EL_STABILITY, 0.45);
-const EL_SIMILARITY = clamp01(process.env.EL_SIMILARITY, 0.85);
-const EL_STYLE = clamp01(process.env.EL_STYLE, 0.5);
+// Voice character (all env-tunable so cadence/warmth can be dialed in without a redeploy).
+// Defaults follow the J.A.R.V.I.S. humanization guide §3 — the target for a Bettany-style clone:
+//  • stability 0.40  (35–45%): lowered so the AI adds emotional variance + natural intonation
+//                    instead of a monotone, robotic read. Most impactful knob.
+//  • similarity 0.90 (85–95%): high → stays true to the voice's signature (drop to ~0.80 if clinical).
+//  • style 0.20      (15–25%): a subtle amount of "character" without a caricature.
+//  • speaker boost on: keeps the richness/depth in the lower frequencies.
+const EL_STABILITY = clamp01(process.env.EL_STABILITY, 0.40);
+const EL_SIMILARITY = clamp01(process.env.EL_SIMILARITY, 0.90);
+const EL_STYLE = clamp01(process.env.EL_STYLE, 0.20);
 const EL_SPEAKER_BOOST = process.env.EL_SPEAKER_BOOST !== '0';
 const OPENAI_KEY = process.env.OPENAI_API_KEY || '';
 function clamp01(v, d) { const n = parseFloat(v); return isFinite(n) ? Math.max(0, Math.min(1, n)) : d; }

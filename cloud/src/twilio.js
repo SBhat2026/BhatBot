@@ -54,14 +54,18 @@ async function sayEl(host, text) {
 }
 // Turn-taking knobs (env-tunable): the caller fed back that BhatBot interrupted + missed speech.
 //  • speechTimeout = seconds of trailing SILENCE before we treat the turn as done. "auto" uses
-//    Twilio's endpointing (can clip mid-thought); a fixed value (default 2s) is more patient.
+//    Twilio's endpointing (can clip mid-thought); a fixed value (default 3s) is more patient so it
+//    properly waits until you're actually finished talking before responding.
+//  • bargeIn = let the caller cut in WHILE BhatBot is speaking — Twilio stops the prompt the moment
+//    it detects speech, so you can interrupt instead of waiting for it to finish.
 //  • speechModel "phone_call" + enhanced is Twilio's telephony-optimized recognizer → fewer "say
 //    that again" repeats than experimental_conversations on a noisy line.
-const GATHER_TIMEOUT = process.env.GATHER_SPEECH_TIMEOUT || '2';
+const GATHER_TIMEOUT = process.env.GATHER_SPEECH_TIMEOUT || '3';
 const GATHER_MODEL = process.env.GATHER_SPEECH_MODEL || 'phone_call';
 const GATHER_ENHANCED = process.env.GATHER_ENHANCED !== '0';
+const GATHER_BARGEIN = process.env.GATHER_BARGEIN !== '0';
 const gather = (host, token, playEl, leg) => `<?xml version="1.0" encoding="UTF-8"?><Response>` +
-  `<Gather input="speech" action="https://${host}/voice/${token}/gather?leg=${leg}" method="POST" speechTimeout="${GATHER_TIMEOUT}" speechModel="${GATHER_MODEL}" enhanced="${GATHER_ENHANCED}" actionOnEmptyResult="true">${playEl}</Gather>` +
+  `<Gather input="speech" action="https://${host}/voice/${token}/gather?leg=${leg}" method="POST" speechTimeout="${GATHER_TIMEOUT}" speechModel="${GATHER_MODEL}" enhanced="${GATHER_ENHANCED}" bargeIn="${GATHER_BARGEIN}" actionOnEmptyResult="true">${playEl}</Gather>` +
   `<Redirect method="POST">https://${host}/voice/${token}/gather?leg=${leg}</Redirect></Response>`;
 const hangup = (playEl) => `<?xml version="1.0" encoding="UTF-8"?><Response>${playEl}<Hangup/></Response>`;
 
@@ -131,6 +135,28 @@ async function askOwner(question, opts = {}) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) { if (c.answer !== undefined) return { success: true, answer: c.answer, result: `You said: ${c.answer}` }; await sleep(1500); }
   return { success: true, answer: c.answer ?? null, note: 'no spoken answer captured in time (you may not have answered)' };
+}
+
+// ---- outbound: CALL Siddhant to give him a spoken briefing, then stay in command mode -----
+// Used by the scheduler (e.g. a 3pm check-in). We dialed his verified number ourselves, so this is
+// trusted → drops straight into command mode (full agent + tools) with NO passphrase, and any
+// instruction he speaks is executed live.
+async function briefOwner(message, opts = {}) {
+  if (!configured()) return { success: false, error: 'Twilio not configured' };
+  if (!OWNER) return { success: false, error: 'OWNER_PHONE not set' };
+  if (!PUBLIC_URL) return { success: false, error: 'PUBLIC_URL not set' };
+  const token = process.env.BHATBOT_TOKEN;
+  let j;
+  try {
+    j = await twilioPost('Calls.json', {
+      To: OWNER, From: FROM,
+      Url: `${PUBLIC_URL}/voice/${token}/brief?msg=${enc(String(message || '').slice(0, 900))}`,
+      StatusCallback: `${PUBLIC_URL}/voice/${token}/status`, StatusCallbackEvent: 'completed',
+    });
+  } catch (e) { return { success: false, error: e.message }; }
+  const c = getCall(j.sid); c.dir = 'brief'; c.peer = OWNER; c.owner = true;
+  db.pushActivity('call', `📞→ briefing you${message ? ': ' + String(message).slice(0, 80) : ''}`);
+  return { success: true, callSid: j.sid, result: 'Calling you now with the update.' };
 }
 
 // ---- Twilio signature check (defense even though token-gated) ------------------
@@ -339,6 +365,18 @@ function mount(app, { token, form }) {
     res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?><Response><Pause length="3"/><Redirect method="POST">https://${host}/voice/${token}/ownerwait?n=${n + 1}</Redirect></Response>`);
   });
 
+  // BRIEF first leg — BhatBot called Siddhant to give him an update; speak it, then stay in
+  // command mode so anything he says is run by the full agent (tools execute live).
+  app.post('/voice/:token/brief', form, async (req, res) => {
+    if (!verified(req)) return reject(res);
+    const sid = req.body.CallSid || ''; const c = getCall(sid); c.dir = 'brief'; c.peer = req.body.To || OWNER; c.owner = true;
+    const host = req.get('host');
+    const msg = (req.query.msg || '').toString().trim() || 'Good afternoon, sir. BhatBot here with your update.';
+    c.history.push({ role: 'assistant', content: msg });
+    db.pushActivity('call', '📞← briefing call answered (command mode)');
+    return res.type('text/xml').send(gather(host, token, await sayEl(host, msg + ' What would you like me to do, sir?'), 'owner'));
+  });
+
   // ASK first leg — BhatBot is calling Siddhant for input; ask the question, then listen.
   app.post('/voice/:token/ask', form, async (req, res) => {
     if (!verified(req)) return reject(res);
@@ -380,4 +418,4 @@ function relaySummary(sid) {
   db.pushActivity('call', `${head} summary texted to you`);
 }
 
-module.exports = { mount, placeCall, askOwner, sendSMS, notifyOwner, configured };
+module.exports = { mount, placeCall, askOwner, briefOwner, sendSMS, notifyOwner, configured };

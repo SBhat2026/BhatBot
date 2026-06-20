@@ -47,6 +47,11 @@ const REGISTRY = {
       input_schema: { type: 'object', properties: { to: { type: 'string' }, message: { type: 'string' } }, required: ['to', 'message'] } },
     run: async ({ to, message }) => { if (!twilio || !twilio.configured()) return { success: false, error: 'texting not available' }; await twilio.sendSMS(to, message); return { success: true, result: `Texted ${to}.` }; },
   },
+  brief_owner: {
+    def: { name: 'brief_owner', description: 'CALL Siddhant on the phone and give him a spoken status update / briefing, then stay on the line in command mode so he can give you instructions which you execute live. Use for scheduled check-ins or when you proactively need to update him by voice. Provide the spoken opening briefing.',
+      input_schema: { type: 'object', properties: { message: { type: 'string', description: 'The spoken briefing to open the call with (warm, concise, a few sentences).' } }, required: ['message'] } },
+    run: async ({ message }) => twilio ? twilio.briefOwner(message) : { success: false, error: 'calling not available' },
+  },
   ask_owner: {
     def: { name: 'ask_owner', description: 'CALL Siddhant on the phone to get a decision or information only HE can provide, when you are genuinely blocked mid-task (e.g. a choice, an approval, a value you do not have). He answers by voice and his spoken reply is returned to you so you can continue. Use sparingly — only when you truly cannot proceed without his input.',
       input_schema: { type: 'object', properties: { question: { type: 'string', description: 'One clear spoken-style question to ask him.' } }, required: ['question'] } },
