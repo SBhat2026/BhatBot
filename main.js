@@ -20,6 +20,7 @@ const wsState = require('./lib/state');
 const wsMemory = require('./lib/memory');
 const semantic = require('./lib/semantic');           // #12 — embedding-based semantic/episodic recall (degrades gracefully)
 const subagents = require('./lib/subagents');          // #20 — persistent specialized sub-agents (research/coding/lifeadmin)
+const ambient = require('./lib/ambient');              // #18 — opt-in proactive Calendar/Mail awareness (OFF by default)
 const visualInspect = require('./lib/inspect');
 const security = require('./lib/security');          // P0.4 — injection sanitizer + daily audit
 const notion = require('./lib/notion');               // P3  — Notion long-term memory (degrades gracefully)
@@ -1822,6 +1823,11 @@ const TOOLS = [
       items: { type: 'array', items: { type: 'string' }, description: 'For save: approved plain-English facts/habits to remember.' }
     }, required: ['action'] } },
   { name: 'request_permissions', description: 'Trigger the macOS Screen Recording + Accessibility permission prompts for BhatBot and open the matching System Settings → Privacy panes so Siddhant can toggle the app on. Use when vision_click / screen_parse / native login / AppleScript fail for permissions, or when he asks to "grant permissions" / "fix permissions".', input_schema: { type: 'object', properties: {} } },
+  { name: 'ambient', description: 'Inspect or control the AMBIENT AWARENESS layer — opt-in proactive monitoring of Siddhant\'s Calendar (upcoming events + conflicts) and Mail (unread needing a reply) that surfaces high-signal items unprompted. OFF by default; privacy-first (titles/subjects/counts only, redacted, quiet-hours-aware). action:"status" shows watchers + state; "scan" runs one pass now and returns a digest; "enable"/"disable" toggle it (optionally a single source: calendar|mail). Use when Siddhant asks to "keep an eye on my calendar/email", "what\'s coming up", or to turn ambient monitoring on/off.',
+    input_schema: { type: 'object', properties: {
+      action: { type: 'string', enum: ['scan', 'status', 'enable', 'disable'] },
+      source: { type: 'string', enum: ['calendar', 'mail'], description: 'Optional: toggle just this watcher.' }
+    }, required: ['action'] } },
   { name: 'subagent', description: 'Delegate to a PERSISTENT specialized sub-agent that keeps its OWN memory/context across tasks and has a scoped toolset — for recurring, focused work and for doing several things at once. Agents: "research" (analysis/sources/synthesis), "coding" (code changes + verify, can use claude_code), "lifeadmin" (scheduling/reminders/logistics). action:"run"{agent, task, background?} runs it (background:true returns immediately and works in parallel while you keep going — use for "do X and Y at the same time"); "list" shows agents + how many turns each remembers; "history"{agent}; "reset"{agent} wipes one agent\'s memory. Use this instead of doing big specialized work inline when it benefits from a dedicated, remembering specialist.',
     input_schema: { type: 'object', properties: {
       action: { type: 'string', enum: ['run', 'list', 'history', 'reset'] },
@@ -3482,6 +3488,22 @@ async function executeTool(name, input) {
         result = await browserObserve(input); break;
       case 'self_improve':
         result = await selfImproveScan(input || {}); break;
+      case 'ambient': {
+        const a = input.action;
+        if (a === 'status') { result = { success: true, ...ambient.sources() }; break; }
+        if (a === 'scan') { const r = await ambient.scan(); result = { success: !r.error, ...r, digest: ambient.digest(r.signals || []) }; break; }
+        if (a === 'enable' || a === 'disable') {
+          const cur = loadConfig().ambient || {};
+          const next = { ...cur, enabled: a === 'enable' };
+          if (input.source) next.sources = { ...(cur.sources || {}), [input.source]: a === 'enable' };
+          saveConfig({ ambient: next });
+          if (a === 'enable') startAmbient(); else if (_ambientTimer) { clearInterval(_ambientTimer); _ambientTimer = null; }
+          result = { success: true, ambient: next, result: `Ambient awareness ${a}d${input.source ? ' for ' + input.source : ''}.` };
+          break;
+        }
+        result = { success: false, error: 'unknown ambient action: ' + a };
+        break;
+      }
       case 'subagent': {
         const act = input.action || 'list';
         if (act === 'list') { result = { success: true, agents: subagents.list() }; break; }
@@ -4796,6 +4818,33 @@ Flag anything urgent with ⚠.`;
 // BhatBot act on its own: reminders, recurring checks, "do X every morning / in 30 min".
 // ---------------------------------------------------------------------------
 let schedulerTimer = null, schedulerRunning = new Set(), schedulerBusy = false;
+// Ambient awareness (#18): opt-in proactive monitoring of Calendar/Mail. OFF unless
+// config.ambient.enabled — never schedules otherwise, so no permission prompts. Surfaces only
+// NEW, deduped, redacted, non-quiet-hours signals via the existing out-of-band channels.
+let _ambientTimer = null;
+function startAmbient() {
+  try {
+    if (!ambient.isEnabled()) return;                 // master switch OFF → do nothing
+    const cfg = ambient.loadConfig();
+    const everyMs = Math.max(5, Number(cfg.intervalMin) || 30) * 60 * 1000;
+    if (_ambientTimer) clearInterval(_ambientTimer);
+    const tick = async () => {
+      try {
+        const res = await ambient.scan();
+        if (!res || res.skipped || !res.signals || !res.signals.length) return;
+        const brief = ambient.digest(res.signals);
+        if (!brief) return;
+        try { telegramNotify('🛰 ' + brief); } catch {}
+        try { sendToActivity('tool-update', { type: 'thinking', text: '🛰 ambient: ' + brief.replace(/\n/g, ' ').slice(0, 200) }); } catch {}
+        ambient.markSurfaced(res.signals);
+      } catch (e) { console.error('[ambient] tick failed:', e.message); }
+    };
+    _ambientTimer = setInterval(tick, everyMs);
+    setTimeout(tick, 15000);   // first pass once perms/window settle
+    console.log('[ambient] started (every ' + (everyMs / 60000) + 'm)');
+  } catch (e) { console.error('[ambient] start failed:', e.message); }
+}
+
 function startScheduler() {
   if (schedulerTimer) return;
   schedulerTimer = setInterval(tickScheduler, 30000);
@@ -6120,6 +6169,7 @@ app.whenReady().then(() => {
     startTelegramBridge();
     scheduleBriefing();
     startScheduler();   // proactive recurring/one-off tasks
+    startAmbient();     // #18 opt-in ambient awareness (no-op unless config.ambient.enabled)
     // Pre-warm local Kokoro TTS so the first spoken reply isn't cold (~0.8s load), then give a
     // short spoken "ready" confirmation once warm (ambient mode has no visual chat affordance,
     // so the greeting tells you BhatBot is live and listening). Fires once.
