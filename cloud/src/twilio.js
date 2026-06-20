@@ -52,8 +52,16 @@ async function sayEl(host, text) {
   } catch {}
   return `<Say voice="Google.en-US-Neural2-D">${xmlEsc(t)}</Say>`;   // fallback so the call never goes silent
 }
+// Turn-taking knobs (env-tunable): the caller fed back that BhatBot interrupted + missed speech.
+//  • speechTimeout = seconds of trailing SILENCE before we treat the turn as done. "auto" uses
+//    Twilio's endpointing (can clip mid-thought); a fixed value (default 2s) is more patient.
+//  • speechModel "phone_call" + enhanced is Twilio's telephony-optimized recognizer → fewer "say
+//    that again" repeats than experimental_conversations on a noisy line.
+const GATHER_TIMEOUT = process.env.GATHER_SPEECH_TIMEOUT || '2';
+const GATHER_MODEL = process.env.GATHER_SPEECH_MODEL || 'phone_call';
+const GATHER_ENHANCED = process.env.GATHER_ENHANCED !== '0';
 const gather = (host, token, playEl, leg) => `<?xml version="1.0" encoding="UTF-8"?><Response>` +
-  `<Gather input="speech" action="https://${host}/voice/${token}/gather?leg=${leg}" method="POST" speechTimeout="auto" speechModel="experimental_conversations" actionOnEmptyResult="true">${playEl}</Gather>` +
+  `<Gather input="speech" action="https://${host}/voice/${token}/gather?leg=${leg}" method="POST" speechTimeout="${GATHER_TIMEOUT}" speechModel="${GATHER_MODEL}" enhanced="${GATHER_ENHANCED}" actionOnEmptyResult="true">${playEl}</Gather>` +
   `<Redirect method="POST">https://${host}/voice/${token}/gather?leg=${leg}</Redirect></Response>`;
 const hangup = (playEl) => `<?xml version="1.0" encoding="UTF-8"?><Response>${playEl}<Hangup/></Response>`;
 

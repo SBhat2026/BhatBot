@@ -1820,14 +1820,38 @@ const CONFIRM_PATTERNS = [
   { re: /\btrash\b/, reason: 'This will move files to Trash.' }
 ];
 
-function auditLog(name, input, result) {
+const AUDIT_SECRET_KEYS = /^(password|pass|secret|token|api[_-]?key|credref|cred_ref|totp|otp|pin|passphrase|authorization)$/i;
+function redactForAudit(obj) {
+  try {
+    return JSON.stringify(obj, (k, v) => {
+      if (AUDIT_SECRET_KEYS.test(k)) return '«redacted»';
+      if (typeof v === 'string' && !/CRED_REF_/.test(v) && v.length > 200) return v.slice(0, 200) + '…';
+      return v;
+    }).slice(0, 1000);
+  } catch { return ''; }
+}
+// Append-only ledger of every tool call: tool, source (desktop vs remote/phone), redacted args,
+// ok, duration, and a short result. Secrets are never written (resolved values aren't in `input`
+// here, and secret-named keys are redacted). Forensic trail + feed for the cost/self-improve loops.
+function auditLog(name, input, result, ms) {
   try {
     fs.mkdirSync(path.dirname(AUDIT_PATH), { recursive: true });
+    const r = result || {};
     fs.appendFileSync(AUDIT_PATH, JSON.stringify({
       ts: new Date().toISOString(), tool: name,
-      input: JSON.stringify(input).slice(0, 200), ok: result.success !== false
+      source: isRemote() ? 'remote/phone' : 'desktop',
+      args: redactForAudit(input), ok: r.success !== false,
+      ms: ms != null ? Math.round(ms) : undefined,
+      result: String(r.error || r.result || (r.success !== false ? 'ok' : '')).slice(0, 300),
     }) + '\n');
   } catch {}
+}
+// Read the most recent audit entries (newest first) — used by cost/observability + self-improve.
+function readAudit(limit = 100) {
+  try {
+    const lines = fs.readFileSync(AUDIT_PATH, 'utf8').trim().split('\n');
+    return lines.slice(-Math.min(2000, limit)).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean).reverse();
+  } catch { return []; }
 }
 
 // Autonomous mode: the user explicitly wants maximum self-driving. When on (default true),
@@ -2634,7 +2658,34 @@ function saveMemoryEntry(section, content) {
   const insertAt = idx + heading.length;
   md = md.slice(0, insertAt) + '\n' + line + md.slice(insertAt + 1);
   fs.writeFileSync(MEMORY_PATH, md);
+  // SoT mirror: Notion is the authoritative durable store. Fire-and-forget + deduped so a fact
+  // written from the Mac and from the cloud doesn't diverge into two copies.
+  try { notion.appendMemory({ fact: content, tags: [section.toLowerCase().replace(/[^a-z]+/g, '-')], source: 'agent' }); } catch {}
   return { success: true, saved: `${section}: ${content}` };
+}
+
+// Write-through reconcile: pull recent AUTHORITATIVE facts from Notion into the local memory.md
+// cache, so facts the cloud wrote while the Mac slept appear locally too. Append-only and
+// de-duplicated against the current file — it never deletes, so divergence can only shrink.
+async function syncMemoryFromNotion() {
+  try {
+    if (!notion.isConfigured || !notion.isConfigured() || !notion.recentMemory) return;
+    const recent = await notion.recentMemory({ limit: 80 });
+    if (!recent || !recent.length) return;
+    let md = fs.existsSync(MEMORY_PATH) ? fs.readFileSync(MEMORY_PATH, 'utf8') : INITIAL_MEMORY;
+    const haveNorm = md.toLowerCase().replace(/[^a-z0-9 ]+/g, ' ');
+    const norm = (s) => s.toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 60);
+    const missing = recent.filter((m) => m.fact && norm(m.fact) && !haveNorm.includes(norm(m.fact)));
+    if (!missing.length) return;
+    const SECTION = '## Notes';
+    const idx = md.indexOf(SECTION);
+    if (idx === -1) return;
+    const insertAt = idx + SECTION.length;
+    const lines = missing.slice(0, 40).map((m) => `- ${(m.date || '').slice(0, 10) || today()}: [notion] ${m.fact}`).join('\n');
+    md = md.slice(0, insertAt) + '\n' + lines + '\n' + md.slice(insertAt + 1);
+    fs.writeFileSync(MEMORY_PATH, md);
+    sendToActivity('tool-update', { type: 'thinking', text: `🔄 reconciled ${missing.length} fact(s) from Notion into local memory.` });
+  } catch {}
 }
 
 // Ollama tool-calling: convert Anthropic-shaped messages+tools → Ollama /api/chat, then
@@ -3142,6 +3193,7 @@ function isRetryableTool(name, input) {
 
 async function executeTool(name, input) {
   let result;
+  const __auditT0 = Date.now();
   // Resolve CRED_REF_* handles to real secrets just before the tool runs. The audit log
   // (below) records `input` with the handles intact, never the decrypted secret.
   const auditInput = input;
@@ -3395,7 +3447,7 @@ async function executeTool(name, input) {
       } else if (name === 'browser' && typeof result.text === 'string') result.text = security.sanitizeExternalContent(result.text, 'browser');
     }
   } catch {}
-  auditLog(name, auditInput, result);   // log handles, never resolved secrets
+  auditLog(name, auditInput, result, Date.now() - __auditT0);   // log handles, never resolved secrets
   return result;
 }
 
@@ -5854,6 +5906,7 @@ app.whenReady().then(() => {
     initMcpServer();
     startCloudBridge();   // connect to the cloud backend as its Mac executor (if configured)
     setTimeout(() => { maybeMorningBrief(); }, 6000);   // first-open-of-day brief (cloud-gated)
+    setTimeout(() => { syncMemoryFromNotion(); }, 8000);   // write-through reconcile from the Notion SoT
     startTelegramBridge();
     scheduleBriefing();
     startScheduler();   // proactive recurring/one-off tasks

@@ -103,13 +103,21 @@ const REGISTRY = {
 function toolDefs() { return Object.values(REGISTRY).map((t) => t.def); }
 function isRelay(name) { return !!(REGISTRY[name] && REGISTRY[name].relay); }
 
-async function dispatchTool(name, input) {
+async function dispatchTool(name, input, source) {
   const t = REGISTRY[name];
   if (!t) return { success: false, error: 'unknown tool: ' + name };
+  const start = Date.now();
+  let res;
   try {
-    if (t.relay) return await macExec(name, input || {});
-    return await t.run(input || {});
-  } catch (e) { return { success: false, error: String(e && e.message ? e.message : e) }; }
+    res = t.relay ? await macExec(name, input || {}) : await t.run(input || {});
+  } catch (e) { res = { success: false, error: String(e && e.message ? e.message : e) }; }
+  // Append-only audit trail of every tool call (args redacted in db.logTool).
+  try {
+    db.logTool({ source: source || (t.relay ? 'cloud→mac' : 'cloud'), tool: name, args: input,
+      ok: res && res.success !== false, ms: Date.now() - start,
+      result: res && (res.error || res.result || (res.success !== false ? 'ok' : '')) });
+  } catch {}
+  return res;
 }
 
 module.exports = { toolDefs, dispatchTool, isRelay, macOnline };

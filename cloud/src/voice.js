@@ -3,9 +3,18 @@
 // Whisper STT. Lifted from the original server.js so it stays the same voice as the desktop.
 const EL_KEY = process.env.ELEVENLABS_API_KEY || '';
 const EL_VOICE = process.env.ELEVENLABS_VOICE_ID || 'EzDG2x1uAnCqbzN9Q0wA';
-const EL_MODEL = process.env.ELEVENLABS_MODEL || 'eleven_flash_v2_5';
-const TTS_SPEED = Math.max(0.7, Math.min(1.2, parseFloat(process.env.TTS_SPEED) || 1.08));
+// turbo_v2_5 is materially warmer/less synthetic than flash while staying low-latency enough for
+// a live call (flash trades quality for the last ~100ms). Override with ELEVENLABS_MODEL.
+const EL_MODEL = process.env.ELEVENLABS_MODEL || 'eleven_turbo_v2_5';
+const TTS_SPEED = Math.max(0.7, Math.min(1.2, parseFloat(process.env.TTS_SPEED) || 1.0));
+// Voice character (all env-tunable so cadence/warmth can be dialed in without a redeploy):
+//  stability ↓ = more expressive/varied (less robotic monotone); style ↑ = more human inflection.
+const EL_STABILITY = clamp01(process.env.EL_STABILITY, 0.45);
+const EL_SIMILARITY = clamp01(process.env.EL_SIMILARITY, 0.85);
+const EL_STYLE = clamp01(process.env.EL_STYLE, 0.5);
+const EL_SPEAKER_BOOST = process.env.EL_SPEAKER_BOOST !== '0';
 const OPENAI_KEY = process.env.OPENAI_API_KEY || '';
+function clamp01(v, d) { const n = parseFloat(v); return isFinite(n) ? Math.max(0, Math.min(1, n)) : d; }
 
 function normalizeForSpeech(input) {
   let s = String(input || '');
@@ -46,9 +55,9 @@ async function tts(text, opts = {}) {
   // alnum). Phones/old installs send local Kokoro names like "bm_george" → those 404'd on EL
   // and produced silence. Anything not an EL id falls back to the canonical Jarvis voice.
   const voice = /^[A-Za-z0-9]{20}$/.test(opts.voice || '') ? opts.voice : EL_VOICE;
-  const r = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voice}?output_format=mp3_44100_128&optimize_streaming_latency=3`, {
+  const r = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voice}?output_format=mp3_44100_128&optimize_streaming_latency=2`, {
     method: 'POST', headers: { 'xi-api-key': EL_KEY, 'content-type': 'application/json' },
-    body: JSON.stringify({ text: t, model_id: EL_MODEL, voice_settings: { stability: 0.38, similarity_boost: 0.75, style: 0.35, use_speaker_boost: true, speed } })
+    body: JSON.stringify({ text: t, model_id: EL_MODEL, voice_settings: { stability: EL_STABILITY, similarity_boost: EL_SIMILARITY, style: EL_STYLE, use_speaker_boost: EL_SPEAKER_BOOST, speed } })
   });
   if (!r.ok) return { error: 'elevenlabs ' + r.status + ': ' + (await r.text()).slice(0, 160) };
   const buf = Buffer.from(await r.arrayBuffer());

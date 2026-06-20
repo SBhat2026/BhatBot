@@ -40,6 +40,10 @@ CREATE TABLE IF NOT EXISTS activity (
 CREATE TABLE IF NOT EXISTS meta (
   key TEXT PRIMARY KEY, value TEXT
 );
+CREATE TABLE IF NOT EXISTS audit (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER, source TEXT, tool TEXT,
+  args TEXT, ok INTEGER, ms INTEGER, result TEXT
+);
 `);
 
 const now = () => Date.now();
@@ -113,6 +117,25 @@ function getActivity(since) {
   return { seq: _actMax.get().m, events: ev.map((e) => ({ id: e.id, kind: e.kind, text: e.text })) };
 }
 
+// ---- audit log (append-only ledger of every tool call; forensic + cost/router feed) ----------
+const SECRET_KEYS = /^(password|pass|secret|token|api[_-]?key|credref|cred_ref|totp|otp|pin|passphrase|authorization)$/i;
+function redactArgs(obj) {
+  try {
+    const s = JSON.stringify(obj, (k, v) => {
+      if (SECRET_KEYS.test(k)) return '«redacted»';
+      if (typeof v === 'string' && v.length > 300) return v.slice(0, 300) + '…';
+      return v;
+    });
+    return (s || '').slice(0, 1500);
+  } catch { return ''; }
+}
+const _insAudit = db.prepare('INSERT INTO audit (ts,source,tool,args,ok,ms,result) VALUES (?,?,?,?,?,?,?)');
+const _auditRecent = db.prepare('SELECT id,ts,source,tool,args,ok,ms,result FROM audit ORDER BY id DESC LIMIT ?');
+function logTool({ source = 'cloud', tool, args, ok, ms, result } = {}) {
+  try { _insAudit.run(now(), source, String(tool || ''), redactArgs(args), ok ? 1 : 0, Math.round(ms || 0), String(result == null ? '' : result).slice(0, 500)); } catch {}
+}
+function getAuditLog(limit = 100) { return _auditRecent.all(Math.min(1000, Number(limit) || 100)); }
+
 // ---- meta kv (small settings: last brief day, etc.) ---------------------------
 const _getMeta = db.prepare('SELECT value FROM meta WHERE key=?');
 const _setMeta = db.prepare('INSERT INTO meta (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=?');
@@ -125,4 +148,5 @@ module.exports = {
   saveMemory, recallMemory,
   recordCost, costToday,
   pushActivity, getActivity,
+  logTool, getAuditLog,
 };

@@ -73,9 +73,24 @@ async function recallSmart(query, limit = 5) {
   } catch { return direct; }
 }
 
-async function appendMemory(fact, { tags = [], source = 'agent', confidence = 0.8 } = {}) {
+// SoT dedup helpers (mirror lib/notion.js): Notion is authoritative, so don't write near-dups.
+function normFact(s) { return String(s || '').toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim(); }
+function similarFact(a, b) {
+  const na = normFact(a), nb = normFact(b); if (!na || !nb) return false;
+  if (na === nb || na.includes(nb) || nb.includes(na)) return true;
+  const ta = new Set(na.split(' ').filter((w) => w.length > 2)), tb = new Set(nb.split(' ').filter((w) => w.length > 2));
+  if (!ta.size || !tb.size) return false;
+  let inter = 0; for (const t of ta) if (tb.has(t)) inter++;
+  return inter / (ta.size + tb.size - inter) >= 0.8;
+}
+async function appendMemory(fact, { tags = [], source = 'agent', confidence = 0.8, dedup = true } = {}) {
   const nc = client(); if (!nc || !MEMORY_DB || !fact) return { skipped: true };
   try {
+    if (dedup) {
+      const r = await nc.databases.query({ database_id: MEMORY_DB, sorts: [{ timestamp: 'created_time', direction: 'descending' }], page_size: 60 }).catch(() => ({ results: [] }));
+      const exists = (r.results || []).some((p) => similarFact(propText(p.properties && (p.properties.Fact || p.properties.Name)), fact));
+      if (exists) return { success: true, deduped: true };
+    }
     await nc.pages.create({
       parent: { database_id: MEMORY_DB },
       properties: {

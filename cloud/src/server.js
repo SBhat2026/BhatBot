@@ -75,6 +75,7 @@ app.get('/api/:token/morning', guard, async (_q, res) => {
 
 // ---- activity + config --------------------------------------------------------
 app.get('/api/:token/activity', guard, (req, res) => { noStore(res); res.json(db.getActivity(req.query.since)); });
+app.get('/api/:token/audit', guard, (req, res) => { noStore(res); res.json({ entries: db.getAuditLog(Number(req.query.limit) || 100) }); });
 app.get('/api/:token/config', guard, (_q, s) => { noStore(s); s.json({ nexusUrl: process.env.NEXUS_URL || '', mac: relay.macStatus() }); });
 
 // ---- PWA (serve the same mobile UI so phone/native/browser can point here) -----
