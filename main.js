@@ -5026,10 +5026,14 @@ function startWakeHelper() {
         const line = buf.slice(0, i).trim();
         buf = buf.slice(i + 1);
         if (line === 'VOICE') {                              // barge-in: user spoke over the TTS
-          if (ttsActive) { stopDesktopTTS(); sendToActivity('tool-update', { type: 'thinking', text: '🎙 barge-in — stopped speaking' }); if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('barge-in', {}); }
+          if (ttsActive || agentState === 'running') {
+            bargeInInterrupt();                              // stop speaking AND abort the turn → listen
+            sendToActivity('tool-update', { type: 'thinking', text: '🎙 barge-in — stopped, listening' });
+            if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('barge-in', {});
+          }
         }
-        else if (line === 'WAKE') { if (ttsActive) stopDesktopTTS(); triggerWake(''); }   // wake also interrupts
-        else if (line.startsWith('CMD')) { if (ttsActive) stopDesktopTTS(); triggerWake(line.slice(3).trim()); }
+        else if (line === 'WAKE') { bargeInInterrupt(); triggerWake(''); }   // a spoken wake preempts the current turn
+        else if (line.startsWith('CMD')) { bargeInInterrupt(); triggerWake(line.slice(3).trim()); }
         else if (line === 'READY') console.log('[wake] listener ready');
       }
     });
@@ -5491,6 +5495,13 @@ function stopDesktopTTS() {
   if (ttsPlayProc) { try { ttsPlayProc.kill(); } catch {} ttsPlayProc = null; }
   setTtsActive(false);
   setWakeMute(false);   // clear any name-clip wake suppression on interrupt
+}
+// Barge-in (#19): true turn-taking — cancel in-flight speech AND abort the running agent turn so
+// BhatBot actually STOPS and listens (not just goes quiet while it keeps working). The finished
+// turn returns via finish('⏹ Stopped.') on the next loop check. Gated by config.bargeInAbortsTurn.
+function bargeInInterrupt() {
+  stopDesktopTTS();
+  if (agentState === 'running' && loadConfig().bargeInAbortsTurn !== false) agentState = 'stopped';
 }
 // Sentence chunks for streaming speech (synth one, play it while the next synthesizes).
 function splitForSpeech(text) {
