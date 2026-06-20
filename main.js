@@ -823,13 +823,19 @@ function buildSystemPrompt(query) {
 // Model routing
 // ---------------------------------------------------------------------------
 function chooseModel(lastUserMessage) {
-  if (overBudget()) return MODEL_HAIKU;             // past daily budget → cheapest cloud model
-  const sonnet = [
-    /write.*prompt/i, /claude.?code/i, /architect/i, /refactor/i, /debug/i,
-    /explain.*why/i, /design/i, /strategy/i, /research/i, /paper/i,
-    /how.*work/i, /optimize/i, /plan/i, /review/i
-  ];
-  return sonnet.some((p) => p.test(lastUserMessage)) ? MODEL_SONNET : MODEL_HAIKU;
+  let model, task;
+  if (overBudget()) { model = MODEL_HAIKU; task = 'budget'; }
+  else {
+    const sonnet = [
+      /write.*prompt/i, /claude.?code/i, /architect/i, /refactor/i, /debug/i,
+      /explain.*why/i, /design/i, /strategy/i, /research/i, /paper/i,
+      /how.*work/i, /optimize/i, /plan/i, /review/i
+    ];
+    const hit = sonnet.some((p) => p.test(lastUserMessage || ''));
+    model = hit ? MODEL_SONNET : MODEL_HAIKU; task = hit ? 'reasoning' : 'simple';
+  }
+  _lastModel = model; _lastRouterTask = task;       // remembered for router telemetry (#13)
+  return model;
 }
 
 // ---------------------------------------------------------------------------
@@ -959,6 +965,32 @@ function recordToolCost(tool, usd) {
   } catch {}
 }
 function overBudget() { const c = loadConfig(); return !!(c.dailyBudgetUsd && costToday().usd >= c.dailyBudgetUsd); }
+
+// --- Learned-router telemetry (#13) — log each routing decision so routing can be tuned with
+// DATA (latency/cost/correction-rate per task class) instead of guessed heuristics. Append-only;
+// chooseModel records the decision, finish() fills in latency+cost, reflectOnCorrection flags a
+// correction. routerStats() aggregates; no behavior change yet — this is the measurement layer. ---
+const ROUTER_LOG = path.join(os.homedir(), '.bhatbot', 'router.jsonl');
+let _lastModel = null, _lastRouterTask = null;
+function logRouterDecision(e) {
+  try { fs.mkdirSync(path.dirname(ROUTER_LOG), { recursive: true }); fs.appendFileSync(ROUTER_LOG, JSON.stringify({ ts: new Date().toISOString(), ...e }) + '\n'); } catch {}
+}
+function markRouterCorrected() { if (_lastRouterTask) logRouterDecision({ taskType: _lastRouterTask, model: _lastModel, corrected: true }); }
+function routerStats() {
+  try {
+    const rows = fs.readFileSync(ROUTER_LOG, 'utf8').trim().split('\n').map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+    const agg = {};
+    for (const r of rows) {
+      const k = (r.taskType || '?') + ' → ' + String(r.model || '?').replace(/^claude-/, '');
+      agg[k] = agg[k] || { decisions: 0, corrected: 0, ms: 0, usd: 0 };
+      if (r.corrected) agg[k].corrected++; else { agg[k].decisions++; agg[k].ms += r.ms || 0; agg[k].usd += r.usd || 0; }
+    }
+    return Object.entries(agg).map(([route, v]) => ({ route, decisions: v.decisions, corrected: v.corrected,
+      correctionRate: v.decisions ? +(v.corrected / v.decisions).toFixed(2) : 0,
+      avgMs: v.decisions ? Math.round(v.ms / v.decisions) : 0, usd: +v.usd.toFixed(4) }))
+      .sort((a, b) => b.decisions - a.decisions);
+  } catch { return []; }
+}
 
 // Estimated input tokens a Claude request would cost (system + tools + trimmed messages).
 function requestTokenEstimate(messages) {
@@ -3609,6 +3641,7 @@ function appendToLastUser(history, text) {
 
 async function agentLoop(history, apiKey, event, opts = {}) {
   agentState = 'running';
+  const _turnT0 = Date.now(); const _usd0 = costToday().usd;   // router telemetry (#13)
   pendingGuidance = [];          // fresh per task
   const usedGuidance = [];       // collected for the post-task "learn this?" prompt
   let iterations = 0;
@@ -3662,6 +3695,7 @@ async function agentLoop(history, apiKey, event, opts = {}) {
     if (usedGuidance.length) sendToActivity('learn_prompt', { text: usedGuidance.join(' | ') });
     // Strip any <speak> tags from the returned text (renderer shows this as the final bubble).
     reflectOnCorrection(history, lastUserText(history), text);   // async, non-blocking
+    try { logRouterDecision({ taskType: _lastRouterTask || currentMode, model: _lastModel, ms: Date.now() - _turnT0, usd: +(costToday().usd - _usd0).toFixed(5) }); } catch {}   // #13
     const clean = String(text || '').replace(/<\/?speak>/g, '').trim();
     // #12 episodic memory: record the turn (what happened, when). Fire-and-forget; the store caps
     // + evicts oldest episodic first so durable semantic facts survive under pressure.
@@ -5607,6 +5641,7 @@ function reflectOnCorrection(history, userText, priorText) {
     const c = loadConfig();
     if (c.reflection === false) return;
     if (!userText || !CORRECTION_RE.test(userText)) return;
+    markRouterCorrected();   // #13 — the prior turn's route led to a correction; feed the router data
     // last assistant text in history = what's being corrected
     let prior = priorText || '';
     if (!prior) { const a = [...(history || [])].reverse().find((m) => m.role === 'assistant'); if (a) prior = typeof a.content === 'string' ? a.content : (Array.isArray(a.content) ? a.content.filter((b) => b.type === 'text').map((b) => b.text).join(' ') : ''); }
@@ -5821,6 +5856,7 @@ ipcMain.handle('get-health', async () => {
     todayEntries, estimatedCost: `$${estimatedCost.toFixed(3)}`,
     costCalls: ct.calls, costByModel: ct.byModel, costByTool: ct.byTool || {},
     costToolUsd: ct.toolUsd || 0, dailyBudget: cfg.dailyBudgetUsd ?? null,
+    router: routerStats().slice(0, 8),
     memEntries, memKb, ollamaOnline, agentState,
     telegram: !!cfg.telegramToken, briefingHour: cfg.briefingHour ?? null
   };
