@@ -103,9 +103,21 @@ const REGISTRY = {
 function toolDefs() { return Object.values(REGISTRY).map((t) => t.def); }
 function isRelay(name) { return !!(REGISTRY[name] && REGISTRY[name].relay); }
 
+// Capability tiers (#17): high-blast-radius tools require a STEPPED-UP channel. Voice command
+// mode is passphrase-gated (stepped up); SMS is NOT (caller-ID/number is spoofable and there's no
+// passphrase), so high-risk tools are denied over SMS even from the owner number. Phone-channel
+// compromise is a different threat model than physical Mac access — scope tools accordingly.
+const HIGH_RISK = new Set(['run_shell', 'system_control', 'write_file']);
+const UNTRUSTED_CHANNELS = new Set(['sms']);
+function channelAllows(name, channel) { return !(HIGH_RISK.has(name) && UNTRUSTED_CHANNELS.has(channel)); }
+
 async function dispatchTool(name, input, source) {
   const t = REGISTRY[name];
   if (!t) return { success: false, error: 'unknown tool: ' + name };
+  if (!channelAllows(name, source)) {
+    try { db.logTool({ source: source || 'cloud', tool: name, args: input, ok: false, ms: 0, result: 'denied: high-risk over untrusted channel' }); } catch {}
+    return { success: false, error: `"${name}" is a high-risk tool and is blocked over ${source}. Call from voice command mode (passphrase-gated) instead.` };
+  }
   const start = Date.now();
   let res;
   try {

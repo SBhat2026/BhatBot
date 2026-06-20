@@ -36,6 +36,8 @@ async function runTurn(convId, userText, { reset = false } = {}) {
   if (reset) db.resetConversation(convId);
   const text = String(userText || '').trim();
   if (!text) return { error: 'empty' };
+  // Channel/auth tier (#17): phone-voice is passphrase-gated (stepped up); sms is not (spoofable).
+  const channel = convId === 'sms' ? 'sms' : convId === 'phone-voice' ? 'phone' : 'cloud';
 
   db.pushActivity('task', text.slice(0, 200));
 
@@ -70,7 +72,7 @@ async function runTurn(convId, userText, { reset = false } = {}) {
     const results = [];
     for (const tu of toolUses) {
       db.pushActivity('tool', tu.name);
-      const result = await dispatchTool(tu.name, tu.input);
+      const result = await dispatchTool(tu.name, tu.input, channel);
       results.push({ type: 'tool_result', tool_use_id: tu.id, content: JSON.stringify(result).slice(0, 24 * 1024), is_error: result && result.success === false });
     }
     history.push({ role: 'user', content: results });
