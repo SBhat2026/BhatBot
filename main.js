@@ -5058,7 +5058,14 @@ function startWakeHelper() {
     // avoids background voices false-triggering. Enable energy VAD only if explicitly set.
     const wakeEnv = { ...process.env, PATH: EXEC_PATH,
       BHATBOT_BARGE: wc.bargeIn === true ? '1' : '0',
-      BHATBOT_BARGE_THRESH: String(wc.bargeInThreshold || 0.085) };
+      BHATBOT_BARGE_THRESH: String(wc.bargeInThreshold || 0.085),
+      // Speaker-gated wake (#10/#19): only Siddhant's voice triggers it, and it learns his voice
+      // online from each wake. "auto" gates once a profile exists; fail-opens if resemblyzer absent.
+      BHATBOT_SPEAKER_GATE: wc.speakerGate != null ? String(wc.speakerGate) : 'auto',
+      BHATBOT_SPEAKER_ADAPT: wc.speakerAdapt === false ? '0' : '1',
+      BHATBOT_VOICEID_VENV: path.join(os.homedir(), '.bhatbot', 'voiceid-venv'),
+      ...(wc.speakerThreshold != null ? { BHATBOT_SPEAKER_THRESH: String(wc.speakerThreshold) } : {}),
+      ...(wc.micDevice != null ? { BHATBOT_MIC_DEVICE: String(wc.micDevice) } : {}) };
     wakeProc = require('child_process').spawn(resolvePython(), ['-u', script], { env: wakeEnv });
     let buf = '';
     const triggerWake = (cmd) => {

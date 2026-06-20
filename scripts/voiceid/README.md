@@ -7,9 +7,25 @@ Uses [Resemblyzer](https://github.com/resemble-ai/Resemblyzer) (a pretrained d-v
 encoder). Runs fully locally; no audio leaves the machine.
 
 ## Status
-⚠️ **Scaffolding — needs real-audio testing.** The enroll/verify pipeline and the Node wrapper
-(`lib/voiceid.js`) are written and self-contained, but have NOT yet been run against real
-recordings or wired into the live call-auth path. That's the next check-in step.
+✅ **Wired into the always-on wake listener for ADAPTIVE (train-as-you-use-it) recognition.**
+⚠️ Still needs real-audio testing + the one-time `setup.sh` (installs resemblyzer/torch in the
+venv the listener borrows). Batch enrollment below is now OPTIONAL — the listener auto-bootstraps.
+
+## How it actually works now (adaptive, online)
+`scripts/listen.py` (the wake listener) gates every wake on a speaker match and **learns your
+voice from each confirmed wake** (online enrollment → `~/.bhatbot/voiceid/owner.json`):
+- **No profile yet?** The first `BHATBOT_SPEAKER_BOOTSTRAP` (default 5) wakes are accepted and
+  used to SEED the profile. Then gating turns on automatically.
+- **Profile exists?** Only utterances matching your voice (cosine ≥ threshold) wake it —
+  background noise / other people are rejected. Strong matches keep refining the profile, so it
+  gets more accustomed to you over time. The same gate suppresses noise-triggered barge-in.
+- Fail-open: if resemblyzer isn't installed or a clip is unclear, it never goes deaf.
+
+Tuning knobs (config.json `wake.*` or env): `speakerGate` (auto|1|0), `speakerAdapt`,
+`speakerThreshold`, `micDevice` (e.g. an iPhone Continuity Mic name), `BHATBOT_SPEAKER_BOOTSTRAP`.
+
+You only need `setup.sh` once (for the venv). Batch enroll below just gives it a faster, cleaner
+head-start than bootstrapping from live wakes.
 
 ## 1. Setup (once)
 ```bash
