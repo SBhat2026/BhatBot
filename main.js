@@ -1821,6 +1821,12 @@ const TOOLS = [
       items: { type: 'array', items: { type: 'string' }, description: 'For save: approved plain-English facts/habits to remember.' }
     }, required: ['action'] } },
   { name: 'request_permissions', description: 'Trigger the macOS Screen Recording + Accessibility permission prompts for BhatBot and open the matching System Settings → Privacy panes so Siddhant can toggle the app on. Use when vision_click / screen_parse / native login / AppleScript fail for permissions, or when he asks to "grant permissions" / "fix permissions".', input_schema: { type: 'object', properties: {} } },
+  { name: 'self_improve', description: 'Scan BhatBot\'s own tool-call AUDIT LOG for recurring failures and have Claude Code DRAFT a fix as a reviewable diff (it does NOT apply changes — Siddhant is the merge gate). Use when asked to "improve yourself" / "fix your recurring errors", or run it periodically. action:"scan" finds the top recurring failing tool (≥ minCount, default 3) and writes a proposed-fix .md to ~/.bhatbot/self-improve/ + notifies. dryRun:true just reports the failure clusters without invoking Claude Code.',
+    input_schema: { type: 'object', properties: {
+      action: { type: 'string', enum: ['scan'], description: 'scan the audit log + draft a fix.' },
+      dryRun: { type: 'boolean', description: 'Only report recurring-failure clusters; do not draft.' },
+      minCount: { type: 'number', description: 'Min repeats before drafting (default 3).' }
+    } } },
   { name: 'manage_schedule', description: 'Schedule BhatBot to do things PROACTIVELY/AUTONOMOUSLY — reminders, recurring checks, "every morning brief me", "in 30 minutes do X", "every Monday at 9am". Each schedule runs the given `prompt` through the full agent at its time (no one watching), then speaks the result aloud and texts it to Telegram. Use this whenever Siddhant asks for something to happen later or repeatedly. Actions: add (create), list, remove{id}, enable{id}, disable{id}, run{id} (fire now). For timing pass ONE of: kind:"daily"+at:"HH:MM" / kind:"weekly"+at:"HH:MM"+dow(0=Sun) / kind:"interval"+everyMinutes|everyHours / kind:"once"+runAt(ISO), OR the shortcuts inMinutes / inHours / everyMinutes / everyHours.',
     input_schema: { type: 'object', properties: {
       action: { type: 'string', enum: ['add', 'list', 'remove', 'enable', 'disable', 'run'], description: 'What to do.' },
@@ -1935,6 +1941,37 @@ function readAudit(limit = 100) {
     const lines = fs.readFileSync(AUDIT_PATH, 'utf8').trim().split('\n');
     return lines.slice(-Math.min(2000, limit)).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean).reverse();
   } catch { return []; }
+}
+
+// Self-improvement loop (#21): mine the audit log for RECURRING tool failures, then have Claude
+// Code DRAFT a fix as a reviewable diff (plan mode → never edits files). Siddhant is the merge
+// gate. Turns "notice bug → describe it → prompt CC" into "CC already drafted a fix, review it."
+async function selfImproveScan(opts = {}) {
+  const fails = readAudit(800).filter((e) => e && e.ok === false);
+  if (!fails.length) return { success: true, result: 'No tool failures in the recent audit log — nothing to improve.' };
+  const groups = {};
+  for (const e of fails) {
+    const errKey = String(e.result || '').toLowerCase().replace(/\d+/g, '#').replace(/[^a-z #]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 60);
+    const k = e.tool + ' :: ' + errKey;
+    groups[k] = groups[k] || { tool: e.tool, sample: e.result, args: e.args, count: 0 };
+    groups[k].count++;
+  }
+  const ranked = Object.values(groups).sort((a, b) => b.count - a.count);
+  const top = ranked[0];
+  const minCount = opts.minCount || 3;
+  if (!top || top.count < minCount) return { success: true, result: `Top recurring failure (${top ? top.tool + ' ×' + top.count : 'none'}) is below the ${minCount}× threshold — not drafting a fix.`, groups: ranked.slice(0, 5) };
+  if (opts.dryRun) return { success: true, result: `Would draft a fix for ${top.tool} (${top.count}× — "${String(top.sample).slice(0, 80)}")`, groups: ranked.slice(0, 5) };
+  const proj = process.env.BHATBOT_PROJECT || path.join(os.homedir(), 'bhatbot');
+  const prompt = `The tool "${top.tool}" in this codebase has failed ${top.count} times recently with errors like: "${String(top.sample).slice(0, 220)}" (example redacted args: ${String(top.args).slice(0, 220)}). Find the likely root cause in the code and propose a precise fix as a unified diff, with a one-paragraph rationale. Investigate read-only; do NOT modify files — output the proposed diff only.`;
+  // --permission-mode plan → Claude Code investigates + proposes WITHOUT applying edits.
+  const r = await runShell('claude -p ' + JSON.stringify(prompt) + ' --permission-mode plan', proj, 300000);
+  const out = (r && (r.stdout || r.result)) || (r && r.error) || '(no output)';
+  const dir = path.join(os.homedir(), '.bhatbot', 'self-improve'); fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, `${Date.now()}-${String(top.tool).replace(/[^\w]/g, '_')}.md`);
+  fs.writeFileSync(file, `# Self-improve draft — ${top.tool} (${top.count} failures)\n\nSample error: ${top.sample}\n\n---\n\n${out}`);
+  try { telegramNotify(`🛠 Drafted a fix for recurring "${top.tool}" failures (${top.count}×). Review (not applied): ${file}`); } catch {}
+  sendToActivity('tool-update', { type: 'thinking', text: `🛠 self-improve: drafted a fix for ${top.tool} → ${file}` });
+  return { success: true, result: `Drafted a REVIEWABLE fix for ${top.tool} (${top.count} failures) → ${file}. Not applied — review the diff and apply if it's good.`, file, top: { tool: top.tool, count: top.count } };
 }
 
 // Autonomous mode: the user explicitly wants maximum self-driving. When on (default true),
@@ -3424,6 +3461,8 @@ async function executeTool(name, input) {
         result = await browserWorkflow(input); break;
       case 'browser_observe':
         result = await browserObserve(input); break;
+      case 'self_improve':
+        result = await selfImproveScan(input || {}); break;
       case 'screen_observe':
         result = await screenObserve(input); break;
       case 'play_chess': {
