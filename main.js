@@ -22,6 +22,7 @@ const semantic = require('./lib/semantic');           // #12 — embedding-based
 const subagents = require('./lib/subagents');          // #20 — persistent specialized sub-agents (research/coding/lifeadmin)
 const ambient = require('./lib/ambient');              // #18 — opt-in proactive Calendar/Mail awareness (OFF by default)
 const { textHintFromSelector, splitForSpeech, estimateToolCost } = require('./lib/pure');  // SPLIT_PLAN step 1
+const projects = require('./lib/projects');            // #24 — project memory + living auto-summary
 const visualInspect = require('./lib/inspect');
 const security = require('./lib/security');          // P0.4 — injection sanitizer + daily audit
 const notion = require('./lib/notion');               // P3  — Notion long-term memory (degrades gracefully)
@@ -769,6 +770,7 @@ function buildMemoryBlock(query) {
   if (shared) out += '\n\n## SHARED BANK (Notion — written by any agent/surface)\n\n' + shared;
   if (episodic) out += '\n\n## RECALLED FROM PAST SESSIONS (episodic)\n\n' + episodic;
   if (working) out += '\n\n## THIS SESSION SO FAR (working)\n\n' + working;
+  try { const proj = projects.contextBlock(); if (proj) out += '\n\n' + proj; } catch {}   // #24 active project context
   return out ? redactSecrets(out) : '';
 }
 // P4 — per-task operating mode. Set at agentLoop entry (router suggestedMode on the
@@ -1817,6 +1819,13 @@ const TOOLS = [
     input_schema: { type: 'object', properties: {
       action: { type: 'string', enum: ['scan', 'status', 'enable', 'disable'] },
       source: { type: 'string', enum: ['calendar', 'mail'], description: 'Optional: toggle just this watcher.' }
+    }, required: ['action'] } },
+  { name: 'project', description: "Open and track a PROJECT with a living, auto-updating summary. Use 'open' when Siddhant starts or switches to a project so BhatBot keeps its context across turns (the active project's summary is injected into your memory every turn, and it auto-refreshes as work happens). 'note' records a decision/milestone/fact; 'summary' regenerates the rolling summary now; 'status' shows the active project; 'list' shows all; 'close' marks one done. Open a project whenever he's clearly working on a named, ongoing thing.",
+    input_schema: { type: 'object', properties: {
+      action: { type: 'string', enum: ['open', 'list', 'status', 'note', 'summary', 'close'] },
+      name: { type: 'string', description: "Project name (for 'open') or slug (for note/summary/close; omit to target the active project)." },
+      text: { type: 'string', description: "For 'note': the decision/milestone/fact to record." },
+      kind: { type: 'string', enum: ['note', 'decision', 'milestone'], description: "For 'note': entry kind (default note)." }
     }, required: ['action'] } },
   { name: 'subagent', description: 'Delegate to a PERSISTENT specialized sub-agent that keeps its OWN memory/context across tasks and has a scoped toolset — for recurring, focused work and for doing several things at once. Agents: "research" (analysis/sources/synthesis), "coding" (code changes + verify, can use claude_code), "lifeadmin" (scheduling/reminders/logistics). action:"run"{agent, task, background?} runs it (background:true returns immediately and works in parallel while you keep going — use for "do X and Y at the same time"); "list" shows agents + how many turns each remembers; "history"{agent}; "reset"{agent} wipes one agent\'s memory. Use this instead of doing big specialized work inline when it benefits from a dedicated, remembering specialist.',
     input_schema: { type: 'object', properties: {
@@ -3287,6 +3296,12 @@ function subagentDeps() {
   };
 }
 
+// Lean summary model call for project memory (#24) — minimal system so it's cheap.
+const projectSummarize = async (prompt) => {
+  const j = await anthropicRequest({ model: MODEL_HAIKU, max_tokens: 400, system: 'You write tight, factual project summaries.', messages: [{ role: 'user', content: prompt }] }, getApiKey());
+  return (j.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim();
+};
+
 async function executeTool(name, input) {
   let result;
   const __auditT0 = Date.now();
@@ -3439,6 +3454,29 @@ async function executeTool(name, input) {
         result = await browserObserve(input); break;
       case 'self_improve':
         result = await selfImproveScan(input || {}); break;
+      case 'project': {
+        const a = input.action;
+        const slugOf = () => (input.name ? projects.slugify(input.name) : projects.activeSlug());
+        if (a === 'open') {
+          const rec = projects.open(input.name || 'Project');
+          if (!rec) { result = { success: false, error: 'Could not open project.' }; break; }
+          try { notion.updateProjectState({ projectName: rec.name, status: rec.status, facts: (rec.highlights || []).slice(-5) }); } catch {}
+          result = { success: true, slug: rec.slug, name: rec.name, status: rec.status, summary: rec.summary || '(new project)', result: `Opened project "${rec.name}". I'll keep a running summary of it.` };
+          break;
+        }
+        if (a === 'list') { result = { success: true, projects: projects.list() }; break; }
+        if (a === 'status') { const r = projects.active(); result = r ? { success: true, name: r.name, slug: r.slug, status: r.status, summary: r.summary, highlights: (r.highlights || []).slice(-5) } : { success: true, active: null, result: 'No active project.' }; break; }
+        if (a === 'note') { const slug = slugOf(); if (!slug) { result = { success: false, error: 'No active project — open one first.' }; break; } projects.note(slug, input.text || '', input.kind || 'note'); result = { success: true, result: 'Noted.' }; break; }
+        if (a === 'summary') {
+          const slug = slugOf(); if (!slug) { result = { success: false, error: 'No active project — open one first.' }; break; }
+          const summary = await projects.updateSummary(slug, { summarize: projectSummarize });
+          try { const r = projects.get(slug); notion.updateProjectState({ projectName: r.name, status: 'active', facts: [summary] }); } catch {}
+          result = { success: true, summary }; break;
+        }
+        if (a === 'close') { const slug = slugOf(); if (!slug) { result = { success: false, error: 'No project to close.' }; break; } projects.close(slug); result = { success: true, closed: slug, result: 'Project closed.' }; break; }
+        result = { success: false, error: 'unknown project action: ' + a };
+        break;
+      }
       case 'ambient': {
         const a = input.action;
         if (a === 'status') { result = { success: true, ...ambient.sources() }; break; }
@@ -3752,6 +3790,8 @@ async function agentLoop(history, apiKey, event, opts = {}) {
     // #12 episodic memory: record the turn (what happened, when). Fire-and-forget; the store caps
     // + evicts oldest episodic first so durable semantic facts survive under pressure.
     try { const u = lastUserText(history); if (u && clean) semantic.upsert({ text: `User: ${String(u).slice(0, 400)}\nAssistant: ${clean.slice(0, 800)}`, kind: 'episodic', meta: { surface: stream ? 'desktop' : 'headless' } }).catch(() => {}); } catch {}
+    // #24 project memory: if a project is open, record the turn + cheaply refresh its living summary.
+    try { const slug = projects.activeSlug(); if (slug) { projects.recordTurn(slug, lastUserText(history), clean); projects.maybeAutoSummarize(slug, { summarize: projectSummarize }).catch(() => {}); } } catch {}
     return { text: clean, history, _streamed: stream };
   };
 
