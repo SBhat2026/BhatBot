@@ -21,6 +21,7 @@ const wsMemory = require('./lib/memory');
 const semantic = require('./lib/semantic');           // #12 — embedding-based semantic/episodic recall (degrades gracefully)
 const subagents = require('./lib/subagents');          // #20 — persistent specialized sub-agents (research/coding/lifeadmin)
 const ambient = require('./lib/ambient');              // #18 — opt-in proactive Calendar/Mail awareness (OFF by default)
+const { textHintFromSelector, splitForSpeech, estimateToolCost } = require('./lib/pure');  // SPLIT_PLAN step 1
 const visualInspect = require('./lib/inspect');
 const security = require('./lib/security');          // P0.4 — injection sanitizer + daily audit
 const notion = require('./lib/notion');               // P3  — Notion long-term memory (degrades gracefully)
@@ -940,18 +941,6 @@ function costToday() {
 }
 // Per-TOOL spend (paid generation tools) folded into the SAME daily ledger so the cost number is
 // the whole picture — model tokens + FLUX/TRELLIS/image-gen — not just the LLM.
-function estimateToolCost(name, input, result) {
-  if (!result || result.success === false) return 0;    // failed calls cost ~nothing
-  if (name === 'generate_image') {
-    const prov = result.provider || (input && input.provider) || 'openai';
-    if (prov === 'flux') return 0.04;
-    if (prov === 'flux-fast') return 0.003;
-    const q = (input && input.quality) || 'medium';
-    return q === 'high' ? 0.08 : q === 'low' ? 0.01 : 0.04;
-  }
-  if (name === 'generate_3d') return 0.10;              // TRELLIS via Replicate (approx)
-  return 0;
-}
 function recordToolCost(tool, usd) {
   try {
     if (!usd) return;
@@ -2147,14 +2136,6 @@ async function ensureBrowser() {
 // Selector drift is the Achilles' heel of DOM replay. When a learned selector no longer matches,
 // fall back to the vision stack (OmniParser → vision_click) using a text hint mined from the
 // selector — so a stale workflow self-heals instead of silently failing.
-function textHintFromSelector(sel) {
-  if (!sel) return '';
-  const m = sel.match(/:has-text\("([^"]+)"\)/i) || sel.match(/\[aria-label="([^"]+)"\]/i)
-    || sel.match(/\[placeholder="([^"]+)"\]/i) || sel.match(/\[name="([^"]+)"\]/i);
-  if (m) return m[1];
-  if (sel.startsWith('#')) return sel.slice(1).replace(/[-_]/g, ' ');
-  return sel.replace(/[#.\[\]"'=>~]/g, ' ').replace(/\s+/g, ' ').trim();
-}
 async function visionClickByText(hint) {
   if (!hint || !omniAvailable()) return false;
   try {
@@ -5559,15 +5540,7 @@ function bargeInInterrupt() {
   stopDesktopTTS();
   if (agentState === 'running' && loadConfig().bargeInAbortsTurn !== false) agentState = 'stopped';
 }
-// Sentence chunks for streaming speech (synth one, play it while the next synthesizes).
-function splitForSpeech(text) {
-  const clean = String(text || '').replace(/```[\s\S]*?```/g, ' code block ').replace(/[*_`#>]/g, '').trim();
-  const parts = clean.match(/[^.!?\n]+[.!?]?(\s|$)|[^.!?\n]+$/g) || [];
-  const out = []; let buf = '';
-  for (let p of parts) { p = p.trim(); if (!p) continue; buf = buf ? buf + ' ' + p : p; if (buf.length >= 60 || /[.!?]$/.test(p)) { out.push(buf); buf = ''; } }
-  if (buf) out.push(buf);
-  return out.filter((s) => s.length);
-}
+// splitForSpeech moved to lib/pure.js (SPLIT_PLAN step 1).
 function playFile(file, seq, text) {
   return new Promise((res) => {
     if (seq !== ttsPlaySeq) return res();
