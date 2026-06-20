@@ -36,7 +36,8 @@ const DB_MODELS = { db_speech: 'gpt-oss-20b', db_directive: 'gemma-4-26b' };
 
 const CONFIG_PATH = path.join(os.homedir(), '.bhatbot', 'config.json');
 const MEMORY_PATH = path.join(os.homedir(), '.bhatbot', 'memory.md');
-const AUDIT_PATH = path.join(os.homedir(), '.bhatbot', 'audit.log');
+const makeAudit = require('./lib/audit');   // SPLIT_PLAN step 2 — audit module (DI factory)
+const { AUDIT_PATH, auditLog, readAudit } = makeAudit({ isRemote, estimateToolCost, recordToolCost });
 
 const HOTKEY = 'CommandOrControl+Shift+B';
 const MODEL_SONNET = 'claude-sonnet-4-6';      // corrected from stale spec id
@@ -1911,41 +1912,8 @@ const CONFIRM_PATTERNS = [
   { re: /\btrash\b/, reason: 'This will move files to Trash.' }
 ];
 
-const AUDIT_SECRET_KEYS = /^(password|pass|secret|token|api[_-]?key|credref|cred_ref|totp|otp|pin|passphrase|authorization)$/i;
-function redactForAudit(obj) {
-  try {
-    return JSON.stringify(obj, (k, v) => {
-      if (AUDIT_SECRET_KEYS.test(k)) return '«redacted»';
-      if (typeof v === 'string' && !/CRED_REF_/.test(v) && v.length > 200) return v.slice(0, 200) + '…';
-      return v;
-    }).slice(0, 1000);
-  } catch { return ''; }
-}
-// Append-only ledger of every tool call: tool, source (desktop vs remote/phone), redacted args,
-// ok, duration, and a short result. Secrets are never written (resolved values aren't in `input`
-// here, and secret-named keys are redacted). Forensic trail + feed for the cost/self-improve loops.
-function auditLog(name, input, result, ms) {
-  try {
-    fs.mkdirSync(path.dirname(AUDIT_PATH), { recursive: true });
-    const r = result || {};
-    let usd; try { usd = estimateToolCost(name, input, r); if (usd) recordToolCost(name, usd); } catch {}
-    fs.appendFileSync(AUDIT_PATH, JSON.stringify({
-      ts: new Date().toISOString(), tool: name,
-      source: isRemote() ? 'remote/phone' : 'desktop',
-      args: redactForAudit(input), ok: r.success !== false,
-      ms: ms != null ? Math.round(ms) : undefined,
-      usd: usd || undefined,
-      result: String(r.error || r.result || (r.success !== false ? 'ok' : '')).slice(0, 300),
-    }) + '\n');
-  } catch {}
-}
-// Read the most recent audit entries (newest first) — used by cost/observability + self-improve.
-function readAudit(limit = 100) {
-  try {
-    const lines = fs.readFileSync(AUDIT_PATH, 'utf8').trim().split('\n');
-    return lines.slice(-Math.min(2000, limit)).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean).reverse();
-  } catch { return []; }
-}
+// auditLog / readAudit / redactForAudit / AUDIT_PATH moved to lib/audit.js (SPLIT_PLAN step 2);
+// constructed near the top via makeAudit({ isRemote, estimateToolCost, recordToolCost }).
 
 // Self-improvement loop (#21): mine the audit log for RECURRING tool failures, then have Claude
 // Code DRAFT a fix as a reviewable diff (plan mode → never edits files). Siddhant is the merge
