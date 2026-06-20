@@ -3368,8 +3368,10 @@ async function executeTool(name, input) {
       }
       case 'request_permissions': {
         const p = await ensurePermissions({ openSettings: true, force: true });
-        try { primeAppAutomation(true); } catch {}   // re-surface Notes/Reminders/Calendar automation prompts
-        result = { success: true, screenRecording: p.screen, accessibility: p.accessibility, allGranted: p.ok, note: (p.ok ? 'Screen + Accessibility granted. ' : 'Opened System Settings → Privacy; toggle BhatBot on for the missing ones. ') + 'Also re-requested Automation for Notes/Reminders/Calendar — approve the prompts.' };
+        let primed = [];
+        try { primed = primeAppAutomation(true) || []; } catch {}   // re-surface Automation prompts for all driven apps
+        result = { success: true, screenRecording: p.screen, accessibility: p.accessibility, allGranted: p.ok, automationApps: primed,
+          note: (p.ok ? 'Screen + Accessibility granted. ' : 'Opened System Settings → Privacy; toggle BhatBot on for the missing ones. ') + `Also requested Automation for ${primed.join(', ') || 'the connected apps'} — approve each prompt as it appears (and check System Settings → Privacy & Security → Automation).` };
         break;
       }
       case 'manage_schedule': {
@@ -6081,18 +6083,35 @@ ipcMain.handle('perm-status', () => permStatus());
 // harmless one to each (with a short timeout so it can't hang) while the user is watching at
 // launch. Granting these stops the AppleEvent timeouts that blocked Notes/Reminders in testing.
 // Done once (config.automationPrimed) unless forced via the request_permissions tool.
+// Surface the macOS Automation consent prompts for every app BhatBot drives via Apple events, so
+// they appear under System Settings → Privacy & Security → Automation. Any Apple event triggers
+// the prompt, so the exact command doesn't matter — we use a harmless per-app probe. Reminders,
+// Mail (ambient awareness), Calendar, Notes, Music, Contacts, System Events (GUI scripting).
+const AUTOMATION_APPS = [
+  ['Reminders', 'count (every list)'],
+  ['Calendar', 'count (every calendar)'],
+  ['Mail', 'count (every account)'],
+  ['Notes', 'count (every folder)'],
+  ['Music', 'count (every playlist)'],
+  ['Contacts', 'count (every person)'],
+  ['System Events', 'count (every process)'],
+];
+const AUTOMATION_VERSION = 2;   // bump when AUTOMATION_APPS changes so installs re-prime the new apps
 function primeAppAutomation(force = false) {
-  if (process.platform !== 'darwin') return;
+  if (process.platform !== 'darwin') return [];
   const c = loadConfig();
-  if (!force && c.automationPrimed) return;
-  for (const app of ['Notes', 'Reminders', 'Calendar']) {
+  if (!force && c.automationPrimed === AUTOMATION_VERSION) return [];
+  const primed = [];
+  for (const [app, probe] of AUTOMATION_APPS) {
     try {
-      const p = spawn('osascript', ['-e', `with timeout of 6 seconds`, '-e', `tell application "${app}" to count (every window)`, '-e', `end timeout`], { env: { ...process.env, PATH: EXEC_PATH } });
+      const p = spawn('osascript', ['-e', `with timeout of 6 seconds`, '-e', `tell application "${app}" to ${probe}`, '-e', `end timeout`], { env: { ...process.env, PATH: EXEC_PATH } });
       p.on('error', () => {});
       setTimeout(() => { try { p.kill(); } catch {} }, 8000);   // never leave a prompt-blocked osascript hanging
+      primed.push(app);
     } catch {}
   }
-  saveConfig({ automationPrimed: true });
+  saveConfig({ automationPrimed: AUTOMATION_VERSION });
+  return primed;
 }
 
 // ---------------------------------------------------------------------------
