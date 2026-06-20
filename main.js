@@ -910,6 +910,34 @@ function costToday() {
   try { const led = JSON.parse(fs.readFileSync(COSTS_PATH, 'utf8')); return led[today()] || { usd: 0, calls: 0, byModel: {} }; }
   catch { return { usd: 0, calls: 0, byModel: {} }; }
 }
+// Per-TOOL spend (paid generation tools) folded into the SAME daily ledger so the cost number is
+// the whole picture — model tokens + FLUX/TRELLIS/image-gen — not just the LLM.
+function estimateToolCost(name, input, result) {
+  if (!result || result.success === false) return 0;    // failed calls cost ~nothing
+  if (name === 'generate_image') {
+    const prov = result.provider || (input && input.provider) || 'openai';
+    if (prov === 'flux') return 0.04;
+    if (prov === 'flux-fast') return 0.003;
+    const q = (input && input.quality) || 'medium';
+    return q === 'high' ? 0.08 : q === 'low' ? 0.01 : 0.04;
+  }
+  if (name === 'generate_3d') return 0.10;              // TRELLIS via Replicate (approx)
+  return 0;
+}
+function recordToolCost(tool, usd) {
+  try {
+    if (!usd) return;
+    let led = {}; try { led = JSON.parse(fs.readFileSync(COSTS_PATH, 'utf8')); } catch {}
+    const d = today();
+    led[d] = led[d] || { usd: 0, calls: 0, byModel: {} };
+    led[d].usd += usd;
+    led[d].toolUsd = (led[d].toolUsd || 0) + usd;
+    led[d].byTool = led[d].byTool || {};
+    led[d].byTool[tool] = (led[d].byTool[tool] || 0) + usd;
+    fs.mkdirSync(path.dirname(COSTS_PATH), { recursive: true });
+    fs.writeFileSync(COSTS_PATH, JSON.stringify(led));
+  } catch {}
+}
 function overBudget() { const c = loadConfig(); return !!(c.dailyBudgetUsd && costToday().usd >= c.dailyBudgetUsd); }
 
 // Estimated input tokens a Claude request would cost (system + tools + trimmed messages).
@@ -1675,11 +1703,12 @@ const TOOLS = [
       query: { type: 'string', description: 'Only return elements whose label contains this text (e.g. "Sign in").' },
       semantics: { type: 'boolean', description: 'Caption icons too (slower). Default false.' }
     } } },
-  { name: 'vision_click', description: 'Click at coordinates from screen_parse (vision-driven control). For target:"screen" the coords are Mac screen points and the click is delivered via the OS (needs Accessibility permission); for target:"browser" it clicks in the Playwright page. Use after screen_parse to actuate a native-app element. double:true for a double-click.',
+  { name: 'vision_click', description: 'Click at coordinates from screen_parse (vision-driven control). For target:"screen" the coords are Mac screen points and the click is delivered via the OS (needs Accessibility permission); for target:"browser" it clicks in the Playwright page. Use after screen_parse to actuate a native-app element. double:true for a double-click. CLOSED-LOOP: it returns a fresh post-click screenshot so you can SEE the result and confirm it landed (don\'t fire-and-assume). Pass `expect` (text you should see if the click worked) and it also reports verified:true/false so you can retry/replan on a miss.',
     input_schema: { type: 'object', properties: {
       x: { type: 'number' }, y: { type: 'number' },
       target: { type: 'string', enum: ['screen', 'browser'], description: 'Must match the screen_parse target the coords came from.' },
-      double: { type: 'boolean' }
+      double: { type: 'boolean' },
+      expect: { type: 'string', description: 'Optional: text/label that should be visible if the click succeeded. Returns verified:true/false so you can replan on a mismatch.' }
     }, required: ['x', 'y'] } },
   { name: 'ask_ai', description: 'Query ANOTHER AI model for research, a second opinion, or to cross-check. Providers: claude (Sonnet), openai (GPT), gemini (Google), local (your Ollama models). Use when you want an independent answer or to compare models.',
     input_schema: { type: 'object', properties: {
@@ -1837,11 +1866,13 @@ function auditLog(name, input, result, ms) {
   try {
     fs.mkdirSync(path.dirname(AUDIT_PATH), { recursive: true });
     const r = result || {};
+    let usd; try { usd = estimateToolCost(name, input, r); if (usd) recordToolCost(name, usd); } catch {}
     fs.appendFileSync(AUDIT_PATH, JSON.stringify({
       ts: new Date().toISOString(), tool: name,
       source: isRemote() ? 'remote/phone' : 'desktop',
       args: redactForAudit(input), ok: r.success !== false,
       ms: ms != null ? Math.round(ms) : undefined,
+      usd: usd || undefined,
       result: String(r.error || r.result || (r.success !== false ? 'ok' : '')).slice(0, 300),
     }) + '\n');
   } catch {}
@@ -5054,12 +5085,29 @@ async function visionClick(input) {
   const x = Number(input.x), y = Number(input.y);
   if (!isFinite(x) || !isFinite(y)) return { success: false, error: 'numeric x,y required (from screen_parse click coords)' };
   if (target === 'browser') {
-    try { await ensureBrowser(); if (input.double) await page.mouse.dblclick(x, y); else await page.mouse.click(x, y); await page.waitForLoadState('domcontentloaded', { timeout: 8000 }).catch(() => {}); return { success: true, clicked: { x, y }, target, _image: await page.screenshot({ type: 'jpeg', quality: 60 }).then((b) => b.toString('base64')).catch(() => undefined), _imageMime: 'image/jpeg' }; }
-    catch (e) { return { success: false, error: 'browser click failed: ' + e.message }; }
+    try {
+      await ensureBrowser();
+      if (input.double) await page.mouse.dblclick(x, y); else await page.mouse.click(x, y);
+      await page.waitForLoadState('domcontentloaded', { timeout: 8000 }).catch(() => {});
+      // Closed loop: re-screenshot so the model SEES the result; verify `expect` if given.
+      let verified, note;
+      if (input.expect) { try { verified = (await page.content()).toLowerCase().includes(String(input.expect).toLowerCase()); note = verified ? `Verified: "${input.expect}" present after click.` : `Could not confirm "${input.expect}" after click — re-read the page and replan.`; } catch {} }
+      return { success: true, clicked: { x, y }, target, verified, note, _image: await page.screenshot({ type: 'jpeg', quality: 60 }).then((b) => b.toString('base64')).catch(() => undefined), _imageMime: 'image/jpeg' };
+    } catch (e) { return { success: false, error: 'browser click failed: ' + e.message }; }
   }
   const res = await omniRequest({ cmd: 'click', x, y, double: !!input.double }, 10000);
   if (!res.ok) return { success: false, error: 'click failed: ' + (res.error || 'unknown') + ' — grant Accessibility permission to BhatBot.' };
-  return { success: true, clicked: { x, y }, target };
+  // Closed loop on native GUIs: after the OS click, settle then re-capture so the model can
+  // confirm the action landed (fire-and-assume is how silently-wrong actions compound). If
+  // `expect` is given, OmniParser-verify that the expected element/text is now on screen.
+  await sleep(400);
+  let b64, verified, note;
+  if (input.expect) {
+    try { const p = await screenParse({ target: 'screen', query: input.expect, semantics: false }); if (p.success) { b64 = p._image; verified = (p.elements || []).length > 0; note = verified ? `Verified: "${input.expect}" visible after click.` : `Could not confirm "${input.expect}" after click — it may not have landed; re-parse and replan.`; } } catch {}
+  }
+  if (!b64) { try { const cap = await captureScreenPng(); if (!cap.error) b64 = cap.b64; } catch {} }
+  if (b64) sendToActivity('screenshot', { data: b64 });
+  return { success: true, clicked: { x, y }, target, verified, note, _image: b64, _imageMime: b64 ? 'image/png' : undefined };
 }
 
 // Allowed Kokoro voices (guards against junk from the phone). British male/female first.
@@ -5736,7 +5784,8 @@ ipcMain.handle('get-health', async () => {
   const cfg = loadConfig();
   return {
     todayEntries, estimatedCost: `$${estimatedCost.toFixed(3)}`,
-    costCalls: ct.calls, costByModel: ct.byModel, dailyBudget: cfg.dailyBudgetUsd ?? null,
+    costCalls: ct.calls, costByModel: ct.byModel, costByTool: ct.byTool || {},
+    costToolUsd: ct.toolUsd || 0, dailyBudget: cfg.dailyBudgetUsd ?? null,
     memEntries, memKb, ollamaOnline, agentState,
     telegram: !!cfg.telegramToken, briefingHour: cfg.briefingHour ?? null
   };
