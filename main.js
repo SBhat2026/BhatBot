@@ -19,6 +19,7 @@ const orchestrator = require('./lib/agents/orchestrator');
 const wsState = require('./lib/state');
 const wsMemory = require('./lib/memory');
 const semantic = require('./lib/semantic');           // #12 — embedding-based semantic/episodic recall (degrades gracefully)
+const subagents = require('./lib/subagents');          // #20 — persistent specialized sub-agents (research/coding/lifeadmin)
 const visualInspect = require('./lib/inspect');
 const security = require('./lib/security');          // P0.4 — injection sanitizer + daily audit
 const notion = require('./lib/notion');               // P3  — Notion long-term memory (degrades gracefully)
@@ -1821,6 +1822,14 @@ const TOOLS = [
       items: { type: 'array', items: { type: 'string' }, description: 'For save: approved plain-English facts/habits to remember.' }
     }, required: ['action'] } },
   { name: 'request_permissions', description: 'Trigger the macOS Screen Recording + Accessibility permission prompts for BhatBot and open the matching System Settings → Privacy panes so Siddhant can toggle the app on. Use when vision_click / screen_parse / native login / AppleScript fail for permissions, or when he asks to "grant permissions" / "fix permissions".', input_schema: { type: 'object', properties: {} } },
+  { name: 'subagent', description: 'Delegate to a PERSISTENT specialized sub-agent that keeps its OWN memory/context across tasks and has a scoped toolset — for recurring, focused work and for doing several things at once. Agents: "research" (analysis/sources/synthesis), "coding" (code changes + verify, can use claude_code), "lifeadmin" (scheduling/reminders/logistics). action:"run"{agent, task, background?} runs it (background:true returns immediately and works in parallel while you keep going — use for "do X and Y at the same time"); "list" shows agents + how many turns each remembers; "history"{agent}; "reset"{agent} wipes one agent\'s memory. Use this instead of doing big specialized work inline when it benefits from a dedicated, remembering specialist.',
+    input_schema: { type: 'object', properties: {
+      action: { type: 'string', enum: ['run', 'list', 'history', 'reset'] },
+      agent: { type: 'string', enum: ['research', 'coding', 'lifeadmin'], description: 'Which specialist.' },
+      task: { type: 'string', description: 'For run: what you want the sub-agent to do (it remembers prior tasks in its thread).' },
+      background: { type: 'boolean', description: 'For run: true = start it in parallel and return immediately (you get notified on completion); false = wait for the result.' },
+      maxSteps: { type: 'number', description: 'For run: tool-loop budget (default 8, max 16).' }
+    }, required: ['action'] } },
   { name: 'self_improve', description: 'Scan BhatBot\'s own tool-call AUDIT LOG for recurring failures and have Claude Code DRAFT a fix as a reviewable diff (it does NOT apply changes — Siddhant is the merge gate). Use when asked to "improve yourself" / "fix your recurring errors", or run it periodically. action:"scan" finds the top recurring failing tool (≥ minCount, default 3) and writes a proposed-fix .md to ~/.bhatbot/self-improve/ + notifies. dryRun:true just reports the failure clusters without invoking Claude Code.',
     input_schema: { type: 'object', properties: {
       action: { type: 'string', enum: ['scan'], description: 'scan the audit log + draft a fix.' },
@@ -3313,6 +3322,16 @@ function isRetryableTool(name, input) {
   return false;
 }
 
+// Deps injected into persistent sub-agents (#20): the scoped model call, the full tool registry
+// (sub-agents filter it to their allowlist), executeTool, the key, and the model ids.
+function subagentDeps() {
+  return {
+    anthropicRequest, executeTool, toolDefs: TOOLS, apiKey: getApiKey(),
+    models: { sonnet: MODEL_SONNET, haiku: MODEL_HAIKU },
+    onStep: (name, tool) => sendToActivity('tool-update', { type: 'thinking', text: `🤝 ${name} → ${tool}` }),
+  };
+}
+
 async function executeTool(name, input) {
   let result;
   const __auditT0 = Date.now();
@@ -3463,6 +3482,27 @@ async function executeTool(name, input) {
         result = await browserObserve(input); break;
       case 'self_improve':
         result = await selfImproveScan(input || {}); break;
+      case 'subagent': {
+        const act = input.action || 'list';
+        if (act === 'list') { result = { success: true, agents: subagents.list() }; break; }
+        if (act === 'history') { result = { success: true, agent: input.agent, history: subagents.history(input.agent || '') }; break; }
+        if (act === 'reset') { result = subagents.reset(input.agent || ''); break; }
+        if (act === 'run') {
+          if (!input.agent || !input.task) { result = { success: false, error: 'agent and task required' }; break; }
+          if (input.background) {
+            sendToActivity('tool-update', { type: 'thinking', text: `🤝 ${input.agent} sub-agent started (parallel): ${String(input.task).slice(0, 80)}` });
+            subagents.run(input.agent, input.task, subagentDeps(), { maxSteps: input.maxSteps })
+              .then((r) => { const msg = `🤝 ${input.agent} done: ${String(r.result || r.error || '').slice(0, 300)}`; sendToActivity('tool-update', { type: 'thinking', text: msg }); try { telegramNotify(msg); } catch {} })
+              .catch((e) => sendToActivity('tool-update', { type: 'thinking', text: `🤝 ${input.agent} failed: ${e.message}` }));
+            result = { success: true, started: input.agent, background: true, result: `${input.agent} sub-agent is working in the background — I'll report when it finishes.` };
+            break;
+          }
+          result = await subagents.run(input.agent, input.task, subagentDeps(), { maxSteps: input.maxSteps });
+          break;
+        }
+        result = { success: false, error: 'unknown subagent action: ' + act };
+        break;
+      }
       case 'screen_observe':
         result = await screenObserve(input); break;
       case 'play_chess': {
