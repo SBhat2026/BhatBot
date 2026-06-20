@@ -18,6 +18,7 @@ const workspaceMgr = require('./lib/workspace');
 const orchestrator = require('./lib/agents/orchestrator');
 const wsState = require('./lib/state');
 const wsMemory = require('./lib/memory');
+const semantic = require('./lib/semantic');           // #12 — embedding-based semantic/episodic recall (degrades gracefully)
 const visualInspect = require('./lib/inspect');
 const security = require('./lib/security');          // P0.4 — injection sanitizer + daily audit
 const notion = require('./lib/notion');               // P3  — Notion long-term memory (degrades gracefully)
@@ -733,6 +734,23 @@ async function refreshNotionRecall(query) {
   } catch { _notionRecall = { key: query || '', text: '' }; }
 }
 
+// Tier 5 — SEMANTIC recall (embedding match over durable facts + past turns). Like Notion, the
+// search is async so we pre-warm a query-keyed cache that buildMemoryBlock (sync) reads.
+let _semanticRecall = { key: '', text: '' };
+async function refreshSemanticRecall(query) {
+  try {
+    if (loadConfig().semanticRecall === false || !semantic.isReady || !semantic.isReady()) { _semanticRecall = { key: '', text: '' }; return; }
+    const key = notionRecallKey(query);
+    if (!key || key === _semanticRecall.key) return;
+    const hits = await Promise.race([
+      semantic.search(key, { k: loadConfig().semanticK || 5 }),
+      new Promise((r) => setTimeout(() => r(null), 4000)),
+    ]);
+    const arr = Array.isArray(hits) ? hits : [];
+    _semanticRecall = { key, text: arr.length ? arr.map((h) => `- ${h.text}${h.kind === 'episodic' ? ' (past turn)' : ''} (${(h.score || 0).toFixed(2)})`).join('\n') : '' };
+  } catch { _semanticRecall = { key: query || '', text: '' }; }
+}
+
 function buildMemoryBlock(query) {
   const cfg = loadConfig();
   const longTerm = memoryRetrieve(query, cfg.memoryTopK || 14);                              // tier 3
@@ -740,8 +758,10 @@ function buildMemoryBlock(query) {
   const working = (sessionSpoken && sessionSpoken.length)                                     // tier 1
     ? sessionSpoken.slice(-6).map((s) => '- ' + String(s).slice(0, 160)).join('\n') : '';
   const shared = (_notionRecall.text && _notionRecall.key === notionRecallKey(query)) ? _notionRecall.text : '';  // tier 4
+  const semBank = (_semanticRecall.text && _semanticRecall.key === notionRecallKey(query)) ? _semanticRecall.text : '';  // tier 5
   let out = '';
   if (longTerm) out += '\n\n---\n## RELEVANT MEMORY (long-term)\n\n' + longTerm;
+  if (semBank) out += '\n\n## SEMANTIC RECALL (embedding match — facts + past turns)\n\n' + semBank;
   if (shared) out += '\n\n## SHARED BANK (Notion — written by any agent/surface)\n\n' + shared;
   if (episodic) out += '\n\n## RECALLED FROM PAST SESSIONS (episodic)\n\n' + episodic;
   if (working) out += '\n\n## THIS SESSION SO FAR (working)\n\n' + working;
@@ -2692,6 +2712,7 @@ function saveMemoryEntry(section, content) {
   // SoT mirror: Notion is the authoritative durable store. Fire-and-forget + deduped so a fact
   // written from the Mac and from the cloud doesn't diverge into two copies.
   try { notion.appendMemory({ fact: content, tags: [section.toLowerCase().replace(/[^a-z]+/g, '-')], source: 'agent' }); } catch {}
+  try { semantic.upsert({ text: content, kind: 'semantic', meta: { section } }).catch(() => {}); } catch {}   // #12 embedding store
   return { success: true, saved: `${section}: ${content}` };
 }
 
@@ -2715,6 +2736,7 @@ async function syncMemoryFromNotion() {
     const lines = missing.slice(0, 40).map((m) => `- ${(m.date || '').slice(0, 10) || today()}: [notion] ${m.fact}`).join('\n');
     md = md.slice(0, insertAt) + '\n' + lines + '\n' + md.slice(insertAt + 1);
     fs.writeFileSync(MEMORY_PATH, md);
+    try { for (const m of missing.slice(0, 40)) semantic.upsert({ text: m.fact, kind: 'semantic', meta: { section: 'Notes', source: 'notion' } }).catch(() => {}); } catch {}
     sendToActivity('tool-update', { type: 'thinking', text: `🔄 reconciled ${missing.length} fact(s) from Notion into local memory.` });
   } catch {}
 }
@@ -3600,7 +3622,7 @@ async function agentLoop(history, apiKey, event, opts = {}) {
 
   // Passive auto-recall from the shared Notion bank — fold relevant facts (written by the Mac,
   // the cloud backend, or any other agent) into the memory block before we answer. Bounded to 4s.
-  await refreshNotionRecall(lastUserText(history));
+  await Promise.all([refreshNotionRecall(lastUserText(history)), refreshSemanticRecall(lastUserText(history))]);
 
   // Streaming: emit text deltas to the renderer (live bubble) AND speak each finished
   // sentence as it lands. Only on the desktop chat path (opts.stream); MCP/Telegram stay
@@ -3640,7 +3662,11 @@ async function agentLoop(history, apiKey, event, opts = {}) {
     if (usedGuidance.length) sendToActivity('learn_prompt', { text: usedGuidance.join(' | ') });
     // Strip any <speak> tags from the returned text (renderer shows this as the final bubble).
     reflectOnCorrection(history, lastUserText(history), text);   // async, non-blocking
-    return { text: String(text || '').replace(/<\/?speak>/g, '').trim(), history, _streamed: stream };
+    const clean = String(text || '').replace(/<\/?speak>/g, '').trim();
+    // #12 episodic memory: record the turn (what happened, when). Fire-and-forget; the store caps
+    // + evicts oldest episodic first so durable semantic facts survive under pressure.
+    try { const u = lastUserText(history); if (u && clean) semantic.upsert({ text: `User: ${String(u).slice(0, 400)}\nAssistant: ${clean.slice(0, 800)}`, kind: 'episodic', meta: { surface: stream ? 'desktop' : 'headless' } }).catch(() => {}); } catch {}
+    return { text: clean, history, _streamed: stream };
   };
 
   // Step budget: headroom for complex tasks that diagnose + retry across several approaches.
@@ -4656,7 +4682,7 @@ Flag anything urgent with ⚠.`;
 // headlessly (like the briefing), then announces/notifies + reschedules. This is what lets
 // BhatBot act on its own: reminders, recurring checks, "do X every morning / in 30 min".
 // ---------------------------------------------------------------------------
-let schedulerTimer = null, schedulerRunning = new Set();
+let schedulerTimer = null, schedulerRunning = new Set(), schedulerBusy = false;
 function startScheduler() {
   if (schedulerTimer) return;
   schedulerTimer = setInterval(tickScheduler, 30000);
@@ -4664,13 +4690,22 @@ function startScheduler() {
   setTimeout(tickScheduler, 4000);   // catch anything already overdue shortly after boot
 }
 async function tickScheduler() {
+  if (schedulerBusy) return;                       // SERIAL: never run two scheduled tasks at once
+  if (agentState !== 'idle') return;               // PRECEDENCE: yield to a live foreground turn; retry next tick
   let due = [];
   try { due = scheduler.due(Date.now()); } catch { return; }
-  for (const s of due) {
-    if (schedulerRunning.has(s.id)) continue;   // don't overlap a long-running task with its next tick
-    schedulerRunning.add(s.id);
-    runScheduledTask(s).finally(() => schedulerRunning.delete(s.id));
-  }
+  if (!due.length) return;
+  // Idempotency: nextRun is a fixed past instant for daily/weekly/once and advanced by markRan,
+  // so an overdue job (Mac was asleep) fires exactly ONCE on wake — no missed-tick storm.
+  schedulerBusy = true;
+  try {
+    for (const s of due) {
+      if (agentState !== 'idle') break;            // user started interacting → defer the rest to next tick
+      if (schedulerRunning.has(s.id)) continue;
+      schedulerRunning.add(s.id);
+      try { await runScheduledTask(s); } catch {} finally { schedulerRunning.delete(s.id); }
+    }
+  } finally { schedulerBusy = false; }
 }
 async function runScheduledTask(s) {
   try {
