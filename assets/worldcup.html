@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>BhatBot · World Cup 2026</title>
+<style>
+  :root{ --bg:#090d13; --panel:#0e141d; --line:#15212f; --cyan:#00c8ff; --cyan-soft:#7fe3ff;
+    --txt:#c8d6e5; --txt-strong:#dff1ff; --dim:#5b708a; --ok:#2fe08a; --warn:#ffb02e;
+    --mono:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,monospace; }
+  *{box-sizing:border-box;} html,body{margin:0;height:100%;background:var(--bg);color:var(--txt);font:13px/1.5 var(--mono);}
+  body{padding:14px 16px 30px;}
+  h1{font-size:15px;letter-spacing:.18em;color:var(--txt-strong);margin:0 0 2px;text-transform:uppercase;}
+  .sub{color:var(--dim);font-size:11px;letter-spacing:.06em;margin-bottom:14px;}
+  .live{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px;}
+  .livecard{border:1px solid #1b4a5e;border-radius:8px;padding:6px 10px;background:rgba(0,200,255,.06);color:var(--cyan-soft);}
+  .livedot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--ok);box-shadow:0 0 8px var(--ok);margin-right:6px;animation:pulse 1.4s infinite;}
+  @keyframes pulse{50%{opacity:.35;}}
+  .sec{color:var(--cyan);font-size:11px;letter-spacing:.14em;text-transform:uppercase;margin:18px 0 8px;}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px;}
+  .grp{border:1px solid var(--line);border-radius:10px;background:var(--panel);padding:8px 10px;}
+  .grp h3{margin:0 0 6px;font-size:12px;color:var(--txt-strong);letter-spacing:.1em;}
+  table{width:100%;border-collapse:collapse;font-size:11.5px;}
+  th{color:var(--dim);text-align:right;font-weight:400;padding:2px 4px;}
+  th.l,td.l{text-align:left;}
+  td{padding:2px 4px;text-align:right;}
+  tr.adv td{color:var(--txt-strong);} tr.adv td.l::before{content:"▸ ";color:var(--cyan);}
+  tr.third td{color:var(--warn);}
+  .odds{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:8px;}
+  .obar{border:1px solid var(--line);border-radius:8px;background:var(--panel);padding:7px 9px;}
+  .obar .top{display:flex;justify-content:space-between;font-size:12px;color:var(--txt-strong);}
+  .bar{height:5px;border-radius:3px;background:#10202c;margin-top:5px;overflow:hidden;}
+  .bar i{display:block;height:100%;background:linear-gradient(90deg,var(--cyan),var(--cyan-soft));}
+  .pred{border:1px solid var(--line);border-radius:8px;background:var(--panel);padding:7px 10px;margin-bottom:7px;font-size:12px;}
+  .pp{display:inline-block;min-width:34px;text-align:right;}
+  .err{color:var(--warn);padding:20px;}
+  .foot{position:fixed;bottom:0;left:0;right:0;background:#0c1219;border-top:1px solid var(--line);
+    padding:5px 16px;font-size:10px;color:var(--dim);letter-spacing:.06em;display:flex;justify-content:space-between;}
+</style>
+</head>
+<body>
+<h1>FIFA World Cup 2026</h1>
+<div class="sub" id="sub">loading live data…</div>
+<div id="root"></div>
+<div class="foot"><span id="status">●</span><span id="clock"></span></div>
+<script>
+const pct = (x) => (x * 100).toFixed(x >= 0.1 ? 0 : 1);
+function render(s) {
+  document.getElementById('sub').textContent =
+    `updated ${new Date(s.fetchedAt).toLocaleTimeString()} · ${s.matches.length} matches · ${s.stages.join(' / ')}`;
+  const R = [];
+  if (s.live && s.live.length) {
+    R.push('<div class="live">' + s.live.map(m =>
+      `<div class="livecard"><span class="livedot"></span>${m.home.abbr} ${m.hs}–${m.as} ${m.away.abbr} · ${m.detail}</div>`).join('') + '</div>');
+  }
+  R.push('<div class="sec">Group standings</div><div class="grid">');
+  for (const g of s.tables) {
+    let rows = '';
+    g.table.forEach((r, i) => {
+      const cls = i < 2 ? 'adv' : (i === 2 ? 'third' : '');
+      rows += `<tr class="${cls}"><td>${i + 1}</td><td class="l">${r.name}</td><td>${r.P}</td><td>${r.GD >= 0 ? '+' : ''}${r.GD}</td><td><b>${r.Pts}</b></td></tr>`;
+    });
+    R.push(`<div class="grp"><h3>Group ${g.label}</h3><table>
+      <tr><th></th><th class="l">Team</th><th>P</th><th>GD</th><th>Pts</th></tr>${rows}</table></div>`);
+  }
+  R.push('</div>');
+  const ranked = Object.entries(s.odds).sort((a, b) => b[1].W - a[1].W).slice(0, 12);
+  const max = ranked.length ? ranked[0][1].W : 1;
+  R.push('<div class="sec">Title odds · Monte-Carlo</div><div class="odds">');
+  for (const [ab, o] of ranked) {
+    R.push(`<div class="obar"><div class="top"><span>${ab}</span><span>${pct(o.W)}%</span></div>
+      <div class="bar"><i style="width:${(o.W / max * 100).toFixed(0)}%"></i></div></div>`);
+  }
+  R.push('</div>');
+  if (s.upcoming && s.upcoming.length) {
+    R.push('<div class="sec">Next matches · prediction</div>');
+    for (const m of s.upcoming.slice(0, 10)) {
+      const p = (s.preds && s.preds[m.id]) || null;
+      const txt = p ? `<span class="pp">${pct(p.pHome)}%</span> / draw <span class="pp">${pct(p.pDraw)}%</span> / <span class="pp">${pct(p.pAway)}%</span>` : '';
+      R.push(`<div class="pred">${m.home.abbr} vs ${m.away.abbr} ${txt} <span style="color:var(--dim)">· ${new Date(m.date).toLocaleString([], {weekday:'short', hour:'2-digit', minute:'2-digit'})}</span></div>`);
+    }
+  }
+  document.getElementById('root').innerHTML = R.join('');
+}
+async function tick() {
+  try {
+    const s = await window.wc.snapshot();
+    if (s && s.error) { document.getElementById('root').innerHTML = `<div class="err">⚠ ${s.error}</div>`; }
+    else if (s) { render(s); document.getElementById('status').textContent = '● live'; }
+  } catch (e) { document.getElementById('status').textContent = '● ' + (e.message || 'offline'); }
+  document.getElementById('clock').textContent = new Date().toLocaleTimeString();
+}
+tick(); setInterval(tick, 60000);
+</script>
+</body>
+</html>

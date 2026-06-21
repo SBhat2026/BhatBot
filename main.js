@@ -219,7 +219,7 @@ const WORKFLOW_DIR = path.join(os.homedir(), '.bhatbot', 'workflows');
 const NOTES_DIR = path.join(os.homedir(), '.bhatbot', 'notes');
 const pendingConfirms = new Map();
 let pendingGuidance = [];   // live feedback queued mid-task (steering)
-let nexusWindow = null, studioWindow = null, terminalWindow = null, chessWindow = null;
+let nexusWindow = null, studioWindow = null, terminalWindow = null, chessWindow = null, worldCupWindow = null;
 let studioWatcher = null, ptyProc = null, wakeProc = null;
 
 const STUDIO_DIR = path.join(os.homedir(), '.bhatbot', 'studio');
@@ -2022,7 +2022,11 @@ async function worldCupTool(input) {
       const ranked = Object.entries(snap.odds).sort((a, b) => b[1].W - a[1].W).slice(0, 12);
       return { success: true, result: 'Title odds (Monte-Carlo):\n' + ranked.map(([ab, o]) => `${ab}: ${(o.W * 100).toFixed(1)}% to win, ${(o.F * 100).toFixed(1)}% final`).join('\n') };
     }
-    // report (default) + open (also returns report; GUI viewer is a follow-up)
+    if (action === 'open') {
+      const w = openWorldCupWindow();
+      return w.success ? { success: true, result: 'Opened the live World Cup viewer.' } : w;
+    }
+    // report (default)
     return { success: true, result: worldcup.report(snap) };
   } catch (e) { return { success: false, error: 'world_cup: ' + (e.message || String(e)) }; }
 }
@@ -5113,6 +5117,31 @@ function openChessWindow(difficulty) {
   }
   return { success: true };
 }
+
+// --- Live World Cup 2026 viewer (auto-refreshing bracket + odds) ---
+function openWorldCupWindow() {
+  const asset = path.join(__dirname, 'assets', 'worldcup.html');
+  if (!fs.existsSync(asset)) return { success: false, error: 'worldcup.html asset missing' };
+  if (worldCupWindow && !worldCupWindow.isDestroyed()) { worldCupWindow.show(); worldCupWindow.focus(); return { success: true }; }
+  worldCupWindow = new BrowserWindow({
+    width: 1040, height: 860, resizable: true, minWidth: 520, minHeight: 480,
+    title: 'World Cup 2026', backgroundColor: '#090d13',
+    webPreferences: { contextIsolation: true, preload: path.join(__dirname, 'preload-worldcup.js') }
+  });
+  worldCupWindow.loadFile(asset);
+  worldCupWindow.on('closed', () => { worldCupWindow = null; });
+  return { success: true };
+}
+// Snapshot for the viewer — adds per-match win/draw/loss predictions for the upcoming fixtures.
+ipcMain.handle('wc-snapshot', async () => {
+  try {
+    const s = await worldcup.snapshot({ ttlMs: 30000, sims: 6000 });
+    const preds = {};
+    for (const m of s.upcoming.slice(0, 12)) preds[m.id] = worldcup.predict(s.elo, m.home.abbr, m.away.abbr, { home: true });
+    // strip the heavy raw match list the viewer doesn't need; keep what it renders
+    return { fetchedAt: s.fetchedAt, stages: s.stages, matches: s.matches, tables: s.tables, odds: s.odds, live: s.live, upcoming: s.upcoming, preds };
+  } catch (e) { return { error: e.message || String(e) }; }
+});
 
 // --- Embedded Claude Code terminal (node-pty + xterm) ---
 function openTerminalWindow() {
