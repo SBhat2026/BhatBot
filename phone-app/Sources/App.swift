@@ -77,6 +77,15 @@ struct WebRoot: UIViewRepresentable {
         weak var web: WKWebView?
         private var usingFallback = false
 
+        // Self-updating offline cache: the last UI we successfully loaded from the cloud, saved to
+        // disk. This decouples the OFFLINE path from the .ipa too — when the cloud is unreachable we
+        // serve the latest deployed UI we've seen, not the (possibly months-old) build-time bundle.
+        // Net effect: rebuilding the .ipa is only ever needed for NATIVE (Swift) changes, never UI.
+        private var cachedURL: URL {
+            FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+                .appendingPathComponent("mobile-cached.html")
+        }
+
         // Re-inject the current host/token (config can change at runtime) before each load.
         private func applyConfigScript() {
             guard let web = web else { return }
@@ -93,13 +102,28 @@ struct WebRoot: UIViewRepresentable {
             web.load(URLRequest(url: Config.remoteURL, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 12))
         }
 
-        // Bundled copy of the UI — always present, so the app opens even with the Mac down.
+        // Offline UI — always opens even with the cloud/Mac down. Prefer the self-updating cache
+        // (latest deployed UI we've seen); fall back to the build-time bundle only if nothing cached.
         func loadFallback() {
-            guard let web = web, !usingFallback,
-                  let url = Bundle.main.url(forResource: "mobile", withExtension: "html") else { return }
+            guard let web = web, !usingFallback else { return }
             usingFallback = true
             applyConfigScript()
-            web.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent())
+            let fm = FileManager.default
+            if fm.fileExists(atPath: cachedURL.path) {
+                web.loadFileURL(cachedURL, allowingReadAccessTo: cachedURL.deletingLastPathComponent())
+            } else if let url = Bundle.main.url(forResource: "mobile", withExtension: "html") {
+                web.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent())
+            }
+        }
+
+        // After a successful live load, snapshot the served HTML to the offline cache. The cloud's
+        // /app/:token accepts the path token, so a plain GET returns the same UI the WebView rendered.
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            guard !usingFallback else { return }
+            URLSession.shared.dataTask(with: Config.remoteURL) { [weak self] data, _, _ in
+                guard let self = self, let data = data, data.count > 1000 else { return }
+                try? data.write(to: self.cachedURL, options: .atomic)
+            }.resume()
         }
 
         @objc func pull(_ rc: UIRefreshControl) { loadRemote(); rc.endRefreshing() }
