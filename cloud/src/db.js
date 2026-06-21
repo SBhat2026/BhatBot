@@ -44,6 +44,11 @@ CREATE TABLE IF NOT EXISTS audit (
   id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER, source TEXT, tool TEXT,
   args TEXT, ok INTEGER, ms INTEGER, result TEXT
 );
+CREATE TABLE IF NOT EXISTS contacts (
+  id TEXT PRIMARY KEY, name TEXT, phones TEXT, emails TEXT, note TEXT,
+  phones_norm TEXT, updated_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_contacts_name ON contacts(name);
 `);
 
 const now = () => Date.now();
@@ -136,6 +141,58 @@ function logTool({ source = 'cloud', tool, args, ok, ms, result } = {}) {
 }
 function getAuditLog(limit = 100) { return _auditRecent.all(Math.min(1000, Number(limit) || 100)); }
 
+// ---- contacts (who's who — caller-ID resolution + agent lookup, with user "who is" notes) -----
+const normPhone = (s) => String(s || '').replace(/\D/g, '').slice(-10);
+const _upsertContact = db.prepare(`INSERT INTO contacts (id,name,phones,emails,note,phones_norm,updated_at)
+  VALUES (@id,@name,@phones,@emails,@note,@phones_norm,@updated_at)
+  ON CONFLICT(id) DO UPDATE SET name=excluded.name, phones=excluded.phones, emails=excluded.emails,
+    phones_norm=excluded.phones_norm, updated_at=excluded.updated_at,
+    note=COALESCE(NULLIF(excluded.note,''), contacts.note)`);  // never wipe a user note on re-import
+const _allContacts = db.prepare('SELECT id,name,phones,emails,note,phones_norm FROM contacts ORDER BY name ASC');
+const _contactById = db.prepare('SELECT id,name,phones,emails,note,phones_norm FROM contacts WHERE id=?');
+const _setNoteById = db.prepare('UPDATE contacts SET note=?, updated_at=? WHERE id=?');
+const slug = (s) => String(s || 'contact').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 48) || 'contact';
+function _parse(r) { if (!r) return null; return { id: r.id, name: r.name, phones: JSON.parse(r.phones || '[]'), emails: JSON.parse(r.emails || '[]'), note: r.note || '' }; }
+
+function upsertContacts(arr = []) {
+  let n = 0;
+  const tx = db.transaction((items) => {
+    const seen = new Set();
+    for (const c of items) {
+      const name = String(c.name || '').trim(); if (!name && !(c.phones || []).length) continue;
+      let id = String(c.id || '').trim() || slug(name);
+      while (seen.has(id)) id = id + '-' + Math.random().toString(36).slice(2, 5);  // dedupe collisions
+      seen.add(id);
+      const phones = (c.phones || []).map(String);
+      const phones_norm = phones.map(normPhone).filter(Boolean);
+      _upsertContact.run({ id, name, phones: JSON.stringify(phones), emails: JSON.stringify(c.emails || []),
+        note: String(c.note || ''), phones_norm: JSON.stringify(phones_norm), updated_at: now() });
+      n++;
+    }
+  });
+  tx(arr); return n;
+}
+function getContacts() { return _allContacts.all().map(_parse); }
+function findContactByPhone(num) {
+  const key = normPhone(num); if (key.length < 7) return null;
+  for (const r of _allContacts.all()) { try { if ((JSON.parse(r.phones_norm || '[]')).includes(key)) return _parse(r); } catch {} }
+  return null;
+}
+function searchContacts(q, k = 8) {
+  const s = String(q || '').toLowerCase().trim(); if (!s) return [];
+  const key = normPhone(s);
+  return _allContacts.all().map(_parse).filter((c) =>
+    c.name.toLowerCase().includes(s) || (c.note || '').toLowerCase().includes(s) ||
+    (key.length >= 7 && c.phones.map(normPhone).includes(key))).slice(0, k);
+}
+function setContactNote(idOrName, note) {
+  let row = _contactById.get(String(idOrName || ''));
+  if (!row) { const m = searchContacts(idOrName, 1); if (m.length) row = _contactById.get(m[0].id); }
+  if (!row) return null;
+  _setNoteById.run(String(note || ''), now(), row.id);
+  return _parse(_contactById.get(row.id));
+}
+
 // ---- meta kv (small settings: last brief day, etc.) ---------------------------
 const _getMeta = db.prepare('SELECT value FROM meta WHERE key=?');
 const _setMeta = db.prepare('INSERT INTO meta (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=?');
@@ -149,4 +206,5 @@ module.exports = {
   recordCost, costToday,
   pushActivity, getActivity,
   logTool, getAuditLog,
+  upsertContacts, getContacts, findContactByPhone, searchContacts, setContactNote,
 };

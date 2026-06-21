@@ -78,6 +78,17 @@ app.get('/api/:token/activity', guard, (req, res) => { noStore(res); res.json(db
 app.get('/api/:token/audit', guard, (req, res) => { noStore(res); res.json({ entries: db.getAuditLog(Number(req.query.limit) || 100) }); });
 app.get('/api/:token/config', guard, (_q, s) => { noStore(s); s.json({ nexusUrl: process.env.NEXUS_URL || '', mac: relay.macStatus() }); });
 
+// ---- contacts (Mac imports them here; agent + butler use them for who's-who) ---
+app.post('/api/:token/contacts', guard, (req, res) => {
+  try { const n = db.upsertContacts((req.body && req.body.contacts) || []); res.json({ ok: true, count: n }); }
+  catch (e) { res.json({ error: String(e && e.message || e) }); }
+});
+app.get('/api/:token/contacts', guard, (_q, res) => { noStore(res); res.json({ contacts: db.getContacts() }); });
+app.post('/api/:token/contacts/note', guard, (req, res) => {
+  const c = db.setContactNote((req.body && req.body.name) || '', (req.body && req.body.note) || '');
+  res.json(c ? { ok: true, contact: c } : { error: 'no matching contact' });
+});
+
 // ---- PWA (serve the same mobile UI so phone/native/browser can point here) -----
 const MOBILE = path.join(PUBLIC, 'mobile.html');
 const appVersion = () => { try { return String(Math.floor(fs.statSync(MOBILE).mtimeMs)); } catch { return '0'; } };

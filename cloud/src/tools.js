@@ -57,6 +57,17 @@ const REGISTRY = {
       input_schema: { type: 'object', properties: { question: { type: 'string', description: 'One clear spoken-style question to ask him.' } }, required: ['question'] } },
     run: async ({ question }) => twilio ? twilio.askOwner(question) : { success: false, error: 'calling not available' },
   },
+  contacts: {
+    def: { name: 'contacts', description: "Look up / annotate Siddhant's contacts (imported from his Mac). Use to resolve who someone is, find a number to call/text, or record context about a person. action: lookup (by name or phone number), search (fuzzy over name/note/number), list (names only), who_is (set/append a note describing who a contact is and how to deal with them — Siddhant's own context). Runs in the cloud — always available.",
+      input_schema: { type: 'object', properties: { action: { type: 'string', enum: ['lookup', 'search', 'list', 'who_is'] }, query: { type: 'string', description: 'name or phone number (lookup/search)' }, name: { type: 'string', description: 'contact name/id (who_is)' }, note: { type: 'string', description: 'the context to store about this person (who_is)' } }, required: ['action'] } },
+    run: async ({ action, query, name, note }) => {
+      if (action === 'list') { const all = db.getContacts(); return { success: true, count: all.length, names: all.map((c) => c.name) }; }
+      if (action === 'lookup') { const c = db.findContactByPhone(query) || db.searchContacts(query, 1)[0]; return c ? { success: true, contact: c } : { success: false, error: 'no match for ' + query }; }
+      if (action === 'search') { return { success: true, matches: db.searchContacts(query, 8) }; }
+      if (action === 'who_is') { const c = db.setContactNote(name, note); return c ? { success: true, contact: c } : { success: false, error: 'no contact named ' + name }; }
+      return { success: false, error: 'unknown contacts action: ' + action };
+    },
+  },
   // ---- Mac-relay tools (run on the computer when it's awake) -------------------
   run_shell: {
     def: { name: 'run_shell', description: 'Run a shell command on Siddhant’s Mac (needs the computer awake + connected). rm/rmdir/trash are blocked from remote for safety.',

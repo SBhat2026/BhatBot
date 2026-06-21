@@ -89,6 +89,14 @@ const BUTLER_SYS = "You are BhatBot, Siddhant Bhat's courteous, professional but
 const ABUSE_RE = /\b(f+u+c+k\w*|motherf\w*|sh[i1]t\w*|b[i1]tch\w*|assholes?|c[u]nt\w*|dickheads?|bastards?|shut up|screw you|piss off|go to hell|n[i1]gg\w*|fa[g6]+ots?|slut|whore)\b/i;
 function isAbusive(t) { return ABUSE_RE.test(String(t || '')); }
 
+// Caller-ID → known contact (imported from the Mac). Lets the butler greet people by name and use
+// Siddhant's own "who is who" context. Display name for SMS/activity; sys hint for the on-call brain.
+function peerName(c) { return (c && c.known && c.known.name) || (c && c.peer) || 'caller'; }
+function knownHint(c) {
+  if (!c || !c.known) return '';
+  return ` IMPORTANT — caller ID matches a known contact: ${c.known.name}.${c.known.note ? ' Context Siddhant gave about them: ' + c.known.note + '.' : ''} Greet them by name and use this context, while still confirming who you're speaking with.`;
+}
+
 // ---- outbound: the agent tool calls this -------------------------------------
 async function placeCall(to, purpose) {
   if (!configured()) return { success: false, error: 'Twilio not configured (set TWILIO_SID/TOKEN/FROM secrets).' };
@@ -212,9 +220,10 @@ function mount(app, { token, form }) {
       db.pushActivity('call', '📞← command-mode call on your number — requesting passphrase');
       return res.type('text/xml').send(gather(host, token, await sayEl(host, 'Good evening, sir. BhatBot here. Your passphrase, please.'), 'auth'));
     }
-    db.pushActivity('call', `📞← incoming from ${c.peer}`);
+    const known = db.findContactByPhone(c.peer); if (known) c.known = known;
+    db.pushActivity('call', `📞← incoming from ${peerName(c)}`);
     const greet = await converse(sid, '[Incoming call. Greet them, clearly state that this is BhatBot, Siddhant Bhat\'s assistant, then in one short greeting ask who is calling, what it\'s regarding, and who they are hoping to reach.]',
-      'This is an INBOUND call. Open by identifying yourself as "BhatBot, Siddhant\'s assistant." In one short greeting, ask who is calling, why, and who they are hoping to reach.');
+      'This is an INBOUND call. Open by identifying yourself as "BhatBot, Siddhant\'s assistant." In one short greeting, ask who is calling, why, and who they are hoping to reach.' + knownHint(c));
     res.type('text/xml').send(gather(host, token, await sayEl(host, greet), 'screen'));
   });
 
@@ -292,11 +301,11 @@ function mount(app, { token, form }) {
       // First screening turn → record who/why and quietly notify the owner.
       if (!c.screened) {
         c.screened = true; c.reason = speech;
-        notifyOwner(`📞 Call from ${c.peer}: “${speech.slice(0, 200)}”\nReply TAKE to be connected — otherwise I’ll assist them as your butler and text you a summary.`);
-        db.pushActivity('call', `🛎 ${c.peer}: ${speech.slice(0, 140)} — assisting as butler (reply TAKE to jump in)`);
+        notifyOwner(`📞 Call from ${peerName(c)}: “${speech.slice(0, 200)}”\nReply TAKE to be connected — otherwise I’ll assist them as your butler and text you a summary.`);
+        db.pushActivity('call', `🛎 ${peerName(c)}: ${speech.slice(0, 140)} — assisting as butler (reply TAKE to jump in)`);
       }
       // Courteous butler turn: acknowledge, offer help, take details, relay later.
-      const r = await converse(sid, speech, BUTLER_SYS);
+      const r = await converse(sid, speech, BUTLER_SYS + knownHint(c));
       // Patch-through: butler only emits [PATCH] when the caller asked for Siddhant by name AND has
       // a legitimate reason → try to ring Siddhant; if he doesn't pick up, fall to a message.
       if (/\[PATCH\]/i.test(r)) {
