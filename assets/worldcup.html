@@ -83,7 +83,8 @@ function render(s) {
 }
 async function tick() {
   try {
-    const s = await window.wc.snapshot();
+    const get = (window.wc && window.wc.snapshot) ? window.wc.snapshot : async () => window.__WC_BAKED__;
+    const s = await get();
     if (s && s.error) { document.getElementById('root').innerHTML = `<div class="err">⚠ ${s.error}</div>`; }
     else if (s) { render(s); document.getElementById('status').textContent = '● live'; }
   } catch (e) { document.getElementById('status').textContent = '● ' + (e.message || 'offline'); }

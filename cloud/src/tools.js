@@ -7,6 +7,40 @@
 const db = require('./db');
 const { macExec, macOnline, queueExec } = require('./relay');
 let twilio = null; try { twilio = require('./twilio'); } catch {}
+const worldcup = require('./worldcup');   // live FIFA WC 2026 engine (cloud-native, no key)
+
+function _wcResolve(snap, q) {
+  if (!q) return null;
+  const s = String(q).trim().toLowerCase();
+  for (const g of snap.groups) for (const t of g.teams) {
+    if (t.abbr.toLowerCase() === s) return t.abbr;
+    if (String(t.name).toLowerCase().includes(s)) return t.abbr;
+  }
+  return String(q).toUpperCase();
+}
+async function worldCup(input = {}) {
+  const action = input.action || 'report';
+  try {
+    const snap = await worldcup.snapshot({ ttlMs: 30000, sims: Number(input.sims) || 5000 });
+    if (action === 'predict') {
+      const a = _wcResolve(snap, input.home), b = _wcResolve(snap, input.away);
+      if (!a || !b) return { success: false, error: 'need home and away' };
+      const p = worldcup.predict(snap.elo, a, b, { home: true });
+      return { success: true, result: `${a} vs ${b}: ${a} ${(p.pHome * 100).toFixed(0)}% / draw ${(p.pDraw * 100).toFixed(0)}% / ${b} ${(p.pAway * 100).toFixed(0)}%` };
+    }
+    if (action === 'group') {
+      const g = snap.tables.find((t) => t.label.toUpperCase() === String(input.label || '').toUpperCase());
+      if (!g) return { success: false, error: `group ${input.label} not found` };
+      return { success: true, result: `Group ${g.label}\n` + g.table.map((r, i) => `${i + 1}. ${r.name} — ${r.Pts} pts (GD ${r.GD >= 0 ? '+' : ''}${r.GD})`).join('\n') };
+    }
+    if (action === 'live') return { success: true, result: snap.live.length ? snap.live.map((m) => `● ${m.home.name} ${m.hs}–${m.as} ${m.away.name} (${m.detail})`).join('\n') : 'No World Cup matches in progress.' };
+    if (action === 'odds') {
+      const r = Object.entries(snap.odds).sort((a, b) => b[1].W - a[1].W).slice(0, 10);
+      return { success: true, result: 'Title odds:\n' + r.map(([ab, o]) => `${ab}: ${(o.W * 100).toFixed(1)}%`).join('\n') };
+    }
+    return { success: true, result: worldcup.report(snap) };
+  } catch (e) { return { success: false, error: 'world_cup: ' + (e.message || String(e)) }; }
+}
 
 // ---- cloud-native implementations ---------------------------------------------
 async function webFetch({ url }) {
@@ -26,6 +60,14 @@ const REGISTRY = {
     def: { name: 'web_fetch', description: 'HTTP GET a URL and return its text (15s, 50KB cap). Use for live web info, APIs, pages. Runs in the cloud — always available.',
       input_schema: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'] } },
     run: webFetch,
+  },
+  world_cup: {
+    def: { name: 'world_cup', description: 'FIFA World Cup 2026 — LIVE bracket, group standings, and predictions (runs in the cloud, always available). Pulls live scores, computes group tables, maintains a results-driven Elo, and Monte-Carlo simulates the tournament for title odds + match win-probabilities. Use for any World Cup question. actions: "report" (default), "odds", "predict"{home,away}, "group"{label A–L}, "live".',
+      input_schema: { type: 'object', properties: {
+        action: { type: 'string', enum: ['report', 'odds', 'predict', 'group', 'live'] },
+        home: { type: 'string' }, away: { type: 'string' }, label: { type: 'string' }
+      } } },
+    run: worldCup,
   },
   remember: {
     def: { name: 'remember', description: 'Persist a durable fact to long-term memory (preferences, decisions, personal facts, project state). One clear sentence.',
