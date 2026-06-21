@@ -21,8 +21,18 @@ const EL_SPEAKER_BOOST = process.env.EL_SPEAKER_BOOST !== '0';
 const OPENAI_KEY = process.env.OPENAI_API_KEY || '';
 function clamp01(v, d) { const n = parseFloat(v); return isFinite(n) ? Math.max(0, Math.min(1, n)) : d; }
 
+// Strip leaked chain-of-thought / meta-narration before display OR speech (mirrors lib/pure.js).
+function stripReasoning(text) {
+  let s = String(text || '');
+  s = s.replace(/<thinking\b[\s\S]*?<\/thinking>/gi, ' ').replace(/<think\b[\s\S]*?<\/think>/gi, ' ');
+  s = s.replace(/<\/?(?:thinking|think|reasoning|scratchpad)\b[^>]*>/gi, ' ');
+  s = s.replace(/<thinking\b[\s\S]*$/i, ' ').replace(/<think\b[\s\S]*$/i, ' ');
+  s = s.replace(/^\s*(?:the user (?:is|wants|seems|said|just)|i (?:should|need to|will|am going to|notice|see that)|let me (?:think|reason|consider))\b[^\n.!?]*[.!?]?\s*/i, '');
+  return s.replace(/[ \t]{2,}/g, ' ').trim();
+}
+
 function normalizeForSpeech(input) {
-  let s = String(input || '');
+  let s = stripReasoning(String(input || ''));
   s = s.replace(/```[\s\S]*?```/g, ' ').replace(/`([^`]+)`/g, '$1');
   s = s.replace(/!?\[([^\]]+)\]\([^)]+\)/g, '$1').replace(/https?:\/\/\S+/gi, ' ').replace(/\bwww\.\S+/gi, ' ');
   s = s.replace(/(\*\*|__)(.*?)\1/g, '$2').replace(/(\*|_)(?=\S)(.*?)(?<=\S)\1/g, '$2');
@@ -30,7 +40,7 @@ function normalizeForSpeech(input) {
   s = s.replace(/(^|\s)((?:~|\.\.?)?\/(?:[\w.@%+-]+\/)+[\w.@%+-]*)/g, (_m, pre, p) => pre + (p.replace(/\/+$/, '').split('/').pop() || ''));
   s = s.replace(/\be\.g\.,?/gi, 'for example,').replace(/\bi\.e\.,?/gi, 'that is,').replace(/\betc\.?/gi, 'etcetera').replace(/\bvs\.?/gi, 'versus');
   s = s.replace(/\$\s?(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d{2}))?/g, (_m, d, c) => { d = d.replace(/,/g, ''); return d + (d === '1' ? ' dollar' : ' dollars') + (c ? ' and ' + c + ' cents' : ''); });
-  s = s.replace(/([A-Za-z])\.([A-Za-z0-9])/g, '$1 dot $2');
+  s = s.replace(/([A-Za-z0-9])\.(?=[A-Za-z])/g, '$1 dot ');   // domains/emails: gmail.com→"gmail dot com"; decimals (digit.digit) stay
   s = s.replace(/&/g, ' and ').replace(/%/g, ' percent').replace(/(\S)@(\S)/g, '$1 at $2').replace(/\s@\s/g, ' at ')
        .replace(/#(\d+)/g, 'number $1').replace(/#/g, ' hash ').replace(/\s\+\s/g, ' plus ')
        .replace(/([A-Za-z])\/([A-Za-z])/g, '$1 slash $2').replace(/°/g, ' degrees').replace(/\$(?=[A-Za-z])/g, '').replace(/[~^|<>*$]/g, ' ');
@@ -75,6 +85,10 @@ async function stt(buf, mime) {
   const fd = new FormData();
   fd.append('file', new Blob([buf], { type: mime || 'audio/webm' }), 'audio.' + ext);
   fd.append('model', 'gpt-4o-mini-transcribe');
+  // Vocabulary biasing so uncommon names/emails aren't misheard (e.g. "Siddhant"→"Citadel").
+  // Seed via STT_VOCAB env (comma-separated names/emails); brand words always included.
+  const vocab = ['BhatBot', 'Jarvis', ...String(process.env.STT_VOCAB || '').split(',')].map((x) => x.trim()).filter(Boolean);
+  if (vocab.length) fd.append('prompt', 'Expected names/identifiers (keep emails lowercase): ' + vocab.join(', ') + '.');
   const r = await fetch('https://api.openai.com/v1/audio/transcriptions', { method: 'POST', headers: { authorization: 'Bearer ' + OPENAI_KEY }, body: fd });
   if (!r.ok) return { error: 'whisper ' + r.status + ': ' + (await r.text()).slice(0, 160) };
   const j = await r.json();

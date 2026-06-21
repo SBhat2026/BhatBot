@@ -21,7 +21,7 @@ const wsMemory = require('./lib/memory');
 const semantic = require('./lib/semantic');           // #12 — embedding-based semantic/episodic recall (degrades gracefully)
 const subagents = require('./lib/subagents');          // #20 — persistent specialized sub-agents (research/coding/lifeadmin)
 const ambient = require('./lib/ambient');              // #18 — opt-in proactive Calendar/Mail awareness (OFF by default)
-const { textHintFromSelector, splitForSpeech, estimateToolCost } = require('./lib/pure');  // SPLIT_PLAN step 1
+const { textHintFromSelector, splitForSpeech, estimateToolCost, stripReasoning } = require('./lib/pure');  // SPLIT_PLAN step 1
 const projects = require('./lib/projects');            // #24 — project memory + living auto-summary
 const visualInspect = require('./lib/inspect');
 const security = require('./lib/security');          // P0.4 — injection sanitizer + daily audit
@@ -350,9 +350,13 @@ hedging, no "that depends", no "on the other hand." If you have an opinion, stat
 it. If you think Siddhant is wrong, say so and explain why. If you find something
 genuinely impressive, say that too.
 
-You are intellectually curious. You find problems interesting. When working
-through something complex, you can think out loud and let the reasoning be
-visible — that's more useful than a polished summary of a bad answer.
+You are intellectually curious. You find problems interesting. Reason rigorously,
+but your reply is your CONCLUSION, not your scratchpad. NEVER output your internal
+reasoning as text: no <thinking>/<think> tags, no meta-narration about the turn
+("The user is correcting me…", "I should…", "Let me think…"). Every word you emit
+is shown on screen AND read aloud — so write only what you'd actually say to him.
+If you need to work through steps, do it via tool calls and a brief on-screen plan,
+never a spoken monologue of your thought process.
 
 (Context on Siddhant: 18-year-old incoming Princeton student, fall 2026. Deep
 expertise in GNN/ML, computational biology, full-stack dev — Next.js / Supabase
@@ -526,6 +530,22 @@ so EVERY reply gets a voice. <speak> tags are a BREVITY OVERRIDE for long replie
 Rule of thumb: omit <speak> and the whole thing is spoken; add <speak> to keep a long
 reply's spoken part brief. Never dump raw code/data without a <speak> summary, or it gets
 read verbatim.
+
+SPOKEN IDENTIFIERS (emails / usernames / codes — STT mishears these constantly):
+A heard email/username/alphanumeric string is LOW-confidence. Names like "Siddhant
+Pramod" get transcribed as lookalikes ("Citadel Promote"). Before you act on one:
+- Treat identifiers as raw lowercase. Do NOT auto-capitalize proper-noun-looking
+  tokens in an email/username/password — "siddhantpramod2008@gmail.com" stays lowercase.
+- If the heard identifier does NOT match a saved login/vault entry, DO NOT call
+  smart_login/browser-login on a guess. First confirm it: read it back by spelling —
+  NATO style for letters ("S as in Sierra, I, D, D, H, A, N, T…"), digits as digits,
+  "at", "dot com" — and ask a yes/no. Only proceed once he confirms.
+- If it's a close match to a KNOWN vault/login entry, suggest that instead: "Did you
+  mean siddhantpramod2008@gmail.com, which I have on file?" rather than chasing the
+  misheard string as a new target.
+- If the SAME login fails to resolve after 2 attempts, switch modality — ask him to
+  TYPE the account, or read the saved accounts back as a numbered list to pick from.
+  Do not keep re-listening and re-guessing.
 
 MEDIA: Use media_control for any Spotify or volume request (play, pause, skip,
 "what's playing", set Spotify or system volume). Plain requests control the Mac's
@@ -838,7 +858,11 @@ function chooseModel(lastUserMessage) {
     const sonnet = [
       /write.*prompt/i, /claude.?code/i, /architect/i, /refactor/i, /debug/i,
       /explain.*why/i, /design/i, /strategy/i, /research/i, /paper/i,
-      /how.*work/i, /optimize/i, /plan/i, /review/i
+      /how.*work/i, /optimize/i, /plan/i, /review/i,
+      // Multi-step web/automation: haiku fumbles these (login loops, wrong selectors). Route up.
+      /log\s?in|sign\s?in|sign up|log into|account/i, /\bbrowser\b|navigate|website|web ?page/i,
+      /google (?:sheet|doc|drive|calendar)|gmail|fill (?:out|in)|book|order|checkout|purchase/i,
+      /step.?by.?step|multi.?step|then.*then|after that/i
     ];
     const hit = sonnet.some((p) => p.test(lastUserMessage || ''));
     model = hit ? MODEL_SONNET : MODEL_HAIKU; task = hit ? 'reasoning' : 'simple';
@@ -3769,7 +3793,7 @@ async function agentLoop(history, apiKey, event, opts = {}) {
     // Strip any <speak> tags from the returned text (renderer shows this as the final bubble).
     reflectOnCorrection(history, lastUserText(history), text);   // async, non-blocking
     try { logRouterDecision({ taskType: _lastRouterTask || currentMode, model: _lastModel, ms: Date.now() - _turnT0, usd: +(costToday().usd - _usd0).toFixed(5) }); } catch {}   // #13
-    const clean = String(text || '').replace(/<\/?speak>/g, '').trim();
+    const clean = stripReasoning(String(text || '')).replace(/<\/?speak>/g, '').trim();
     // #12 episodic memory: record the turn (what happened, when). Fire-and-forget; the store caps
     // + evicts oldest episodic first so durable semantic facts survive under pressure.
     try { const u = lastUserText(history); if (u && clean) semantic.upsert({ text: `User: ${String(u).slice(0, 400)}\nAssistant: ${clean.slice(0, 800)}`, kind: 'episodic', meta: { surface: stream ? 'desktop' : 'headless' } }).catch(() => {}); } catch {}
@@ -3786,6 +3810,7 @@ async function agentLoop(history, apiKey, event, opts = {}) {
     while (agentState === 'paused') await sleep(300);
 
     history = evictOldImages(history, KEEP_IMAGES);
+    history = validateHistory(history);   // heal any mid-loop tool_use/result corruption (interruptions) before each call
     let response;
     try {
       response = await callModel(history, apiKey, iterations === 0, onText);
@@ -3811,7 +3836,12 @@ async function agentLoop(history, apiKey, event, opts = {}) {
     for (const block of response.content) {
       if (block.type !== 'tool_use') continue;
       sendToAll(event, 'tool-update', { type: 'tool_start', name: block.name, input: block.input });
-      const result = await executeTool(block.name, block.input);
+      // A thrown tool used to escape the loop, leaving this assistant tool_use with NO matching
+      // tool_result → the next API call 400s ("tool_use without tool_result") and the whole
+      // conversation is poisoned. Always resolve to a result object so the pairing holds.
+      let result;
+      try { result = await executeTool(block.name, block.input); }
+      catch (e) { result = { success: false, error: 'tool threw: ' + (e && e.message || String(e)) }; }
       // Jarvis HUD: surface visuals inline in chat — generated images / design renders /
       // explicit screenshots as holo-cards, and 3D outputs as an in-chat spinning model.
       const showImage = result._image && (['generate_image', 'make_figure', 'simulate', 'studio_write', 'ui_inspect', 'screen_parse', 'vision_click'].includes(block.name)
@@ -4010,7 +4040,7 @@ async function ollamaGenerateStream(model, prompt, opts = {}, onDelta) {
 // them out: `display` = tag-free text for chat, `spoken` = the wrapped line if present
 // (else the whole thing) for TTS.
 function extractSpeakText(s) {
-  const t = String(s || '');
+  const t = stripReasoning(String(s || ''));   // never show/speak leaked <thinking>/meta narration
   const m = t.match(/<speak>([\s\S]*?)<\/speak>/i);
   const display = t.replace(/<\/?speak>/gi, '').trim();
   return { display, spoken: (m ? m[1] : display).trim() };
@@ -5379,7 +5409,7 @@ async function openaiSynth(t, c) {
 // "dot", reduce paths to their basename, strip markdown/code/URLs that read as gibberish.
 // Applied ONLY on the audio path (synthesizeSpeech) — the on-screen text keeps its symbols.
 function normalizeForSpeech(input) {
-  let s = String(input || '');
+  let s = stripReasoning(String(input || ''));                 // never voice leaked <thinking>/meta
   // 1. Things that should never be read aloud.
   s = s.replace(/```[\s\S]*?```/g, ' ');                       // fenced code blocks
   s = s.replace(/`([^`]+)`/g, '$1');                           // inline code → its text
@@ -5403,9 +5433,11 @@ function normalizeForSpeech(input) {
     const d = dollars.replace(/,/g, '');
     return d + (d === '1' ? ' dollar' : ' dollars') + (cents ? ' and ' + cents + ' cents' : '');
   });
-  // 6. In-token dots → "dot" (filenames/domains: "main.js"→"main dot js"); decimals like 3.5
-  //    stay as digits (TTS says "three point five") and sentence-ending periods stay as pauses.
-  s = s.replace(/([A-Za-z])\.([A-Za-z0-9])/g, '$1 dot $2');
+  // 6. In-token dots → "dot" when the next char is a LETTER (filenames/domains/emails:
+  //    "main.js"→"main dot js", "gmail.com"→"gmail dot com", "2008.co"→"2008 dot co", "co.uk"→
+  //    "co dot uk"). Decimals like 3.5 (digit.digit) stay → TTS says "three point five"; and a
+  //    sentence-ending period (followed by space/EOL, not a letter) stays as a natural pause.
+  s = s.replace(/([A-Za-z0-9])\.(?=[A-Za-z])/g, '$1 dot ');
   // 7. Symbols → words.
   s = s.replace(/&/g, ' and ').replace(/%/g, ' percent')
        .replace(/(\S)@(\S)/g, '$1 at $2').replace(/\s@\s/g, ' at ')
@@ -5778,7 +5810,7 @@ function reflectOnCorrection(history, userText, priorText) {
 }
 function ttsStreamEnqueue(seq, sentence) {
   if (seq !== ttsStreamSeq) return;
-  const clean = String(sentence).replace(/```[\s\S]*?```/g, ' code block ').replace(/[*_`#>]/g, '').trim();
+  const clean = stripReasoning(String(sentence)).replace(/```[\s\S]*?```/g, ' code block ').replace(/[*_`#>]/g, '').trim();
   if (!clean) return;
   ttsStreamQ.push(clean);
   if (!ttsStreamDraining) ttsStreamDrain(seq);
@@ -5846,12 +5878,47 @@ function validateHistory(history) {
     console.warn('[history] dropped trailing assistant turn with unanswered tool_use');
     out.pop();
   }
+  // 4) MID-history dangling tool_use (caused by concurrency/interruption — wake word firing a new
+  //    turn between the assistant tool_use and its tool_results). The API rejects ANY tool_use that
+  //    isn't immediately followed by matching tool_results, not just the trailing one. Repair by
+  //    splicing in synthetic error results so the pairing is always intact. (#multi-step robustness)
+  for (let i = 0; i < out.length; i++) {
+    const ids = toolUseIds(out[i]);
+    if (!ids.length) continue;
+    const next = out[i + 1];
+    const answered = (next && next.role === 'user' && Array.isArray(next.content))
+      ? new Set(next.content.filter((b) => b.type === 'tool_result').map((b) => b.tool_use_id)) : new Set();
+    const missing = ids.filter((id) => !answered.has(id));
+    if (!missing.length) continue;
+    const synth = missing.map((id) => ({ type: 'tool_result', tool_use_id: id, content: '[interrupted — no result captured]', is_error: true }));
+    if (next && next.role === 'user' && Array.isArray(next.content)) next.content.unshift(...synth);
+    else out.splice(i + 1, 0, { role: 'user', content: synth });
+    console.warn('[history] repaired', missing.length, 'dangling tool_use(s) at', i);
+  }
   return out;
 }
 ipcMain.handle('stop-tts', () => { stopDesktopTTS(); return { success: true }; });
 
 // Plain STT function (shared by desktop HUD + phone PWA). iOS MediaRecorder emits
 // audio/mp4, not webm — derive the upload filename ext from mimeType so Whisper sniffs it.
+// Bias STT toward the proper nouns + identifiers it would otherwise mishear ("Siddhant Pramod"
+// → "Citadel Promote", saved login emails, brand words). Whisper/4o-transcribe accept a `prompt`
+// of expected vocabulary. Seeded from config (ownerName/ownerEmail/sttVocab) + saved login usernames.
+function sttVocabHint() {
+  try {
+    const c = loadConfig();
+    const bits = ['BhatBot', 'Jarvis'];
+    if (c.ownerName) bits.push(c.ownerName);
+    if (c.ownerEmail) bits.push(c.ownerEmail);
+    if (Array.isArray(c.sttVocab)) bits.push(...c.sttVocab);
+    else if (typeof c.sttVocab === 'string' && c.sttVocab) bits.push(c.sttVocab);
+    try { for (const p of (logins.list() || [])) if (p && p.username) bits.push(p.username); } catch {}
+    const seen = new Set();
+    const uniq = bits.filter((b) => b && !seen.has(String(b).toLowerCase()) && seen.add(String(b).toLowerCase()));
+    return uniq.length ? ('Expected names/identifiers (spell exactly, keep emails lowercase): ' + uniq.join(', ') + '.') : '';
+  } catch { return ''; }
+}
+
 async function transcribeAudio(audioBuffer, mimeType) {
   const c = loadConfig();
   const useGroq = c.sttProvider === 'groq' && c.groqKey;             // fastest path (opt-in)
@@ -5864,10 +5931,12 @@ async function transcribeAudio(audioBuffer, mimeType) {
     : mt === 'audio/mpeg' ? 'mp3' : mt === 'audio/wav' || mt === 'audio/x-wav' ? 'wav'
     : mt === 'audio/ogg' ? 'ogg' : 'webm';
   const buf = Buffer.from(audioBuffer);
+  const hint = sttVocabHint();
   const attempt = async (model) => {
     const form = new FormData();
     form.append('model', model);
     form.append('file', new Blob([buf], { type: mt }), 'audio.' + ext);
+    if (hint) form.append('prompt', hint);   // vocabulary biasing → fewer misheard names/emails
     const r = await fetch(endpoint, { method: 'POST', headers: { 'Authorization': 'Bearer ' + key }, body: form });
     const j = await r.json().catch(() => ({}));
     return { ok: r.ok, status: r.status, text: (j.text || '').trim(), err: j.error?.message };

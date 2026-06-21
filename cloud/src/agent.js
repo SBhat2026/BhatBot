@@ -7,6 +7,7 @@
 const db = require('./db');
 const { callClaude, MODEL_SONNET, MODEL_HAIKU } = require('./llm');
 const { toolDefs, dispatchTool, macOnline } = require('./tools');
+const { stripReasoning } = require('./voice');   // strip leaked <thinking>/meta before it reaches the phone
 let notion = null; try { notion = require('../notion'); } catch {}
 
 const MAX_STEPS = Number(process.env.AGENT_MAX_STEPS || 8);
@@ -24,7 +25,11 @@ The Mac is currently ${macUp ? 'ONLINE — you may use computer tools.' : 'OFFLI
 
 You can also make real phone calls (call_person) and send texts (text_person) on his behalf via Twilio — you have NO access to his contacts, so ask for or use a phone number in E.164 form (e.g. +16095551234). For a call, confirm the number + purpose, then call_person and tell him you'll text a summary.
 
-Use remember when he states a durable preference, decision, or fact. Use recall when a question may depend on something he told you before. Keep replies short and natural.`;
+Use remember when he states a durable preference, decision, or fact. Use recall when a question may depend on something he told you before. Keep replies short and natural.
+
+NEVER output internal reasoning: no <thinking>/<think> tags, no meta-narration ("The user is correcting me…", "Let me think…"). Your reply is your conclusion; every word is read aloud.
+
+SPOKEN IDENTIFIERS (STT mishears emails/usernames — "Siddhant Pramod"→"Citadel Promote"): treat a heard email/username as low-confidence and lowercase. If it doesn't match a known account, confirm by spelling it back (NATO: "S as in Sierra…", digits, "at", "dot com") and get a yes/no before acting. If it's close to a known one, suggest that instead. After 2 failed attempts, ask him to type it rather than re-guessing.`;
   if (recalled && recalled.length) s += `\n\nRELEVANT MEMORY (use silently, do not enumerate):\n` + recalled.map((f) => '- ' + f).join('\n');
   const cost = db.costToday();
   if (cost.calls) s += `\n\nAPI spend today: $${cost.usd.toFixed(3)} (${cost.calls} calls). Be efficient.`;
@@ -62,7 +67,7 @@ async function runTurn(convId, userText, { reset = false } = {}) {
 
     const toolUses = content.filter((b) => b.type === 'tool_use');
     if (!toolUses.length || resp.stop_reason === 'end_turn') {
-      const out = content.filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim();
+      const out = stripReasoning(content.filter((b) => b.type === 'text').map((b) => b.text).join('\n')).trim();
       // Persist explicit "remember…" facts to the shared bank too (cross-surface continuity).
       maybeShareFact(text, out);
       db.pushActivity('done', out.slice(0, 200));
@@ -83,7 +88,7 @@ async function runTurn(convId, userText, { reset = false } = {}) {
   // Step budget hit — one final tool-less summary.
   history.push({ role: 'user', content: '[Step budget reached. Do NOT call tools. In one or two short sentences tell me what you did, what remains, and the next step.]' });
   const fin = await callClaude({ system, messages: history.slice(-HISTORY_LIMIT), model });
-  const out = (fin.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim() || 'Reached the step budget for this turn.';
+  const out = stripReasoning((fin.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('\n')).trim() || 'Reached the step budget for this turn.';
   db.addMessage(convId, 'assistant', fin.content || out);
   db.pushActivity('done', out.slice(0, 200));
   return { text: out, _model: model, _macOnline: macOnline() };
