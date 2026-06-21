@@ -45,6 +45,9 @@ const MODEL_SONNET = 'claude-sonnet-4-6';      // corrected from stale spec id
 const MODEL_HAIKU = 'claude-haiku-4-5';        // corrected from stale spec id
 const MAX_AGENT_ITERATIONS = 20;   // step ceiling; complex tasks need headroom to retry/replan
 const EXEC_PATH = `${process.env.PATH || ''}:/usr/local/bin:/opt/homebrew/bin:/Library/Frameworks/Python.framework/Versions/Current/bin:/Library/Frameworks/Python.framework/Versions/3.13/bin`;
+// SPLIT_PLAN step 7: raw shell exec + destructive-command pattern lists live in lib/shell.js now.
+// The confirm/autonomous/remote gating that CONSULTS these stays below (woven into IPC/window state).
+const { HARD_BLOCKED, CONFIRM_PATTERNS, runShell } = require('./lib/shell')({ EXEC_PATH });
 // In a packaged .app, files live inside app.asar (a virtual archive). Electron patches
 // fs reads to see into it, but a spawned process (python) opens the path itself and
 // can't read app.asar — so anything we SPAWN must be asarUnpack'd and its path rewritten
@@ -1908,19 +1911,8 @@ const TOOLS = [
     }, required: ['message'] } }
 ];
 
-// shell safety
-const HARD_BLOCKED = [
-  /rm\s+-rf\s+\/(?:\s|$)/,
-  /:\(\)\{.*\}/,
-  /mkfs\./,
-  /dd\s+if=.*of=\/dev\/(sd|disk)/
-];
-const CONFIRM_PATTERNS = [
-  { re: /\brm\b/, reason: 'This will permanently delete files.' },
-  { re: /\brmdir\b/, reason: 'This will remove a directory.' },
-  { re: /\btrash\b/, reason: 'This will move files to Trash.' }
-];
-
+// shell safety: HARD_BLOCKED / CONFIRM_PATTERNS / runShell moved to lib/shell.js (SPLIT_PLAN step 7),
+// constructed near EXEC_PATH at the top. The confirm/autonomous/remote gates that consult them remain below.
 // auditLog / readAudit / redactForAudit / AUDIT_PATH moved to lib/audit.js (SPLIT_PLAN step 2);
 // constructed near the top via makeAudit({ isRemote, estimateToolCost, recordToolCost }).
 
@@ -1989,16 +1981,7 @@ function requestConfirm(command, reason) {
   });
 }
 
-function runShell(command, cwd, timeoutMs) {
-  return new Promise((resolve) => {
-    exec(command, { cwd: cwd || os.homedir(), timeout: timeoutMs || 60000, env: { ...process.env, PATH: EXEC_PATH }, maxBuffer: 10 * 1024 * 1024 },
-      (err, stdout, stderr) => {
-        if (err && err.killed) return resolve({ success: false, error: `Command timed out (${Math.round((timeoutMs || 60000) / 1000)}s)` });
-        resolve({ success: !err, stdout: stdout || '', stderr: stderr || '', exitCode: err ? err.code : 0 });
-      });
-  });
-}
-
+// runShell now provided by lib/shell.js (constructed at top). The web-handling helpers continue below.
 // --- Web-handling helpers: real geolocation, auto-dismiss popups, persist window position ----
 // Real lat/long so "show results near you" / store locators / weather actually localize (Chromium
 // otherwise blocks the geolocation prompt → sites fall back to a wrong/empty location). Cached in

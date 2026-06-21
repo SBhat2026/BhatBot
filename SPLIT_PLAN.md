@@ -9,9 +9,19 @@ The project already has a healthy `lib/` (credentials, security, notion, figures
 scheduler, simulate, agents/, …). This plan extends that pattern to the tool/runtime code.
 
 ## Status
-🟡 **Started — plan locked; extraction is incremental and must be verified booting between steps.**
-Do NOT do this blind: each extraction needs `npm start` to confirm the app still launches before
-the next. The first PR is the lowest-risk slice (pure helpers), to prove the wiring.
+🟢 **Classifier-critical surface extracted + verified booting.** Done: step 1 (`lib/pure.js`),
+step 2 (`lib/audit.js`), step 4 (science already lived in `lib/simulate.js`), and **step 7's payoff**
+— raw `exec()` + `HARD_BLOCKED`/`CONFIRM_PATTERNS` now in `lib/shell.js` (DI factory). After each,
+`node -c` + a standalone module smoke-test + a 12s Electron boot (markers: `[mcp] listening`,
+`[wake] listener ready`, `[scheduler] started`, `[cloud-bridge] connected`) all green.
+
+The strongest classifier signal — a single file holding the agent loop AND raw shell exec AND the
+destructive-command list — is now broken up: shell exec is its own reviewable module.
+
+**Remaining (navigability-only, lower priority — do incrementally with a per-tool smoke test each):**
+step 3 creation (`generateImage`/`generate3D`/`make_printable`), step 5 vision (`screenParse`/
+`visionClick`/`screenObserve`), step 6 browser (biggest), step 8 window-manager, step 9 agent-loop.
+The confirm/autonomous/remote GATES stay in main.js by design (woven into IPC + activity-window state).
 
 ## The DI pattern (the crux)
 Everything currently shares module-scoped mutable state (`page`, `browser`, `mainWindow`,
