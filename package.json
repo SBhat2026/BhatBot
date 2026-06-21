@@ -7,7 +7,9 @@
   "scripts": {
     "start": "electron .",
     "build": "electron-builder --mac dir",
-    "build:dmg": "electron-builder --mac dmg"
+    "build:dmg": "electron-builder --mac dmg",
+    "wc": "node lib/worldcup.js",
+    "wc:iterate": "node scripts/worldcup-iterate.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

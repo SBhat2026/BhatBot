@@ -10,6 +10,7 @@ const { exec, spawn, spawnSync } = require('child_process');
 const crypto = require('crypto');
 const darkbloom = require('./darkbloom');
 const credentials = require('./lib/credentials');
+const worldcup = require('./lib/worldcup');               // FIFA WC 2026 live bracket + prediction engine
 const { classify } = require('./taskClassifier');
 const { startMcpServer, stopMcpServer } = require('./mcp-server');
 // Workspace multi-agent stack (Architecture v2) — orchestrator delegates big projects to
@@ -1868,6 +1869,22 @@ const TOOLS = [
       dryRun: { type: 'boolean', description: 'Only report recurring-failure clusters; do not draft.' },
       minCount: { type: 'number', description: 'Min repeats before drafting (default 3).' }
     } } },
+  { name: 'world_cup', description: 'FIFA World Cup 2026 — LIVE bracket, group standings, and predictions. Pulls live scores (ESPN, no key), computes group tables itself, maintains a results-driven Elo, and Monte-Carlo simulates the rest of the tournament for title/advancement odds + match win-probabilities. Use for any World Cup question ("who\'s winning group X", "odds Argentina wins it", "predict France vs Brazil", "show the bracket"). actions: "report" (full bracket+odds, default), "odds" (title odds table), "predict"{home,away} (one matchup win/draw/loss), "group"{label}, "live" (in-progress now), "open" (launch the live viewer window).',
+    input_schema: { type: 'object', properties: {
+      action: { type: 'string', enum: ['report', 'odds', 'predict', 'group', 'live', 'open'] },
+      home: { type: 'string', description: 'Team abbreviation or name (for predict).' },
+      away: { type: 'string', description: 'Team abbreviation or name (for predict).' },
+      label: { type: 'string', description: 'Group letter A–L (for group).' },
+      sims: { type: 'number', description: 'Monte-Carlo iterations (default 6000).' }
+    } } },
+  { name: 'self_fix', description: 'SELF-HEALING: have BhatBot fix its OWN code with its built-in Claude Code, verified + auto-reverted on failure. Given a problem description and a `verify` shell command that must exit 0 when fixed, it: snapshots git, runs Claude Code headless to edit the repo, runs verify, and KEEPS the change only if verify passes (else git-reverts). Use when a capability is broken / a tool keeps failing / the World Cup harness logs a FAIL. Self-aware loop: pair with the iteration log. apply:false drafts only (no edits).',
+    input_schema: { type: 'object', properties: {
+      problem: { type: 'string', description: 'What is broken + any error/log excerpt.' },
+      verify: { type: 'string', description: 'Shell command that exits 0 once fixed (e.g. "node scripts/worldcup-iterate.js").' },
+      files: { type: 'string', description: 'Optional file path hints to focus the fix.' },
+      apply: { type: 'boolean', description: 'true = actually edit+verify+keep/revert; false = draft only.' },
+      maxRounds: { type: 'number', description: 'Fix→verify attempts before giving up (default 2).' }
+    } } },
   { name: 'manage_schedule', description: 'Schedule BhatBot to do things PROACTIVELY/AUTONOMOUSLY — reminders, recurring checks, "every morning brief me", "in 30 minutes do X", "every Monday at 9am". Each schedule runs the given `prompt` through the full agent at its time (no one watching), then speaks the result aloud and texts it to Telegram. Use this whenever Siddhant asks for something to happen later or repeatedly. Actions: add (create), list, remove{id}, enable{id}, disable{id}, run{id} (fire now). For timing pass ONE of: kind:"daily"+at:"HH:MM" / kind:"weekly"+at:"HH:MM"+dow(0=Sun) / kind:"interval"+everyMinutes|everyHours / kind:"once"+runAt(ISO), OR the shortcuts inMinutes / inHours / everyMinutes / everyHours.',
     input_schema: { type: 'object', properties: {
       action: { type: 'string', enum: ['add', 'list', 'remove', 'enable', 'disable', 'run'], description: 'What to do.' },
@@ -1969,6 +1986,95 @@ async function selfImproveScan(opts = {}) {
   try { telegramNotify(`🛠 Drafted a fix for recurring "${top.tool}" failures (${top.count}×). Review (not applied): ${file}`); } catch {}
   sendToActivity('tool-update', { type: 'thinking', text: `🛠 self-improve: drafted a fix for ${top.tool} → ${file}` });
   return { success: true, result: `Drafted a REVIEWABLE fix for ${top.tool} (${top.count} failures) → ${file}. Not applied — review the diff and apply if it's good.`, file, top: { tool: top.tool, count: top.count } };
+}
+
+// ── World Cup 2026 tool ───────────────────────────────────────────────────────
+function _wcResolve(snap, q) {
+  if (!q) return null;
+  const s = String(q).trim().toLowerCase();
+  for (const g of snap.groups) for (const t of g.teams) {
+    if (t.abbr.toLowerCase() === s) return t.abbr;
+    if (String(t.name).toLowerCase() === s || String(t.name).toLowerCase().includes(s)) return t.abbr;
+  }
+  return String(q).toUpperCase();   // assume it's already an abbreviation
+}
+async function worldCupTool(input) {
+  const action = input.action || 'report';
+  try {
+    const snap = await worldcup.snapshot({ ttlMs: 30000, sims: Number(input.sims) || 6000 });
+    if (action === 'predict') {
+      const a = _wcResolve(snap, input.home), b = _wcResolve(snap, input.away);
+      if (!a || !b) return { success: false, error: 'need home and away teams' };
+      const p = worldcup.predict(snap.elo, a, b, { home: true });
+      return { success: true, result: `${a} vs ${b}: ${a} ${(p.pHome * 100).toFixed(0)}% / draw ${(p.pDraw * 100).toFixed(0)}% / ${b} ${(p.pAway * 100).toFixed(0)}% (expected goals ${p.la.toFixed(2)}–${p.lb.toFixed(2)})`, prediction: p };
+    }
+    if (action === 'group') {
+      const g = snap.tables.find((t) => t.label.toUpperCase() === String(input.label || '').toUpperCase());
+      if (!g) return { success: false, error: `group ${input.label} not found (A–L)` };
+      const lines = g.table.map((r, i) => `${i + 1}. ${r.name} — ${r.Pts} pts (${r.W}-${r.D}-${r.L}, GD ${r.GD >= 0 ? '+' : ''}${r.GD})`);
+      return { success: true, result: `Group ${g.label}\n` + lines.join('\n') };
+    }
+    if (action === 'live') {
+      if (!snap.live.length) return { success: true, result: 'No World Cup matches in progress right now.' };
+      return { success: true, result: snap.live.map((m) => `● ${m.home.name} ${m.hs}–${m.as} ${m.away.name} (${m.detail})`).join('\n') };
+    }
+    if (action === 'odds') {
+      const ranked = Object.entries(snap.odds).sort((a, b) => b[1].W - a[1].W).slice(0, 12);
+      return { success: true, result: 'Title odds (Monte-Carlo):\n' + ranked.map(([ab, o]) => `${ab}: ${(o.W * 100).toFixed(1)}% to win, ${(o.F * 100).toFixed(1)}% final`).join('\n') };
+    }
+    // report (default) + open (also returns report; GUI viewer is a follow-up)
+    return { success: true, result: worldcup.report(snap) };
+  } catch (e) { return { success: false, error: 'world_cup: ' + (e.message || String(e)) }; }
+}
+
+// ── Self-healing: BhatBot fixes its own code via Claude Code, gated by a verify command ─────────
+// Self-awareness (the problem) + the means to fix (Claude Code) + a SAFETY NET (verify must pass,
+// else git-revert). apply:false = draft only. apply:true requires a clean working tree so a failed
+// fix can be cleanly reverted without clobbering unrelated work.
+async function selfFix(input) {
+  const proj = process.env.BHATBOT_PROJECT || path.join(os.homedir(), 'bhatbot');
+  const problem = String(input.problem || '').trim();
+  if (!problem) return { success: false, error: 'self_fix needs a `problem` description' };
+  const verify = String(input.verify || '').trim();
+  const fileHint = input.files ? `\nFocus on: ${input.files}` : '';
+
+  if (!input.apply) {   // draft-only (safe default), mirrors self_improve
+    const prompt = `In this repo, diagnose and propose a fix for: ${problem}${fileHint}\n${verify ? `The fix is correct when \`${verify}\` exits 0.` : ''}\nInvestigate read-only; output a precise unified diff + one-paragraph rationale. Do NOT modify files.`;
+    const r = await runShell('claude -p ' + JSON.stringify(prompt) + ' --permission-mode plan', proj, 300000);
+    const out = (r && (r.stdout || r.result)) || (r && r.error) || '(no output)';
+    const dir = path.join(os.homedir(), '.bhatbot', 'self-improve'); fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, `${Date.now()}-selffix.md`);
+    fs.writeFileSync(file, `# self_fix draft\n\nProblem: ${problem}\nVerify: ${verify || '(none)'}\n\n---\n\n${out}`);
+    return { success: true, result: `Drafted a fix (not applied) → ${file}`, file };
+  }
+
+  if (!verify) return { success: false, error: 'apply mode requires a `verify` command (exit 0 = fixed)' };
+  // Safety: refuse on a dirty tree so a failed fix reverts cleanly.
+  const dirty = await runShell('git status --porcelain', proj, 15000);
+  if ((dirty.stdout || '').trim()) return { success: false, error: 'working tree is dirty — commit or stash first so a failed self-fix can be reverted safely.' };
+
+  const maxRounds = Math.max(1, Math.min(4, Number(input.maxRounds) || 2));
+  const rounds = [];
+  let lastVerify = '';
+  for (let i = 1; i <= maxRounds; i++) {
+    sendToActivity('tool-update', { type: 'thinking', text: `🩺 self-fix round ${i}/${maxRounds}: ${problem.slice(0, 60)}` });
+    const prompt = `Fix this in the current repo: ${problem}${fileHint}\nThe fix is verified when this command exits 0:\n  ${verify}\n${lastVerify ? `\nThe previous attempt still failed verification with:\n${lastVerify.slice(0, 1500)}\n` : ''}Make the minimal necessary edits to the source files. Do not run the verify command yourself.`;
+    const cc = await runShell('claude -p ' + JSON.stringify(prompt) + ' --permission-mode acceptEdits', proj, 300000);
+    const v = await runShell(verify, proj, 300000);
+    lastVerify = ((v.stdout || '') + '\n' + (v.stderr || '')).trim();
+    const passed = v.success && (v.exitCode === 0 || v.exitCode == null);
+    rounds.push({ round: i, passed, cc: (cc.stdout || cc.error || '').slice(-400), verify: lastVerify.slice(-600) });
+    if (passed) {
+      const diff = await runShell('git --no-pager diff --stat', proj, 15000);
+      try { telegramNotify(`🩺 self-fix succeeded (round ${i}): ${problem.slice(0, 80)}`); } catch {}
+      sendToActivity('tool-update', { type: 'thinking', text: `✅ self-fix passed verify in round ${i}` });
+      return { success: true, result: `Fixed + verified in round ${i}. Changes (review & commit):\n${(diff.stdout || '').slice(0, 1000)}`, rounds, applied: true };
+    }
+  }
+  // All rounds failed → revert to the clean baseline.
+  await runShell('git checkout -- . && git clean -fd', proj, 30000);
+  sendToActivity('tool-update', { type: 'thinking', text: `↩ self-fix failed ${maxRounds}× — reverted to clean state` });
+  return { success: false, error: `Could not fix in ${maxRounds} round(s); reverted to clean state.`, rounds };
 }
 
 // Autonomous mode: the user explicitly wants maximum self-driving. When on (default true),
@@ -3604,6 +3710,10 @@ async function executeTool(name, input) {
         result = await generate3D(input);
         break;
       }
+      case 'world_cup':
+        result = await worldCupTool(input || {}); break;
+      case 'self_fix':
+        result = await selfFix(input || {}); break;
       default:
         result = { success: false, error: `Unknown tool: ${name}` };
     }
