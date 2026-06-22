@@ -2,7 +2,7 @@
 // Voice I/O — both fully cloud-capable (just API calls): ElevenLabs TTS (Jarvis) + OpenAI
 // Whisper STT. Lifted from the original server.js so it stays the same voice as the desktop.
 const EL_KEY = process.env.ELEVENLABS_API_KEY || '';
-const EL_VOICE = process.env.ELEVENLABS_VOICE_ID || 'EzDG2x1uAnCqbzN9Q0wA';
+const EL_VOICE = process.env.ELEVENLABS_VOICE_ID || 'nuIFNGEZkRGoYBg8iBYe';
 // turbo_v2_5 is materially warmer/less synthetic than flash while staying low-latency enough for
 // a live call (flash trades quality for the last ~100ms). Override with ELEVENLABS_MODEL.
 const EL_MODEL = process.env.ELEVENLABS_MODEL || 'eleven_turbo_v2_5';
@@ -27,6 +27,11 @@ function stripReasoning(text) {
   s = s.replace(/<thinking\b[\s\S]*?<\/thinking>/gi, ' ').replace(/<think\b[\s\S]*?<\/think>/gi, ' ');
   s = s.replace(/<\/?(?:thinking|think|reasoning|scratchpad)\b[^>]*>/gi, ' ');
   s = s.replace(/<thinking\b[\s\S]*$/i, ' ').replace(/<think\b[\s\S]*$/i, ' ');
+  // Leaked tool-call markup (model emits function-call XML as literal text) — strip it.
+  s = s.replace(/<(?:antml:)?function_calls\b[\s\S]*?<\/(?:antml:)?function_calls>/gi, ' ');
+  s = s.replace(/<(?:antml:)?invoke\b[\s\S]*?<\/(?:antml:)?invoke>/gi, ' ');
+  s = s.replace(/<\/?(?:antml:)?(?:function_calls|invoke|parameter|tool_call|tool_use|function_results?)\b[^>]*>/gi, ' ');
+  s = s.replace(/<(?:antml:)?function_calls\b[\s\S]*$/i, ' ');
   s = s.replace(/^\s*(?:the user (?:is|wants|seems|said|just)|i (?:should|need to|will|am going to|notice|see that)|let me (?:think|reason|consider))\b[^\n.!?]*[.!?]?\s*/i, '');
   return s.replace(/[ \t]{2,}/g, ' ').trim();
 }

@@ -12,7 +12,8 @@
     "wc:iterate": "node scripts/worldcup-iterate.js",
     "ctl": "node scripts/bhatctl.js",
     "logs": "node scripts/bhatctl.js logs -f",
-    "smoke": "node scripts/smoke.js"
+    "smoke": "node scripts/smoke.js",
+    "eval": "node scripts/complex-eval.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

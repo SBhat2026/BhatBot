@@ -24,8 +24,13 @@ async function worldCup(input = {}) {
   try {
     // DEFAULT / standings / live / update → hand back the live standings link (cheap; the phone
     // shows a tappable, auto-updating page). No Monte-Carlo, minimal tokens.
-    if (['open', 'report', 'standings', 'live', 'scores', 'update'].includes(action)) {
+    if (['open', 'report', 'standings', 'scores', 'update'].includes(action)) {
       return { success: true, result: `Live World Cup standings & scores (auto-updating): ${worldcup.STANDINGS_URL}`, url: worldcup.STANDINGS_URL };
+    }
+    // Informative: live scores + a recommended match + insights + web buzz → form your own opinion.
+    if (['watch', 'insights', 'recommend', 'brief', 'live', 'whatshappening'].includes(action)) {
+      const b = await worldcup.watchBrief({ maxBuzz: 5 });
+      return { success: true, result: worldcup.formatWatch(b), brief: b };
     }
     if (action === 'predict') {
       const snap = await worldcup.snapshot({ ttlMs: 60000, sims: 0 });
@@ -69,10 +74,10 @@ const REGISTRY = {
     run: webFetch,
   },
   world_cup: {
-    def: { name: 'world_cup', description: 'FIFA World Cup 2026 live data (cloud, always available). DEFAULT (and for any "update / standings / scores / who\'s winning") → action "open": returns a tappable, auto-updating live standings & scores link — give Siddhant that link, do NOT read tables out. Use computing actions only for a specific number: "predict"{home,away} (cheap), "group"{label A–L} (cheap), "odds" (Monte-Carlo title odds — expensive, use sparingly).',
+    def: { name: 'world_cup', description: 'FIFA World Cup 2026 live data + analysis (cloud, always available). PICK BY INTENT: "open" — for "standings / scores / who\'s winning": returns a tappable auto-updating link, do NOT read tables out. "watch" — for "what should I watch / what\'s happening with the game / give me insights / fill me in": returns live scores + a RECOMMENDED match + key insights (prediction, Elo, recent form, group stakes) + a web scan of what people are saying; use it to give Siddhant YOUR opinion on what to watch plus a couple sharp insights, conversationally. "predict"{home,away} (cheap), "group"{label A–L} (cheap), "odds" (Monte-Carlo, expensive). Default "open".',
       input_schema: { type: 'object', properties: {
-        action: { type: 'string', enum: ['open', 'predict', 'group', 'odds', 'standings', 'live'] },
-        home: { type: 'string' }, away: { type: 'string' }, label: { type: 'string' }
+        action: { type: 'string', enum: ['open', 'watch', 'predict', 'group', 'odds', 'standings'] },
+        home: { type: 'string' }, away: { type: 'string' }, label: { type: 'string' }, sims: { type: 'number' }
       } } },
     run: worldCup,
   },
@@ -180,8 +185,8 @@ const REGISTRY = {
     relay: true,
   },
   ambient: {
-    def: { name: 'ambient', description: 'Inspect/control ambient awareness (proactive Calendar/Mail monitoring) on the Mac. action: scan/status/enable/disable (optional source: calendar|mail). Needs the computer awake.',
-      input_schema: { type: 'object', properties: { action: { type: 'string', enum: ['scan', 'status', 'enable', 'disable'] }, source: { type: 'string', enum: ['calendar', 'mail'] } }, required: ['action'] } },
+    def: { name: 'ambient', description: 'Inspect/control ambient awareness (Calendar/Mail) on the Mac. action: "read"{source:"mail"|"calendar"} pulls that source ON DEMAND right now (use for "any important emails?" or the morning brief — works even if background monitoring is off); "scan" runs enabled watchers; status/enable/disable manage background monitoring. Needs the computer awake.',
+      input_schema: { type: 'object', properties: { action: { type: 'string', enum: ['read', 'scan', 'status', 'enable', 'disable'] }, source: { type: 'string', enum: ['calendar', 'mail'] } }, required: ['action'] } },
     relay: true,
   },
   subagent: {

@@ -15,11 +15,13 @@ const HISTORY_LIMIT = Number(process.env.HISTORY_LIMIT || 40);
 
 const SONNET_HINTS = [/write.*prompt/i, /architect/i, /refactor/i, /debug/i, /explain.*why/i, /design/i, /strategy/i, /research/i, /paper/i, /optimiz/i, /\bplan\b/i, /review/i, /analy[sz]e/i,
   // live-data/sports → route up so the tool is reliably invoked instead of a stale-memory reply
-  /world cup|bracket|standings?|who'?s winning|tournament|fixtures?|matchup|\bodds\b/i];
+  /world cup|bracket|standings?|who'?s winning|tournament|fixtures?|matchup|\bodds\b|what.*watch|worth watching|\binsights?\b/i];
 function pickModel(text) { return SONNET_HINTS.some((re) => re.test(text || '')) ? MODEL_SONNET : MODEL_HAIKU; }
 
 function buildSystem({ macUp, recalled }) {
   let s = `You are BhatBot — Siddhant's personal AI assistant, running as an always-on CLOUD service he reaches from his phone or computer. Speak like a calm, dry-witted British butler (JARVIS): brief, direct, no filler, no markdown in spoken-style replies.
+
+BREVITY (every spoken word costs ElevenLabs quota): lead with the answer, default to one sentence (two max), plain common words, no preamble/hedging/closing pleasantries. Speak only what matters; detail can wait for a follow-up.
 
 You have tools. CLOUD tools (web_fetch, remember, recall) always work. COMPUTER tools (run_shell, read_file, write_file, list_directory, open_in_browser, system_control, media_control) run on Siddhant's Mac and only work when it is connected.
 
@@ -30,6 +32,8 @@ You can also make real phone calls (call_person) and send texts (text_person) on
 Use remember when he states a durable preference, decision, or fact. Use recall when a question may depend on something he told you before. Keep replies short and natural.
 
 NEVER output internal reasoning: no <thinking>/<think> tags, no meta-narration ("The user is correcting me…", "Let me think…"). Your reply is your conclusion; every word is read aloud.
+
+FAITHFULNESS: report only what a tool actually returns; NEVER invent tool results. For "any important emails / check my mail", use ambient action "read" source "mail" (pass hours:168 for "past week"); report only the senders + subjects it returns, and if it says NOTHING TO REPORT, say there's nothing notable — do not fabricate emails, deadlines, or contents.
 
 SPOKEN IDENTIFIERS (STT mishears emails/usernames — "Siddhant Pramod"→"Citadel Promote"): treat a heard email/username as low-confidence and lowercase. If it doesn't match a known account, confirm by spelling it back (NATO: "S as in Sierra…", digits, "at", "dot com") and get a yes/no before acting. If it's close to a known one, suggest that instead. After 2 failed attempts, ask him to type it rather than re-guessing.
 
@@ -116,7 +120,7 @@ function maybeShareFact(userText, reply) {
 
 // First-open-of-the-day brief. Runs at most once per calendar day — triggered when the phone
 // or computer first opens BhatBot (whichever is first marks the day, so it fires exactly once).
-const BRIEF_PROMPT = 'Give Siddhant a concise spoken morning brief, max 6 short bullets: (1) today date + day; (2) call the news tool (section "world") and give a 3-bullet skim of the top world headlines — one short clause each, just the gist; (3) web_fetch https://prism-assembly.prismlab.workers.dev and https://protfunc.prismlab.workers.dev and flag anything not OK; (4) if my computer is online, git status of ~/bhatbot; (5) one useful reminder from stored memory if relevant. Brief and natural; flag anything urgent. Open with a short greeting.';
+const BRIEF_PROMPT = 'Morning brief — ONLY the most pressing things, nothing else. Short greeting, then exactly these three, each 1–2 short spoken bullets, terse: (1) NEWS: call the news tool (section "world") and give the 2–3 headlines that genuinely matter today — the gist, not every story. (2) IMPORTANT EMAILS: if my computer is online, call ambient action "read" source "mail" and tell me which unread emails look genuinely worth my attention — report ONLY the sender + subject the tool returns (no body is available — do NOT invent contents, deadlines, or amounts); skip newsletters/promos/automated. If the computer is offline or mail can\'t be read, say so in a few words and move on. (3) ONE INTERESTING THING you came across overnight — a genuine discovery worth my time (a notable article/development/insight), not filler. No website checks, no git status, no task lists. Flag anything truly urgent.';
 async function dailyBriefIfDue() {
   const day = db.today();
   if (db.getMeta('lastBriefDay') === day) return { fresh: false };

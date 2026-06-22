@@ -281,8 +281,107 @@ function report(s) {
   return L.join('\n');
 }
 
+// ── "what should I watch" briefing (mirror of lib/worldcup.js) ──────────────────
+function recentForm(matches, abbr, n = 5) {
+  const done = matches.filter((m) => m.completed && m.hs != null && m.as != null && (m.home.abbr === abbr || m.away.abbr === abbr))
+    .sort((a, b) => new Date(b.date) - new Date(a.date)).slice(0, n);
+  return done.map((m) => {
+    const home = m.home.abbr === abbr;
+    const gf = home ? m.hs : m.as, ga = home ? m.as : m.hs;
+    const res = gf > ga ? 'W' : gf < ga ? 'L' : 'D';
+    return { res, gf, ga, opp: home ? m.away.abbr : m.home.abbr, score: `${gf}-${ga}` };
+  });
+}
+function groupSpot(snap, abbr) {
+  for (const g of snap.tables) { const i = g.table.findIndex((r) => r.abbr === abbr); if (i >= 0) return { label: g.label, pos: i + 1, row: g.table[i], size: g.table.length }; }
+  return null;
+}
+function matchInsights(snap, m) {
+  const out = [];
+  const p = predict(snap.elo, m.home.abbr, m.away.abbr, { home: true });
+  const ea = Math.round(snap.elo[m.home.abbr] ?? 1610), eb = Math.round(snap.elo[m.away.abbr] ?? 1610);
+  const fav = ea >= eb ? m.home.abbr : m.away.abbr;
+  out.push(`Model: ${m.home.abbr} ${(p.pHome * 100).toFixed(0)}% / draw ${(p.pDraw * 100).toFixed(0)}% / ${m.away.abbr} ${(p.pAway * 100).toFixed(0)}% (xG ${p.la.toFixed(1)}–${p.lb.toFixed(1)}).`);
+  out.push(`Strength: ${fav} edge, Elo ${ea} vs ${eb} (gap ${Math.abs(ea - eb)}).`);
+  for (const ab of [m.home.abbr, m.away.abbr]) {
+    const f = recentForm(snap.matches, ab, 5);
+    if (f.length) out.push(`${ab} form: ${f.map((x) => x.res).join('')} (last: ${f.map((x) => x.opp + ' ' + x.score).slice(0, 3).join(', ')}).`);
+  }
+  if (m.group) {
+    for (const ab of [m.home.abbr, m.away.abbr]) {
+      const s = groupSpot(snap, ab);
+      if (s) out.push(`${ab}: Group ${s.label} #${s.pos}, ${s.row.Pts} pts (${s.row.W}-${s.row.D}-${s.row.L}).`);
+    }
+  }
+  if (m.state === 'in') out.push(`LIVE NOW: ${m.home.abbr} ${m.hs}–${m.as} ${m.away.abbr} (${m.detail}).`);
+  return { prediction: p, insights: out, favorite: fav, closeness: 1 - Math.abs(p.pHome - p.pAway) };
+}
+function pickWatch(snap) {
+  if (snap.live.length) {
+    return snap.live.map((m) => ({ m, s: 1 - Math.abs((m.hs ?? 0) - (m.as ?? 0)) * 0.2 })).sort((a, b) => b.s - a.s)[0].m;
+  }
+  const now = Date.now();
+  const soon = snap.upcoming.filter((m) => new Date(m.date).getTime() - now < 72 * 3600e3);
+  const pool = soon.length ? soon : snap.upcoming.slice(0, 6);
+  let best = null, bestScore = -1e9;
+  for (const m of pool) {
+    const p = predict(snap.elo, m.home.abbr, m.away.abbr, { home: true });
+    const ea = snap.elo[m.home.abbr] ?? 1610, eb = snap.elo[m.away.abbr] ?? 1610;
+    const hrs = Math.max(0, (new Date(m.date).getTime() - now) / 3600e3);
+    const score = (ea + eb) / 2 + 500 * (1 - Math.abs(p.pHome - p.pAway)) - hrs * 1.5;
+    if (score > bestScore) { bestScore = score; best = m; }
+  }
+  return best || snap.upcoming[0] || null;
+}
+async function buzz(query, n = 5) {
+  try {
+    const url = `https://news.google.com/rss/search?q=${encodeURIComponent(query)}&hl=en-US&gl=US&ceid=US:en`;
+    const r = await fetch(url, { headers: { 'user-agent': 'Mozilla/5.0', 'cache-control': 'no-cache' } });
+    if (!r.ok) return [];
+    const xml = await r.text();
+    const items = [...xml.matchAll(/<item>([\s\S]*?)<\/item>/g)].slice(0, n);
+    const dec = (s) => String(s || '').replace(/<!\[CDATA\[|\]\]>/g, '').replace(/<[^>]+>/g, '').replace(/&amp;/g, '&').replace(/&#39;|&apos;/g, "'").replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>').trim();
+    return items.map((it) => { const t = it[1].match(/<title>([\s\S]*?)<\/title>/); return t ? dec(t[1]) : ''; }).filter(Boolean);
+  } catch { return []; }
+}
+async function watchBrief({ maxBuzz = 5 } = {}) {
+  const snap = await snapshot({ ttlMs: 30000, sims: 0 });
+  const pick = pickWatch(snap);
+  const live = snap.live.map((m) => `${m.home.abbr} ${m.hs}–${m.as} ${m.away.abbr} (${m.detail})`);
+  let rec = null, headlines = [];
+  if (pick) {
+    const ins = matchInsights(snap, pick);
+    for (const q of [`${pick.home.name} ${pick.away.name} World Cup`, `${pick.home.name} World Cup 2026`, 'World Cup 2026']) {
+      headlines = await buzz(q, maxBuzz);
+      if (headlines.length) break;
+    }
+    rec = {
+      matchup: `${pick.home.name} vs ${pick.away.name}`,
+      abbr: `${pick.home.abbr} vs ${pick.away.abbr}`,
+      state: pick.state,
+      kickoff: pick.date,
+      kickoffLocal: pick.state === 'pre' ? new Date(pick.date).toLocaleString('en-US', { weekday: 'short', hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York', timeZoneName: 'short' }) : null,
+      stage: pick.group ? `Group ${pick.group}` : (pick.stage || '').replace(/-/g, ' '),
+      prediction: ins.prediction,
+      insights: ins.insights,
+    };
+  }
+  return { generatedAt: snap.fetchedAt, live, recommendation: rec, buzz: headlines, liveCount: snap.live.length, upcomingCount: snap.upcoming.length };
+}
+function formatWatch(b) {
+  const L = [];
+  if (b.live && b.live.length) { L.push('LIVE NOW:'); for (const m of b.live) L.push('• ' + m); L.push(''); }
+  const r = b.recommendation;
+  if (r) {
+    L.push(`TOP PICK TO WATCH: ${r.matchup}${r.state === 'in' ? ' — LIVE NOW' : r.kickoffLocal ? ' — ' + r.kickoffLocal : ''}${r.stage ? ' (' + r.stage + ')' : ''}`);
+    for (const i of r.insights) L.push('• ' + i);
+    if (b.buzz && b.buzz.length) { L.push('WHAT PEOPLE ARE SAYING (web):'); for (const h of b.buzz) L.push('• ' + h); }
+  } else L.push('No live or upcoming matches found in the current window.');
+  return L.join('\n');
+}
+
 const STANDINGS_URL = 'https://www.google.com/search?q=fifa+world+cup+2026+standings';
-module.exports = { snapshot, report, predict, simulateTournament, buildGroups, computeTable, seedElo, fetchEvents, parseMatch, LEAGUE, WINDOW, STANDINGS_URL };
+module.exports = { snapshot, report, predict, simulateTournament, buildGroups, computeTable, seedElo, fetchEvents, parseMatch, recentForm, matchInsights, pickWatch, buzz, watchBrief, formatWatch, LEAGUE, WINDOW, STANDINGS_URL };
 
 // CLI / self-test harness entry: `node lib/worldcup.js`
 if (require.main === module) {

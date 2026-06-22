@@ -552,6 +552,12 @@ so EVERY reply gets a voice. <speak> tags are a BREVITY OVERRIDE for long replie
 Rule of thumb: omit <speak> and the whole thing is spoken; add <speak> to keep a long
 reply's spoken part brief. Never dump raw code/data without a <speak> summary, or it gets
 read verbatim.
+BREVITY (every spoken word costs ElevenLabs quota — be economical):
+- Lead with the answer; cut preamble, hedging, and restating the question.
+- Default to ONE sentence; two only when genuinely needed. Short, common words over long ones.
+- Drop filler ("I'd be happy to", "just so you know", "as you can see", "it looks like").
+- Say "yes/done/can't" plainly. No closing pleasantries unless he's clearly wrapping up.
+- For lists/data, speak only the headline and the one thing that matters; the rest is on screen.
 
 SPOKEN IDENTIFIERS (emails / usernames / codes — STT mishears these constantly):
 A heard email/username/alphanumeric string is LOW-confidence. Names like "Siddhant
@@ -577,11 +583,27 @@ prices/stocks, "today/now/currently/latest/this week", and any date-sensitive fa
   the world_cup tool — never answer from memory and never say "the next World Cup is in 2026"
   or "I don't have real-time data". For a general update / standings / scores / "who's winning",
   just call world_cup (default action opens the live standings page in his browser) and say one
-  brief line like "Pulled up the live standings" — do NOT read tables aloud. Use the computing
-  actions only when he asks for a specific number: predict{home,away}, group{label}, or odds.
+  brief line like "Pulled up the live standings" — do NOT read tables aloud. For "what should I
+  watch / what's happening with the game / give me insights / fill me in", use world_cup action
+  "watch" → it returns live scores, a recommended match, key insights, and a web scan of buzz;
+  give him YOUR opinion on what to watch plus a couple of sharp insights, conversationally (don't
+  list raw data). Use the computing actions only when he asks for a specific number:
+  predict{home,away}, group{label}, or odds.
 - Other live/current questions → web_search / fetch_url / weather / the relevant tool.
 - The "Current date & time" block below is authoritative — trust it over any internal sense
   of the date. If you ever feel unsure of the date, it is the one in that block.
+
+EMAIL: to check his mail / "any important emails" / "what's in my inbox" / for the morning
+brief, use the ambient tool action "read" source "mail" — it reads his native Mac Mail.app
+inbox (all accounts) for recent unread that look worth attention. Do NOT open a Gmail web
+login or ask which account for a read-only check; only use a browser/Gmail login if he
+explicitly wants to act inside web Gmail (compose, search the web client, etc.).
+Pass hours for the window: 168 for "past week", 24 for "today", default ~12 (overnight).
+FAITHFULNESS (critical): the mail read returns ONLY each email's sender + subject (no body),
+and ONLY the items the tool actually returns. Report just those. If the result says "NOTHING
+TO REPORT", tell him plainly there's nothing notable — do NOT list any emails. NEVER invent
+senders, subjects, body contents, deadlines, dollar amounts, or "expires in N days". Reporting
+an email that wasn't in the tool output is a serious error; when unsure, say to open the inbox.
 
 MEDIA: Use media_control for any Spotify or volume request (play, pause, skip,
 "what's playing", set Spotify or system volume). Plain requests control the Mac's
@@ -901,7 +923,7 @@ function chooseModel(lastUserMessage) {
       /step.?by.?step|multi.?step|then.*then|after that/i,
       // Live-data / sports questions: route up so the model reliably picks the right tool
       // (world_cup / web_search) instead of haiku answering from stale memory.
-      /world cup|bracket|standings?|who'?s winning|tournament|fixtures?|matchup|\bodds\b/i
+      /world cup|bracket|standings?|who'?s winning|tournament|fixtures?|matchup|\bodds\b|what.*watch|worth watching|\binsights?\b/i
     ];
     const hit = sonnet.some((p) => p.test(lastUserMessage || ''));
     model = hit ? MODEL_SONNET : MODEL_HAIKU; task = hit ? 'reasoning' : 'simple';
@@ -1886,10 +1908,11 @@ const TOOLS = [
       items: { type: 'array', items: { type: 'string' }, description: 'For save: approved plain-English facts/habits to remember.' }
     }, required: ['action'] } },
   { name: 'request_permissions', description: 'Trigger the macOS Screen Recording + Accessibility permission prompts for BhatBot and open the matching System Settings → Privacy panes so Siddhant can toggle the app on. Use when vision_click / screen_parse / native login / AppleScript fail for permissions, or when he asks to "grant permissions" / "fix permissions".', input_schema: { type: 'object', properties: {} } },
-  { name: 'ambient', description: 'Inspect or control the AMBIENT AWARENESS layer — opt-in proactive monitoring of Siddhant\'s Calendar (upcoming events + conflicts) and Mail (unread needing a reply) that surfaces high-signal items unprompted. OFF by default; privacy-first (titles/subjects/counts only, redacted, quiet-hours-aware). action:"status" shows watchers + state; "scan" runs one pass now and returns a digest; "enable"/"disable" toggle it (optionally a single source: calendar|mail). Use when Siddhant asks to "keep an eye on my calendar/email", "what\'s coming up", or to turn ambient monitoring on/off.',
+  { name: 'ambient', description: 'Inspect or control the AMBIENT AWARENESS layer — opt-in proactive monitoring of Siddhant\'s Calendar (upcoming events + conflicts) and Mail (unread needing a reply) that surfaces high-signal items unprompted. OFF by default; privacy-first (titles/subjects/counts only, redacted, quiet-hours-aware). action:"status" shows watchers + state; "scan" runs one pass now (only enabled sources) and returns a digest; "read"{source:"mail"|"calendar"} does an ON-DEMAND pull of ONE source right now even if always-on monitoring is OFF (use this to check important unread email or upcoming events on request, e.g. in the morning brief, without turning on background notifications); "enable"/"disable" toggle background monitoring (optionally a single source). Use when Siddhant asks to "keep an eye on my calendar/email", "any important emails", "what\'s coming up", or to read mail/calendar for a brief.',
     input_schema: { type: 'object', properties: {
-      action: { type: 'string', enum: ['scan', 'status', 'enable', 'disable'] },
-      source: { type: 'string', enum: ['calendar', 'mail'], description: 'Optional: toggle just this watcher.' }
+      action: { type: 'string', enum: ['scan', 'read', 'status', 'enable', 'disable'] },
+      source: { type: 'string', enum: ['calendar', 'mail'], description: 'For "read": which source to pull now. For enable/disable: toggle just this watcher.' },
+      hours: { type: 'number', description: 'For "read" mail: lookback window in hours (default 12 — overnight). Use 168 for "past week", 24 for "today".' }
     }, required: ['action'] } },
   { name: 'project', description: "Open and track a PROJECT with a living, auto-updating summary. Use 'open' when Siddhant starts or switches to a project so BhatBot keeps its context across turns (the active project's summary is injected into your memory every turn, and it auto-refreshes as work happens). 'note' records a decision/milestone/fact; 'summary' regenerates the rolling summary now; 'status' shows the active project; 'list' shows all; 'close' marks one done. Open a project whenever he's clearly working on a named, ongoing thing.",
     input_schema: { type: 'object', properties: {
@@ -1912,9 +1935,9 @@ const TOOLS = [
       dryRun: { type: 'boolean', description: 'Only report recurring-failure clusters; do not draft.' },
       minCount: { type: 'number', description: 'Min repeats before drafting (default 3).' }
     } } },
-  { name: 'world_cup', description: 'FIFA World Cup 2026 live data. DEFAULT (and for any "update / standings / scores / what\'s happening / show me the World Cup" request) → action "open": opens the live, auto-updating standings & scores page in Siddhant\'s browser and returns nothing to read out — say something brief like "Pulled up the live standings for you" and do NOT enumerate tables (this is the cheap path; the browser shows the live data). Use the COMPUTING actions only when he explicitly wants a number: "predict"{home,away} (one matchup win/draw/loss, cheap), "group"{label A–L} (one group table, cheap), "odds" (Monte-Carlo title odds — the only expensive action, use sparingly).',
+  { name: 'world_cup', description: 'FIFA World Cup 2026 live data + analysis. PICK THE ACTION BY INTENT: (1) "open" — for "show me / pull up the standings / scores / table": opens the live auto-updating page in his browser, returns nothing to read; just say "Pulled up the live standings". (2) "watch" — for "what should I watch / what\'s happening with the game / give me insights / fill me in / anything good on": returns live scores + a RECOMMENDED match to watch + key insights (model prediction, Elo, recent form, group stakes) + a fresh web scan of what people are saying. Use this signal to give YOUR OWN opinion on what to watch and a couple of sharp insights — be conversational and concise, don\'t just list the data. (3) "predict"{home,away} — one matchup win/draw/loss. (4) "group"{label A–L} — one group table. (5) "odds" — Monte-Carlo title odds (expensive, use sparingly). Default action is "open".',
     input_schema: { type: 'object', properties: {
-      action: { type: 'string', enum: ['open', 'predict', 'group', 'odds', 'standings', 'live'] },
+      action: { type: 'string', enum: ['open', 'watch', 'predict', 'group', 'odds', 'standings'] },
       home: { type: 'string', description: 'Team abbreviation or name (for predict).' },
       away: { type: 'string', description: 'Team abbreviation or name (for predict).' },
       label: { type: 'string', description: 'Group letter A–L (for group).' },
@@ -2052,9 +2075,16 @@ async function worldCupTool(input) {
     // DEFAULT + standings/live/report/open: just open the live standings page in a browser.
     // Zero Monte-Carlo, zero data fed back to the model → cheapest path for the common
     // "what's the World Cup update / standings / scores" ask. The page auto-updates live.
-    if (['open', 'report', 'standings', 'live', 'scores', 'update'].includes(action)) {
+    if (['open', 'report', 'standings', 'scores', 'update'].includes(action)) {
       try { shell.openExternal(worldcup.STANDINGS_URL); } catch {}
       return { success: true, result: 'Opened the live World Cup standings & scores in your browser. The page auto-updates with current group tables and in-progress matches — no need for me to read them out.' };
+    }
+    // INFORMATIVE: live state + a recommended match to watch + key insights + web buzz. Use this
+    // for "what should I watch / what's happening with the game / give me insights / fill me in".
+    // No Monte-Carlo; one ESPN pull + one Google-News scan. Form YOUR opinion from this signal.
+    if (['watch', 'insights', 'recommend', 'brief', 'live', 'whatshappening'].includes(action)) {
+      const b = await worldcup.watchBrief({ maxBuzz: 5 });
+      return { success: true, result: worldcup.formatWatch(b), brief: b };
     }
     // predict / group only need standings + Elo → snapshot with sims:0 (skips the heavy sim).
     if (action === 'predict') {
@@ -3650,6 +3680,7 @@ async function executeTool(name, input) {
         const a = input.action;
         if (a === 'status') { result = { success: true, ...ambient.sources() }; break; }
         if (a === 'scan') { const r = await ambient.scan(); result = { success: !r.error, ...r, digest: ambient.digest(r.signals || []) }; break; }
+        if (a === 'read' || a === 'peek') { const r = await ambient.scanSource(input.source || 'mail', { hours: Number(input.hours) || 0 }); result = { success: !r.error, ...r }; break; }
         if (a === 'enable' || a === 'disable') {
           const cur = loadConfig().ambient || {};
           const next = { ...cur, enabled: a === 'enable' };
@@ -4133,7 +4164,7 @@ function looksLikeToolTask(text) {
   if (/[~/][\w.]|\b[\w-]+\.(png|jpe?g|pdf|txt|md|json|csv|js|ts|py|stl|obj|glb|mp3|wav|docx?|xlsx?|key|pages)\b/.test(t)) return true;  // paths / filenames
   // Live/current-data questions are tool tasks too (world_cup / web_search / weather) — they must
   // NOT be shunted to the tool-less local/Darkbloom fast path, which answers from stale training.
-  if (/\bworld cup\b|\bstandings?\b|\bbracket\b|\bodds\b|who'?s winning|\bscores?\b|\bfixtures?\b|\bmatchup\b|right now|\btoday\b|currently|\blatest\b|live (?:score|match|game|update)|\bweather\b|\bstock|\bprice\b|\bnews\b|\bheadlines?\b/.test(t)) return true;
+  if (/\bworld cup\b|\bstandings?\b|\bbracket\b|\bodds\b|who'?s winning|\bscores?\b|\bfixtures?\b|\bmatchup\b|right now|\btoday\b|currently|\blatest\b|live (?:score|match|game|update)|what.*\bwatch\b|worth watching|the (?:game|match)\b|\binsights?\b|fill me in|\bweather\b|\bstock|\bprice\b|\bnews\b|\bheadlines?\b/.test(t)) return true;
   return /\b(open|launch|quit|close|play|pause|skip|resume|search|google|browse|navigate|go to|website|url|click|type|screenshot|screen|capture|delete|remove|create|make|build|write|edit|save|move|rename|copy|file|folder|directory|\bls\b|\bcd\b|run|exec|shell|command|terminal|deploy|install|update|git|commit|push|email|gmail|inbox|send|calendar|event|schedule|remind|reminder|note|notes|message|imessage|text|spotify|playlist|song|music|track|volume|login|log in|sign in|download|upload|generate|image|picture|logo|render|3d|stl|print|figure|plot|graph|chart|simulate|notion|app\b|browser|playwright|spreadsheet|document)\b/.test(t);
 }
 
@@ -4983,19 +5014,17 @@ async function runBriefing() {
         + t.map((x) => `- ${x.title}${x.priority ? ` [P:${x.priority}]` : ''}${x.dueDate ? ` (due ${x.dueDate})` : ''}${x.projectName ? ` — ${x.projectName}` : ''}`).join('\n') + '\n\n';
     }
   } catch {}
-  const prompt = notionTasks + `Morning briefing. Be terse, max 5 bullets, each ≤15 words. Check:
-1. git status on ${proj}
-2. HTTP status of: ${checks.join(', ')}
-3. Search for papers on "protein complex assembly order" from the last 30 days
-4. Files modified in ${proj} in the last 24h
-5. Current date/time
-Flag anything urgent with ⚠.`;
+  const prompt = `Morning brief — ONLY the most pressing things, nothing else. Open with a short greeting, then exactly these three, each 1–2 short bullets, terse and spoken-friendly:
+1. NEWS: call the news tool (section world) and give me the 2–3 headlines that genuinely matter today — the gist, not every story.
+2. IMPORTANT EMAILS: call ambient action "read" source "mail" and tell me which unread emails look genuinely worth my attention — report ONLY the sender + subject the tool returns (no body is available — do NOT invent contents, deadlines, or amounts). Skip newsletters/promos/automated. If mail can't be read, say so in a few words and move on.
+3. ONE INTERESTING THING you came across — a genuine discovery worth my time (a notable article, development, or insight from the news/web), not filler.
+No website checks, no git status, no task lists. Flag anything truly urgent with ⚠.`;
   try {
     const res = await agentLoop([{ role: 'user', content: prompt }], getApiKey(), { sender: { send() {} } });
     const text = res.text || 'briefing produced no output';
     const note = text.slice(0, 220).replace(/"/g, '\\"');
     try { spawn('osascript', ['-e', `display notification "${note}" with title "Bhatbot Briefing" sound name "Ping"`]); } catch {}
-    sayLocal('Good morning Siddhant. Your briefing is ready.');
+    try { speakDesktop(text, { full: true }); } catch {}   // ONE voice: ElevenLabs via speakDesktop, never macOS say
     telegramNotify('☀️ Morning briefing:\n\n' + text);
     sendToActivity('tool-update', { type: 'thinking', text: '☀️ briefing:\n' + text });
   } catch (e) { console.error('[briefing] failed:', e.message); }
