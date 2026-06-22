@@ -6,7 +6,7 @@ const EL_VOICE = process.env.ELEVENLABS_VOICE_ID || 'nuIFNGEZkRGoYBg8iBYe';
 // turbo_v2_5 is materially warmer/less synthetic than flash while staying low-latency enough for
 // a live call (flash trades quality for the last ~100ms). Override with ELEVENLABS_MODEL.
 const EL_MODEL = process.env.ELEVENLABS_MODEL || 'eleven_turbo_v2_5';
-const TTS_SPEED = Math.max(0.7, Math.min(1.2, parseFloat(process.env.TTS_SPEED) || 1.0));
+const TTS_SPEED = Math.max(0.7, Math.min(1.2, parseFloat(process.env.TTS_SPEED) || 1.08));
 // Voice character (all env-tunable so cadence/warmth can be dialed in without a redeploy).
 // Defaults follow the J.A.R.V.I.S. humanization guide §3 — the target for a Bettany-style clone:
 //  • stability 0.40  (35–45%): lowered so the AI adds emotional variance + natural intonation
@@ -44,8 +44,11 @@ function normalizeForSpeech(input) {
   s = s.replace(/^\s{0,3}#{1,6}\s+/gm, '').replace(/^\s*>\s?/gm, '').replace(/^\s*([-*•]|\d+\.)\s+/gm, '');
   s = s.replace(/(^|\s)((?:~|\.\.?)?\/(?:[\w.@%+-]+\/)+[\w.@%+-]*)/g, (_m, pre, p) => pre + (p.replace(/\/+$/, '').split('/').pop() || ''));
   s = s.replace(/\be\.g\.,?/gi, 'for example,').replace(/\bi\.e\.,?/gi, 'that is,').replace(/\betc\.?/gi, 'etcetera').replace(/\bvs\.?/gi, 'versus');
+  s = s.replace(/\bpts\b/gi, 'points').replace(/\bpt\b/g, 'point').replace(/\bGD\b/g, 'goal difference').replace(/\bGF\b/g, 'goals for').replace(/\bGA\b/g, 'goals against').replace(/\bxG\b/g, 'expected goals').replace(/\bapprox\.?/gi, 'approximately').replace(/\bno\.\s?(?=\d)/gi, 'number ').replace(/\bmins\b/gi, 'minutes').replace(/\bhrs\b/gi, 'hours');
   s = s.replace(/\$\s?(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d{2}))?/g, (_m, d, c) => { d = d.replace(/,/g, ''); return d + (d === '1' ? ' dollar' : ' dollars') + (c ? ' and ' + c + ' cents' : ''); });
-  s = s.replace(/([A-Za-z0-9])\.(?=[A-Za-z])/g, '$1 dot ');   // domains/emails: gmail.com→"gmail dot com"; decimals (digit.digit) stay
+  s = s.replace(/(\d)\s*[–—]\s*(\d)/g, '$1 to $2');           // numeric range → "to" (1.6–1.1)
+  s = s.replace(/(\d)\.(\d)/g, '$1 point $2');                // decimals → "57 point 5" (after currency, before dot-rule)
+  s = s.replace(/([A-Za-z0-9])\.(?=[A-Za-z])/g, '$1 dot ');   // domains/emails: gmail.com→"gmail dot com"
   s = s.replace(/&/g, ' and ').replace(/%/g, ' percent').replace(/(\S)@(\S)/g, '$1 at $2').replace(/\s@\s/g, ' at ')
        .replace(/#(\d+)/g, 'number $1').replace(/#/g, ' hash ').replace(/\s\+\s/g, ' plus ')
        .replace(/([A-Za-z])\/([A-Za-z])/g, '$1 slash $2').replace(/°/g, ' degrees').replace(/\$(?=[A-Za-z])/g, '').replace(/[~^|<>*$]/g, ' ');
@@ -57,12 +60,12 @@ const DISCOURSE_LEAD = /^(right|so|well|now|look|listen|honestly|actually|alrigh
 function humanizeCadence(input) {
   let s = String(input || '');
   if (!s || !/flash|turbo/i.test(EL_MODEL)) return s;
-  s = s.replace(DISCOURSE_LEAD, (m) => m.replace(/[,\s]+$/, '') + '<break time="0.25s"/> ');
-  s = s.replace(/\s*\.\.\.+\s*/g, ' <break time="0.45s"/> ');
-  s = s.replace(/\s*[—–]\s*/g, ' <break time="0.25s"/> ').replace(/\s+-\s+/g, ' <break time="0.25s"/> ');
-  let n = (s.match(/<break/g) || []).length; const MAX = 6;
-  s = s.replace(/([.!?])\s+(?=[A-Z0-9])/g, (m, p) => (n++ < MAX ? p + ' <break time="0.3s"/> ' : m));
-  let count = 0; s = s.replace(/<break[^>]*>/g, (t) => (++count > MAX ? '' : t));
+  s = s.replace(DISCOURSE_LEAD, (m) => m.replace(/[,\s]+$/, '') + '<break time="0.2s"/> ');
+  s = s.replace(/\s*\.\.\.+\s*/g, ' <break time="0.3s"/> ');
+  s = s.replace(/\s*[—–]\s*/g, ' <break time="0.2s"/> ').replace(/\s+-\s+/g, ' <break time="0.2s"/> ');
+  // No per-sentence break injected — ElevenLabs already pauses at . ! ? and stacking a break made
+  // sentence-ends drag. Just cap the beats we added (ellipsis/dash/discourse).
+  const MAX = 6; let count = 0; s = s.replace(/<break[^>]*>/g, (t) => (++count > MAX ? '' : t));
   return s.replace(/[ \t]{2,}/g, ' ').trim();
 }
 

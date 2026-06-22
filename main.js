@@ -366,6 +366,25 @@ and precise. You manage things without being asked, remember everything, and
 surface information before it's needed. You treat Siddhant's time as the scarce
 resource it is. Address him as "sir" — naturally and sparingly, never effusive.
 
+VOICE & CHARACTER — you are JARVIS, not a generic chatbot. This is not optional flavor;
+it is how you talk. Channel Paul Bettany's JARVIS: unflappable, bone-dry, quietly amused.
+- Dry wit and understated, affectionate sarcasm are part of nearly every exchange — a raised
+  eyebrow in words. Deadpan, never zany; the humor is in the restraint.
+- Effortless competence: you are never impressed by your own work and never anxious. A hard
+  task gets a calm "Already done, sir," not enthusiasm.
+- Gentle, loyal teasing when he does something silly ("A bold choice, sir. We'll see how it
+  goes."), and the occasional well-placed barb when he's wrong — but always on his side.
+- British understatement: "That went about as well as expected" for a disaster; "Mildly
+  concerning" for a real problem. Litotes over hyperbole.
+- NEVER perky, bubbly, or sycophantic. No exclamation-point cheer, no "Happy to help!", no
+  emoji. Warmth shows as dryness and reliability, not gushing.
+Examples of the register (don't reuse verbatim — match the tone):
+- "Pulled up the standings. Norway are favoured, though Senegal seem unaware of that."
+- "Deployed. Try not to break it before lunch, sir."
+- "I could do that. I'd advise against it, but I could."
+- "Your inbox is, as ever, a monument to optimism. Two things actually matter."
+Wit serves the answer — it never delays it or buries the point. One dry beat, then the substance.
+
 But you are not a yes-man. You have a high-quality internal model of the world —
 physics, history, philosophy, biology, economics, culture, software — and you
 use it freely. When asked for your view on anything, give it directly. No
@@ -5698,9 +5717,9 @@ async function elevenLabsSynth(t, c, opts = {}) {
   const vs = {
     stability: c.ttsStability != null ? c.ttsStability : 0.38,
     similarity_boost: c.ttsSimilarity != null ? c.ttsSimilarity : 0.75,
-    style: c.ttsStyle != null ? c.ttsStyle : 0.35,
+    style: c.ttsStyle != null ? c.ttsStyle : 0.40,   // a touch more expressive so the dry wit lands
     use_speaker_boost: c.ttsSpeakerBoost != null ? c.ttsSpeakerBoost : true,
-    speed: Math.max(0.7, Math.min(1.2, Number(c.ttsSpeed) || 1.06))
+    speed: Math.max(0.7, Math.min(1.2, Number(c.ttsSpeed) || 1.10))   // slightly quicker delivery
   };
   const body = { text, model_id: model, voice_settings: vs };
   // (2) Request stitching — give the model the surrounding sentences so prosody flows across
@@ -5752,11 +5771,23 @@ function normalizeForSpeech(input) {
   s = s.replace(/\be\.g\.,?/gi, 'for example,').replace(/\bi\.e\.,?/gi, 'that is,')
        .replace(/\betc\.?/gi, 'etcetera').replace(/\bvs\.?/gi, 'versus')
        .replace(/\bw\/\s/gi, 'with ').replace(/\baka\b/gi, 'also known as');
+  // 4b. Domain/common abbreviations spoken in full (stats tables etc. read as letters otherwise).
+  s = s.replace(/\bpts\b/gi, 'points').replace(/\bpt\b/g, 'point')
+       .replace(/\bGD\b/g, 'goal difference').replace(/\bGF\b/g, 'goals for').replace(/\bGA\b/g, 'goals against')
+       .replace(/\bxG\b/g, 'expected goals').replace(/\bapprox\.?/gi, 'approximately')
+       .replace(/\bno\.\s?(?=\d)/gi, 'number ').replace(/\bmins\b/gi, 'minutes').replace(/\bhrs\b/gi, 'hours');
   // 5. Currency: "$5"→"5 dollars", "$5.99"→"5 dollars and 99 cents", "$1,200"→"1200 dollars".
   s = s.replace(/\$\s?(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d{2}))?/g, (_m, dollars, cents) => {
     const d = dollars.replace(/,/g, '');
     return d + (d === '1' ? ' dollar' : ' dollars') + (cents ? ' and ' + cents + ' cents' : '');
   });
+  // 5b. Numeric RANGE with en/em dash → "to" ("xG 1.6–1.1" → "1.6 to 1.1", "2018–2022"). Plain
+  //     hyphens are left alone (scores/records like 2-1 stay as the model wrote them).
+  s = s.replace(/(\d)\s*[–—]\s*(\d)/g, '$1 to $2');
+  // 5c. Decimals → "X point Y" so percentages/ratios are unambiguous ("57.5%" → "57 point 5
+  //     percent"). Runs AFTER currency (which already consumed $5.99) and BEFORE the dot→"dot"
+  //     rule; digit.digit never hits the "dot" rule, only letter-adjacent dots do.
+  s = s.replace(/(\d)\.(\d)/g, '$1 point $2');
   // 6. In-token dots → "dot" when the next char is a LETTER (filenames/domains/emails:
   //    "main.js"→"main dot js", "gmail.com"→"gmail dot com", "2008.co"→"2008 dot co", "co.uk"→
   //    "co dot uk"). Decimals like 3.5 (digit.digit) stay → TTS says "three point five"; and a
@@ -5786,8 +5817,8 @@ const DISCOURSE_LEAD = /^(right|so|well|now|look|listen|honestly|actually|alrigh
 function humanizeCadence(input, { breaks = false } = {}) {
   let s = String(input || '');
   if (!s) return s;
-  const SHORT = breaks ? '<break time="0.25s"/>' : ',';
-  const MED = breaks ? '<break time="0.45s"/>' : ' …';
+  const SHORT = breaks ? '<break time="0.2s"/>' : ',';
+  const MED = breaks ? '<break time="0.3s"/>' : ' …';
   // Opening discourse marker → a brief beat after it ("Right, on it." → "Right,⟨beat⟩ on it.")
   s = s.replace(DISCOURSE_LEAD, (m) => m.replace(/[,\s]+$/, '') + (breaks ? SHORT + ' ' : ', '));
   // Ellipses = a trailing-off pause; em/en dashes and " - " = a mid-thought beat.
@@ -5795,16 +5826,11 @@ function humanizeCadence(input, { breaks = false } = {}) {
   s = s.replace(/\s*[—–]\s*/g, breaks ? ' ' + SHORT + ' ' : ', ');
   s = s.replace(/\s+-\s+/g, breaks ? ' ' + SHORT + ' ' : ', ');
   if (breaks) {
-    // Cap injected breaks (incl. the ones above) to avoid the documented instability.
-    let n = (s.match(/<break/g) || []).length;
-    const MAX = 6;
-    // A gentle beat between sentences, but only while under the cap.
-    s = s.replace(/([.!?])\s+(?=[A-Z0-9])/g, (m, p) => (n++ < MAX ? p + ' <break time="0.3s"/> ' : m));
-    if ((s.match(/<break/g) || []).length > MAX) {
-      // Trim from the end if we somehow blew the cap (defensive).
-      let count = 0;
-      s = s.replace(/<break[^>]*>/g, (t) => (++count > MAX ? '' : t));
-    }
+    // NOTE: we deliberately do NOT inject a <break> between sentences — ElevenLabs already pauses
+    // naturally at . ! ? and an extra break stacked on top made sentence-ends drag. Cap the beats
+    // we DID add (ellipses/dashes/discourse) to avoid the documented prosody instability.
+    const MAX = 6; let count = 0;
+    s = s.replace(/<break[^>]*>/g, (t) => (++count > MAX ? '' : t));
   }
   return s.replace(/[ \t]{2,}/g, ' ').trim();
 }
