@@ -13,7 +13,9 @@ let notion = null; try { notion = require('../notion'); } catch {}
 const MAX_STEPS = Number(process.env.AGENT_MAX_STEPS || 8);
 const HISTORY_LIMIT = Number(process.env.HISTORY_LIMIT || 40);
 
-const SONNET_HINTS = [/write.*prompt/i, /architect/i, /refactor/i, /debug/i, /explain.*why/i, /design/i, /strategy/i, /research/i, /paper/i, /optimiz/i, /\bplan\b/i, /review/i, /analy[sz]e/i];
+const SONNET_HINTS = [/write.*prompt/i, /architect/i, /refactor/i, /debug/i, /explain.*why/i, /design/i, /strategy/i, /research/i, /paper/i, /optimiz/i, /\bplan\b/i, /review/i, /analy[sz]e/i,
+  // live-data/sports → route up so the tool is reliably invoked instead of a stale-memory reply
+  /world cup|bracket|standings?|who'?s winning|tournament|fixtures?|matchup|\bodds\b/i];
 function pickModel(text) { return SONNET_HINTS.some((re) => re.test(text || '')) ? MODEL_SONNET : MODEL_HAIKU; }
 
 function buildSystem({ macUp, recalled }) {
@@ -29,7 +31,11 @@ Use remember when he states a durable preference, decision, or fact. Use recall 
 
 NEVER output internal reasoning: no <thinking>/<think> tags, no meta-narration ("The user is correcting me…", "Let me think…"). Your reply is your conclusion; every word is read aloud.
 
-SPOKEN IDENTIFIERS (STT mishears emails/usernames — "Siddhant Pramod"→"Citadel Promote"): treat a heard email/username as low-confidence and lowercase. If it doesn't match a known account, confirm by spelling it back (NATO: "S as in Sierra…", digits, "at", "dot com") and get a yes/no before acting. If it's close to a known one, suggest that instead. After 2 failed attempts, ask him to type it rather than re-guessing.`;
+SPOKEN IDENTIFIERS (STT mishears emails/usernames — "Siddhant Pramod"→"Citadel Promote"): treat a heard email/username as low-confidence and lowercase. If it doesn't match a known account, confirm by spelling it back (NATO: "S as in Sierra…", digits, "at", "dot com") and get a yes/no before acting. If it's close to a known one, suggest that instead. After 2 failed attempts, ask him to type it rather than re-guessing.
+
+LIVE DATA — never answer from memory: your training is stale. For anything current (scores, standings, news, weather, prices, "today/now/latest") you MUST use a tool and answer from its result. The FIFA World Cup 2026 IS HAPPENING NOW (June–July 2026) — for ANY World Cup question (update, standings, "who's winning", title odds, a matchup prediction, the bracket) call the world_cup tool; do NOT say "the next World Cup is 2026" or "I don't have real-time data" — you do, via world_cup.
+
+Current date & time: ${new Date().toLocaleString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York', timeZoneName: 'short' })}. Trust this over any internal sense of the date.`;
   if (recalled && recalled.length) s += `\n\nRELEVANT MEMORY (use silently, do not enumerate):\n` + recalled.map((f) => '- ' + f).join('\n');
   const cost = db.costToday();
   if (cost.calls) s += `\n\nAPI spend today: $${cost.usd.toFixed(3)} (${cost.calls} calls). Be efficient.`;
@@ -110,7 +116,7 @@ function maybeShareFact(userText, reply) {
 
 // First-open-of-the-day brief. Runs at most once per calendar day — triggered when the phone
 // or computer first opens BhatBot (whichever is first marks the day, so it fires exactly once).
-const BRIEF_PROMPT = 'Give Siddhant a concise spoken morning brief, max 5 short bullets: (1) today date + day; (2) web_fetch https://prism-assembly.prismlab.workers.dev and https://protfunc.prismlab.workers.dev and flag anything not OK; (3) if my computer is online, git status of ~/bhatbot; (4) one useful reminder from stored memory if relevant. Brief and natural; flag anything urgent. Open with a short greeting.';
+const BRIEF_PROMPT = 'Give Siddhant a concise spoken morning brief, max 6 short bullets: (1) today date + day; (2) call the news tool (section "world") and give a 3-bullet skim of the top world headlines — one short clause each, just the gist; (3) web_fetch https://prism-assembly.prismlab.workers.dev and https://protfunc.prismlab.workers.dev and flag anything not OK; (4) if my computer is online, git status of ~/bhatbot; (5) one useful reminder from stored memory if relevant. Brief and natural; flag anything urgent. Open with a short greeting.';
 async function dailyBriefIfDue() {
   const day = db.today();
   if (db.getMeta('lastBriefDay') === day) return { fresh: false };

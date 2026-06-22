@@ -95,4 +95,4 @@ async function stt(buf, mime) {
   return { text: (j.text || '').trim() };
 }
 
-module.exports = { tts, stt, normalizeForSpeech, humanizeCadence };
+module.exports = { tts, stt, normalizeForSpeech, humanizeCadence, stripReasoning };

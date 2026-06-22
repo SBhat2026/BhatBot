@@ -11,6 +11,7 @@ const crypto = require('crypto');
 const darkbloom = require('./darkbloom');
 const credentials = require('./lib/credentials');
 const worldcup = require('./lib/worldcup');               // FIFA WC 2026 live bracket + prediction engine
+const news = require('./lib/news');                       // NYT news skim (RSS, no key; Top Stories API if nytApiKey set)
 const { classify } = require('./taskClassifier');
 const { startMcpServer, stopMcpServer } = require('./mcp-server');
 // Workspace multi-agent stack (Architecture v2) — orchestrator delegates big projects to
@@ -40,6 +41,26 @@ const CONFIG_PATH = path.join(os.homedir(), '.bhatbot', 'config.json');
 const MEMORY_PATH = path.join(os.homedir(), '.bhatbot', 'memory.md');
 const makeAudit = require('./lib/audit');   // SPLIT_PLAN step 2 — audit module (DI factory)
 const { AUDIT_PATH, auditLog, readAudit } = makeAudit({ isRemote, estimateToolCost, recordToolCost });
+
+// Tee all console output to ~/.bhatbot/logs/app.log so the terminal CLI (scripts/bhatctl.js)
+// and headless tests can watch the real agent's logs + errors without a UI attached. Size-capped
+// (truncates at ~5MB) so it can't grow unbounded. Best-effort — never let logging break the app.
+const LOG_PATH = path.join(os.homedir(), '.bhatbot', 'logs', 'app.log');
+try {
+  fs.mkdirSync(path.dirname(LOG_PATH), { recursive: true });
+  try { if (fs.statSync(LOG_PATH).size > 5 * 1024 * 1024) fs.writeFileSync(LOG_PATH, ''); } catch {}
+  const _logStream = fs.createWriteStream(LOG_PATH, { flags: 'a' });
+  const _tee = (orig, level) => (...args) => {
+    try {
+      const line = args.map((a) => typeof a === 'string' ? a : (() => { try { return JSON.stringify(a); } catch { return String(a); } })()).join(' ');
+      _logStream.write(`${new Date().toISOString()} [${level}] ${line}\n`);
+    } catch {}
+    try { orig(...args); } catch {}
+  };
+  console.log = _tee(console.log.bind(console), 'log');
+  console.warn = _tee(console.warn.bind(console), 'warn');
+  console.error = _tee(console.error.bind(console), 'error');
+} catch {}
 
 const HOTKEY = 'CommandOrControl+Shift+B';
 const MODEL_SONNET = 'claude-sonnet-4-6';      // corrected from stale spec id
@@ -548,6 +569,20 @@ Pramod" get transcribed as lookalikes ("Citadel Promote"). Before you act on one
   TYPE the account, or read the saved accounts back as a numbered list to pick from.
   Do not keep re-listening and re-guessing.
 
+LIVE DATA & CURRENT EVENTS — never answer from memory, ALWAYS use a tool: Your training
+is stale; for ANYTHING current you MUST call a tool and answer from its result, never from
+what you "know". This covers: scores/standings/brackets/odds/"who's winning", news, weather,
+prices/stocks, "today/now/currently/latest/this week", and any date-sensitive fact.
+- FIFA World Cup 2026 IS HAPPENING RIGHT NOW (June–July 2026). For ANY World Cup question use
+  the world_cup tool — never answer from memory and never say "the next World Cup is in 2026"
+  or "I don't have real-time data". For a general update / standings / scores / "who's winning",
+  just call world_cup (default action opens the live standings page in his browser) and say one
+  brief line like "Pulled up the live standings" — do NOT read tables aloud. Use the computing
+  actions only when he asks for a specific number: predict{home,away}, group{label}, or odds.
+- Other live/current questions → web_search / fetch_url / weather / the relevant tool.
+- The "Current date & time" block below is authoritative — trust it over any internal sense
+  of the date. If you ever feel unsure of the date, it is the one in that block.
+
 MEDIA: Use media_control for any Spotify or volume request (play, pause, skip,
 "what's playing", set Spotify or system volume). Plain requests control the Mac's
 Spotify. If Siddhant names a device (on my phone, on the Mac), pass the device field
@@ -863,7 +898,10 @@ function chooseModel(lastUserMessage) {
       // Multi-step web/automation: haiku fumbles these (login loops, wrong selectors). Route up.
       /log\s?in|sign\s?in|sign up|log into|account/i, /\bbrowser\b|navigate|website|web ?page/i,
       /google (?:sheet|doc|drive|calendar)|gmail|fill (?:out|in)|book|order|checkout|purchase/i,
-      /step.?by.?step|multi.?step|then.*then|after that/i
+      /step.?by.?step|multi.?step|then.*then|after that/i,
+      // Live-data / sports questions: route up so the model reliably picks the right tool
+      // (world_cup / web_search) instead of haiku answering from stale memory.
+      /world cup|bracket|standings?|who'?s winning|tournament|fixtures?|matchup|\bodds\b/i
     ];
     const hit = sonnet.some((p) => p.test(lastUserMessage || ''));
     model = hit ? MODEL_SONNET : MODEL_HAIKU; task = hit ? 'reasoning' : 'simple';
@@ -1105,7 +1143,11 @@ async function callClaude(messages, apiKey, model) {
     max_tokens: 4096,
     system: systemBlocks(lastUserText(messages)),
     tools: TOOLS,
-    messages: capTokens(messages)
+    // validateHistory AFTER capTokens: trimming can re-orphan a tool_use/tool_result pair.
+    // This is the single chokepoint every Claude tool-loop call shares, so the API can never
+    // see an unpaired tool_use (the recurring "tool_use without tool_result" 400), no matter
+    // which entry point (chat/voice/telegram/cloud-bridge/pacing re-entry) built the messages.
+    messages: validateHistory(capTokens(messages))
   }, apiKey);
 }
 
@@ -1184,7 +1226,8 @@ function callClaudeStream(messages, apiKey, model, onText) {
   return anthropicStream({
     model, max_tokens: 4096,
     system: systemBlocks(lastUserText(messages)),
-    tools: TOOLS, messages: capTokens(messages)
+    // see callClaude: re-validate AFTER capTokens so trimming can't re-orphan a tool pair.
+    tools: TOOLS, messages: validateHistory(capTokens(messages))
   }, apiKey, onText);
 }
 
@@ -1869,13 +1912,18 @@ const TOOLS = [
       dryRun: { type: 'boolean', description: 'Only report recurring-failure clusters; do not draft.' },
       minCount: { type: 'number', description: 'Min repeats before drafting (default 3).' }
     } } },
-  { name: 'world_cup', description: 'FIFA World Cup 2026 — LIVE bracket, group standings, and predictions. Pulls live scores (ESPN, no key), computes group tables itself, maintains a results-driven Elo, and Monte-Carlo simulates the rest of the tournament for title/advancement odds + match win-probabilities. Use for any World Cup question ("who\'s winning group X", "odds Argentina wins it", "predict France vs Brazil", "show the bracket"). actions: "report" (full bracket+odds, default), "odds" (title odds table), "predict"{home,away} (one matchup win/draw/loss), "group"{label}, "live" (in-progress now), "open" (launch the live viewer window).',
+  { name: 'world_cup', description: 'FIFA World Cup 2026 live data. DEFAULT (and for any "update / standings / scores / what\'s happening / show me the World Cup" request) → action "open": opens the live, auto-updating standings & scores page in Siddhant\'s browser and returns nothing to read out — say something brief like "Pulled up the live standings for you" and do NOT enumerate tables (this is the cheap path; the browser shows the live data). Use the COMPUTING actions only when he explicitly wants a number: "predict"{home,away} (one matchup win/draw/loss, cheap), "group"{label A–L} (one group table, cheap), "odds" (Monte-Carlo title odds — the only expensive action, use sparingly).',
     input_schema: { type: 'object', properties: {
-      action: { type: 'string', enum: ['report', 'odds', 'predict', 'group', 'live', 'open'] },
+      action: { type: 'string', enum: ['open', 'predict', 'group', 'odds', 'standings', 'live'] },
       home: { type: 'string', description: 'Team abbreviation or name (for predict).' },
       away: { type: 'string', description: 'Team abbreviation or name (for predict).' },
       label: { type: 'string', description: 'Group letter A–L (for group).' },
       sims: { type: 'number', description: 'Monte-Carlo iterations (default 6000).' }
+    } } },
+  { name: 'news', description: 'Skim the latest NYT headlines + abstracts for a quick read (Siddhant has a NYT account; uses public NYT feeds, no login needed). Use for "what\'s the news / world news / today\'s headlines / what\'s happening in the world", and it powers the daily morning world-news skim. Returns a compact numbered list (headline — abstract). sections: world (default), us, politics, business, technology, science, home. limit default 6.',
+    input_schema: { type: 'object', properties: {
+      section: { type: 'string', enum: ['world', 'us', 'politics', 'business', 'technology', 'science', 'home'], description: 'News section (default world).' },
+      limit: { type: 'number', description: 'How many headlines (default 6, max ~15).' }
     } } },
   { name: 'self_fix', description: 'SELF-HEALING: have BhatBot fix its OWN code with its built-in Claude Code, verified + auto-reverted on failure. Given a problem description and a `verify` shell command that must exit 0 when fixed, it: snapshots git, runs Claude Code headless to edit the repo, runs verify, and KEEPS the change only if verify passes (else git-reverts). Use when a capability is broken / a tool keeps failing / the World Cup harness logs a FAIL. Self-aware loop: pair with the iteration log. apply:false drafts only (no edits).',
     input_schema: { type: 'object', properties: {
@@ -1999,35 +2047,39 @@ function _wcResolve(snap, q) {
   return String(q).toUpperCase();   // assume it's already an abbreviation
 }
 async function worldCupTool(input) {
-  const action = input.action || 'report';
+  const action = input.action || 'open';
   try {
-    const snap = await worldcup.snapshot({ ttlMs: 30000, sims: Number(input.sims) || 6000 });
+    // DEFAULT + standings/live/report/open: just open the live standings page in a browser.
+    // Zero Monte-Carlo, zero data fed back to the model → cheapest path for the common
+    // "what's the World Cup update / standings / scores" ask. The page auto-updates live.
+    if (['open', 'report', 'standings', 'live', 'scores', 'update'].includes(action)) {
+      try { shell.openExternal(worldcup.STANDINGS_URL); } catch {}
+      return { success: true, result: 'Opened the live World Cup standings & scores in your browser. The page auto-updates with current group tables and in-progress matches — no need for me to read them out.' };
+    }
+    // predict / group only need standings + Elo → snapshot with sims:0 (skips the heavy sim).
     if (action === 'predict') {
+      const snap = await worldcup.snapshot({ ttlMs: 60000, sims: 0 });
       const a = _wcResolve(snap, input.home), b = _wcResolve(snap, input.away);
       if (!a || !b) return { success: false, error: 'need home and away teams' };
       const p = worldcup.predict(snap.elo, a, b, { home: true });
       return { success: true, result: `${a} vs ${b}: ${a} ${(p.pHome * 100).toFixed(0)}% / draw ${(p.pDraw * 100).toFixed(0)}% / ${b} ${(p.pAway * 100).toFixed(0)}% (expected goals ${p.la.toFixed(2)}–${p.lb.toFixed(2)})`, prediction: p };
     }
     if (action === 'group') {
+      const snap = await worldcup.snapshot({ ttlMs: 60000, sims: 0 });
       const g = snap.tables.find((t) => t.label.toUpperCase() === String(input.label || '').toUpperCase());
       if (!g) return { success: false, error: `group ${input.label} not found (A–L)` };
       const lines = g.table.map((r, i) => `${i + 1}. ${r.name} — ${r.Pts} pts (${r.W}-${r.D}-${r.L}, GD ${r.GD >= 0 ? '+' : ''}${r.GD})`);
       return { success: true, result: `Group ${g.label}\n` + lines.join('\n') };
     }
-    if (action === 'live') {
-      if (!snap.live.length) return { success: true, result: 'No World Cup matches in progress right now.' };
-      return { success: true, result: snap.live.map((m) => `● ${m.home.name} ${m.hs}–${m.as} ${m.away.name} (${m.detail})`).join('\n') };
-    }
+    // odds is the ONLY action that pays for the Monte-Carlo simulation (title/advancement odds).
     if (action === 'odds') {
+      const snap = await worldcup.snapshot({ ttlMs: 60000, sims: Number(input.sims) || 4000 });
       const ranked = Object.entries(snap.odds).sort((a, b) => b[1].W - a[1].W).slice(0, 12);
       return { success: true, result: 'Title odds (Monte-Carlo):\n' + ranked.map(([ab, o]) => `${ab}: ${(o.W * 100).toFixed(1)}% to win, ${(o.F * 100).toFixed(1)}% final`).join('\n') };
     }
-    if (action === 'open') {
-      const w = openWorldCupWindow();
-      return w.success ? { success: true, result: 'Opened the live World Cup viewer.' } : w;
-    }
-    // report (default)
-    return { success: true, result: worldcup.report(snap) };
+    // unknown action → open the page
+    try { shell.openExternal(worldcup.STANDINGS_URL); } catch {}
+    return { success: true, result: 'Opened the live World Cup standings in your browser.' };
   } catch (e) { return { success: false, error: 'world_cup: ' + (e.message || String(e)) }; }
 }
 
@@ -3716,6 +3768,11 @@ async function executeTool(name, input) {
       }
       case 'world_cup':
         result = await worldCupTool(input || {}); break;
+      case 'news': {
+        const nr = await news.skim({ section: (input && input.section) || 'world', limit: Math.min(Number(input && input.limit) || 6, 15), apiKey: loadConfig().nytApiKey || process.env.NYT_API_KEY || '' });
+        result = nr.error ? { success: false, error: nr.error } : { success: true, result: news.format(nr), items: nr.items };
+        break;
+      }
       case 'self_fix':
         result = await selfFix(input || {}); break;
       default:
@@ -4074,6 +4131,9 @@ function pipelineCfg() {
 function looksLikeToolTask(text) {
   const t = String(text || '').toLowerCase();
   if (/[~/][\w.]|\b[\w-]+\.(png|jpe?g|pdf|txt|md|json|csv|js|ts|py|stl|obj|glb|mp3|wav|docx?|xlsx?|key|pages)\b/.test(t)) return true;  // paths / filenames
+  // Live/current-data questions are tool tasks too (world_cup / web_search / weather) — they must
+  // NOT be shunted to the tool-less local/Darkbloom fast path, which answers from stale training.
+  if (/\bworld cup\b|\bstandings?\b|\bbracket\b|\bodds\b|who'?s winning|\bscores?\b|\bfixtures?\b|\bmatchup\b|right now|\btoday\b|currently|\blatest\b|live (?:score|match|game|update)|\bweather\b|\bstock|\bprice\b|\bnews\b|\bheadlines?\b/.test(t)) return true;
   return /\b(open|launch|quit|close|play|pause|skip|resume|search|google|browse|navigate|go to|website|url|click|type|screenshot|screen|capture|delete|remove|create|make|build|write|edit|save|move|rename|copy|file|folder|directory|\bls\b|\bcd\b|run|exec|shell|command|terminal|deploy|install|update|git|commit|push|email|gmail|inbox|send|calendar|event|schedule|remind|reminder|note|notes|message|imessage|text|spotify|playlist|song|music|track|volume|login|log in|sign in|download|upload|generate|image|picture|logo|render|3d|stl|print|figure|plot|graph|chart|simulate|notion|app\b|browser|playwright|spreadsheet|document)\b/.test(t);
 }
 
@@ -4313,8 +4373,9 @@ async function runPipeline(history, apiKey, event, opts = {}) {
       if (parser) parser.finish();
       if (text) {
         const { display, spoken } = extractSpeakText(text);   // strip any literal <speak> tags
-        if (opts.stream && opts.ttsSeq == null) speakDesktop(spoken);   // non-handler callers keep the old voice path
-        return { text: display, history: [...history, { role: 'assistant', content: display }], _provider: 'pipeline-local', _streamed: !!(opts.stream && opts.ttsSeq != null) };
+        const cleanDisplay = stripReasoning(display);   // local models leak <thinking>/meta — never show it
+        if (opts.stream && opts.ttsSeq == null) speakDesktop(stripReasoning(spoken));   // non-handler callers keep the old voice path
+        return { text: cleanDisplay, history: [...history, { role: 'assistant', content: cleanDisplay }], _provider: 'pipeline-local', _streamed: !!(opts.stream && opts.ttsSeq != null) };
       }
     } catch (e) { console.warn('[pipeline] simple failed:', e.message); }
     return escalate('local simple failed');
@@ -4377,6 +4438,10 @@ function quickRoute(text, history = []) {
   if (/```|https?:\/\/|(^|\s)[~./][\w./-]*\/[\w.-]+|\b[\w-]+\.(js|ts|py|md|json|html|css|sh|png|jpg|jpeg|pdf|stl|glb|csv|txt|yml|yaml|toml)\b/i.test(t)) return 'action';
   if (ACTION_RE.test(t)) return 'action';
   if (/\b(email|e-mail|calendar|spotify|browser|browse|screenshot|terminal|shell|command|repo|commit|push|deploy|3d|image|stl|workflow|password|log\s?in|automate|notes?|reminder|file|folder|directory|studio|nexus|code)\b/i.test(t)) return 'action';
+  // Live/current-data questions (World Cup, scores, standings, odds, predictions, weather…) need a
+  // tool — they must hit the full agent, NOT the tool-less chat fast-path (which answers from stale
+  // training and leaked the "next World Cup is 2026" reply). looksLikeToolTask carries these terms.
+  if (looksLikeToolTask(t)) return 'action';
   const words = t.split(/\s+/).length;
   // Short and question-/chat-shaped, no action signal → just talk.
   if (words <= 40 && (/\?\s*$/.test(t) || /\b(what|who|why|how|when|which|whose|explain|tell me|do you|are you|did you|can you|could you|would you|your|you'?re|hi|hey|hello|thanks|thank you|good (morning|afternoon|evening|night)|how are you|what'?s up|nice|cool|ok|okay|yes|no|sure)\b/i.test(t)))
@@ -4402,7 +4467,7 @@ async function fastReply(history, apiKey, event, opts = {}) {
     messages: capTokens(history)                    // NO tools → faster first token, no tool-decision detour
   }, apiKey, onText);
   if (parser) parser.finish(); else if (stream && ttsSeq != null) ttsStreamFlush(ttsSeq);
-  const text = r.content.filter((b) => b.type === 'text').map((b) => b.text).join('\n').replace(/<\/?speak>/g, '').trim();
+  const text = stripReasoning(r.content.filter((b) => b.type === 'text').map((b) => b.text).join('\n')).replace(/<\/?speak>/g, '').trim();
   return { text, history: [...history, { role: 'assistant', content: text }], _provider: 'anthropic', _model: MODEL_HAIKU, _streamed: !!(stream && ttsSeq != null) };
 }
 

@@ -236,15 +236,16 @@ function simulateTournament(state, N = 8000) {
 
 // ── public snapshot (cached) ──────────────────────────────────────────────────
 let _cache = null, _cacheAt = 0;
+// sims:0 SKIPS the Monte-Carlo simulation (the expensive part) → cheap standings/Elo-only snapshot.
 async function snapshot({ ttlMs = 60000, sims = 8000 } = {}) {
-  if (_cache && Date.now() - _cacheAt < ttlMs) return _cache;
+  if (_cache && Date.now() - _cacheAt < ttlMs && (sims === 0 || (_cache.odds && Object.keys(_cache.odds).length))) return _cache;
   const events = await fetchEvents();
   const matches = events.map(parseMatch).filter(Boolean);
   if (!matches.length) throw new Error('parsed 0 matches');
   const groups = buildGroups(matches);
   const elo = seedElo(matches);
   const tables = groups.map((g) => ({ label: g.label, table: computeTable(g) }));
-  const odds = simulateTournament({ groups, elo, matches }, sims);
+  const odds = sims > 0 ? simulateTournament({ groups, elo, matches }, sims) : {};
   const live = matches.filter((m) => m.state === 'in');
   const upcoming = matches.filter((m) => m.state === 'pre').sort((a, b) => new Date(a.date) - new Date(b.date));
   _cache = { fetchedAt: Date.now(), matches, groups, tables, elo, odds, live, upcoming, stages: [...new Set(matches.map((m) => m.stage))] };
@@ -280,7 +281,8 @@ function report(s) {
   return L.join('\n');
 }
 
-module.exports = { snapshot, report, predict, simulateTournament, buildGroups, computeTable, seedElo, fetchEvents, parseMatch, LEAGUE, WINDOW };
+const STANDINGS_URL = 'https://www.google.com/search?q=fifa+world+cup+2026+standings';
+module.exports = { snapshot, report, predict, simulateTournament, buildGroups, computeTable, seedElo, fetchEvents, parseMatch, LEAGUE, WINDOW, STANDINGS_URL };
 
 // CLI / self-test harness entry: `node lib/worldcup.js`
 if (require.main === module) {

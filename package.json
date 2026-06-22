@@ -9,7 +9,10 @@
     "build": "electron-builder --mac dir",
     "build:dmg": "electron-builder --mac dmg",
     "wc": "node lib/worldcup.js",
-    "wc:iterate": "node scripts/worldcup-iterate.js"
+    "wc:iterate": "node scripts/worldcup-iterate.js",
+    "ctl": "node scripts/bhatctl.js",
+    "logs": "node scripts/bhatctl.js logs -f",
+    "smoke": "node scripts/smoke.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
