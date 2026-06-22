@@ -920,7 +920,8 @@ async function send(text) {
         // already being spoken by main; the non-streamed fallback is spoken here.
         closeLiveBubble();
         if (res.text) { addBot(res.text); showCaption(res.text); }   // hidden transcript + caption
-        if (!(streamedThisTurn && res._streamed) && res.text) {
+        // Speak here unless main already spoke it live (streamed AND it actually produced audio).
+        if (!(streamedThisTurn && res._streamed && res._spoke !== false) && res.text) {
           setOrbState('speaking');
           speak(res.text).finally(() => { ttsIdle = true; setOrbState('idle'); maybeRearm(); });
         }
@@ -936,6 +937,12 @@ async function send(text) {
         }
         else if (res.text) { const b = addBot(res.text); if (res.text.length > 300) addReadFull(b, res.text); }
         closeLiveBubble();
+        // Streamed turn but main produced no audio (tool-only step / short confirmation) → never
+        // be silent: speak it here, and re-arm conversation off this speech.
+        if (res._spoke === false && res.text) {
+          setOrbState('speaking');
+          speak(res.text).finally(() => { ttsIdle = true; setOrbState('idle'); maybeRearm(); });
+        }
       } else {
         // Non-streaming path (fallback providers): render + speak as before.
         const bubble = addBot(res.text);
@@ -1069,7 +1076,7 @@ document.addEventListener('keydown', (e) => {
 // ("that's all", "we're done", "go to sleep", "stop listening", "dismissed", "goodbye").
 let convoMode = false;
 let ttsIdle = true;            // true once main signals speech has fully drained for the turn
-const STOP_RE = /^\s*(thanks[, ]*)?(that'?s (all|it|everything)|that'?ll be all|that will be all|we'?re done|we are done|i'?m done|all done|done for now|go to sleep|goto sleep|stop listening|stop the conversation|stand down|dismissed|good\s?bye|bye( bhatbot| jarvis)?|you can stop|that is all)\.?\s*$/i;
+const STOP_RE = /^\s*(thanks[, ]*)?(that'?s (all|it|everything)|that'?ll be all|that will be all|that'?ll do|we'?re done|we are done|i'?m done|i am done|all done|done for now|(i'?m|i am) (satisfied|good|all set)|done with (the|this|my) project( for now)?|go to sleep|goto sleep|stop listening|stop the conversation|stand down|dismissed|good\s?bye|bye( bhatbot| jarvis)?|you can stop|that is all)\.?\s*$/i;
 function setConvo(on) {
   convoMode = on;
   document.body.classList.toggle('convo', on);

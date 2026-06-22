@@ -5829,11 +5829,16 @@ ipcMain.handle('play-tts', (_e, { text, full }) => speakDesktop(text, { full: !!
 // --- Streaming TTS: speak each sentence the moment it completes, while the model is still
 // generating the next. First audio at ~sentence 1 (~2-3s) instead of after the whole reply
 // + a summarize call. Shares ttsPlaySeq so a new turn cancels in-flight speech. ---
-let ttsStreamSeq = 0, ttsStreamBuf = '', ttsStreamQ = [], ttsStreamDraining = false;
+let ttsStreamSeq = 0, ttsStreamBuf = '', ttsStreamQ = [], ttsStreamDraining = false, ttsStreamProduced = false;
 function ttsStreamStart() {
   stopDesktopTTS();
-  ttsStreamSeq = ++ttsPlaySeq; ttsStreamBuf = ''; ttsStreamQ = []; ttsStreamDraining = false;
+  ttsStreamSeq = ++ttsPlaySeq; ttsStreamBuf = ''; ttsStreamQ = []; ttsStreamDraining = false; ttsStreamProduced = false;
   return ttsStreamSeq;
+}
+// Tell the renderer speech has drained for this turn → conversation mode re-arms the mic. This
+// MUST fire for every turn (even silent ones), or hands-free conversation wedges after one reply.
+function emitTtsIdle(seq) {
+  try { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('tts-idle', { seq }); } catch {}
 }
 function ttsStreamFeed(seq, delta) {
   if (seq !== ttsStreamSeq) return;
@@ -6016,6 +6021,7 @@ function ttsStreamEnqueue(seq, sentence) {
   if (seq !== ttsStreamSeq) return;
   const clean = stripReasoning(String(sentence)).replace(/```[\s\S]*?```/g, ' code block ').replace(/[*_`#>]/g, '').trim();
   if (!clean) return;
+  ttsStreamProduced = true;            // this turn put audio on the wire → drain will emit tts-idle
   ttsStreamQ.push(clean);
   if (!ttsStreamDraining) ttsStreamDrain(seq);
 }
@@ -6041,10 +6047,7 @@ async function ttsStreamDrain(seq) {
     }
   } finally {
     ttsStreamDraining = false;
-    // Tell the renderer speech has drained for this turn → conversation mode re-arms the mic.
-    if (seq === ttsStreamSeq && !ttsStreamQ.length) {
-      try { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('tts-idle', { seq }); } catch {}
-    }
+    if (seq === ttsStreamSeq && !ttsStreamQ.length) emitTtsIdle(seq);
   }
 }
 
@@ -6292,9 +6295,14 @@ ipcMain.handle('chat', async (event, { history }) => {
     const res = await dispatchTurn(history, apiKey, ev, { stream: true, ttsSeq });
     if (wrap) setTimeout(() => endSession('wrap-up'), 1200);
     latMark('turn-complete');
+    // Tell the renderer whether main actually spoke this turn (so a silent turn falls back to
+    // renderer-side speech), and GUARANTEE the conversation re-arms: if nothing was queued the
+    // drain never runs, so emit tts-idle here or hands-free mode wedges after one reply.
+    if (res && typeof res === 'object') res._spoke = ttsStreamProduced;
+    if (ttsSeq === ttsStreamSeq && !ttsStreamProduced && !ttsStreamQ.length && !ttsStreamDraining) emitTtsIdle(ttsSeq);
     return res;
   }
-  catch (e) { clearTimeout(ackTimer); return { error: String(e && e.message ? e.message : e) }; }
+  catch (e) { clearTimeout(ackTimer); emitTtsIdle(ttsSeq); return { error: String(e && e.message ? e.message : e) }; }
 });
 ipcMain.handle('list-notes', () => listNotes());
 ipcMain.on('end-session', () => endSession('manual'));
