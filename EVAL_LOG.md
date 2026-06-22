@@ -25,3 +25,26 @@ Here's why: JD Vance just announced the U.S. is easing oil sanctions on Iran,
   - reply: France vs Iraq is live right now, still zero-zero at the 6-minute mark.
 
 It's a blowout on paper — France 97% to win, xG gap 4.6 to 0.3. Iraq got hammered 4–1 b
+
+## 2026-06-22T21:30:46.723Z — 6/6 passed (complex-eval)
+- PASS **watch-recommendation** (25.8s)
+  - reply: France vs Iraq is live right now at 21 minutes in, France up 1–0. Here's the honest take: it's not a competitive match. France is a tier above Iraq — 470 Elo po
+- PASS **multi-tool-brief** (119.5s)
+  - reply: **News:** Keir Starmer resigns as UK PM; Andy Burnham (Labour mayor) poised to take over — Britain's seventh PM in a decade.
+
+**World Cup:** France vs Iraq is l
+- PASS **news-judgment** (126.6s)
+  - reply: The most important story is the **Iran nuclear deal unraveling** — Vance claims Iran agreed to UN inspectors, but Iran denies it, and there's no actual progress
+- PASS **predict-with-reasoning** (126.0s)
+  - reply: Model says Argentina 56%, draw 23%, Spain 21%. xG favors Argentina 1.77 to 0.99.
+
+I'd back **Argentina**, and it's not close. Here's why: Spain has aged. They w
+- PASS **compare-groups** (72.0s)
+  - reply: | **Group A** | **Group B** |
+|---|---|
+| **1. Mexico** 6 pts (2W, GD +3) | **1T. Canada** 4 pts (1W–1D, GD +6) |
+| **2. South Korea** 3 pts (1W–1D, GD 0) | **1
+- PASS **conditional-live** (64.4s)
+  - reply: **France 1–0 Iraq, 30 minutes in. LIVE NOW.**
+
+This is a rout in slow motion. France 97% to win, xG 4.6 to 0.3 — Iraq is getting demolished. Mbappé is on the pi

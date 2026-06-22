@@ -34,6 +34,7 @@ const modePrompts = require('./lib/prompts');         // P4  — mode-switching 
 const jobsBus = require('./lib/jobs');                // P5  — background job bus (task cards + spoken relay + steering)
 const scheduler = require('./lib/scheduler');         // proactive scheduler (recurring/one-off autonomous tasks)
 const simulate = require('./lib/simulate');           // physics/chem/math simulation sandbox (scipy/sympy/rdkit/openmm/pyscf…)
+const selfheal = require('./lib/selfheal');           // autonomous self-healing (DISABLED by default; verify-gated self_fix loop)
 
 const DB_MODELS = { db_speech: 'gpt-oss-20b', db_directive: 'gemma-4-26b' };
 
@@ -1956,6 +1957,12 @@ const TOOLS = [
       apply: { type: 'boolean', description: 'true = actually edit+verify+keep/revert; false = draft only.' },
       maxRounds: { type: 'number', description: 'Fix→verify attempts before giving up (default 2).' }
     } } },
+  { name: 'self_heal', description: 'AUTONOMOUS self-healing loop (the always-on version of self_fix). DISABLED by default — does nothing until Siddhant turns it on. When enabled it watches for BhatBot\'s own mistakes (repeated tool failures, bugs he flags, failing self-tests, runtime crashes) and fixes them with Claude Code, verify-gated + auto-reverted, committed locally (never pushed). action:"status" shows state + queue; "enable"/"disable" toggle it; "run" forces one fix cycle now; "queue"{problem,verify?} manually enqueue a mistake to fix. Use "status" when asked "can you fix yourself / are you self-healing", and "enable"/"disable" when he says to turn self-healing on/off.',
+    input_schema: { type: 'object', properties: {
+      action: { type: 'string', enum: ['status', 'enable', 'disable', 'run', 'queue'] },
+      problem: { type: 'string', description: 'For "queue": what is broken (a mistake to fix).' },
+      verify: { type: 'string', description: 'For "queue": shell command that exits 0 once fixed (default: node scripts/verify-syntax.js).' }
+    }, required: ['action'] } },
   { name: 'manage_schedule', description: 'Schedule BhatBot to do things PROACTIVELY/AUTONOMOUSLY — reminders, recurring checks, "every morning brief me", "in 30 minutes do X", "every Monday at 9am". Each schedule runs the given `prompt` through the full agent at its time (no one watching), then speaks the result aloud and texts it to Telegram. Use this whenever Siddhant asks for something to happen later or repeatedly. Actions: add (create), list, remove{id}, enable{id}, disable{id}, run{id} (fire now). For timing pass ONE of: kind:"daily"+at:"HH:MM" / kind:"weekly"+at:"HH:MM"+dow(0=Sun) / kind:"interval"+everyMinutes|everyHours / kind:"once"+runAt(ISO), OR the shortcuts inMinutes / inHours / everyMinutes / everyHours.',
     input_schema: { type: 'object', properties: {
       action: { type: 'string', enum: ['add', 'list', 'remove', 'enable', 'disable', 'run'], description: 'What to do.' },
@@ -3806,6 +3813,25 @@ async function executeTool(name, input) {
       }
       case 'self_fix':
         result = await selfFix(input || {}); break;
+      case 'self_heal': {
+        const a = (input && input.action) || 'status';
+        if (a === 'status') { result = { success: true, ...selfheal.status(loadConfig) }; break; }
+        if (a === 'enable' || a === 'disable') {
+          const cur = loadConfig().selfHeal || {};
+          saveConfig({ selfHeal: { ...cur, enabled: a === 'enable' } });
+          if (a === 'enable') startSelfHeal(); else stopSelfHeal();
+          result = { success: true, result: `Autonomous self-healing ${a}d.`, ...selfheal.status(loadConfig) };
+          break;
+        }
+        if (a === 'queue') {
+          const q = selfheal.enqueue({ problem: input.problem, verify: input.verify, source: 'manual' }, loadConfig);
+          result = { success: !q.skipped, ...q };
+          break;
+        }
+        if (a === 'run') { result = { success: true, ...(await selfheal.tick(loadConfig, selfHealDeps())) }; break; }
+        result = { success: false, error: 'unknown self_heal action: ' + a };
+        break;
+      }
       default:
         result = { success: false, error: `Unknown tool: ${name}` };
     }
@@ -5064,6 +5090,71 @@ function startAmbient() {
   } catch (e) { console.error('[ambient] start failed:', e.message); }
 }
 
+// --- Autonomous self-healing (#self_heal) — DISABLED unless config.selfHeal.enabled. ----------
+// Wires the policy engine (lib/selfheal) to the real fixer (selfFix / Claude Code), git, notify,
+// and the idle/clean-tree probes. Runs ONLY while the agent is idle; one fix at a time.
+const SELF_HEAL_PROJ = process.env.BHATBOT_PROJECT || path.join(os.homedir(), 'bhatbot');
+let _selfHealTimer = null;
+function selfHealDeps() {
+  return {
+    runFix: selfFix,                                   // existing verify-gated Claude Code fixer
+    notify: (t) => { try { telegramNotify(t); } catch {} try { sendToActivity('tool-update', { type: 'thinking', text: t }); } catch {} },
+    runShell,
+    proj: SELF_HEAL_PROJ,
+    readAudit: () => { try { return readAudit(500); } catch { return []; } },
+    probe: async () => {
+      let treeClean = false;
+      try { const r = await runShell('git status --porcelain', SELF_HEAL_PROJ, 15000); treeClean = !((r.stdout || '').trim()); } catch {}
+      return { idle: agentState === 'idle', treeClean };
+    },
+  };
+}
+// Self-tests trigger: if the most recent smoke/eval run logged a FAIL recently, queue a fix whose
+// verify re-runs that suite (so the fix is proven against the real failing test).
+function scanSelfTestLogs() {
+  const cfg = selfheal.cfgFrom(loadConfig);
+  if (!cfg.triggers.selfTests) return;
+  for (const [file, cmd] of [['SMOKE_LOG.md', 'npm run smoke'], ['EVAL_LOG.md', 'npm run eval']]) {
+    try {
+      const txt = fs.readFileSync(path.join(SELF_HEAL_PROJ, file), 'utf8');
+      const sections = txt.split(/\n## /).filter(Boolean);
+      const last = sections[sections.length - 1]; if (!last) continue;
+      if (!/\bFAIL\b/.test(last)) continue;                       // latest run was clean
+      const tsM = last.match(/(\d{4}-\d{2}-\d{2}T[\d:.]+Z)/);
+      const when = tsM ? new Date(tsM[1]).getTime() : 0;
+      if (when && Date.now() - when > cfg.windowMin * 60 * 1000) continue;   // stale failure
+      const fails = (last.match(/FAIL \*\*([^*]+)\*\*/g) || []).map((s) => s.replace(/FAIL \*\*|\*\*/g, '')).join(', ');
+      selfheal.enqueue({ key: 'selftest:' + file + ':' + (tsM ? tsM[1] : ''), source: 'selfTests',
+        problem: `The ${file.replace('_LOG.md', '').toLowerCase()} self-test suite is failing (${fails || 'see log'}). Diagnose and fix the underlying code so the suite passes.`,
+        verify: `node scripts/verify-syntax.js && ${cmd}` }, loadConfig);
+    } catch {}
+  }
+}
+async function selfHealTick() {
+  if (!selfheal.enabled(loadConfig)) return;
+  if (agentState !== 'idle') return;                   // never fix mid-task
+  try { scanSelfTestLogs(); } catch {}
+  try { const r = await selfheal.tick(loadConfig, selfHealDeps()); if (r && r.fixed) console.log('[self-heal]', r.changed); }
+  catch (e) { console.error('[self-heal] tick failed:', e.message); }
+}
+function startSelfHeal() {
+  if (!selfheal.enabled(loadConfig)) { console.log('[self-heal] disabled (config.selfHeal.enabled !== true)'); return; }
+  if (_selfHealTimer) return;
+  _selfHealTimer = setInterval(selfHealTick, 15 * 60 * 1000);   // scan + at most one fix every 15m
+  console.log('[self-heal] enabled — watching for mistakes (15m cycle, 1 fix at a time, never pushes)');
+  setTimeout(selfHealTick, 60 * 1000);
+}
+function stopSelfHeal() { if (_selfHealTimer) { clearInterval(_selfHealTimer); _selfHealTimer = null; } console.log('[self-heal] stopped'); }
+// Runtime-crash trigger: an uncaught error is a mistake worth fixing. Guarded (enabled + trigger).
+process.on('uncaughtException', (e) => {
+  console.error('[uncaught]', e && e.stack || e);
+  try { selfheal.enqueue({ key: 'crash:' + String(e && e.message).slice(0, 60), source: 'runtimeErrors', problem: 'BhatBot threw an uncaught exception: ' + (e && e.stack ? e.stack.slice(0, 600) : String(e)) + '. Find and fix the root cause.', verify: 'node scripts/verify-syntax.js' }, loadConfig); } catch {}
+});
+process.on('unhandledRejection', (e) => {
+  console.error('[unhandledRejection]', e && e.stack || e);
+  try { selfheal.enqueue({ key: 'reject:' + String(e && e.message).slice(0, 60), source: 'runtimeErrors', problem: 'BhatBot had an unhandled promise rejection: ' + (e && e.stack ? e.stack.slice(0, 600) : String(e)) + '. Find and fix the root cause.', verify: 'node scripts/verify-syntax.js' }, loadConfig); } catch {}
+});
+
 function startScheduler() {
   if (schedulerTimer) return;
   schedulerTimer = setInterval(tickScheduler, 30000);
@@ -6034,6 +6125,11 @@ function reflectOnCorrection(history, userText, priorText) {
     // last assistant text in history = what's being corrected
     let prior = priorText || '';
     if (!prior) { const a = [...(history || [])].reverse().find((m) => m.role === 'assistant'); if (a) prior = typeof a.content === 'string' ? a.content : (Array.isArray(a.content) ? a.content.filter((b) => b.type === 'text').map((b) => b.text).join(' ') : ''); }
+    // Self-heal corrections trigger: a BUG report (not a style nit) → queue a code fix. Style/tone
+    // corrections ("be more concise") stay preference-only; functional breakage gets fixed.
+    if (/\b(broke|broken|error|crash|crashed|doesn'?t work|didn'?t work|not working|failed|fails|bug|wrong (output|result|data|answer)|hallucinat|made up|fabricat|spoke|spoken|pronounc)\b/i.test(userText)) {
+      try { selfheal.enqueue({ key: 'correction:' + userText.slice(0, 60), source: 'corrections', problem: `Siddhant reported a bug: "${userText.slice(0, 300)}". My prior reply/behavior: "${String(prior).slice(0, 300)}". Diagnose and fix the underlying code in the BhatBot repo.`, verify: 'node scripts/verify-syntax.js' }, loadConfig); } catch {}
+    }
     (async () => {
       try {
         const r = await callClaude([{ role: 'user', content: `User correction: "${userText.slice(0, 500)}"\nMy prior reply: "${String(prior).slice(0, 800)}"\n\nExtract ONE durable working-preference to remember for next time, as a single imperative line (e.g. "Keep spoken replies under two sentences"). If there is nothing durable/actionable, output exactly: NONE` }], getApiKey(), MODEL_HAIKU);
@@ -6477,6 +6573,7 @@ app.whenReady().then(() => {
     scheduleBriefing();
     startScheduler();   // proactive recurring/one-off tasks
     startAmbient();     // #18 opt-in ambient awareness (no-op unless config.ambient.enabled)
+    startSelfHeal();    // autonomous self-healing (no-op unless config.selfHeal.enabled)
     // Pre-warm local Kokoro TTS so the first spoken reply isn't cold (~0.8s load), then give a
     // short spoken "ready" confirmation once warm (ambient mode has no visual chat affordance,
     // so the greeting tells you BhatBot is live and listening). Fires once.
