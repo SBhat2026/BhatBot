@@ -6,7 +6,7 @@ const EL_VOICE = process.env.ELEVENLABS_VOICE_ID || 'nuIFNGEZkRGoYBg8iBYe';
 // turbo_v2_5 is materially warmer/less synthetic than flash while staying low-latency enough for
 // a live call (flash trades quality for the last ~100ms). Override with ELEVENLABS_MODEL.
 const EL_MODEL = process.env.ELEVENLABS_MODEL || 'eleven_turbo_v2_5';
-const TTS_SPEED = Math.max(0.7, Math.min(1.2, parseFloat(process.env.TTS_SPEED) || 1.08));
+const TTS_SPEED = Math.max(0.7, Math.min(1.2, parseFloat(process.env.TTS_SPEED) || 1.03));
 // Voice character (all env-tunable so cadence/warmth can be dialed in without a redeploy).
 // Defaults follow the J.A.R.V.I.S. humanization guide §3 — the target for a Bettany-style clone:
 //  • stability 0.40  (35–45%): lowered so the AI adds emotional variance + natural intonation

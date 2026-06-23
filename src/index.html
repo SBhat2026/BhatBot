@@ -214,6 +214,8 @@
     cursor: pointer; border-radius: 6px; display: flex; align-items: center; justify-content: center; transition: .12s; flex-shrink: 0;
   }
   .ibtn:hover { border-color: var(--accent); color: var(--accent); }
+  #spd { width: 64px; height: 34px; flex-shrink: 0; accent-color: var(--accent); cursor: pointer; align-self: center; }
+  #spd::-webkit-slider-runnable-track { height: 3px; background: var(--line); border-radius: 2px; }
   #send.busy { opacity: .4; pointer-events: none; }
   #mic.rec { border-color: var(--err); }
   .ibtn.rec { border-color: var(--accent); color: var(--accent); box-shadow: 0 0 8px rgba(0,200,255,.4) inset; }
@@ -437,6 +439,7 @@
     <button class="ibtn" id="attach" title="Attach screenshot / photo / screen recording">📎</button>
     <button class="ibtn" id="mic" title="Voice">🎙</button>
     <button class="ibtn" id="spk" title="Speak replies (Jarvis voice)">🔊</button>
+    <input id="spd" type="range" min="0.7" max="1.2" step="0.02" value="1.05" title="Speaking speed (Slower ↔ Faster)" aria-label="Speaking speed" />
     <button class="ibtn" id="vfirst" title="Voice-first: speak replies, don't print them">🎧</button>
     <button class="ibtn" id="send" title="Send">▶</button>
   </div>
@@ -1156,6 +1159,14 @@ spk.addEventListener('click', () => {
   if (!voiceCfg.hasTTS) { tbar.textContent = '🔊 No TTS key — set openaiKey or elevenLabsKey in config.json'; return; }
   ttsOn = !ttsOn; if (!ttsOn) stopSpeaking(); setSpkUI();
 });
+// Speaking-speed slider — persists live (read per utterance, no restart). "speak slower/faster"
+// voice commands change the same config.ttsSpeed; reflect that here whenever voiceCfg refreshes.
+const spd = document.getElementById('spd');
+if (spd) {
+  const setSpdTitle = (v) => spd.title = `Speaking speed ${Number(v).toFixed(2)} (Slower ↔ Faster)`;
+  spd.addEventListener('input', () => { setSpdTitle(spd.value); try { window.bhatbot.setTtsSpeed(parseFloat(spd.value)); } catch {} });
+  setSpdTitle(spd.value);
+}
 
 // ---- voice-first + ambient mode ----
 // ambient  = pure voice surface: input bar hidden, orb stage, wake-word listening only.
@@ -1359,6 +1370,7 @@ function initWake() {
     ttsOn = !!(voiceCfg.hasTTS && voiceCfg.ttsEnabled);   // auto-on if a TTS provider is configured
     setSpkUI();
     if (!voiceCfg.hasTTS) spk.style.opacity = '0.4';
+    if (spd && voiceCfg.ttsSpeed != null) { spd.value = voiceCfg.ttsSpeed; spd.title = `Speaking speed ${Number(voiceCfg.ttsSpeed).toFixed(2)} (Slower ↔ Faster)`; }
   } catch {}
 })();
 

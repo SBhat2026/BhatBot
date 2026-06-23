@@ -4627,6 +4627,29 @@ async function runPipeline(history, apiKey, event, opts = {}) {
 // 'unsure' = let the existing LLM router / pipeline decide. Deliberately CONSERVATIVE:
 // only returns 'chat' when there is no tool signal at all, so we never strand an action
 // on a tool-less reply.
+// Live speaking-speed control by voice/text — "speak slower", "talk faster", "slow down your
+// voice". Nudges config.ttsSpeed by 0.04 (clamped 0.7–1.2) and persists it; because synth reads
+// ttsSpeed per-utterance, the very next spoken line (this confirmation) uses the new speed — no
+// restart. Conservative patterns so "slow down the build" / "speed up the script" don't trip it.
+function maybeAdjustSpeed(text) {
+  const t = String(text || '').trim().toLowerCase();
+  if (!t || t.split(/\s+/).length > 8) return null;   // only short, command-shaped utterances
+  const slower = /\b(speak|talk|read|say (?:it|that))\b.{0,14}\b(slow|slower|slowly)\b/.test(t)
+    || /\bslow (?:down )?(?:your |the )?voice\b/.test(t) || /\b(?:speak|talk) more slowly\b/.test(t)
+    || /^(?:please\s+|hey\s+)?slow down[.!]?$/.test(t);
+  const faster = /\b(speak|talk|read|say (?:it|that))\b.{0,14}\b(fast|faster|quick|quicker|quickly)\b/.test(t)
+    || /\bspeed up (?:your |the )?voice\b/.test(t) || /\b(?:speak|talk) more quickly\b/.test(t)
+    || /^(?:please\s+|hey\s+)?(?:speed up|talk faster)[.!]?$/.test(t);
+  if (!slower && !faster) return null;
+  const c = loadConfig();
+  const cur = Number(c.ttsSpeed) || 1.05;
+  const next = Math.max(0.7, Math.min(1.2, +(cur + (faster ? 0.04 : -0.04)).toFixed(2)));
+  if (next === cur) return faster ? 'Already at my briskest, sir.' : 'That is as measured as I get, sir.';
+  saveConfig({ ttsSpeed: next });
+  sendToActivity('tool-update', { type: 'thinking', text: `🗣 speaking speed → ${next}` });
+  return faster ? 'Picking up the pace, sir.' : 'Slowing down, sir.';
+}
+
 function quickRoute(text, history = []) {
   const t = String(text || '').trim();
   if (!t) return 'unsure';
@@ -4686,6 +4709,10 @@ function dispatchTurn(history, apiKey, event, opts = {}) {
 // quickRoute first (free); only fall to the LLM router/pipeline when genuinely unsure.
 async function _dispatchTurnInner(history, apiKey, event, opts = {}) {
   const userText = lastUserText(history);
+  // Live speaking-speed intent — handled inline (no tool/agent hop) so the spoken confirmation
+  // itself plays at the freshly-saved speed.
+  const spd = maybeAdjustSpeed(userText);
+  if (spd) return { text: spd, history: [...history, { role: 'assistant', content: spd }], _provider: 'local', _model: 'intent' };
   if (loadConfig().fastChat !== false) {
     const qr = quickRoute(userText, history);
     if (qr === 'chat') {
@@ -5632,8 +5659,16 @@ ipcMain.handle('get-voice-config', () => {
     hasOpenAI: !!(c.openaiKey || (c.sttProvider === 'groq' && c.groqKey)),
     picovoiceKey: c.picovoiceKey || null, wakeWord: c.wakeWord || 'jarvis', silenceMs: c.silenceMs || 2000,
     ttsEnabled: c.ttsEnabled !== false, ttsProvider, hasTTS,
+    ttsSpeed: c.ttsSpeed != null ? c.ttsSpeed : 1.05,
     hasReplicateKey: !!c.replicateKey, hasImageGen: !!c.openaiKey
   };
+});
+// Live speaking-speed from the settings slider. Clamped to ElevenLabs' 0.7–1.2 range; read per
+// utterance in elevenLabsSynth, so no restart needed. Returns the saved value.
+ipcMain.handle('set-tts-speed', (_e, v) => {
+  const n = Math.max(0.7, Math.min(1.2, Number(v) || 1.05));
+  saveConfig({ ttsSpeed: n });
+  return n;
 });
 // ---------------------------------------------------------------------------
 // Kokoro — local neural TTS (free, offline, high quality). A python worker is
@@ -5803,8 +5838,8 @@ async function kokoroSynth(text, opts = {}) {
   const c = loadConfig();
   const id = kokoroNextId++;
   const voice = (opts.voice && KOKORO_VOICES.includes(opts.voice)) ? opts.voice : (c.kokoroVoice || 'bm_george');
-  let speed = Number(opts.speed != null ? opts.speed : (c.kokoroSpeed != null ? c.kokoroSpeed : (c.ttsSpeed != null ? c.ttsSpeed : 1.08)));
-  if (!isFinite(speed)) speed = 1.08;
+  let speed = Number(opts.speed != null ? opts.speed : (c.kokoroSpeed != null ? c.kokoroSpeed : (c.ttsSpeed != null ? c.ttsSpeed : 1.05)));
+  if (!isFinite(speed)) speed = 1.05;
   speed = Math.max(0.6, Math.min(1.4, speed));   // clamp to a sane, non-robotic range
   const req = { id, text: String(text).slice(0, 2000), voice, speed, lang: c.kokoroLang || 'en-gb' };
   const msg = await new Promise((resolve) => {
@@ -5841,7 +5876,7 @@ async function elevenLabsSynth(t, c, opts = {}) {
     similarity_boost: c.ttsSimilarity != null ? c.ttsSimilarity : 0.75,
     style: c.ttsStyle != null ? c.ttsStyle : 0.40,   // a touch more expressive so the dry wit lands
     use_speaker_boost: c.ttsSpeakerBoost != null ? c.ttsSpeakerBoost : true,
-    speed: Math.max(0.7, Math.min(1.2, Number(c.ttsSpeed) || 1.10))   // slightly quicker delivery
+    speed: Math.max(0.7, Math.min(1.2, Number(c.ttsSpeed) || 1.05))   // deliberate, natural pace (was 1.10); user-tunable live via "speak slower/faster" + settings slider
   };
   const body = { text, model_id: model, voice_settings: vs };
   // (2) Request stitching — give the model the surrounding sentences so prosody flows across
