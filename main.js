@@ -4935,7 +4935,10 @@ async function initMcpServer() {
       port, token, runAgent: runAgentHeadless, transcribe: transcribeAudio,
       synthesize: synthesizeSpeech, summarize: summarizeForSpeech, media: mediaBytesToBlocks,
       voiceTurn, endVoiceCall, getActivity, nexusUrl: NEXUS_URL, ownerPhone: c.myPhone,
-      twilioAuthToken: c.twilioToken, jobs: jobsBus, control: phoneControl, screenshot: captureScreenJpeg
+      twilioAuthToken: c.twilioToken, jobs: jobsBus, control: phoneControl, screenshot: captureScreenJpeg,
+      // Phone-call speech-recognition tuning (see gatherTwiml). All optional in config.json.
+      voice: { hints: c.voiceHints, speechModel: c.voiceSpeechModel, speechTimeout: c.voiceSpeechTimeout,
+        timeout: c.voiceTimeout, enhanced: c.voiceEnhanced, language: c.voiceLanguage }
     });
     writeClaudeMcpConfig();                       // so the embedded Claude Code can use BhatBot's MCP tools
     console.log(`[mcp] listening on http://127.0.0.1:${port}/mcp/${token}`);

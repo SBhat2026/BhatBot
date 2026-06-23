@@ -7,7 +7,7 @@
 
 let httpServer = null;
 
-async function startMcpServer({ port, token, runAgent, transcribe, synthesize, summarize, media, voiceTurn, endVoiceCall, getActivity, nexusUrl, ownerPhone, twilioAuthToken, jobs, control, screenshot }) {
+async function startMcpServer({ port, token, runAgent, transcribe, synthesize, summarize, media, voiceTurn, endVoiceCall, getActivity, nexusUrl, ownerPhone, twilioAuthToken, jobs, control, screenshot, voice }) {
   if (httpServer) return httpServer;
   const express = require('express');
   const fs = require('fs');
@@ -327,11 +327,28 @@ self.addEventListener('fetch', (e) => {
     }
     return `<Say voice="Google.en-US-Neural2-D">${xmlEsc(t)}</Say>`;
   }
+  // Voice-recognition tuning (config-driven, sensible defaults). These directly improve how well
+  // the call LISTENS: speech `hints` bias Twilio's recognizer toward BhatBot's own vocabulary
+  // (names/projects/commands it would otherwise mis-hear); `enhanced` + telephony speechModel raise
+  // accuracy on a phone line; profanityFilter off keeps transcripts verbatim (no ***-masking that
+  // breaks intent). speechTimeout=auto = natural end-of-utterance detection; nested <Play> in the
+  // <Gather> means the caller can BARGE IN over the reply (Twilio stops the prompt on speech).
+  const V = voice || {};
+  const DEFAULT_HINTS = 'Bhatbot, Jarvis, Nexus, Sledfall, ProtFunc, FABLE, PRISM, World Cup, molecule, protein, simulate, schedule, reminder, calendar, email, Notion, Spotify, Telegram, brief';
+  const vHints = [DEFAULT_HINTS, V.hints].filter(Boolean).join(', ').slice(0, 2000);
+  const vModel = V.speechModel || 'experimental_conversations';
+  const vSpeechTimeout = V.speechTimeout || 'auto';
+  const vTimeout = Number(V.timeout) || 8;          // seconds of initial silence before reprompt
+  const vEnhanced = V.enhanced !== false;
+  const vLang = V.language || 'en-US';
   function gatherTwiml(req, playEl, hangup) {
     if (hangup) return `<?xml version="1.0" encoding="UTF-8"?><Response>${playEl}<Hangup/></Response>`;
     const action = `https://${req.get('host')}/voice/${token}/gather`;
     return `<?xml version="1.0" encoding="UTF-8"?><Response>` +
-      `<Gather input="speech" action="${action}" method="POST" speechTimeout="auto" speechModel="experimental_conversations" actionOnEmptyResult="true">` +
+      `<Gather input="speech" action="${action}" method="POST"` +
+      ` language="${vLang}" speechTimeout="${vSpeechTimeout}" speechModel="${xmlEsc(vModel)}"` +
+      ` enhanced="${vEnhanced ? 'true' : 'false'}" profanityFilter="false" timeout="${vTimeout}"` +
+      ` hints="${xmlEsc(vHints)}" actionOnEmptyResult="true">` +
       `${playEl}</Gather>` +
       // If the gather returns nothing (silence), loop back so it keeps listening.
       `<Redirect method="POST">${action}</Redirect></Response>`;
