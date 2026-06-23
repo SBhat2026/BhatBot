@@ -1956,6 +1956,15 @@ const TOOLS = [
       maxSteps: { type: 'number', description: 'Max reasoning steps (default 6, max 12).' },
       timeoutMs: { type: 'number', description: 'Max run time ms (default 180000, max 600000).' }
     }, required: ['task'] } },
+  { name: 'molecule', description: 'Show a PROTEIN or small MOLECULE in 3D. action:"view" (default) opens an INTERACTIVE 3Dmol.js viewer window (rotate/zoom, style toggles cartoon/stick/sphere/surface); action:"render" produces a PUBLICATION-QUALITY ray-traced PNG still via PyMOL (returned as an image). Inputs (give one): pdb (4-char RCSB id, e.g. "1CRN", "6VXX"), file (local .pdb/.cif/.sdf/.mol2/.xyz), smiles (e.g. "CC(=O)Oc1ccccc1C(=O)O" for aspirin), or name (common/IUPAC, resolved via PubChem). Small molecules get 3D coords + properties (formula, MW, logP, HBD/HBA, TPSA) from RDKit. Use for structural biology, chemistry, drug-molecule questions, or whenever Siddhant wants to SEE a structure.',
+    input_schema: { type: 'object', properties: {
+      action: { type: 'string', enum: ['view', 'render'], description: 'view = interactive window (default); render = PyMOL ray-traced still PNG.' },
+      pdb: { type: 'string', description: '4-character RCSB PDB id, e.g. "1CRN".' },
+      file: { type: 'string', description: 'Absolute path to a local structure file (.pdb/.cif/.sdf/.mol2/.xyz).' },
+      smiles: { type: 'string', description: 'SMILES string for a small molecule.' },
+      name: { type: 'string', description: 'Molecule name (common or IUPAC); resolved to a structure via PubChem.' },
+      style: { type: 'string', enum: ['cartoon', 'stick', 'sphere', 'surface'], description: 'Render style. Default: cartoon for proteins, stick for small molecules.' }
+    } } },
   { name: 'play_chess', description: 'Open a playable chess game in its own window for Siddhant. Full rules engine (legal moves, castling, en passant, promotion, check/checkmate/stalemate) with a built-in AI opponent powered by the Stockfish online API at three strengths. Use whenever he wants to play chess. Optional difficulty.',
     input_schema: { type: 'object', properties: { difficulty: { type: 'string', enum: ['easy', 'medium', 'hard'], description: 'AI strength: easy (casual), medium (depth 8), hard (depth 14). Default medium.' } } } },
   { name: 'screen_observe', description: 'WATCH SIDDHANT\'S WHOLE SCREEN to learn how he works — use this when he SAYS to (e.g. "watch my screen", "start watching", "learn how I do this"). Covers ANY app, not just the browser (that is browser_observe). His command IS the consent, so you do NOT need to ask again — just start. Flow: action:"start"{minutes:1-30} begins a time-boxed session that notes what he is doing every ~25s via the LOCAL vision model (no screenshots are saved; passwords/codes/cards are skipped). When he is done, action:"review" returns the notes — narrate them and ASK which to remember; action:"save"{items:[...approved plain-English habits]} writes ONLY approved items to long-term memory. "stop" ends early; "status" shows whether active + recent notes; "snapshot" describes the screen once. Never auto-start without his word.',
@@ -3563,6 +3572,41 @@ function makePrintable(input) {
   });
 }
 
+// --- Molecule / protein 3D viewer (3Dmol.js interactive + RDKit + PyMOL stills) ---
+const SIM_PY = path.join(os.homedir(), '.bhatbot', 'sim-venv', 'bin', 'python');
+const PYMOL_BIN = '/opt/homebrew/bin/pymol';
+const MOL_DIR = path.join(os.homedir(), '.bhatbot', 'molecules');
+// Generic child-process runner (captures stdout/stderr; not the safety-gated run_shell) for the
+// scientific helpers that emit JSON. Resolves rather than rejects so callers degrade cleanly.
+function runChild(cmd, args, opts = {}) {
+  return new Promise((resolve) => {
+    let proc; try { proc = spawn(cmd, args, { env: { ...process.env, PATH: EXEC_PATH } }); }
+    catch (e) { return resolve({ code: 1, stdout: '', stderr: String(e.message || e) }); }
+    let out = '', err = '';
+    proc.stdout.on('data', (d) => { out += d; });
+    proc.stderr.on('data', (d) => { err += d; });
+    const to = setTimeout(() => { try { proc.kill(); } catch {} }, opts.timeoutMs || 60000);
+    proc.on('close', (code) => { clearTimeout(to); resolve({ code, stdout: out, stderr: err }); });
+    proc.on('error', (e) => { clearTimeout(to); resolve({ code: 1, stdout: out, stderr: String(e.message || e) }); });
+  });
+}
+const molecule = require('./lib/molecule')({
+  simPython: SIM_PY, pymolBin: PYMOL_BIN, dataDir: MOL_DIR,
+  scriptPath: path.join(__dirname, 'scripts', 'mol_prep.py'), run: runChild,
+});
+let molWindow = null, pendingMol = null;
+function openMoleculeWindow(payload) {
+  pendingMol = payload;
+  if (molWindow && !molWindow.isDestroyed()) { molWindow.show(); molWindow.focus(); try { molWindow.webContents.send('molecule', pendingMol); } catch {} return; }
+  molWindow = new BrowserWindow({
+    width: 960, height: 760, x: 160, y: 90, title: 'Bhatbot Molecule Viewer',
+    backgroundColor: '#0a0f17', webPreferences: { contextIsolation: true, nodeIntegration: false, preload: path.join(__dirname, 'src', 'preload-molecule.js') },
+  });
+  molWindow.loadFile(path.join(__dirname, 'src', 'molecule.html'));
+  molWindow.on('closed', () => { molWindow = null; });
+}
+ipcMain.on('molecule-ready', (e) => { try { if (pendingMol) e.sender.send('molecule', pendingMol); } catch {} });
+
 // Transient failure signatures worth one automatic retry (network/load races, not logic errors).
 const TRANSIENT_RE = /(timeout|timed out|ETIMEDOUT|ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|socket hang up|network|Target closed|Execution context|navigation|detached|not attached|temporarily|overloaded|try again|\b50[234]\b|\b429\b)/i;
 // Only auto-retry IDEMPOTENT reads — never an action with side effects (a double click /
@@ -3681,6 +3725,26 @@ async function executeTool(name, input) {
       case 'math_reason': {
         const m = input.model && /sonnet|haiku|opus/.test(input.model) ? 'anthropic/' + input.model : input.model;
         result = await simulate.mathReason({ task: input.task || input.problem, model: m, maxSteps: input.maxSteps, apiKey: getApiKey(), timeoutMs: input.timeoutMs });
+        break;
+      }
+      case 'molecule': {
+        if ((input.action || 'view') === 'render') {
+          const out = path.join(MOL_DIR, `render-${Date.now()}.png`);
+          try {
+            const png = await molecule.renderStill(input, out);
+            const b64 = fs.readFileSync(png).toString('base64');
+            result = { success: true, path: png, _image: b64, _imageMime: 'image/png', message: `PyMOL ray-traced still → ${png}` };
+          } catch (e) { result = { success: false, error: e.message }; }
+        } else {
+          try {
+            const payload = await molecule.prepare(input);
+            openMoleculeWindow(payload);
+            const p = payload.props;
+            const propStr = p ? ` — ${p.formula}, MW ${p.mw}, logP ${p.logp}, HBD ${p.hbd}, HBA ${p.hba}, TPSA ${p.tpsa}` : '';
+            result = { success: true, kind: payload.kind, label: payload.label, source: payload.source, props: p || undefined, resolvedSmiles: payload.resolvedSmiles,
+              message: `Opened ${payload.kind === 'protein' ? 'protein' : 'molecule'} ${payload.label} in the 3D viewer (${payload.style} style)${propStr}.` };
+          } catch (e) { result = { success: false, error: e.message }; }
+        }
         break;
       }
       case 'request_permissions': {
@@ -4214,7 +4278,7 @@ async function agentLoop(history, apiKey, event, opts = {}) {
       catch (e) { result = { success: false, error: 'tool threw: ' + (e && e.message || String(e)) }; }
       // Jarvis HUD: surface visuals inline in chat — generated images / design renders /
       // explicit screenshots as holo-cards, and 3D outputs as an in-chat spinning model.
-      const showImage = result._image && (['generate_image', 'make_figure', 'simulate', 'studio_write', 'ui_inspect', 'screen_parse', 'vision_click'].includes(block.name)
+      const showImage = result._image && (['generate_image', 'make_figure', 'simulate', 'studio_write', 'ui_inspect', 'screen_parse', 'vision_click', 'molecule'].includes(block.name)
         || (block.name === 'browser' && block.input && block.input.action === 'screenshot'));
       const model3d = (block.name === 'generate_3d' || block.name === 'make_printable') && result.success && result.path ? result.path : undefined;
       sendToAll(event, 'tool-update', {

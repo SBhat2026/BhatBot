@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Bhatbot Molecule Viewer</title>
+<style>
+  :root { --accent:#00c8ff; --bg:#0a0f17; }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body { height:100%; overflow:hidden; background:var(--bg); font-family:'JetBrains Mono',monospace; color:#9fb4c8; }
+  #viewport { width:100%; height:100%; position:relative; }
+  #bar { position:fixed; top:0; left:0; right:0; display:flex; align-items:center; gap:14px; padding:7px 14px;
+    font-size:12px; color:#5b708a; background:linear-gradient(180deg,rgba(10,15,23,.92),rgba(10,15,23,0)); z-index:5; }
+  #bar b { color:var(--accent); letter-spacing:.12em; }
+  #name { color:#9fb4c8; }
+  #styles { margin-left:auto; display:flex; gap:6px; }
+  .sbtn { pointer-events:auto; cursor:pointer; background:rgba(0,200,255,.08); border:1px solid rgba(0,200,255,.25);
+    color:#9fb4c8; font:11px 'JetBrains Mono',monospace; padding:3px 9px; border-radius:5px; }
+  .sbtn:hover { background:rgba(0,200,255,.18); }
+  .sbtn.on { background:var(--accent); color:#04121b; border-color:var(--accent); }
+  #props { position:fixed; bottom:10px; left:14px; font-size:11px; color:#6b84a0; z-index:5; line-height:1.7;
+    background:rgba(10,15,23,.7); padding:6px 10px; border-radius:6px; max-width:60%; }
+  #hint { position:fixed; bottom:10px; right:14px; font-size:11px; color:#46627d; z-index:5; }
+  #err { position:fixed; inset:0; display:none; align-items:center; justify-content:center; text-align:center; padding:30px; color:#ff8a99; font-size:13px; line-height:1.6; }
+</style>
+</head>
+<body>
+<div id="bar"><b>◉ MOLECULE</b><span id="name">…</span>
+  <div id="styles">
+    <span class="sbtn" data-style="cartoon">cartoon</span>
+    <span class="sbtn" data-style="stick">stick</span>
+    <span class="sbtn" data-style="sphere">sphere</span>
+    <span class="sbtn" data-style="surface">surface</span>
+  </div>
+</div>
+<div id="viewport"></div>
+<div id="props"></div>
+<div id="hint">drag to rotate · scroll to zoom · shift-drag to pan</div>
+<div id="err"></div>
+
+<script src="./vendor/3dmol/3Dmol-min.js"></script>
+<script>
+  const $ = (id) => document.getElementById(id);
+  let viewer = null, current = null, curStyle = 'cartoon';
+
+  function applyStyle(style) {
+    if (!viewer) return;
+    curStyle = style;
+    viewer.setStyle({}, {});           // clear
+    viewer.removeAllSurfaces();
+    if (style === 'cartoon')      viewer.setStyle({}, { cartoon: { color: 'spectrum' }, stick: { radius: 0.12, hidden: true } });
+    else if (style === 'stick')   viewer.setStyle({}, { stick: { radius: 0.18 }, sphere: { scale: 0.22 } });
+    else if (style === 'sphere')  viewer.setStyle({}, { sphere: {} });
+    else if (style === 'surface') { viewer.setStyle({}, { cartoon: { color: 'spectrum' } }); viewer.addSurface($3Dmol.SurfaceType.VDW, { opacity: 0.75, color: 'white' }); }
+    document.querySelectorAll('.sbtn').forEach((b) => b.classList.toggle('on', b.dataset.style === style));
+    viewer.render();
+  }
+
+  function show(payload) {
+    try {
+      current = payload;
+      $('name').textContent = (payload.label || '') + (payload.source ? '  ·  ' + payload.source : '');
+      if (payload.props) {
+        const p = payload.props;
+        $('props').innerHTML = `formula <b style="color:#9fb4c8">${p.formula}</b> · MW ${p.mw} · logP ${p.logp} · HBD ${p.hbd} · HBA ${p.hba} · TPSA ${p.tpsa} · rot ${p.rot_bonds}`;
+      } else $('props').textContent = '';
+      if (!viewer) viewer = $3Dmol.createViewer($('viewport'), { backgroundColor: '0x0a0f17' });
+      viewer.clear();
+      viewer.addModel(payload.data, payload.format);
+      // proteins → cartoon by default; small molecules → stick
+      applyStyle(payload.style || (payload.kind === 'protein' ? 'cartoon' : 'stick'));
+      viewer.zoomTo();
+      viewer.render();
+    } catch (e) {
+      $('err').style.display = 'flex';
+      $('err').textContent = 'Render failed: ' + (e && e.message ? e.message : e);
+    }
+  }
+
+  document.querySelectorAll('.sbtn').forEach((b) => b.addEventListener('click', () => applyStyle(b.dataset.style)));
+  window.addEventListener('resize', () => { if (viewer) viewer.resize(); });
+
+  if (window.mol) { window.mol.onMolecule(show); window.mol.ready(); }
+</script>
+</body>
+</html>
