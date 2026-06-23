@@ -21,6 +21,7 @@ const orchestrator = require('./lib/agents/orchestrator');
 const wsState = require('./lib/state');
 const wsMemory = require('./lib/memory');
 const semantic = require('./lib/semantic');           // #12 — embedding-based semantic/episodic recall (degrades gracefully)
+const toolselect = require('./lib/toolselect');        // W1 — per-turn tool retrieval (context-rot prevention)
 const subagents = require('./lib/subagents');          // #20 — persistent specialized sub-agents (research/coding/lifeadmin)
 const ambient = require('./lib/ambient');              // #18 — opt-in proactive Calendar/Mail awareness (OFF by default)
 const { textHintFromSelector, splitForSpeech, estimateToolCost, stripReasoning } = require('./lib/pure');  // SPLIT_PLAN step 1
@@ -1074,6 +1075,11 @@ function overBudget() { const c = loadConfig(); return !!(c.dailyBudgetUsd && co
 // correction. routerStats() aggregates; no behavior change yet — this is the measurement layer. ---
 const ROUTER_LOG = path.join(os.homedir(), '.bhatbot', 'router.jsonl');
 let _lastModel = null, _lastRouterTask = null;
+// W1 — per-turn tool subset. agentLoop sets this once (relevant tools for the turn) and clears it in
+// finish(); every Claude tool-loop call reads it via activeTools(). null ⇒ full catalog (default,
+// and the graceful fallback when retrieval is off / unavailable / low-confidence).
+let _activeTools = null;
+function activeTools() { return _activeTools || TOOLS; }
 function logRouterDecision(e) {
   try { fs.mkdirSync(path.dirname(ROUTER_LOG), { recursive: true }); fs.appendFileSync(ROUTER_LOG, JSON.stringify({ ts: new Date().toISOString(), ...e }) + '\n'); } catch {}
 }
@@ -1184,7 +1190,7 @@ async function callClaude(messages, apiKey, model) {
     model,
     max_tokens: 4096,
     system: systemBlocks(lastUserText(messages)),
-    tools: TOOLS,
+    tools: activeTools(),
     // validateHistory AFTER capTokens: trimming can re-orphan a tool_use/tool_result pair.
     // This is the single chokepoint every Claude tool-loop call shares, so the API can never
     // see an unpaired tool_use (the recurring "tool_use without tool_result" 400), no matter
@@ -1269,7 +1275,7 @@ function callClaudeStream(messages, apiKey, model, onText) {
     model, max_tokens: 4096,
     system: systemBlocks(lastUserText(messages)),
     // see callClaude: re-validate AFTER capTokens so trimming can't re-orphan a tool pair.
-    tools: TOOLS, messages: validateHistory(capTokens(messages))
+    tools: activeTools(), messages: validateHistory(capTokens(messages))
   }, apiKey, onText);
 }
 
@@ -4001,6 +4007,21 @@ async function agentLoop(history, apiKey, event, opts = {}) {
   // the cloud backend, or any other agent) into the memory block before we answer. Bounded to 4s.
   await Promise.all([refreshNotionRecall(lastUserText(history)), refreshSemanticRecall(lastUserText(history))]);
 
+  // W1 — context-rot prevention: inject only the tools relevant to THIS turn (top-k by embedding
+  // similarity + a small always-present CORE set), computed ONCE here and reused across every
+  // tool-loop step (never swap mid-loop). null ⇒ full catalog (no key / low confidence / disabled).
+  _activeTools = null;
+  if (loadConfig().toolRetrieval !== false) {
+    try {
+      const sel = await toolselect.select(lastUserText(history), TOOLS, { k: Number(loadConfig().toolRetrievalK) || 12 });
+      if (sel && sel.tools && sel.tools.length) {
+        _activeTools = sel.tools;
+        sendToActivity('tool-update', { type: 'thinking', text: `🧰 tools: ${sel.tools.length}/${TOOLS.length} selected for this turn` });
+        try { fs.appendFileSync(AUDIT_PATH, JSON.stringify({ ts: new Date().toISOString(), toolSelect: sel.tools.length, of: TOOLS.length }) + '\n'); } catch {}
+      }
+    } catch { /* retrieval is best-effort; fall back to full catalog */ }
+  }
+
   // Streaming: emit text deltas to the renderer (live bubble) AND speak each finished
   // sentence as it lands. Only on the desktop chat path (opts.stream); MCP/Telegram stay
   // non-streaming so their headless senders are untouched.
@@ -4035,6 +4056,7 @@ async function agentLoop(history, apiKey, event, opts = {}) {
   // All exits go through here so live guidance can be offered for learning (2a).
   const finish = (text) => {
     agentState = 'idle';
+    _activeTools = null;   // W1 — drop the per-turn tool subset so out-of-loop calls see the full catalog
     if (speakParser) speakParser.finish(); else if (ttsSeq != null) ttsStreamFlush(ttsSeq);
     if (usedGuidance.length) sendToActivity('learn_prompt', { text: usedGuidance.join(' | ') });
     // Strip any <speak> tags from the returned text (renderer shows this as the final bubble).
