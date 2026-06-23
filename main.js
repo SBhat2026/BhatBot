@@ -2245,9 +2245,11 @@ function isAutonomous() {
 let remoteDepth = 0;
 function isRemote() { return remoteDepth > 0; }
 // opts.forceHuman (W3 stepup tier): never silently auto-approve even under autonomousMode — a human
-// must actively confirm via the card. Remote denial still applies first (no human present at all).
+// must actively confirm via the card. opts.remoteOk (W3 confirm tier): routine mutations requested
+// over the AUTHENTICATED remote channel (mcpToken is the boundary) are allowed + audited, not denied
+// — only stepup/destructive-shell deny over remote (no human to verify code-mod/credentials/rm).
 function requestConfirm(command, reason, opts = {}) {
-  if (isRemote() && loadConfig().remoteAllowDestructive !== true) {
+  if (isRemote() && !opts.remoteOk && loadConfig().remoteAllowDestructive !== true) {
     try { fs.appendFileSync(AUDIT_PATH, JSON.stringify({ ts: new Date().toISOString(), remoteDenied: command.slice(0, 200), reason }) + '\n'); } catch {}
     sendToActivity('tool-update', { type: 'thinking', text: '⛔ remote destructive command denied (no human to confirm): ' + reason });
     return Promise.resolve(false);
@@ -3602,7 +3604,7 @@ async function executeTool(name, input) {
   const __tier = riskOf(name, input, isRemote() ? 'remote' : 'desktop');
   if (__tier === 'confirm' || __tier === 'stepup') {
     const label = name + (input && input.path ? ` ${input.path}` : input && input.action ? ` (${input.action})` : '');
-    const approved = await requestConfirm(label, `${name} — ${__tier === 'stepup' ? 'high-risk (code/secret), human required' : 'mutating action'}`, { forceHuman: __tier === 'stepup' });
+    const approved = await requestConfirm(label, `${name} — ${__tier === 'stepup' ? 'high-risk (code/secret), human required' : 'mutating action'}`, { forceHuman: __tier === 'stepup', remoteOk: __tier === 'confirm' });
     if (!approved) {
       const result = { success: false, error: `Declined by ${__tier} gate: ${name}.` };
       auditLog(name, auditInput, result, Date.now() - __auditT0, _lastUsage);
