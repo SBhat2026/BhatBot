@@ -113,6 +113,22 @@ Plan: `.claude/plans/quirky-strolling-planet.md`. All on `main`, pushed. Verifie
 - **Voice speed**: defaults lowered (config 1.12→1.05, cloud TTS_SPEED→1.03); live "speak slower/faster" command; settings slider (`#spd` + `set-tts-speed` IPC).
 - Cloud already had W2 (cost ledger) + a W3-equivalent (capability tiers). Cloud deployed to Fly.
 
+### 6a-bis. Continual-learning unblock + eval-as-CI (2026-06-23)
+- **Episodic capture fixed (root cause of W5 starvation).** Only `agentLoop.finish()` recorded
+  episodes; `fastReply` (chat) + `pipeline-local` turns were dropped — 11 episodes in 2 days vs 609
+  tool calls. Centralized in `_dispatchTurnInner` (`recordEpisode()`) so every reply path — desktop,
+  remote/MCP, pipeline — records once. Verified live (chat turn now persists). This unblocks the
+  whole fine-tune loop.
+- **Real LoRA run on 3B.** `finetune.sh` default base lowered `Qwen2.5-7B-4bit → 3B-4bit`: the 7B
+  build OOMed the Metal allocator on this 16 GB Mac (crashed at iter 80 when the app competed). 3B
+  trains cleanly at ~2.6 GB peak (val loss → 1.49). `MLX_BASE` overrides for 32 GB+ boxes.
+- **Eval-as-CI gate (roadmap §F).** `npm run verify` (verify-syntax + test:upgrade, no app) +
+  `npm run verify:full` (adds smoke + eval). Tracked pre-push hook at `scripts/git-hooks/pre-push`
+  (`core.hooksPath` set) blocks pushes on red; bypass `--no-verify`.
+- **`AMBITIOUS_ROADMAP.md`** added: prioritized larger efforts (A close learning loop, B decompose
+  main.js, C proactive layer, D unified recall, E desktop↔cloud convergence, F done, G vision loop,
+  H multi-sport).
+
 ### 6b. Prior session (757dabc → 28040fc)
 1. **Hands-free voice/re-arm fix** (`757dabc`): `tts-idle` now guaranteed every turn → mic always
    re-arms; renderer speaks if main produced no audio; conversation stays open until an explicit
@@ -143,19 +159,21 @@ maxPerDay, frozen), `ambient.enabled/sources`, `ttsSpeed/ttsStyle/ttsVoice`, `br
 secrets — never in memory files or prompts.
 
 ## 9. Next steps (proposed, prioritized)
-1. **Real W5 LoRA run once traces accrue** — exporter shows only ~6 SFT pairs today; the pipeline is
-   proven (toolchain ran end-to-end) but needs ~200+ pairs for a promotable adapter. Re-run
-   `ft:export → ft:train → ft:eval` after more usage; the gate auto-holds until it wins.
-2. **Enable + shake down `self_heal`** (built, off) with `maxPerDay:1`; now safer behind the W6
-   sandbox + W3 stepup gate. Watch Telegram for a week, then loosen.
-3. **Raise Anthropic tier / pacing** — still the #1 felt-latency cost on multi-tool turns.
-4. **Finish the `main.js` split** (#11, `SPLIT_PLAN.md`) — extract the tool-dispatch cluster + voice;
-   reduces the monolith risk (now ~6.7k lines + the new W1–W7 hooks).
-5. **Tune W1 retrieval `k`/minScore from data** — log shows 8–13 tools/turn; derive the optimal cap
-   empirically (see research doc §3) rather than the hand-set 12/0.18.
-6. **Multi-sport generalization** (calendar reminder 2026-06-28): world_cup → sport+league registry.
-7. **Hardware tier** (research doc Part 2, deferred): Mac Mini M4 always-on node is the highest-
-   leverage purchase once the software foundation is exercised in daily use.
+_The larger arc lives in `AMBITIOUS_ROADMAP.md` (A–H). Near-term:_
+1. **Let episodic data accrue → real W5 promote** (roadmap §A). Capture is now fixed, so every turn
+   feeds the loop; re-run `ft:export → ft:train → ft:eval` once `stats.json` shows sftPairs ≥ 150 /
+   prefPairs ≥ 20. Add a scheduled idle-time train/eval (A2) and DPO over prefs (A3). The 3B
+   toolchain is proven end-to-end (val loss → 1.49); the gate auto-holds until an adapter wins.
+2. **Decompose `main.js`** (roadmap §B, task #11, ~6.7k lines) — extract agent-core, tool registry,
+   server, voice. Do one extraction per commit; `npm run verify` between each. Unblocks §E.
+3. **Proactive layer** (roadmap §C) — idle-time initiative engine, rate-limited + outcome-learning.
+4. **Enable + shake down `self_heal`** (built, off) with `maxPerDay:1`; safer behind W6 sandbox + W3
+   stepup. Watch Telegram a week, then loosen.
+5. **Raise Anthropic tier / pacing** — still the #1 felt-latency cost on multi-tool turns.
+6. **W1 retrieval validated** (2026-06-23): 40 turns, median 9 tools, **0 fallback misses** — k is
+   well-tuned; no change needed (revisit only if misses appear).
+7. **Multi-sport generalization** (calendar reminder 2026-06-28): world_cup → sport+league registry.
+8. **Hardware tier** (research doc Part 2, deferred): Mac Mini M4 always-on node.
 
 _For deeper history: `ARCHITECTURE.md`, `BHATBOT_DOSSIER.md`, `SPLIT_PLAN.md`, `PERF-EVAL.md`,
 `WORLDCUP_ITERATION_LOG.md`, and the dated commit log._

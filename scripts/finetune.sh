@@ -19,7 +19,10 @@ DATA_DIR="$FT_DIR/data"
 ADAPTER_DIR="$FT_DIR/adapters"
 FUSED_DIR="$FT_DIR/fused"
 LOG="$FT_DIR/finetune.log"
-BASE="${MLX_BASE:-mlx-community/Qwen2.5-7B-Instruct-4bit}"
+# 3B-4bit by default: comfortable headroom on a 16 GB unified-memory Mac while the Electron app +
+# embeddings run concurrently. 7B-4bit OOMs the Metal allocator here under that load (verified —
+# crashed at iter 80 when the app restarted mid-run). Override MLX_BASE to a 7B build on a 32 GB+ box.
+BASE="${MLX_BASE:-mlx-community/Qwen2.5-3B-Instruct-4bit}"
 ITERS="${FT_ITERS:-300}"
 LAYERS="${FT_LAYERS:-8}"
 BATCH="${FT_BATCH:-4}"

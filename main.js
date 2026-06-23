@@ -4165,9 +4165,8 @@ async function agentLoop(history, apiKey, event, opts = {}) {
     reflectOnCorrection(history, lastUserText(history), text);   // async, non-blocking
     try { logRouterDecision({ taskType: _lastRouterTask || currentMode, model: _lastModel, ms: Date.now() - _turnT0, usd: +(costToday().usd - _usd0).toFixed(5) }); } catch {}   // #13
     const clean = stripReasoning(String(text || '')).replace(/<\/?speak>/g, '').trim();
-    // #12 episodic memory: record the turn (what happened, when). Fire-and-forget; the store caps
-    // + evicts oldest episodic first so durable semantic facts survive under pressure.
-    try { const u = lastUserText(history); if (u && clean) semantic.upsert({ text: `User: ${String(u).slice(0, 400)}\nAssistant: ${clean.slice(0, 800)}`, kind: 'episodic', meta: { surface: stream ? 'desktop' : 'headless' } }).catch(() => {}); } catch {}
+    // #12 episodic memory is now recorded centrally in _dispatchTurnInner (covers fastReply +
+    // pipeline-local too, which used to be dropped — starving the W5 fine-tune loop). Not here.
     // #24 project memory: if a project is open, record the turn + cheaply refresh its living summary.
     try { const slug = projects.activeSlug(); if (slug) { projects.recordTurn(slug, lastUserText(history), clean); projects.maybeAutoSummarize(slug, { summarize: projectSummarize }).catch(() => {}); } } catch {}
     return { text: clean, history, _streamed: stream };
@@ -4699,6 +4698,18 @@ async function fastReply(history, apiKey, event, opts = {}) {
 // task overlapping a wake-word-triggered desktop turn) interleave on those and corrupt the
 // result — the source of the truncated "<s"/"I" replies seen in testing. This chain runs each
 // turn to completion before the next starts; concurrent callers queue instead of clobbering.
+// #12/W5 — centralized episodic capture. EVERY reply path (fastReply, pipeline-local, agentLoop,
+// remote/MCP via runAgentHeadless→dispatchTurn) funnels through _dispatchTurnInner, so recording
+// here once captures all turns — not just the tool-using ones agentLoop.finish() used to log.
+// Fire-and-forget; the store caps + evicts oldest episodic first so durable semantic facts survive.
+function recordEpisode(userText, replyText, surface) {
+  try {
+    const u = String(userText || '').trim();
+    const a = String(replyText || '').replace(/<\/?speak>/g, '').trim();
+    if (u && a) semantic.upsert({ text: `User: ${u.slice(0, 400)}\nAssistant: ${a.slice(0, 800)}`, kind: 'episodic', meta: { surface: surface || 'desktop' } }).catch(() => {});
+  } catch {}
+}
+
 let _turnChain = Promise.resolve();
 function dispatchTurn(history, apiKey, event, opts = {}) {
   const job = () => _dispatchTurnInner(history, apiKey, event, opts);
@@ -4715,18 +4726,24 @@ async function _dispatchTurnInner(history, apiKey, event, opts = {}) {
   // itself plays at the freshly-saved speed.
   const spd = maybeAdjustSpeed(userText);
   if (spd) return { text: spd, history: [...history, { role: 'assistant', content: spd }], _provider: 'local', _model: 'intent' };
+  const surface = opts.stream ? 'desktop' : 'headless';
+  let res;
   if (loadConfig().fastChat !== false) {
     const qr = quickRoute(userText, history);
     if (qr === 'chat') {
-      try { return await fastReply(history, apiKey, event, opts); }
+      try { res = await fastReply(history, apiKey, event, opts); }
       catch (e) { console.warn('[fast] reply failed → agent:', e.message); }   // fall through to full agent
     } else if (qr === 'action') {
-      return agentLoop(history, apiKey, event, opts);   // obvious tool-work: skip the local router hop
+      res = await agentLoop(history, apiKey, event, opts);   // obvious tool-work: skip the local router hop
     }
   }
-  return pipelineCfg().enabled
-    ? runPipeline(history, apiKey, event, opts)
-    : agentLoop(history, apiKey, event, opts);
+  if (!res) {
+    res = pipelineCfg().enabled
+      ? await runPipeline(history, apiKey, event, opts)
+      : await agentLoop(history, apiKey, event, opts);
+  }
+  if (res && res.text) recordEpisode(userText, res.text, surface);
+  return res;
 }
 
 // ---------------------------------------------------------------------------

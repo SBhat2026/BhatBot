@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Eval-as-CI gate (AMBITIOUS_ROADMAP.md §F2). Blocks a push if the fast verify suite is red:
+#   verify-syntax (505 JS files parse) + test:upgrade (W1–W8 unit tests).
+# App-dependent checks (smoke, eval) need the running desktop app, so they stay manual
+# (`npm run verify:full`) and are NOT gated here — a hook must run anywhere with no app up.
+# Bypass in a genuine emergency with: git push --no-verify
+set -e
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+cd "$ROOT"
+echo "[pre-push] running npm run verify…"
+if ! npm run --silent verify; then
+  echo "[pre-push] ❌ verify failed — push blocked. Fix, or bypass with: git push --no-verify" >&2
+  exit 1
+fi
+echo "[pre-push] ✅ verify passed"
