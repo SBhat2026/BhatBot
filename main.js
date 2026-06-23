@@ -25,6 +25,7 @@ const toolselect = require('./lib/toolselect');        // W1 — per-turn tool r
 const { riskOf } = require('./lib/risk');              // W3 — per-tool key-risk classification (auto|confirm|stepup)
 const graph = require('./lib/graph');                  // W4 — knowledge-graph memory (entities + typed edges, multi-hop)
 const sandbox = require('./lib/sandbox');              // W6 — worker_threads isolation for community/dynamic plugin tools
+const a2a = require('./lib/a2a');                       // W7 — agent-to-agent handoff envelope (future-proof subagent routing)
 const subagents = require('./lib/subagents');          // #20 — persistent specialized sub-agents (research/coding/lifeadmin)
 const ambient = require('./lib/ambient');              // #18 — opt-in proactive Calendar/Mail awareness (OFF by default)
 const { textHintFromSelector, splitForSpeech, estimateToolCost, stripReasoning } = require('./lib/pure');  // SPLIT_PLAN step 1
@@ -1980,11 +1981,13 @@ const TOOLS = [
     }, required: ['action'] } },
   { name: 'subagent', description: 'Delegate to a PERSISTENT specialized sub-agent that keeps its OWN memory/context across tasks and has a scoped toolset — for recurring, focused work and for doing several things at once. Agents: "research" (analysis/sources/synthesis), "coding" (code changes + verify, can use claude_code), "lifeadmin" (scheduling/reminders/logistics). action:"run"{agent, task, background?} runs it (background:true returns immediately and works in parallel while you keep going — use for "do X and Y at the same time"); "list" shows agents + how many turns each remembers; "history"{agent}; "reset"{agent} wipes one agent\'s memory. Use this instead of doing big specialized work inline when it benefits from a dedicated, remembering specialist.',
     input_schema: { type: 'object', properties: {
-      action: { type: 'string', enum: ['run', 'list', 'history', 'reset'] },
-      agent: { type: 'string', enum: ['research', 'coding', 'lifeadmin'], description: 'Which specialist.' },
-      task: { type: 'string', description: 'For run: what you want the sub-agent to do (it remembers prior tasks in its thread).' },
+      action: { type: 'string', enum: ['run', 'list', 'history', 'reset', 'handoff', 'a2a_log'], description: '"handoff" dispatches via a standardized A2A envelope (future-proof; carries context + artifacts); "a2a_log" shows recent handoffs.' },
+      agent: { type: 'string', enum: ['research', 'coding', 'lifeadmin'], description: 'Which specialist (the handoff target for action:handoff).' },
+      task: { type: 'string', description: 'For run/handoff: what you want the sub-agent to do (it remembers prior tasks in its thread).' },
+      context: { type: 'string', description: 'For handoff: background the target agent needs.' },
+      artifacts: { type: 'array', description: 'For handoff: inputs to pass along (strings or objects).' },
       background: { type: 'boolean', description: 'For run: true = start it in parallel and return immediately (you get notified on completion); false = wait for the result.' },
-      maxSteps: { type: 'number', description: 'For run: tool-loop budget (default 8, max 16).' }
+      maxSteps: { type: 'number', description: 'For run/handoff: tool-loop budget (default 8, max 16).' }
     }, required: ['action'] } },
   { name: 'self_improve', description: 'Scan BhatBot\'s own tool-call AUDIT LOG for recurring failures and have Claude Code DRAFT a fix as a reviewable diff (it does NOT apply changes — Siddhant is the merge gate). Use when asked to "improve yourself" / "fix your recurring errors", or run it periodically. action:"scan" finds the top recurring failing tool (≥ minCount, default 3) and writes a proposed-fix .md to ~/.bhatbot/self-improve/ + notifies. dryRun:true just reports the failure clusters without invoking Claude Code.',
     input_schema: { type: 'object', properties: {
@@ -3809,6 +3812,20 @@ async function executeTool(name, input) {
           result = await subagents.run(input.agent, input.task, subagentDeps(), { maxSteps: input.maxSteps });
           break;
         }
+        if (act === 'handoff') {   // W7 — standardized A2A envelope around a sub-agent dispatch
+          if (!input.agent || !input.task) { result = { success: false, error: 'agent and task required' }; break; }
+          const env = a2a.makeEnvelope({ from: input.from || 'main', to: input.agent, task: input.task, context: input.context, artifacts: input.artifacts });
+          const localAgents = subagents.list().map((a) => a.name);
+          const done = await a2a.handoff(env, {
+            localAgents,
+            run: (to, taskStr, opts) => subagents.run(to, taskStr, subagentDeps(), opts),
+            opts: { maxSteps: input.maxSteps },
+            onStatus: (e) => sendToActivity('tool-update', { type: 'thinking', text: `🛰 A2A ${e.from}→${e.to}: ${e.status}` }),
+          });
+          result = { success: done.status === 'completed', envelopeId: done.id, status: done.status, result: done.result, error: done.status === 'failed' ? (done.history.slice(-1)[0] || {}).note : undefined };
+          break;
+        }
+        if (act === 'a2a_log') { result = { success: true, handoffs: a2a.recent(input.n || 20) }; break; }
         result = { success: false, error: 'unknown subagent action: ' + act };
         break;
       }
