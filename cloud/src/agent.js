@@ -8,6 +8,8 @@ const db = require('./db');
 const { callClaude, MODEL_SONNET, MODEL_HAIKU } = require('./llm');
 const { toolDefs, dispatchTool, macOnline } = require('./tools');
 const { stripReasoning } = require('./voice');   // strip leaked <thinking>/meta before it reaches the phone
+const graph = require('./graph');                // W4 cloud parity — knowledge-graph memory (multi-hop)
+const toolselect = require('./toolselect');      // W1 cloud parity — per-turn tool retrieval (context-rot)
 let notion = null; try { notion = require('../notion'); } catch {}
 
 const MAX_STEPS = Number(process.env.AGENT_MAX_STEPS || 8);
@@ -63,12 +65,22 @@ async function runTurn(convId, userText, { reset = false } = {}) {
   if (notion && notion.configured && notion.configured()) {
     try { const n = await notion.recallSmart(text, 5); if (Array.isArray(n)) recalled = [...new Set([...recalled, ...n])]; } catch {}
   }
+  // W4 — fold multi-hop knowledge-graph relations into recall (relations flat memory can't traverse).
+  try { const g = graph.query(text, { depth: 2, limit: 10 }); if (g.hits && g.hits.length) recalled = [...new Set([...recalled, ...g.hits.map((h) => 'graph: ' + h)])]; } catch {}
 
   db.addMessage(convId, 'user', text);
   let history = db.getHistory(convId, HISTORY_LIMIT);
   const system = buildSystem({ macUp: macOnline(), recalled });
   const model = pickModel(text);
-  const tools = toolDefs();
+  // W1 — inject only the tools relevant to this turn (top-k + CORE); full catalog on low confidence
+  // / no key. Computed once and reused across the step loop so the set never changes mid-task.
+  const fullTools = toolDefs();
+  let tools = fullTools;
+  // Skip subsetting for the fixed morning-brief path (it must always see news + ambient); apply it
+  // to interactive turns only.
+  if (convId !== 'brief') {
+    try { const sel = await toolselect.select(text, fullTools, { k: 12 }); if (sel && sel.tools && sel.tools.length) { tools = sel.tools; db.pushActivity('tool', `🧰 ${sel.tools.length}/${fullTools.length} tools selected`); } } catch {}
+  }
 
   let steps = 0;
   while (steps < MAX_STEPS) {
@@ -114,9 +126,26 @@ function maybeShareFact(userText, reply) {
     if (!fact && /\bmy\s+\w+\s+(is|are|=)\s+\S/i.test(userText) && userText.length < 200) fact = userText.trim();
     if (fact) {
       db.saveMemory(fact, { source: 'user' });
+      graphIngestCloud(fact);   // W4 — mine entity/relation triples into the graph (async, fire-and-forget)
       if (notion && notion.configured && notion.configured()) notion.appendMemory(fact, { tags: ['cloud'], source: 'user', confidence: 0.9 }).catch(() => {});
     }
     if (notion && notion.configured && notion.configured()) notion.logActivity((userText || '').slice(0, 200) + (reply ? ' → ' + reply.slice(0, 120) : '')).catch(() => {});
+  } catch {}
+}
+
+// W4 — extract knowledge-graph triples from a saved fact with a cheap Haiku pass. Async +
+// fire-and-forget so it never blocks the turn; gated by env KNOWLEDGE_GRAPH !== '0'.
+async function graphIngestCloud(content) {
+  try {
+    if (process.env.KNOWLEDGE_GRAPH === '0') return;
+    const text = String(content || '').trim();
+    if (text.length < 8) return;
+    const sys = 'Extract knowledge-graph triples from this fact about Siddhant. Return ONLY JSON: {"triples":[{"subject","predicate","object","subjectType","objectType"}]}. Types ∈ person|project|tool|org|place|concept|event|thing. Canonical short names ("Siddhant" not "I"). Skip non-factual text. Max 6 triples; empty array if none.';
+    const r = await callClaude({ system: sys, messages: [{ role: 'user', content: text.slice(0, 1000) }], model: MODEL_HAIKU });
+    const txt = (r.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('');
+    const m = txt.match(/\{[\s\S]*\}/);
+    const j = m ? JSON.parse(m[0]) : null;
+    if (j && Array.isArray(j.triples) && j.triples.length) { const res = graph.ingest(j.triples); if (res.added) db.pushActivity('memory', `🕸 graph +${res.added} relation${res.added > 1 ? 's' : ''}`); }
   } catch {}
 }
 
