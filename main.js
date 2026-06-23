@@ -1965,6 +1965,15 @@ const TOOLS = [
       name: { type: 'string', description: 'Molecule name (common or IUPAC); resolved to a structure via PubChem.' },
       style: { type: 'string', enum: ['cartoon', 'stick', 'sphere', 'surface'], description: 'Render style. Default: cartoon for proteins, stick for small molecules.' }
     } } },
+  { name: 'maps', description: 'Show a MAP or get DIRECTIONS in an in-app map window. action:"show" (default) centers on a place/address with a marker; action:"route" draws driving/walking/cycling directions between two places and returns distance + ETA. Inputs: for show → query (place or address, e.g. "Eiffel Tower" or "1600 Amphitheatre Pkwy"); for route → from + to (+ optional mode: driving|walking|cycling). Uses OpenStreetMap (free, no key); if a Google Maps key is configured it upgrades geocoding accuracy. Use for "where is…", "how far / how long to get to…", "show me … on a map", trip planning.',
+    input_schema: { type: 'object', properties: {
+      action: { type: 'string', enum: ['show', 'route'], description: 'show = center on a place (default); route = directions from→to.' },
+      query: { type: 'string', description: 'Place or address to show (for action:show).' },
+      from: { type: 'string', description: 'Origin place/address (for action:route).' },
+      to: { type: 'string', description: 'Destination place/address (for action:route).' },
+      mode: { type: 'string', enum: ['driving', 'walking', 'cycling'], description: 'Travel mode for directions (default driving).' },
+      zoom: { type: 'number', description: 'Zoom level for show (default 14).' }
+    } } },
   { name: 'play_chess', description: 'Open a playable chess game in its own window for Siddhant. Full rules engine (legal moves, castling, en passant, promotion, check/checkmate/stalemate) with a built-in AI opponent powered by the Stockfish online API at three strengths. Use whenever he wants to play chess. Optional difficulty.',
     input_schema: { type: 'object', properties: { difficulty: { type: 'string', enum: ['easy', 'medium', 'hard'], description: 'AI strength: easy (casual), medium (depth 8), hard (depth 14). Default medium.' } } } },
   { name: 'screen_observe', description: 'WATCH SIDDHANT\'S WHOLE SCREEN to learn how he works — use this when he SAYS to (e.g. "watch my screen", "start watching", "learn how I do this"). Covers ANY app, not just the browser (that is browser_observe). His command IS the consent, so you do NOT need to ask again — just start. Flow: action:"start"{minutes:1-30} begins a time-boxed session that notes what he is doing every ~25s via the LOCAL vision model (no screenshots are saved; passwords/codes/cards are skipped). When he is done, action:"review" returns the notes — narrate them and ASK which to remember; action:"save"{items:[...approved plain-English habits]} writes ONLY approved items to long-term memory. "stop" ends early; "status" shows whether active + recent notes; "snapshot" describes the screen once. Never auto-start without his word.',
@@ -3607,6 +3616,21 @@ function openMoleculeWindow(payload) {
 }
 ipcMain.on('molecule-ready', (e) => { try { if (pendingMol) e.sender.send('molecule', pendingMol); } catch {} });
 
+// --- Maps (Leaflet + OSM by default; Google geocoding when config.maps.googleKey present) ---
+const maps = require('./lib/maps')({ getKey: () => { try { return (loadConfig().maps && loadConfig().maps.googleKey) || ''; } catch { return ''; } } });
+let mapsWindow = null, pendingMap = null;
+function openMapsWindow(payload) {
+  pendingMap = payload;
+  if (mapsWindow && !mapsWindow.isDestroyed()) { mapsWindow.show(); mapsWindow.focus(); try { mapsWindow.webContents.send('map', pendingMap); } catch {} return; }
+  mapsWindow = new BrowserWindow({
+    width: 1000, height: 760, x: 150, y: 80, title: 'Bhatbot Maps',
+    backgroundColor: '#0a0f17', webPreferences: { contextIsolation: true, nodeIntegration: false, preload: path.join(__dirname, 'src', 'preload-maps.js') },
+  });
+  mapsWindow.loadFile(path.join(__dirname, 'src', 'maps.html'));
+  mapsWindow.on('closed', () => { mapsWindow = null; });
+}
+ipcMain.on('map-ready', (e) => { try { if (pendingMap) e.sender.send('map', pendingMap); } catch {} });
+
 // Transient failure signatures worth one automatic retry (network/load races, not logic errors).
 const TRANSIENT_RE = /(timeout|timed out|ETIMEDOUT|ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|socket hang up|network|Target closed|Execution context|navigation|detached|not attached|temporarily|overloaded|try again|\b50[234]\b|\b429\b)/i;
 // Only auto-retry IDEMPOTENT reads — never an action with side effects (a double click /
@@ -3745,6 +3769,20 @@ async function executeTool(name, input) {
               message: `Opened ${payload.kind === 'protein' ? 'protein' : 'molecule'} ${payload.label} in the 3D viewer (${payload.style} style)${propStr}.` };
           } catch (e) { result = { success: false, error: e.message }; }
         }
+        break;
+      }
+      case 'maps': {
+        try {
+          const payload = await maps.prepare(input);
+          openMapsWindow(payload);
+          if (payload.kind === 'route') {
+            result = { success: true, kind: 'route', distance_km: payload.distance_km, duration_min: payload.duration_min, mode: payload.mode,
+              message: `Directions ${payload.from.label.split(',')[0]} → ${payload.to.label.split(',')[0]}: ${payload.distance_km} km, about ${payload.duration_min} min by ${payload.mode}. Map open.` };
+          } else {
+            result = { success: true, kind: 'point', label: payload.label, source: payload.source,
+              message: `Showing ${payload.label} on the map.` };
+          }
+        } catch (e) { result = { success: false, error: e.message }; }
         break;
       }
       case 'request_permissions': {

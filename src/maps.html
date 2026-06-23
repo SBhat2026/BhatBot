@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Bhatbot Maps</title>
+<link rel="stylesheet" href="./vendor/leaflet/leaflet.css" />
+<style>
+  :root { --accent:#00c8ff; --bg:#0a0f17; }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body { height:100%; overflow:hidden; background:var(--bg); font-family:'JetBrains Mono',monospace; color:#9fb4c8; }
+  #map { width:100%; height:100%; background:#0a0f17; }
+  #bar { position:fixed; top:0; left:0; right:0; display:flex; align-items:center; gap:12px; padding:7px 14px;
+    font-size:12px; color:#5b708a; background:linear-gradient(180deg,rgba(10,15,23,.92),rgba(10,15,23,0)); z-index:1000; pointer-events:none; }
+  #bar b { color:var(--accent); letter-spacing:.12em; }
+  #info { margin-left:auto; color:#9fb4c8; text-align:right; max-width:70%; }
+  #err { position:fixed; inset:0; display:none; align-items:center; justify-content:center; text-align:center; padding:30px; color:#ff8a99; font-size:13px; z-index:2000; }
+  .leaflet-container { background:#0a0f17; }
+</style>
+</head>
+<body>
+<div id="bar"><b>◉ MAPS</b><span id="title"></span><span id="info"></span></div>
+<div id="map"></div>
+<div id="err"></div>
+
+<script src="./vendor/leaflet/leaflet.js"></script>
+<script>
+  const $ = (id) => document.getElementById(id);
+  let map = null;
+
+  // bundled marker images (offline)
+  if (window.L) {
+    L.Icon.Default.prototype.options.iconUrl = './vendor/leaflet/marker-icon.png';
+    L.Icon.Default.prototype.options.iconRetinaUrl = './vendor/leaflet/marker-icon-2x.png';
+    L.Icon.Default.prototype.options.shadowUrl = './vendor/leaflet/marker-shadow.png';
+  }
+
+  function leafletBase() {
+    map = L.map('map', { zoomControl: true, attributionControl: false });
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(map);
+  }
+
+  function showPoint(d) {
+    leafletBase();
+    map.setView(d.center, d.zoom || 14);
+    L.marker(d.center).addTo(map).bindPopup(d.label || '').openPopup();
+    $('title').textContent = d.label || '';
+    $('info').textContent = d.source === 'google' ? 'Google' : 'OpenStreetMap';
+  }
+
+  function showRoute(d) {
+    leafletBase();
+    const line = L.polyline(d.geometry, { color: '#00c8ff', weight: 5, opacity: 0.85 }).addTo(map);
+    L.marker(d.geometry[0]).addTo(map).bindPopup('Start: ' + (d.from.label || ''));
+    L.marker(d.geometry[d.geometry.length - 1]).addTo(map).bindPopup('End: ' + (d.to.label || ''));
+    map.fitBounds(line.getBounds(), { padding: [50, 50] });
+    $('title').textContent = `${d.from.label.split(',')[0]} → ${d.to.label.split(',')[0]}`;
+    $('info').textContent = `${d.distance_km} km · ${d.duration_min} min (${d.mode})`;
+  }
+
+  function render(d) {
+    try {
+      if (d.kind === 'route') showRoute(d); else showPoint(d);
+      setTimeout(() => { if (map) map.invalidateSize(); }, 120);
+    } catch (e) {
+      $('err').style.display = 'flex';
+      $('err').textContent = 'Map failed: ' + (e && e.message ? e.message : e);
+    }
+  }
+
+  window.addEventListener('resize', () => { if (map) map.invalidateSize(); });
+  if (window.bmaps) { window.bmaps.onMap(render); window.bmaps.ready(); }
+</script>
+</body>
+</html>
