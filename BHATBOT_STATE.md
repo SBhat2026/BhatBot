@@ -98,7 +98,22 @@ project, play_chess, subagent.
   — multi-step/judgment, 6/6 green), `scripts/speak-punct-test.js` (audible TTS check),
   `scripts/verify-syntax.js`, console tee → `~/.bhatbot/logs/app.log` (`npm run logs`).
 
-## 6. Recent updates (this session, 757dabc → 28040fc)
+## 6. Recent updates
+
+### 6a. JARVIS-parity upgrade — W1–W8 + cloud parity (→ `1110385`, 2026-06-22)
+Plan: `.claude/plans/quirky-strolling-planet.md`. All on `main`, pushed. Verified live (smoke 4/4, complex-eval 8/8) + a 20-case deterministic suite (`npm run test:upgrade`).
+- **W1 context-rot tool retrieval** (`lib/toolselect.js`): per-turn embedding top-k + CORE set; injects ~8–12 of 50 tools (confirmed live); full-catalog fallback. Cloud parity in `cloud/src/toolselect.js`.
+- **W2 cost/energy telemetry**: every audit entry now carries `model/tin/tout/llmUsd`; costBlock shows per-model/per-tool split.
+- **W3 key-risk gate** (`lib/risk.js`): per-tool auto|confirm|stepup; stepup forces a human for code-mod (self_fix/heal/improve, claude_code) + remote credential tools.
+- **W4 knowledge graph** (`lib/graph.js`): entity/typed-edge JSON store, Haiku triple extraction on save_memory, 2-hop recall fold-in, `save_memory action:"query"`. Cloud parity in `cloud/src/graph.js`.
+- **W5 fine-tune loop**: `npm run ft:export|ft:train|ft:eval` — trace→SFT/pref pairs → MLX LoRA on Qwen → A/B with GATED promote. Ran end-to-end on-device (val loss 4.32→1.22); gate correctly held a toy adapter.
+- **W6 plugin sandbox** (`lib/sandbox.js`): worker_threads isolation (require allowlist, hard timeout, no ambient authority) + `plugin` tool for `config.plugins`.
+- **W7 A2A envelope** (`lib/a2a.js`): Google-A2A-shaped subagent handoff (`subagent action:"handoff"/"a2a_log"`), local runner now + drop-in remote branch.
+- **W8 research doc**: `BHATBOT_RESEARCH_IDEAS.md`/`.pdf` (Manus/Claude directions + retained hardware roadmap).
+- **Voice speed**: defaults lowered (config 1.12→1.05, cloud TTS_SPEED→1.03); live "speak slower/faster" command; settings slider (`#spd` + `set-tts-speed` IPC).
+- Cloud already had W2 (cost ledger) + a W3-equivalent (capability tiers). Cloud deployed to Fly.
+
+### 6b. Prior session (757dabc → 28040fc)
 1. **Hands-free voice/re-arm fix** (`757dabc`): `tts-idle` now guaranteed every turn → mic always
    re-arms; renderer speaks if main produced no audio; conversation stays open until an explicit
    stop phrase ("I'm satisfied / done with the project").
@@ -128,21 +143,19 @@ maxPerDay, frozen), `ambient.enabled/sources`, `ttsSpeed/ttsStyle/ttsVoice`, `br
 secrets — never in memory files or prompts.
 
 ## 9. Next steps (proposed, prioritized)
-1. **Enable + shake down `self_heal`** in a controlled window (it's built, off). Suggest: enable
-   with `maxPerDay:1` first, watch the Telegram notifications for a week, then loosen. Highest-
-   leverage new capability; needs real-world validation.
-2. **Raise Anthropic tier / add request-pacing** — the #1 felt-latency fix. Until then, consider a
-   cheaper default model for chat-class turns or smarter batching.
-3. **Finish the `main.js` split** (#11, `SPLIT_PLAN.md`) — extract the tool-dispatch cluster + voice
-   into modules. Reduces the monolith risk and makes self_heal edits safer/smaller.
-4. **Grow the eval suite** (`complex-eval.js`) into a real regression gate — add computer-action
-   cases (guarded), wire a nightly run that feeds the self_heal `selfTests` trigger.
-5. **Multi-sport generalization** (calendar reminder 2026-06-28): generalize world_cup into a
-   sport+league registry (Olympics/track/more soccer), unified viewer, auto-detect what's live.
-6. **Voice polish loop**: gather Siddhant's feedback on the new cadence/speed numbers and the wit
-   level; consider a true Paul-Bettany clone (see [[project_bhatbot_voice]]).
-7. **Cloud hardening**: confirm Fly secrets (NYT/ELEVENLABS/NOTION) current; a stable named tunnel
-   for the phone; verify the morning brief fires end-to-end on a real morning.
+1. **Real W5 LoRA run once traces accrue** — exporter shows only ~6 SFT pairs today; the pipeline is
+   proven (toolchain ran end-to-end) but needs ~200+ pairs for a promotable adapter. Re-run
+   `ft:export → ft:train → ft:eval` after more usage; the gate auto-holds until it wins.
+2. **Enable + shake down `self_heal`** (built, off) with `maxPerDay:1`; now safer behind the W6
+   sandbox + W3 stepup gate. Watch Telegram for a week, then loosen.
+3. **Raise Anthropic tier / pacing** — still the #1 felt-latency cost on multi-tool turns.
+4. **Finish the `main.js` split** (#11, `SPLIT_PLAN.md`) — extract the tool-dispatch cluster + voice;
+   reduces the monolith risk (now ~6.7k lines + the new W1–W7 hooks).
+5. **Tune W1 retrieval `k`/minScore from data** — log shows 8–13 tools/turn; derive the optimal cap
+   empirically (see research doc §3) rather than the hand-set 12/0.18.
+6. **Multi-sport generalization** (calendar reminder 2026-06-28): world_cup → sport+league registry.
+7. **Hardware tier** (research doc Part 2, deferred): Mac Mini M4 always-on node is the highest-
+   leverage purchase once the software foundation is exercised in daily use.
 
 _For deeper history: `ARCHITECTURE.md`, `BHATBOT_DOSSIER.md`, `SPLIT_PLAN.md`, `PERF-EVAL.md`,
 `WORLDCUP_ITERATION_LOG.md`, and the dated commit log._
