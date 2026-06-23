@@ -47,6 +47,14 @@ const CASES = [
     prompt: "If any World Cup match is live right now, give me the score; otherwise tell me the next big one to look out for.",
     wantTools: ['world_cup'], minTools: 1,
     noStale: /i can'?t check|don'?t have real-?time|2022/i },
+  // W1 regression guards — confirm two-stage tool retrieval still surfaces NON-live-data tools
+  // (filesystem, web) for the right intent, not just the World-Cup/news cluster.
+  { name: 'list-files',
+    prompt: "List the files and folders directly inside my home directory. Just the listing.",
+    wantTools: ['list_directory|run_shell'] },
+  { name: 'fetch-page',
+    prompt: "Fetch https://example.com and tell me the page's title or main heading.",
+    wantTools: ['fetch_url|browser'], wantAny: [/example/i, /illustrative|domain/i] },
 ];
 const LEAK = /<\/?think(ing)?>|^\s*(the user is|let me think|i should|i need to|first,? i)/im;
 
