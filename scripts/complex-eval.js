@@ -71,7 +71,9 @@ async function run() {
       const seed = await api(`/api/${TOKEN}/activity?since=0`, null, 'GET', 8000);
       const cursor = (seed && seed.seq) || 0;
       const t0 = Date.now();
-      res = await api(`/api/${TOKEN}/chat`, { text: t.prompt });
+      // Each case is independent — reset the conversation so a prior case's tool results don't sit
+      // in context and let the model answer THIS prompt without re-calling the tool (false negative).
+      res = await api(`/api/${TOKEN}/chat`, { text: t.prompt, new_conversation: true });
       ms = Date.now() - t0;
       const act = await api(`/api/${TOKEN}/activity?since=${cursor}`, null, 'GET', 8000);
       const events = act.events || [];

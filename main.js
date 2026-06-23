@@ -4117,7 +4117,7 @@ async function agentLoop(history, apiKey, event, opts = {}) {
       if (sel && sel.tools && sel.tools.length) {
         _activeTools = sel.tools;
         sendToActivity('tool-update', { type: 'thinking', text: `🧰 tools: ${sel.tools.length}/${TOOLS.length} selected for this turn` });
-        try { fs.appendFileSync(AUDIT_PATH, JSON.stringify({ ts: new Date().toISOString(), toolSelect: sel.tools.length, of: TOOLS.length }) + '\n'); } catch {}
+        try { fs.appendFileSync(AUDIT_PATH, JSON.stringify({ ts: new Date().toISOString(), toolSelect: sel.tools.length, of: TOOLS.length, names: sel.names }) + '\n'); } catch {}
       }
     } catch { /* retrieval is best-effort; fall back to full catalog */ }
   }
