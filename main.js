@@ -906,7 +906,16 @@ function costBlock() {
     const t = costToday(); if (!t || !t.calls) return '';
     const cap = c.dailyBudgetUsd ? ` of a $${c.dailyBudgetUsd} daily budget` : '';
     const over = c.dailyBudgetUsd && t.usd >= c.dailyBudgetUsd;
-    return `API spend today: $${t.usd.toFixed(3)}${cap} across ${t.calls} calls.`
+    let split = '';
+    try {
+      const bm = Object.entries(t.byModel || {}).sort((a, b) => b[1] - a[1]).slice(0, 3)
+        .map(([m, u]) => `${m} $${u.toFixed(3)}`).join(', ');
+      const bt = Object.entries(t.byTool || {}).sort((a, b) => b[1] - a[1]).slice(0, 2)
+        .map(([m, u]) => `${m} $${u.toFixed(3)}`).join(', ');
+      if (bm) split += ` By model: ${bm}.`;
+      if (bt) split += ` Paid tools: ${bt}.`;
+    } catch {}
+    return `API spend today: $${t.usd.toFixed(3)}${cap} across ${t.calls} calls.` + split
       + (over ? ' OVER BUDGET — prefer the local Ollama pipeline and Haiku, batch independent tool calls, skip vision/browser unless essential, and tell Siddhant if a task needs the budget raised.'
               : ' Size up big tasks before starting: estimate the tool-call/vision load, chunk anything heavy, and batch independent calls.');
   } catch { return ''; }
@@ -1080,6 +1089,20 @@ let _lastModel = null, _lastRouterTask = null;
 // and the graceful fallback when retrieval is off / unavailable / low-confidence).
 let _activeTools = null;
 function activeTools() { return _activeTools || TOOLS; }
+// W2 — last LLM step's usage, captured right after every Claude call so the per-tool audit entry
+// can be tagged with the model + token cost of the step that invoked it. {model,tin,tout,usd}.
+let _lastUsage = null;
+function noteUsage(model, u) {
+  try {
+    if (!u) return;
+    _lastUsage = {
+      model: (model || '').replace(/^claude-/, ''),
+      tin: (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0),
+      tout: u.output_tokens || 0,
+      usd: +costOf(model, u).toFixed(5),
+    };
+  } catch {}
+}
 function logRouterDecision(e) {
   try { fs.mkdirSync(path.dirname(ROUTER_LOG), { recursive: true }); fs.appendFileSync(ROUTER_LOG, JSON.stringify({ ts: new Date().toISOString(), ...e }) + '\n'); } catch {}
 }
@@ -1166,7 +1189,7 @@ async function anthropicRequest(body, apiKey, { retries = 5 } = {}) {
     }
     if (res.ok) {
       const j = await res.json();
-      try { const u = j.usage || {}; recordTokens((u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0)); recordCost(body.model, u); } catch {}
+      try { const u = j.usage || {}; recordTokens((u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0)); recordCost(body.model, u); noteUsage(body.model, u); } catch {}
       return j;
     }
     const retryable = res.status === 429 || res.status === 529 || res.status >= 500;
@@ -1263,7 +1286,7 @@ async function anthropicStream(body, apiKey, onText, { retries = 3 } = {}) {
         } else if (ev.type === 'error') { throw new Error('stream error: ' + JSON.stringify(ev.error).slice(0, 200)); }
       }
     }
-    try { recordTokens((usage.input_tokens || 0) + (usage.output_tokens || 0)); recordCost(body.model, usage); } catch {}
+    try { recordTokens((usage.input_tokens || 0) + (usage.output_tokens || 0)); recordCost(body.model, usage); noteUsage(body.model, usage); } catch {}
     return {
       content: blocks.filter(Boolean).map((b) => b.type === 'tool_use' ? { type: 'tool_use', id: b.id, name: b.name, input: b.input || {} } : { type: 'text', text: b.text }),
       stop_reason: stop_reason || 'end_turn', usage
@@ -3882,7 +3905,7 @@ async function executeTool(name, input) {
       } else if (name === 'browser' && typeof result.text === 'string') result.text = security.sanitizeExternalContent(result.text, 'browser');
     }
   } catch {}
-  auditLog(name, auditInput, result, Date.now() - __auditT0);   // log handles, never resolved secrets
+  auditLog(name, auditInput, result, Date.now() - __auditT0, _lastUsage);   // log handles + LLM-step telemetry, never resolved secrets
   return result;
 }
 
