@@ -17,6 +17,7 @@
     "ft:export": "node scripts/export-prefs.js",
     "ft:train": "bash scripts/finetune.sh",
     "ft:eval": "node scripts/ft-eval.js",
+    "ft:cycle": "node scripts/ft-cycle.js",
     "test:upgrade": "node scripts/test-upgrade.js",
     "verify": "node scripts/verify-syntax.js && node scripts/test-upgrade.js",
     "verify:full": "npm run verify && npm run smoke && npm run eval"

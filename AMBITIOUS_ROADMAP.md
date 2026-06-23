@@ -22,9 +22,10 @@ vs qwen3's 42.6s (26× faster) — the latency prize once a real adapter wins on
 - ⬜ **A1 — Data accrual to threshold.** Let episodes climb past ~200 SFT pairs + real preference
   pairs (corrections are now captured with error strings in audit too). Track via `npm run ft:export`
   `stats.json`. _Gate: don't do a "real" promote run until prefPairs ≥ 20 and sftPairs ≥ 150._
-- ⬜ **A2 — Scheduled offline export+train+eval.** A weekly cron (via `manage_schedule`) that runs
-  export → finetune.sh → ft-eval while the machine is idle, logs the A/B table, and only promotes on
-  a clean win. Must respect RAM pressure (3B-4bit base default; skip if app under load).
+- 🔄 **A2 — Scheduled offline export+train+eval.** ✅ `npm run ft:cycle` (`scripts/ft-cycle.js`)
+  does export → **threshold guard** → train → serve → gated A/B → stop server in one command; the
+  guard cheaply no-ops until `sftPairs ≥ 150` (override `--force`/`--min-sft`). _Remaining: register
+  a nightly `manage_schedule` job that calls it, gated on idle + no RAM pressure._
 - ⬜ **A3 — DPO on preference pairs.** Today finetune.sh does SFT only. Add a DPO pass over
   `prefs.jsonl` once enough correction pairs exist — that's where the corrected-behavior signal lives.
 - ⬜ **A4 — Promotion telemetry surfaced.** Show the active local model + last A/B win-rate in the
