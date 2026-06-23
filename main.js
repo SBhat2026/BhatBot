@@ -22,6 +22,7 @@ const wsState = require('./lib/state');
 const wsMemory = require('./lib/memory');
 const semantic = require('./lib/semantic');           // #12 — embedding-based semantic/episodic recall (degrades gracefully)
 const toolselect = require('./lib/toolselect');        // W1 — per-turn tool retrieval (context-rot prevention)
+const { riskOf } = require('./lib/risk');              // W3 — per-tool key-risk classification (auto|confirm|stepup)
 const subagents = require('./lib/subagents');          // #20 — persistent specialized sub-agents (research/coding/lifeadmin)
 const ambient = require('./lib/ambient');              // #18 — opt-in proactive Calendar/Mail awareness (OFF by default)
 const { textHintFromSelector, splitForSpeech, estimateToolCost, stripReasoning } = require('./lib/pure');  // SPLIT_PLAN step 1
@@ -2233,13 +2234,15 @@ function isAutonomous() {
 // Local desktop use is unaffected. Set config.remoteAllowDestructive:true to opt back in.
 let remoteDepth = 0;
 function isRemote() { return remoteDepth > 0; }
-function requestConfirm(command, reason) {
+// opts.forceHuman (W3 stepup tier): never silently auto-approve even under autonomousMode — a human
+// must actively confirm via the card. Remote denial still applies first (no human present at all).
+function requestConfirm(command, reason, opts = {}) {
   if (isRemote() && loadConfig().remoteAllowDestructive !== true) {
     try { fs.appendFileSync(AUDIT_PATH, JSON.stringify({ ts: new Date().toISOString(), remoteDenied: command.slice(0, 200), reason }) + '\n'); } catch {}
     sendToActivity('tool-update', { type: 'thinking', text: '⛔ remote destructive command denied (no human to confirm): ' + reason });
     return Promise.resolve(false);
   }
-  if (isAutonomous()) {
+  if (isAutonomous() && !opts.forceHuman) {
     try { fs.appendFileSync(AUDIT_PATH, JSON.stringify({ ts: new Date().toISOString(), autoApproved: command.slice(0, 200), reason }) + '\n'); } catch {}
     sendToActivity('tool-update', { type: 'thinking', text: '⚡ auto-approved: ' + reason });
     return Promise.resolve(true);
@@ -3563,6 +3566,20 @@ async function executeTool(name, input) {
   // (below) records `input` with the handles intact, never the decrypted secret.
   const auditInput = input;
   if (credentials.hasRef(input)) { try { input = credentials.resolveRefs(input); } catch {} }
+  // W3 — key-risk gate. Classify the tool and route high-risk tiers through the confirm machinery
+  // BEFORE running. 'auto' falls straight through (run_shell included — its inner command-level gate
+  // is stronger). 'confirm' honours autonomousMode locally + the remote guard; 'stepup' forces a
+  // human even under autonomy. Decline → a clean tool_result error (still audited below).
+  const __tier = riskOf(name, input, isRemote() ? 'remote' : 'desktop');
+  if (__tier === 'confirm' || __tier === 'stepup') {
+    const label = name + (input && input.path ? ` ${input.path}` : input && input.action ? ` (${input.action})` : '');
+    const approved = await requestConfirm(label, `${name} — ${__tier === 'stepup' ? 'high-risk (code/secret), human required' : 'mutating action'}`, { forceHuman: __tier === 'stepup' });
+    if (!approved) {
+      const result = { success: false, error: `Declined by ${__tier} gate: ${name}.` };
+      auditLog(name, auditInput, result, Date.now() - __auditT0, _lastUsage);
+      return result;
+    }
+  }
   const maxAttempts = isRetryableTool(name, input) ? 2 : 1;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
   try {
