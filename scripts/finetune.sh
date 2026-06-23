@@ -39,11 +39,17 @@ if [ ! -s "$DATA_DIR/train.jsonl" ]; then
   echo "[finetune] ⚠ no training data at $DATA_DIR/train.jsonl — run: node scripts/export-prefs.js" | tee -a "$LOG"; exit 1
 fi
 TRAIN_N=$(wc -l < "$DATA_DIR/train.jsonl" | tr -d ' ')
-echo "[finetune] training examples: $TRAIN_N" | tee -a "$LOG"
+VALID_N=$([ -s "$DATA_DIR/valid.jsonl" ] && wc -l < "$DATA_DIR/valid.jsonl" | tr -d ' ' || echo 0)
+echo "[finetune] examples: train=$TRAIN_N valid=$VALID_N" | tee -a "$LOG"
 if [ "$TRAIN_N" -lt 16 ]; then
   echo "[finetune] ⚠ only $TRAIN_N examples — too few for a meaningful LoRA. Let traces accumulate (200+)." | tee -a "$LOG"
   echo "[finetune]   Continuing anyway (smoke run) — do NOT promote the result." | tee -a "$LOG"
 fi
+# mlx_lm validates on a batch each eval step, so batch_size must not exceed the valid-set size,
+# or it errors out ("Dataset must have at least batch_size examples"). Clamp so tiny runs complete.
+if [ "$VALID_N" -lt 1 ]; then echo "[finetune] ⚠ empty valid set — need ≥1 validation example." | tee -a "$LOG"; exit 1; fi
+if [ "$BATCH" -gt "$VALID_N" ]; then echo "[finetune] clamping batch-size $BATCH → $VALID_N (valid-set size)" | tee -a "$LOG"; BATCH="$VALID_N"; fi
+if [ "$BATCH" -gt "$TRAIN_N" ]; then BATCH="$TRAIN_N"; fi
 
 # venv + mlx-lm
 if [ ! -x "$VENV/bin/python3" ]; then
@@ -57,7 +63,7 @@ PY="$VENV/bin/python3"
 # LoRA train. mlx_lm.lora reads {train,valid}.jsonl (chat format) from --data.
 echo "[finetune] starting LoRA…" | tee -a "$LOG"
 mkdir -p "$ADAPTER_DIR"
-"$PY" -m mlx_lm.lora \
+"$PY" -m mlx_lm lora \
   --model "$BASE" \
   --train \
   --data "$DATA_DIR" \
@@ -71,7 +77,7 @@ echo "[finetune] ✅ adapter written to $ADAPTER_DIR" | tee -a "$LOG"
 # Optional: fuse adapter → standalone model dir (input for llama.cpp GGUF conversion → Ollama).
 if [ "${FT_FUSE:-0}" = "1" ]; then
   echo "[finetune] fusing adapter → $FUSED_DIR" | tee -a "$LOG"
-  "$PY" -m mlx_lm.fuse --model "$BASE" --adapter-path "$ADAPTER_DIR" --save-path "$FUSED_DIR" 2>&1 | tee -a "$LOG" || echo "[finetune] ⚠ fuse failed" | tee -a "$LOG"
+  "$PY" -m mlx_lm fuse --model "$BASE" --adapter-path "$ADAPTER_DIR" --save-path "$FUSED_DIR" 2>&1 | tee -a "$LOG" || echo "[finetune] ⚠ fuse failed" | tee -a "$LOG"
 fi
 
 cat <<EOF | tee -a "$LOG"
