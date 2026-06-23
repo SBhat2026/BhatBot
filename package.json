@@ -16,7 +16,8 @@
     "eval": "node scripts/complex-eval.js",
     "ft:export": "node scripts/export-prefs.js",
     "ft:train": "bash scripts/finetune.sh",
-    "ft:eval": "node scripts/ft-eval.js"
+    "ft:eval": "node scripts/ft-eval.js",
+    "test:upgrade": "node scripts/test-upgrade.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
