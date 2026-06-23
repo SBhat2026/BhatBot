@@ -13,7 +13,10 @@
     "ctl": "node scripts/bhatctl.js",
     "logs": "node scripts/bhatctl.js logs -f",
     "smoke": "node scripts/smoke.js",
-    "eval": "node scripts/complex-eval.js"
+    "eval": "node scripts/complex-eval.js",
+    "ft:export": "node scripts/export-prefs.js",
+    "ft:train": "bash scripts/finetune.sh",
+    "ft:eval": "node scripts/ft-eval.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
