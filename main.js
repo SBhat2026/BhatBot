@@ -23,6 +23,7 @@ const wsMemory = require('./lib/memory');
 const semantic = require('./lib/semantic');           // #12 — embedding-based semantic/episodic recall (degrades gracefully)
 const toolselect = require('./lib/toolselect');        // W1 — per-turn tool retrieval (context-rot prevention)
 const { riskOf } = require('./lib/risk');              // W3 — per-tool key-risk classification (auto|confirm|stepup)
+const graph = require('./lib/graph');                  // W4 — knowledge-graph memory (entities + typed edges, multi-hop)
 const subagents = require('./lib/subagents');          // #20 — persistent specialized sub-agents (research/coding/lifeadmin)
 const ambient = require('./lib/ambient');              // #18 — opt-in proactive Calendar/Mail awareness (OFF by default)
 const { textHintFromSelector, splitForSpeech, estimateToolCost, stripReasoning } = require('./lib/pure');  // SPLIT_PLAN step 1
@@ -867,9 +868,12 @@ function buildMemoryBlock(query) {
     ? sessionSpoken.slice(-6).map((s) => '- ' + String(s).slice(0, 160)).join('\n') : '';
   const shared = (_notionRecall.text && _notionRecall.key === notionRecallKey(query)) ? _notionRecall.text : '';  // tier 4
   const semBank = (_semanticRecall.text && _semanticRecall.key === notionRecallKey(query)) ? _semanticRecall.text : '';  // tier 5
+  let graphHits = '';                                                                          // tier 6 (W4)
+  try { if (cfg.knowledgeGraph !== false && query) { const gq = graph.query(query, { depth: 2, limit: 12 }); if (gq.hits && gq.hits.length) graphHits = gq.hits.map((h) => '- ' + h).join('\n'); } } catch {}
   let out = '';
   if (longTerm) out += '\n\n---\n## RELEVANT MEMORY (long-term)\n\n' + longTerm;
   if (semBank) out += '\n\n## SEMANTIC RECALL (embedding match — facts + past turns)\n\n' + semBank;
+  if (graphHits) out += '\n\n## KNOWLEDGE GRAPH (related entities — multi-hop)\n\n' + graphHits;
   if (shared) out += '\n\n## SHARED BANK (Notion — written by any agent/surface)\n\n' + shared;
   if (episodic) out += '\n\n## RECALLED FROM PAST SESSIONS (episodic)\n\n' + episodic;
   if (working) out += '\n\n## THIS SESSION SO FAR (working)\n\n' + working;
@@ -1840,8 +1844,8 @@ const TOOLS = [
       idleMs: { type: 'number', description: 'How long counts as "idle" (default 1500).' },
       timeoutMs: { type: 'number', description: 'For wait: max wait (default 120000).' }
     }, required: ['action'] } },
-  { name: 'save_memory', description: `Persist a fact to long-term memory. section ∈ {${MEMORY_SECTIONS.join(', ')}}.`,
-    input_schema: { type: 'object', properties: { section: { type: 'string', enum: MEMORY_SECTIONS }, content: { type: 'string' } }, required: ['section', 'content'] } },
+  { name: 'save_memory', description: `Persist a fact to long-term memory (action "save", default — give section ∈ {${MEMORY_SECTIONS.join(', ')}} + content). Saved facts are also mined into a knowledge graph of entities + relationships. action "query" answers MULTI-HOP questions about how things connect ("what does the project I started last week use?", "who works on X?") by traversing that graph — pass the question as content; section not needed.`,
+    input_schema: { type: 'object', properties: { action: { type: 'string', enum: ['save', 'query'], description: 'save (default) or query the knowledge graph' }, section: { type: 'string', enum: MEMORY_SECTIONS }, content: { type: 'string', description: 'the fact (save) or the question (query)' } }, required: ['content'] } },
   { name: 'browser', description: 'Dedicated headless Playwright browser; you SEE its screenshots (vision). actions: navigate, click, type, screenshot, get_text, evaluate, login. Use action:"login" to sign into a site: pass url, username, and credRef (a CRED_REF_ handle from keychain_lookup / the vault) — it auto-detects the fields, fills them, and submits. The password is resolved in-process; NEVER put a raw password in `text`.',
     input_schema: { type: 'object', properties: {
       action: { type: 'string', enum: ['navigate', 'click', 'type', 'screenshot', 'get_text', 'evaluate', 'login'] },
@@ -3012,7 +3016,26 @@ function saveMemoryEntry(section, content) {
   // written from the Mac and from the cloud doesn't diverge into two copies.
   try { notion.appendMemory({ fact: content, tags: [section.toLowerCase().replace(/[^a-z]+/g, '-')], source: 'agent' }); } catch {}
   try { semantic.upsert({ text: content, kind: 'semantic', meta: { section } }).catch(() => {}); } catch {}   // #12 embedding store
+  try { graphIngest(content); } catch {}   // W4 — extract entity/relation triples (async, fire-and-forget)
   return { success: true, saved: `${section}: ${content}` };
+}
+
+// W4 — pull knowledge-graph triples out of a saved fact with a cheap Haiku pass and fold them into
+// the graph. Async + fire-and-forget so it never blocks the save. Gated by config.knowledgeGraph.
+async function graphIngest(content) {
+  try {
+    if (loadConfig().knowledgeGraph === false) return;
+    const text = String(content || '').trim();
+    if (text.length < 8) return;
+    const sys = 'Extract knowledge-graph triples from this fact about Siddhant. Return ONLY JSON: {"triples":[{"subject","predicate","object","subjectType","objectType"}]}. Types ∈ person|project|tool|org|place|concept|event|thing. Canonical short names ("Siddhant" not "I"). Skip non-factual text. Max 6 triples; empty array if none.';
+    const r = await anthropicRequest({ model: MODEL_HAIKU, max_tokens: 500, system: sys, messages: [{ role: 'user', content: text.slice(0, 1000) }] }, getApiKey(), { retries: 1 });
+    const txt = (r.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('');
+    const j = parseJsonLoose(txt);
+    if (j && Array.isArray(j.triples) && j.triples.length) {
+      const res = graph.ingest(j.triples);
+      if (res.added) sendToActivity('tool-update', { type: 'thinking', text: `🕸 knowledge graph +${res.added} relation${res.added > 1 ? 's' : ''}` });
+    }
+  } catch {}
 }
 
 // Write-through reconcile: pull recent AUTHORITATIVE facts from Notion into the local memory.md
@@ -3794,6 +3817,11 @@ async function executeTool(name, input) {
         break;
       }
       case 'save_memory':
+        if (input.action === 'query') {   // W4 — multi-hop graph lookup over saved entities/relations
+          const gq = graph.query(input.content || input.query || '', { depth: input.depth || 2, limit: 24 });
+          result = { success: true, relations: gq.hits, seeds: gq.seeds, ...graph.stats() };
+          break;
+        }
         result = saveMemoryEntry(input.section, input.content); break;
       case 'browser':
         result = await browserAction(input); break;
