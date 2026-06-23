@@ -24,6 +24,7 @@ const semantic = require('./lib/semantic');           // #12 — embedding-based
 const toolselect = require('./lib/toolselect');        // W1 — per-turn tool retrieval (context-rot prevention)
 const { riskOf } = require('./lib/risk');              // W3 — per-tool key-risk classification (auto|confirm|stepup)
 const graph = require('./lib/graph');                  // W4 — knowledge-graph memory (entities + typed edges, multi-hop)
+const sandbox = require('./lib/sandbox');              // W6 — worker_threads isolation for community/dynamic plugin tools
 const subagents = require('./lib/subagents');          // #20 — persistent specialized sub-agents (research/coding/lifeadmin)
 const ambient = require('./lib/ambient');              // #18 — opt-in proactive Calendar/Mail awareness (OFF by default)
 const { textHintFromSelector, splitForSpeech, estimateToolCost, stripReasoning } = require('./lib/pure');  // SPLIT_PLAN step 1
@@ -1846,6 +1847,8 @@ const TOOLS = [
     }, required: ['action'] } },
   { name: 'save_memory', description: `Persist a fact to long-term memory (action "save", default — give section ∈ {${MEMORY_SECTIONS.join(', ')}} + content). Saved facts are also mined into a knowledge graph of entities + relationships. action "query" answers MULTI-HOP questions about how things connect ("what does the project I started last week use?", "who works on X?") by traversing that graph — pass the question as content; section not needed.`,
     input_schema: { type: 'object', properties: { action: { type: 'string', enum: ['save', 'query'], description: 'save (default) or query the knowledge graph' }, section: { type: 'string', enum: MEMORY_SECTIONS }, content: { type: 'string', description: 'the fact (save) or the question (query)' } }, required: ['content'] } },
+  { name: 'plugin', description: 'Run a user-defined plugin tool in a secure SANDBOX (worker thread, no access to the filesystem/network/vault unless the plugin opts in, hard timeout). Plugins live in config.plugins ([{name, description, code}]). action:"list" shows installed plugins; action:"run"{name,input} executes one. Use for safe community/dynamically-generated tools.',
+    input_schema: { type: 'object', properties: { action: { type: 'string', enum: ['list', 'run'] }, name: { type: 'string' }, input: { type: 'object' } }, required: ['action'] } },
   { name: 'browser', description: 'Dedicated headless Playwright browser; you SEE its screenshots (vision). actions: navigate, click, type, screenshot, get_text, evaluate, login. Use action:"login" to sign into a site: pass url, username, and credRef (a CRED_REF_ handle from keychain_lookup / the vault) — it auto-detects the fields, fills them, and submits. The password is resolved in-process; NEVER put a raw password in `text`.',
     input_schema: { type: 'object', properties: {
       action: { type: 'string', enum: ['navigate', 'click', 'type', 'screenshot', 'get_text', 'evaluate', 'login'] },
@@ -3823,6 +3826,18 @@ async function executeTool(name, input) {
           break;
         }
         result = saveMemoryEntry(input.section, input.content); break;
+      case 'plugin': {   // W6 — sandboxed execution of user/community plugin tools
+        const plugins = Array.isArray(loadConfig().plugins) ? loadConfig().plugins : [];
+        if ((input.action || 'list') === 'list') {
+          result = { success: true, plugins: plugins.map((p) => ({ name: p.name, description: p.description || '', allow: p.allow || [] })) };
+          break;
+        }
+        const p = plugins.find((x) => x && x.name === input.name);
+        if (!p) { result = { success: false, error: `no plugin named "${input.name}". Define it in config.plugins.` }; break; }
+        const r = await sandbox.runPlugin(p, input.input || {});
+        result = r.success ? { success: true, result: r.result } : { success: false, error: r.error };
+        break;
+      }
       case 'browser':
         result = await browserAction(input); break;
       case 'vision_local':
