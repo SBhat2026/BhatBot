@@ -5015,12 +5015,14 @@ async function initMcpServer() {
   try {
     await startMcpServer({
       port, token, runAgent: runAgentHeadless, transcribe: transcribeAudio,
-      synthesize: synthesizeSpeech, summarize: summarizeForSpeech, media: mediaBytesToBlocks,
+      synthesize: synthesizeSpeech, synthUlaw: synthesizeUlaw, summarize: summarizeForSpeech, media: mediaBytesToBlocks,
       voiceTurn, voiceBegin, voicePoll, endVoiceCall, getActivity, nexusUrl: NEXUS_URL, ownerPhone: c.myPhone,
       twilioAuthToken: c.twilioToken, jobs: jobsBus, control: phoneControl, screenshot: captureScreenJpeg,
       // Phone-call speech-recognition tuning (see gatherTwiml). All optional in config.json.
       voice: { hints: c.voiceHints, speechModel: c.voiceSpeechModel, speechTimeout: c.voiceSpeechTimeout,
-        timeout: c.voiceTimeout, enhanced: c.voiceEnhanced, language: c.voiceLanguage }
+        timeout: c.voiceTimeout, enhanced: c.voiceEnhanced, language: c.voiceLanguage,
+        // Opt-in real-time Media Streams path (WebSocket audio). Default OFF → proven Gather path.
+        mediaStreams: c.voiceMediaStreams === true }
     });
     writeClaudeMcpConfig();                       // so the embedded Claude Code can use BhatBot's MCP tools
     console.log(`[mcp] listening on http://127.0.0.1:${port}/mcp/${token}`);
@@ -6124,6 +6126,40 @@ async function elevenLabsSynth(t, c, opts = {}) {
   const errText = (await r.text()).slice(0, 200);
   if (r.status === 401 || r.status === 429 || /quota_exceeded/.test(errText)) _elDeadUntil = Date.now() + 600000;
   return { error: `elevenlabs ${r.status}: ${errText}`, status: r.status };
+}
+
+// Synthesize directly to 8kHz μ-law (Twilio Media Streams' native format) — no MP3 decode/transcode
+// needed; the bytes drop straight into Twilio media frames. ElevenLabs JARVIS voice only (strict).
+async function synthesizeUlaw(text, opts = {}) {
+  const c = loadConfig();
+  const t = String(text || '').trim();
+  if (!t) return { error: 'empty text' };
+  if (!c.elevenLabsKey) return { error: 'no elevenLabsKey (ElevenLabs voice is required for calls)' };
+  if (Date.now() < _elDeadUntil) return { error: 'elevenlabs cooling down', cooldown: true };
+  const voiceId = c.ttsVoice || c.elevenLabsVoiceId || 'pNInz6obpgDQGcFmaJgB';
+  const model = c.ttsModel || 'eleven_flash_v2_5';
+  const supportsBreaks = c.ttsCadence !== false && /flash|turbo/i.test(model);
+  const body = {
+    text: humanizeCadence(normalizeForSpeech(t), { breaks: supportsBreaks }),
+    model_id: model,
+    voice_settings: {
+      stability: c.ttsStability != null ? c.ttsStability : 0.38,
+      similarity_boost: c.ttsSimilarity != null ? c.ttsSimilarity : 0.75,
+      style: c.ttsStyle != null ? c.ttsStyle : 0.40,
+      use_speaker_boost: c.ttsSpeakerBoost != null ? c.ttsSpeakerBoost : true,
+      speed: Math.max(0.7, Math.min(1.2, Number(c.ttsSpeed) || 1.05)),
+    },
+  };
+  if (opts.previousText) body.previous_text = String(opts.previousText).slice(-400);
+  try {
+    const r = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}?output_format=ulaw_8000&optimize_streaming_latency=4`, {
+      method: 'POST', headers: { 'xi-api-key': c.elevenLabsKey, 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    if (r.ok) return { success: true, ulaw: Buffer.from(await r.arrayBuffer()) };
+    const errText = (await r.text()).slice(0, 200);
+    if (r.status === 401 || r.status === 429 || /quota_exceeded/.test(errText)) _elDeadUntil = Date.now() + 600000;
+    return { error: `elevenlabs ${r.status}: ${errText}`, status: r.status };
+  } catch (e) { return { error: e.message }; }
 }
 
 async function openaiSynth(t, c) {

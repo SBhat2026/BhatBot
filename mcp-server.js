@@ -7,7 +7,7 @@
 
 let httpServer = null;
 
-async function startMcpServer({ port, token, runAgent, transcribe, synthesize, summarize, media, voiceTurn, voiceBegin, voicePoll, endVoiceCall, getActivity, nexusUrl, ownerPhone, twilioAuthToken, jobs, control, screenshot, voice }) {
+async function startMcpServer({ port, token, runAgent, transcribe, synthesize, synthUlaw, summarize, media, voiceTurn, voiceBegin, voicePoll, endVoiceCall, getActivity, nexusUrl, ownerPhone, twilioAuthToken, jobs, control, screenshot, voice }) {
   if (httpServer) return httpServer;
   const express = require('express');
   const fs = require('fs');
@@ -383,6 +383,16 @@ self.addEventListener('fetch', (e) => {
         if (endVoiceCall) endVoiceCall(callSid);
         return res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?><Response>${play}<Hangup/></Response>`);
       }
+      // Real-time path (opt-in): hand the whole call to a Media Streams WebSocket — the greeting,
+      // listening, thinking and speaking all happen over the socket (sub-second turn-taking).
+      if (V.mediaStreams && synthUlaw && voiceBegin) {
+        const host = req.get('host');
+        return res.type('text/xml').send(
+          `<?xml version="1.0" encoding="UTF-8"?><Response><Connect>` +
+          `<Stream url="wss://${host}/voice/${token}/stream">` +
+          `<Parameter name="callSid" value="${xmlEsc(callSid)}"/>` +
+          `</Stream></Connect></Response>`);
+      }
       const r = voiceTurn ? await voiceTurn(callSid, '', greeting) : { text: greeting };
       const play = await sayElement(req, r.text);
       res.type('text/xml').send(gatherTwiml(req, play, r.hangup));
@@ -476,6 +486,30 @@ self.addEventListener('fetch', (e) => {
   });
 
   await new Promise((resolve) => { httpServer = app.listen(port, '127.0.0.1', resolve); });
+
+  // -------------------------------------------------------------------------
+  // Twilio Media Streams WebSocket (opt-in real-time voice). Twilio connects to
+  // wss://<host>/voice/<token>/stream after the <Connect><Stream> TwiML above.
+  // Token-gated on the upgrade path; one voicestream session per connection.
+  // -------------------------------------------------------------------------
+  if (voice && voice.mediaStreams && synthUlaw && voiceBegin) {
+    try {
+      const { WebSocketServer } = require('ws');
+      const voicestream = require('./lib/voicestream')({
+        transcribe, synthUlaw, voiceBegin, voicePoll,
+        onEnd: endVoiceCall, log: (...a) => console.log(...a),
+      });
+      const wss = new WebSocketServer({ noServer: true });
+      const streamPath = `/voice/${token}/stream`;
+      httpServer.on('upgrade', (req, socket, head) => {
+        let pathname; try { pathname = new URL(req.url, 'http://localhost').pathname; } catch { pathname = req.url; }
+        if (pathname !== streamPath) { socket.destroy(); return; }   // token in path gates access
+        wss.handleUpgrade(req, socket, head, (ws) => voicestream.handle(ws, {}));
+      });
+      console.log('[voice] Media Streams enabled → wss://<host>' + streamPath);
+    } catch (e) { console.error('[voice] Media Streams init failed:', e.message); }
+  }
+
   return httpServer;
 }
 

@@ -136,3 +136,13 @@ France edge it — 55% to win, with Brazil at 2
   - reply: Mexico's running the show — six points, two wins. South Korea second on three. Czechia and South Africa are fighting for
 - PASS **date-grounding**
   - reply: Wednesday, June 24, 2026 at 9:49 AM EDT.
+
+## 2026-06-24T13:59:29.245Z — 4/4 passed
+- PASS **world-cup-update**
+  - reply: Switzerland and Canada are squaring off in about five hours—Group B elimination match. Both tied on four points, winner 
+- PASS **predict-matchup**
+  - reply: France are favoured, 55% to win against Brazil's 22%, with a draw at 24%. Expected to be roughly 1.7 goals for France, 1
+- PASS **group-standings**
+  - reply: Mexico's running away with it — two wins, three-goal differential. South Korea sitting second with a win and a draw. Cze
+- PASS **date-grounding**
+  - reply: Wednesday, June 24, 2026 at 9:59 AM EDT.

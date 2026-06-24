@@ -83,6 +83,67 @@ const toolselect = require('../lib/toolselect');
     ['toolselect: small catalog → null (full)', async () => { const r = await toolselect.select('hi', [{ name: 'a', description: 'x' }]); assert.equal(r, null); }],
     ['toolselect: empty query → null', async () => { const big = Array.from({ length: 20 }, (_, i) => ({ name: 't' + i, description: 'desc ' + i })); const r = await toolselect.select('', big); assert.equal(r, null); }],
     ['toolselect: CORE list present', () => { assert.ok(toolselect.CORE.includes('save_memory')); }],
+
+    // ---- Twilio Media Streams voice (μ-law codec + session state machine, no network) ----
+    ['voicestream: μ-law silence/extremes decode', () => {
+      const vs = require('../lib/voicestream')({});
+      assert.equal(vs._ulawByteToPcm(0xff), 0);              // +0 silence
+      assert.equal(vs._ulawByteToPcm(0x7f), 0);              // -0 silence
+      assert.ok(vs._ulawByteToPcm(0x00) < -30000);          // max negative magnitude
+    }],
+    ['voicestream: μ-law→WAV header (8kHz/16-bit/mono)', () => {
+      const vs = require('../lib/voicestream')({});
+      const wav = vs._ulawToWav(Buffer.from([0xff, 0x00, 0x7f, 0x00]));
+      assert.equal(wav.toString('ascii', 0, 4), 'RIFF');
+      assert.equal(wav.toString('ascii', 8, 12), 'WAVE');
+      assert.equal(wav.readUInt32LE(24), 8000);             // sample rate
+      assert.equal(wav.readUInt16LE(34), 16);               // bits/sample
+      assert.equal(wav.readUInt16LE(22), 1);                // mono
+      assert.equal(wav.readUInt32LE(40), 8);                // 4 samples * 2 bytes
+    }],
+    ['voicestream: session greets, transcribes utterance, replies', async () => {
+      const { EventEmitter } = require('events');
+      const calls = { synth: 0, transcribe: 0, begin: 0 };
+      const sent = [];
+      class FakeWS extends EventEmitter { constructor() { super(); this.readyState = 1; } send(s) { sent.push(JSON.parse(s)); } close() { this.readyState = 3; this.emit('close'); } }
+      const vs = require('../lib/voicestream')({
+        synthUlaw: async () => { calls.synth++; return { ulaw: Buffer.alloc(400, 0xff) }; },
+        transcribe: async () => { calls.transcribe++; return { text: 'what time is it' }; },
+        voiceBegin: async (sid, speech) => { calls.begin++; return { mode: 'reply', text: speech ? 'Noon, sir.' : 'Evening, sir.' }; },
+        voicePoll: () => ({ ready: true, text: '', more: false }), log: () => {},
+      });
+      const ws = new FakeWS(); vs.handle(ws, {});
+      ws.emit('message', JSON.stringify({ event: 'start', start: { streamSid: 'MZ', callSid: 'CA' } }));
+      await new Promise((r) => setTimeout(r, 40));
+      const gm = sent.find((m) => m.event === 'mark'); ws.emit('message', JSON.stringify({ event: 'mark', mark: { name: gm.mark.name } }));
+      await new Promise((r) => setTimeout(r, 20));
+      const voiced = Buffer.alloc(160, 0x10).toString('base64'), silent = Buffer.alloc(160, 0xff).toString('base64');
+      for (let i = 0; i < 20; i++) ws.emit('message', JSON.stringify({ event: 'media', media: { payload: voiced } }));
+      for (let i = 0; i < 40; i++) ws.emit('message', JSON.stringify({ event: 'media', media: { payload: silent } }));
+      await new Promise((r) => setTimeout(r, 100));
+      assert.ok(calls.synth >= 2, 'greeting + reply synthesized');
+      assert.equal(calls.transcribe, 1, 'utterance transcribed once');
+      assert.equal(calls.begin, 2, 'greeting turn + reply turn');
+      assert.ok(sent.some((m) => m.event === 'media'), 'media frames sent back');
+    }],
+    ['voicestream: barge-in flushes playback', async () => {
+      const { EventEmitter } = require('events');
+      const sent = [];
+      class FakeWS extends EventEmitter { constructor() { super(); this.readyState = 1; } send(s) { sent.push(JSON.parse(s)); } close() { this.readyState = 3; this.emit('close'); } }
+      // Greeting that takes long enough to still be "busy" when the caller barges in.
+      const vs = require('../lib/voicestream')({
+        synthUlaw: async () => { await new Promise((r) => setTimeout(r, 60)); return { ulaw: Buffer.alloc(8000, 0xff) }; },
+        transcribe: async () => ({ text: '' }), voiceBegin: async () => ({ mode: 'reply', text: 'A long greeting, sir.' }),
+        voicePoll: () => ({ ready: true, text: '', more: false }), log: () => {},
+      });
+      const ws = new FakeWS(); vs.handle(ws, {});
+      ws.emit('message', JSON.stringify({ event: 'start', start: { streamSid: 'MZ', callSid: 'CA' } }));
+      await new Promise((r) => setTimeout(r, 20));   // still busy (synth pending / playing)
+      const voiced = Buffer.alloc(160, 0x10).toString('base64');
+      for (let i = 0; i < 25; i++) ws.emit('message', JSON.stringify({ event: 'media', media: { payload: voiced } }));
+      await new Promise((r) => setTimeout(r, 30));
+      assert.ok(sent.some((m) => m.event === 'clear'), 'sent clear to flush queued audio on barge-in');
+    }],
   ]);
 
   console.log(`\n${failed ? '❌' : '✅'} ${passed} passed, ${failed} failed`);
