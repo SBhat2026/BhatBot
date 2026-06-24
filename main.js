@@ -1974,6 +1974,13 @@ const TOOLS = [
       mode: { type: 'string', enum: ['driving', 'walking', 'cycling'], description: 'Travel mode for directions (default driving).' },
       zoom: { type: 'number', description: 'Zoom level for show (default 14).' }
     } } },
+  { name: 'predict_function', description: 'Predict a PROTEIN\'s molecular FUNCTION with FABLE (Siddhant\'s ProtFunc model) and SEE it on the 3D structure. Give a protein `sequence` (raw amino acids or FASTA) and/or a `uniprot_id`. Returns the top predicted GO molecular-function terms with confidence, the inferred organism, and any calibration warnings. By default it ALSO fetches the AlphaFold/ESMFold structure with per-residue saliency written into B-factors and opens it in the 3D viewer colored by importance (blue=low → red=high), so the functionally important residues stand out. Use for "what does this protein do", function annotation, or visualizing which residues drive the prediction. NOTE: FABLE is trained on insect+mammal and can misclassify some enzymes — treat as a hint, and the per-term warning is shown.',
+    input_schema: { type: 'object', properties: {
+      sequence: { type: 'string', description: 'Protein amino-acid sequence (raw or FASTA; header accession is auto-detected).' },
+      uniprot_id: { type: 'string', description: 'Optional UniProt accession (e.g. "P0DTC2") — improves structure lookup (AlphaFold) and organism grounding.' },
+      taxon: { type: 'string', enum: ['auto', 'insect', 'mammal'], description: 'Organism calibration. Default auto (inferred).' },
+      show_structure: { type: 'boolean', description: 'Open the saliency-colored 3D structure in the viewer (default true).' }
+    }, required: ['sequence'] } },
   { name: 'play_chess', description: 'Open a playable chess game in its own window for Siddhant. Full rules engine (legal moves, castling, en passant, promotion, check/checkmate/stalemate) with a built-in AI opponent powered by the Stockfish online API at three strengths. Use whenever he wants to play chess. Optional difficulty.',
     input_schema: { type: 'object', properties: { difficulty: { type: 'string', enum: ['easy', 'medium', 'hard'], description: 'AI strength: easy (casual), medium (depth 8), hard (depth 14). Default medium.' } } } },
   { name: 'screen_observe', description: 'WATCH SIDDHANT\'S WHOLE SCREEN to learn how he works — use this when he SAYS to (e.g. "watch my screen", "start watching", "learn how I do this"). Covers ANY app, not just the browser (that is browser_observe). His command IS the consent, so you do NOT need to ask again — just start. Flow: action:"start"{minutes:1-30} begins a time-boxed session that notes what he is doing every ~25s via the LOCAL vision model (no screenshots are saved; passwords/codes/cards are skipped). When he is done, action:"review" returns the notes — narrate them and ASK which to remember; action:"save"{items:[...approved plain-English habits]} writes ONLY approved items to long-term memory. "stop" ends early; "status" shows whether active + recent notes; "snapshot" describes the screen once. Never auto-start without his word.',
@@ -3616,6 +3623,9 @@ function openMoleculeWindow(payload) {
 }
 ipcMain.on('molecule-ready', (e) => { try { if (pendingMol) e.sender.send('molecule', pendingMol); } catch {} });
 
+// --- FABLE / ProtFunc tie-in: predict protein FUNCTION → SEE it on the saliency-colored structure ---
+const protfunc = require('./lib/protfunc')({ getUrl: () => { try { return (loadConfig().protfunc && loadConfig().protfunc.url) || ''; } catch { return ''; } } });
+
 // --- Maps (Leaflet + OSM by default; Google geocoding when config.maps.googleKey present) ---
 const maps = require('./lib/maps')({ getKey: () => { try { return (loadConfig().maps && loadConfig().maps.googleKey) || ''; } catch { return ''; } } });
 let mapsWindow = null, pendingMap = null;
@@ -3769,6 +3779,36 @@ async function executeTool(name, input) {
               message: `Opened ${payload.kind === 'protein' ? 'protein' : 'molecule'} ${payload.label} in the 3D viewer (${payload.style} style)${propStr}.` };
           } catch (e) { result = { success: false, error: e.message }; }
         }
+        break;
+      }
+      case 'predict_function': {
+        try {
+          const show = input.show_structure !== false;
+          const a = await protfunc.analyze({ sequence: input.sequence, uniprotId: input.uniprot_id || '', taxon: input.taxon || 'auto', withStructure: show });
+          // Open the saliency-colored structure if we got one.
+          let viz = null;
+          const sal = a.saliency;
+          if (show && sal && sal.pdb) {
+            const kind = sal.coloring || 'plddt'; // 'saliency' (importance) | 'plddt' (confidence)
+            openMoleculeWindow({
+              format: 'pdb', data: sal.pdb, kind: 'protein',
+              label: (input.uniprot_id ? input.uniprot_id.toUpperCase() : 'protein') + ` (${a.length} aa)`,
+              source: 'FABLE · ' + sal.source, colorBy: 'bfactor', bfactorKind: kind, style: 'saliency',
+              functions: { predictions: a.predictions, organism: a.organism, taxonApplied: a.taxonApplied, warning: a.warning },
+            });
+            viz = { source: sal.source, kind };
+          }
+          const top = a.predictions.slice(0, 8).map((p) => `${p.name} (${Math.round(p.prob * 100)}%)`);
+          const lines = [
+            `FABLE predicted function${a.organism ? ' — ' + a.organism : ''} (${a.length} aa):`,
+            ...(top.length ? top.map((t, i) => `  ${i + 1}. ${t}`) : ['  (no terms above threshold)']),
+          ];
+          if (viz) lines.push(`Opened the structure (${viz.source}) in the 3D viewer, colored by ${viz.kind === 'saliency' ? 'per-residue importance' : 'pLDDT confidence (saliency was flat)'}.`);
+          else if (show) lines.push('(structure unavailable — give a uniprot_id for the AlphaFold model)');
+          if (a.warning) lines.push(`⚠ ${a.warning}`);
+          result = { success: true, length: a.length, organism: a.organism, predictions: a.predictions.slice(0, 12),
+            warning: a.warning || undefined, structure: viz || undefined, message: lines.join('\n') };
+        } catch (e) { result = { success: false, error: e.message }; }
         break;
       }
       case 'maps': {

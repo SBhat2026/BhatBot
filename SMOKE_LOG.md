@@ -106,3 +106,13 @@ France edge it — 55% to win, with Brazil at 2
   - reply: Mexico. Two wins, six points, three-goal difference. South Korea's a distant second.
 - PASS **date-grounding**
   - reply: Tuesday, June 23, 2026 at 8:50 PM EDT.
+
+## 2026-06-24T13:40:08.721Z — 1/4 passed
+- PASS **world-cup-update**
+  - reply: ⏹ Stopped.
+- FAIL **predict-matchup** — reply missing /%|percent|favored|chance|odds/i
+  - reply: ⏹ Stopped.
+- FAIL **group-standings** — request failed/timeout: fetch failed; tool world_cup not called
+  - reply: 
+- FAIL **date-grounding** — request failed/timeout: fetch failed; reply missing /2026/
+  - reply: 

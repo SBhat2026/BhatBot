@@ -17,9 +17,26 @@
     color:#9fb4c8; font:11px 'JetBrains Mono',monospace; padding:3px 9px; border-radius:5px; }
   .sbtn:hover { background:rgba(0,200,255,.18); }
   .sbtn.on { background:var(--accent); color:#04121b; border-color:var(--accent); }
+  .sbtn.hidden { display:none; }
   #props { position:fixed; bottom:10px; left:14px; font-size:11px; color:#6b84a0; z-index:5; line-height:1.7;
     background:rgba(10,15,23,.7); padding:6px 10px; border-radius:6px; max-width:60%; }
   #hint { position:fixed; bottom:10px; right:14px; font-size:11px; color:#46627d; z-index:5; }
+  /* FABLE function panel (predicted GO-MF terms) */
+  #funcs { position:fixed; top:42px; right:14px; width:300px; max-height:64%; overflow:auto; z-index:6;
+    background:rgba(10,15,23,.82); border:1px solid rgba(0,200,255,.18); border-radius:8px; padding:10px 12px;
+    font-size:11px; line-height:1.5; display:none; }
+  #funcs h3 { color:var(--accent); font-size:10px; letter-spacing:.14em; margin-bottom:7px; font-weight:600; }
+  .frow { display:flex; align-items:center; gap:7px; margin:3px 0; }
+  .fbar { height:6px; border-radius:3px; background:var(--accent); flex:0 0 auto; min-width:2px; }
+  .fnm { color:#bcd0e4; flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .fpct { color:#5b708a; flex:0 0 auto; }
+  #funcs .warn { color:#ffcf8a; margin-top:8px; padding-top:7px; border-top:1px solid rgba(255,207,138,.18); font-size:10px; line-height:1.45; }
+  #funcs .meta { color:#5b708a; margin-bottom:7px; font-size:10px; }
+  /* Saliency legend (shown only in saliency color mode) */
+  #legend { position:fixed; bottom:42px; right:14px; z-index:6; display:none; align-items:center; gap:8px;
+    font-size:10px; color:#6b84a0; background:rgba(10,15,23,.7); padding:5px 9px; border-radius:6px; }
+  #legbar { width:120px; height:8px; border-radius:4px;
+    background:linear-gradient(90deg,#2b6cff,#ffffff,#ff3b3b); }
   #err { position:fixed; inset:0; display:none; align-items:center; justify-content:center; text-align:center; padding:30px; color:#ff8a99; font-size:13px; line-height:1.6; }
 </style>
 </head>
@@ -30,9 +47,12 @@
     <span class="sbtn" data-style="stick">stick</span>
     <span class="sbtn" data-style="sphere">sphere</span>
     <span class="sbtn" data-style="surface">surface</span>
+    <span class="sbtn hidden" id="salbtn" data-style="saliency">saliency</span>
   </div>
 </div>
 <div id="viewport"></div>
+<div id="funcs"></div>
+<div id="legend"><span id="leglo">low</span><div id="legbar"></div><span id="leghi">high importance</span></div>
 <div id="props"></div>
 <div id="hint">drag to rotate · scroll to zoom · shift-drag to pan</div>
 <div id="err"></div>
@@ -40,7 +60,7 @@
 <script src="./vendor/3dmol/3Dmol-min.js"></script>
 <script>
   const $ = (id) => document.getElementById(id);
-  let viewer = null, current = null, curStyle = 'cartoon';
+  let viewer = null, current = null, curStyle = 'cartoon', hasSaliency = false, bfKind = 'saliency';
 
   function applyStyle(style) {
     if (!viewer) return;
@@ -51,23 +71,61 @@
     else if (style === 'stick')   viewer.setStyle({}, { stick: { radius: 0.18 }, sphere: { scale: 0.22 } });
     else if (style === 'sphere')  viewer.setStyle({}, { sphere: {} });
     else if (style === 'surface') { viewer.setStyle({}, { cartoon: { color: 'spectrum' } }); viewer.addSurface($3Dmol.SurfaceType.VDW, { opacity: 0.75, color: 'white' }); }
+    else if (style === 'saliency') {
+      // Color by per-residue B-factor (FABLE tie-in). Two meanings:
+      //   saliency → high importance = red  (domain min:1=red, max:0=blue)
+      //   plddt    → high confidence = blue (domain min:0=red, max:1=blue)
+      const cs = bfKind === 'plddt' ? { prop: 'b', gradient: 'rwb', min: 0, max: 1 }
+                                    : { prop: 'b', gradient: 'rwb', min: 1, max: 0 };
+      viewer.setStyle({}, { cartoon: { colorscheme: cs }, stick: { radius: 0.12, colorscheme: cs } });
+    }
+    $('legend').style.display = style === 'saliency' ? 'flex' : 'none';
     document.querySelectorAll('.sbtn').forEach((b) => b.classList.toggle('on', b.dataset.style === style));
     viewer.render();
+  }
+
+  // Render the FABLE predicted-function panel (top GO-MF terms with confidence bars).
+  function showFuncs(payload) {
+    const fn = payload.functions;
+    if (!fn || !(fn.predictions && fn.predictions.length) && !fn.warning) { $('funcs').style.display = 'none'; return; }
+    let html = '<h3>◈ FABLE — PREDICTED FUNCTION</h3>';
+    if (fn.organism) html += `<div class="meta">${fn.organism}${fn.taxonApplied ? ' · ' + fn.taxonApplied : ''}</div>`;
+    (fn.predictions || []).slice(0, 12).forEach((p) => {
+      const pct = Math.round((p.prob || 0) * 100);
+      html += `<div class="frow"><div class="fbar" style="width:${Math.max(2, pct * 0.6)}px;opacity:${0.4 + p.prob * 0.6}"></div>` +
+        `<span class="fnm" title="${p.id} — ${p.name}">${p.name}</span><span class="fpct">${pct}%</span></div>`;
+    });
+    if (fn.warning) html += `<div class="warn">⚠ ${fn.warning}</div>`;
+    $('funcs').innerHTML = html;
+    $('funcs').style.display = 'block';
   }
 
   function show(payload) {
     try {
       current = payload;
+      hasSaliency = !!payload.colorBy && payload.colorBy === 'bfactor';
+      bfKind = payload.bfactorKind || 'saliency';
+      if (hasSaliency) {
+        $('salbtn').textContent = bfKind === 'plddt' ? 'confidence' : 'saliency';
+        $('leglo').textContent = bfKind === 'plddt' ? 'low conf' : 'low';
+        $('leghi').textContent = bfKind === 'plddt' ? 'high confidence' : 'high importance';
+        // pLDDT convention: red(low)→blue(high); saliency: blue(low)→red(high).
+        $('legbar').style.background = bfKind === 'plddt'
+          ? 'linear-gradient(90deg,#ff3b3b,#ffffff,#2b6cff)'
+          : 'linear-gradient(90deg,#2b6cff,#ffffff,#ff3b3b)';
+      }
       $('name').textContent = (payload.label || '') + (payload.source ? '  ·  ' + payload.source : '');
       if (payload.props) {
         const p = payload.props;
         $('props').innerHTML = `formula <b style="color:#9fb4c8">${p.formula}</b> · MW ${p.mw} · logP ${p.logp} · HBD ${p.hbd} · HBA ${p.hba} · TPSA ${p.tpsa} · rot ${p.rot_bonds}`;
       } else $('props').textContent = '';
+      showFuncs(payload);
+      $('salbtn').classList.toggle('hidden', !hasSaliency);
       if (!viewer) viewer = $3Dmol.createViewer($('viewport'), { backgroundColor: '0x0a0f17' });
       viewer.clear();
       viewer.addModel(payload.data, payload.format);
-      // proteins → cartoon by default; small molecules → stick
-      applyStyle(payload.style || (payload.kind === 'protein' ? 'cartoon' : 'stick'));
+      // saliency-colored structure → default to the saliency view; else normal defaults.
+      applyStyle(payload.style || (hasSaliency ? 'saliency' : (payload.kind === 'protein' ? 'cartoon' : 'stick')));
       viewer.zoomTo();
       viewer.render();
     } catch (e) {
