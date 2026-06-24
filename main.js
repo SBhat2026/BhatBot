@@ -4235,11 +4235,15 @@ async function agentLoop(history, apiKey, event, opts = {}) {
   const ttsSeq = stream ? (opts.ttsSeq != null ? opts.ttsSeq : ttsStreamStart()) : null;
   if (stream && ttsSeq != null && opts.ttsSeq == null) maybeAck(ttsSeq, lastUserText(history));   // instant verbal ack
   const speakParser = stream ? makeSpeakStream(ttsSeq) : null;
+  // opts.onToken: a raw-delta sink (phone streaming) that captures the reply WITHOUT desktop TTS —
+  // lets the Twilio path start speaking the first sentence before the full reply is generated.
+  const capture = typeof opts.onToken === 'function' ? opts.onToken : null;
   // Display the tag-stripped tokens live; TTS hears only <speak>…</speak> (handled inside the parser).
-  const onText = stream ? (delta) => {
+  const onText = (stream || capture) ? (delta) => {
     latMark('first-token');
     const disp = speakParser ? speakParser.feed(delta) : delta;
-    if (disp) sendToAll(event, 'tool-update', { type: 'token', text: disp });
+    if (disp && stream) sendToAll(event, 'tool-update', { type: 'token', text: disp });
+    if (capture) try { capture(delta); } catch {}
   } : undefined;
 
   // Fast plan + read-out (desktop voice path). Draft a quick plan, SPEAK a summary, show the
@@ -4972,7 +4976,7 @@ async function initMcpServer() {
     await startMcpServer({
       port, token, runAgent: runAgentHeadless, transcribe: transcribeAudio,
       synthesize: synthesizeSpeech, summarize: summarizeForSpeech, media: mediaBytesToBlocks,
-      voiceTurn, endVoiceCall, getActivity, nexusUrl: NEXUS_URL, ownerPhone: c.myPhone,
+      voiceTurn, voiceBegin, voicePoll, endVoiceCall, getActivity, nexusUrl: NEXUS_URL, ownerPhone: c.myPhone,
       twilioAuthToken: c.twilioToken, jobs: jobsBus, control: phoneControl, screenshot: captureScreenJpeg,
       // Phone-call speech-recognition tuning (see gatherTwiml). All optional in config.json.
       voice: { hints: c.voiceHints, speechModel: c.voiceSpeechModel, speechTimeout: c.voiceSpeechTimeout,
@@ -5063,33 +5067,98 @@ function telegramNotify(text) {
 const voiceCalls = new Map();   // CallSid → { history:[], turns:0 }
 const VOICE_BYE = /\b(good ?bye|bye bye|that'?s all|hang up|end (the )?call|nothing else|i'?m done|talk later|see you)\b/i;
 
-// One spoken turn of a live call. speech = what the user just said (empty on the
-// first turn → just greet). Returns { text, hangup }. Short, spoken-style replies.
-async function voiceTurn(callSid, speech, greeting) {
+// ── Live phone-call turn engine ───────────────────────────────────────────────────────────
+// Two-tier for low latency: SIMPLE (conversational) turns — most of a call — get a fast
+// tool-less streamed reply inline; COMPLEX (tool-needing) turns run the full agent in the
+// BACKGROUND while the caller hears filler ("Let me think…" / "uhh, one moment"), and the reply
+// then streams out sentence-by-sentence as it generates (voicePoll). No dead air either way.
+const VOICE_FILLERS = ['Mm, one moment, sir.', 'Uh, let me see…', 'Still with you, sir…', 'Just a moment more…', 'Hm, nearly there…'];
+function nextFiller(st) { const f = VOICE_FILLERS[(st._fi || 0) % VOICE_FILLERS.length]; st._fi = (st._fi || 0) + 1; return f; }
+function clampSpoken(t) { let s = String(t || '').replace(/[*_`#>\[\]]/g, '').replace(/\s+/g, ' ').trim(); if (s.length > 700) s = s.slice(0, 697) + '…'; return s; }
+
+// Pull complete sentences off the streaming buffer once they're long enough to be worth speaking —
+// progressive playback without choppy micro-clips. flush=true emits whatever remains at the end.
+function drainSentences(st, { flush = false } = {}) {
+  const out = []; const buf = st._buf || '';
+  const RE = /[^.!?…]+[.!?…]+(?:["')\]]+)?/g; let m, last = 0;
+  while ((m = RE.exec(buf))) { const sent = m[0].trim(); if (sent.length >= 12) { out.push(sent); last = RE.lastIndex; } }
+  let rem = buf.slice(last);
+  if (flush && rem.trim()) { out.push(rem.trim()); rem = ''; }
+  st._buf = rem;
+  return out;
+}
+
+// Tool-less fast reply for conversational turns (low latency, no agent/tool loop).
+async function voiceFastReply(history) {
+  const sys = systemBlocks(lastUserText(history)) + '\n\n[PHONE CALL: answer in ONE or two short spoken sentences, plain text, no lists.]';
+  const r = await anthropicStream({ model: MODEL_HAIKU, max_tokens: 320, system: sys, messages: capTokens(history) }, getApiKey(), null);
+  return clampSpoken(r.content.filter((b) => b.type === 'text').map((b) => b.text).join(' '));
+}
+
+// Begin a spoken turn:
+//   { mode:'reply', text, hangup }   — speak now (greeting, simple turn, or bye)
+//   { mode:'thinking', filler }      — computing in the background; call voicePoll() until ready
+async function voiceBegin(callSid, speech, greeting) {
   let st = voiceCalls.get(callSid);
   if (!st) { st = { history: [], turns: 0 }; voiceCalls.set(callSid, st); }
   st.turns++;
-  if (st.turns > 30) return { text: 'We have spoken a good while, sir. I shall ring off now. Goodbye.', hangup: true };
+  if (st.turns > 30) return { mode: 'reply', text: 'We have spoken a good while, sir. I shall ring off now. Goodbye.', hangup: true };
   const said = String(speech || '').trim();
-  if (!said) {
-    const g = String(greeting || 'Good evening, sir. How may I help?').trim();
-    st.history.push({ role: 'assistant', content: g });
-    return { text: g, hangup: false };
-  }
-  if (VOICE_BYE.test(said) && said.length < 40) {
-    return { text: 'Very good, sir. Goodbye.', hangup: true };
-  }
+  if (!said) { const g = String(greeting || 'Good evening, sir. How may I help?').trim(); st.history.push({ role: 'assistant', content: g }); return { mode: 'reply', text: g, hangup: false }; }
+  if (VOICE_BYE.test(said) && said.length < 40) return { mode: 'reply', text: 'Very good, sir. Goodbye.', hangup: true };
   st.history.push({ role: 'user', content: '[PHONE CALL — reply in 1-2 short spoken sentences, no markdown, no lists] ' + said });
   if (st.history.length > 24) st.history = st.history.slice(-24);
-  try {
-    const res = await agentLoop(st.history, getApiKey(), { sender: { send() {} } });
-    st.history = (res.history || st.history).slice(-24);
-    let text = (res.text || 'I had no reply, sir.').replace(/[*_`#>\[\]]/g, '').replace(/\s+/g, ' ').trim();
-    if (text.length > 600) text = text.slice(0, 597) + '…';
-    return { text, hangup: false };
-  } catch (e) {
-    return { text: 'Forgive me sir, I ran into an error: ' + (e.message || 'unknown') + '.', hangup: false };
+
+  // SIMPLE → fast tool-less reply inline (most calls; ~1–2s, no filler needed).
+  if (!looksLikeToolTask(said)) {
+    try {
+      const text = await voiceFastReply(st.history);
+      st.history.push({ role: 'assistant', content: text });
+      return { mode: 'reply', text: text || 'Yes, sir?', hangup: false };
+    } catch { /* fall through to the full agent on any hiccup */ }
   }
+
+  // COMPLEX → run the full agent in the BACKGROUND, streaming sentences into st._chunks.
+  st._buf = ''; st._chunks = []; st._done = false; st._fi = 0; st._polls = 0;
+  const ev = { sender: { send() {} } };
+  st._pending = (async () => {
+    try {
+      const res = await agentLoop(st.history, getApiKey(), ev, { onToken: (d) => { st._buf += d; for (const s of drainSentences(st)) st._chunks.push(clampSpoken(s)); } });
+      st.history = (res.history || st.history).slice(-24);
+      for (const s of drainSentences(st, { flush: true })) st._chunks.push(clampSpoken(s));
+      if (!st._chunks.length) st._chunks.push(clampSpoken(res.text) || 'Done, sir.');
+    } catch { st._chunks.push('Forgive me sir, I ran into an error.'); }
+    finally { st._done = true; }
+  })();
+  return { mode: 'thinking', filler: 'Let me think for a moment, sir.' };
+}
+
+// Poll a thinking turn → the next thing to speak:
+//   { ready:true, text, more }   — speak text; more=true → keep playing (don't listen yet)
+//   { ready:false, filler }      — nothing ready yet; play filler, then poll again
+function voicePoll(callSid) {
+  const st = voiceCalls.get(callSid);
+  if (!st) return { ready: true, text: '', more: false };
+  st._polls = (st._polls || 0) + 1;
+  if (st._polls > 40) return { ready: true, text: st._done ? '' : 'Apologies sir, that is taking longer than expected — I will follow up shortly.', more: false };
+  if (st._chunks && st._chunks.length) {
+    const text = st._chunks.shift();
+    const more = st._chunks.length > 0 || !st._done;
+    return { ready: true, text, more };
+  }
+  if (st._done) return { ready: true, text: '', more: false };
+  return { ready: false, filler: nextFiller(st) };
+}
+
+// Back-compat single-shot (drains the whole turn) in case the old webhook path is ever used.
+async function voiceTurn(callSid, speech, greeting) {
+  const b = await voiceBegin(callSid, speech, greeting);
+  if (b.mode === 'reply') return { text: b.text, hangup: b.hangup };
+  const st = voiceCalls.get(callSid);
+  if (st && st._pending) { try { await st._pending; } catch {} }
+  const parts = []; let p;
+  while ((p = voicePoll(callSid)) && p.ready) { if (p.text) parts.push(p.text); if (!p.more) break; }
+  return { text: parts.join(' ') || 'Done, sir.', hangup: false };
 }
 function endVoiceCall(callSid) { if (callSid) voiceCalls.delete(callSid); }
 

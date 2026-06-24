@@ -52,7 +52,10 @@ async function run() {
     try {
       const seed = await api(`/api/${TOKEN}/activity?since=0`, null, 'GET', 8000);
       const cursor = (seed && seed.seq) || 0;
-      res = await api(`/api/${TOKEN}/chat`, { text: t.prompt });
+      // Fresh conversation per case: otherwise World Cup data from earlier cases lingers in
+      // history and the model answers from context WITHOUT re-calling world_cup → false "not called"
+      // failures (same artifact fixed in complex-eval). reset → runAgentHeadless clears mcpHistory.
+      res = await api(`/api/${TOKEN}/chat`, { text: t.prompt, new_conversation: true });
       const act = await api(`/api/${TOKEN}/activity?since=${cursor}`, null, 'GET', 8000);
       trace = (act.events || []).map((e) => e.text).join(' | ');
       text = (res && res.text) || '';

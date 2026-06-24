@@ -7,7 +7,7 @@
 
 let httpServer = null;
 
-async function startMcpServer({ port, token, runAgent, transcribe, synthesize, summarize, media, voiceTurn, endVoiceCall, getActivity, nexusUrl, ownerPhone, twilioAuthToken, jobs, control, screenshot, voice }) {
+async function startMcpServer({ port, token, runAgent, transcribe, synthesize, summarize, media, voiceTurn, voiceBegin, voicePoll, endVoiceCall, getActivity, nexusUrl, ownerPhone, twilioAuthToken, jobs, control, screenshot, voice }) {
   if (httpServer) return httpServer;
   const express = require('express');
   const fs = require('fs');
@@ -353,6 +353,12 @@ self.addEventListener('fetch', (e) => {
       // If the gather returns nothing (silence), loop back so it keeps listening.
       `<Redirect method="POST">${action}</Redirect></Response>`;
   }
+  // Play something (filler or a mid-reply chunk) then immediately poll /await again — does NOT
+  // listen, so the caller hears continuous speech while a complex turn computes/streams.
+  function continueTwiml(req, playEl) {
+    const awaitUrl = `https://${req.get('host')}/voice/${token}/await`;
+    return `<?xml version="1.0" encoding="UTF-8"?><Response>${playEl}<Redirect method="POST">${awaitUrl}</Redirect></Response>`;
+  }
 
   app.get('/voice/:token/clip/:id', guard, (req, res) => {
     const c = clips.get(String(req.params.id).replace(/\.(mp3|wav)$/, ''));
@@ -398,10 +404,45 @@ self.addEventListener('fetch', (e) => {
         const play = await sayElement(req, 'I am still here, sir. Go on.');
         return res.type('text/xml').send(gatherTwiml(req, play, false));
       }
+      // Two-tier path: simple turns answer immediately; complex turns return 'thinking' →
+      // play a "let me think" filler and poll /await while the reply streams in the background.
+      if (voiceBegin) {
+        const b = await voiceBegin(callSid, speech);
+        if (b.mode === 'thinking') {
+          const play = await sayElement(req, b.filler);
+          return res.type('text/xml').send(continueTwiml(req, play));
+        }
+        const play = await sayElement(req, b.text);
+        if (b.hangup && endVoiceCall) endVoiceCall(callSid);
+        return res.type('text/xml').send(gatherTwiml(req, play, b.hangup));
+      }
       const r = voiceTurn ? await voiceTurn(callSid, speech) : { text: 'Voice agent unavailable.' , hangup: true };
       const play = await sayElement(req, r.text);
       if (r.hangup && endVoiceCall) endVoiceCall(callSid);
       res.type('text/xml').send(gatherTwiml(req, play, r.hangup));
+    } catch (e) {
+      res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?><Response><Say>System error.</Say><Hangup/></Response>`);
+    }
+  });
+
+  // Poll leg for a complex/streaming turn: speak the next ready chunk (and keep polling if more is
+  // coming), or play a short filler while the agent is still working, or re-open the mic when done.
+  app.post('/voice/:token/await', guard, form, async (req, res) => {
+    try {
+      if (!twilioVerified(req)) return res.status(403).type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Reject/></Response>');
+      const callSid = req.body.CallSid || '';
+      const p = voicePoll ? voicePoll(callSid) : { ready: true, text: '', more: false };
+      if (!p.ready) {
+        const play = await sayElement(req, p.filler);
+        return res.type('text/xml').send(continueTwiml(req, play));
+      }
+      if (p.text && p.more) {
+        const play = await sayElement(req, p.text);   // a chunk, more coming → keep speaking
+        return res.type('text/xml').send(continueTwiml(req, play));
+      }
+      // final chunk (or nothing left) → speak it if present, then listen again
+      const play = p.text ? await sayElement(req, p.text) : '';
+      res.type('text/xml').send(gatherTwiml(req, play, false));
     } catch (e) {
       res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?><Response><Say>System error.</Say><Hangup/></Response>`);
     }

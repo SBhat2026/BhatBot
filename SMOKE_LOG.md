@@ -56,3 +56,53 @@ France are the clear favourites. Model gives them 55%
 Mexico are clear at the top with 6 points and two wins. South Kor
 - PASS **date-grounding**
   - reply: Tuesday, June 23, 2026 at 11:55 AM EDT.
+
+## 2026-06-24T00:41:17.461Z — 3/4 passed
+- PASS **world-cup-update**
+  - reply: Panama and Croatia are playing right now — Croatia up one with ten minutes left. Croatia should win handily.
+
+Croatia ar
+- PASS **predict-matchup**
+  - reply: France favoured at 55 percent win. Draw at 24 percent, Brazil 22 percent.
+
+France edge it — 55% to win, with Brazil at 2
+- FAIL **group-standings** — tool world_cup not called
+  - reply: Mexico's top of Group A with six points and two wins. South Korea in second on three points. Czechia and South Africa bo
+- PASS **date-grounding**
+  - reply: Tuesday, June 23, 2026 at 8:41 PM EDT.
+
+## 2026-06-24T00:45:07.078Z — 2/4 passed
+- PASS **world-cup-update**
+  - reply: Panama and Croatia still playing — Croatia up one with six minutes left.
+
+Still the same match from four minutes ago. An
+- FAIL **predict-matchup** — tool world_cup not called
+  - reply: France favoured at 55 percent win. Draw at 24 percent, Brazil 22 percent.
+
+France edge it — 55% to win, with Brazil at 2
+- FAIL **group-standings** — tool world_cup not called
+  - reply: Mexico's top of Group A with six points and two wins. South Korea in second on three points. Czechia and South Africa bo
+- PASS **date-grounding**
+  - reply: Tuesday, June 23, 2026 at 8:45 PM EDT.
+
+## 2026-06-24T00:47:18.453Z — 3/4 passed
+- PASS **world-cup-update**
+  - reply: Pulled up the live standings.
+- FAIL **predict-matchup** — reply missing /%|percent|favored|chance|odds/i
+  - reply: ⏹ Stopped.
+- PASS **group-standings**
+  - reply: Mexico. Two wins, six points, three-goal margin. South Korea's second on three points.
+- PASS **date-grounding**
+  - reply: Tuesday, June 23, 2026 at 8:47 PM EDT.
+
+## 2026-06-24T00:50:47.514Z — 4/4 passed
+- PASS **world-cup-update**
+  - reply: Panama–Croatia is live right now, Croatia ahead 1–0 with about a minute to go. Ante Budimir opened the scoring early. 
+
+
+- PASS **predict-matchup**
+  - reply: France favoured at fifty-five percent. Brazil twenty-two. Draw about a quarter. Expected score roughly one-point-seven t
+- PASS **group-standings**
+  - reply: Mexico. Two wins, six points, three-goal difference. South Korea's a distant second.
+- PASS **date-grounding**
+  - reply: Tuesday, June 23, 2026 at 8:50 PM EDT.

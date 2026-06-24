@@ -57,8 +57,45 @@
     $('info').textContent = `${d.distance_km} km · ${d.duration_min} min (${d.mode})`;
   }
 
-  function render(d) {
+  // ---- Google Maps JS rendering (when a key is configured): richer tiles, traffic, satellite,
+  //      Street View. Falls back to Leaflet/OSM if the script fails to load. ----
+  function loadGoogle(key) {
+    return new Promise((resolve, reject) => {
+      if (window.google && window.google.maps) return resolve();
+      const s = document.createElement('script');
+      s.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(key)}`;
+      s.async = true; s.onload = () => resolve(); s.onerror = () => reject(new Error('google maps script failed'));
+      document.head.appendChild(s);
+    });
+  }
+  function googlePoint(d) {
+    const c = { lat: d.center[0], lng: d.center[1] };
+    const gmap = new google.maps.Map($('map'), { center: c, zoom: d.zoom || 14, mapTypeControl: true, streetViewControl: true, fullscreenControl: false });
+    new google.maps.Marker({ position: c, map: gmap, title: d.label || '' });
+    new google.maps.TrafficLayer().setMap(gmap);
+    $('title').textContent = d.label || ''; $('info').textContent = 'Google';
+  }
+  function googleRoute(d) {
+    const gmap = new google.maps.Map($('map'), { mapTypeControl: true, streetViewControl: true, fullscreenControl: false });
+    const path = d.geometry.map(([la, lo]) => ({ lat: la, lng: lo }));
+    new google.maps.Polyline({ path, map: gmap, strokeColor: '#00c8ff', strokeWeight: 5, strokeOpacity: 0.85 });
+    const ends = [path[0], path[path.length - 1]];
+    ends.forEach((pt, i) => new google.maps.Marker({ position: pt, map: gmap, label: i ? 'B' : 'A' }));
+    const b = new google.maps.LatLngBounds(); path.forEach((p) => b.extend(p)); gmap.fitBounds(b);
+    new google.maps.TrafficLayer().setMap(gmap);
+    $('title').textContent = `${d.from.label.split(',')[0]} → ${d.to.label.split(',')[0]}`;
+    $('info').textContent = `${d.distance_km} km · ${d.duration_min} min (${d.mode})`;
+  }
+
+  async function render(d) {
     try {
+      if (d.googleKey) {
+        try {
+          await loadGoogle(d.googleKey);
+          if (d.kind === 'route') googleRoute(d); else googlePoint(d);
+          return;
+        } catch (e) { /* fall back to Leaflet below */ }
+      }
       if (d.kind === 'route') showRoute(d); else showPoint(d);
       setTimeout(() => { if (map) map.invalidateSize(); }, 120);
     } catch (e) {
