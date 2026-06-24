@@ -116,3 +116,23 @@ France edge it — 55% to win, with Brazil at 2
   - reply: 
 - FAIL **date-grounding** — request failed/timeout: fetch failed; reply missing /2026/
   - reply: 
+
+## 2026-06-24T13:47:13.095Z — 3/4 passed
+- PASS **world-cup-update**
+  - reply: Group B's on a knife edge — both Switzerland and Canada are tied on 4 points, so this afternoon's match at 3 PM is a gen
+- FAIL **predict-matchup** — reply missing /%|percent|favored|chance|odds/i
+  - reply: France favoured, fifty-five to twenty-two. Draw's about a quarter. Expected shots: France around one-point-seven, Brazil
+- PASS **group-standings**
+  - reply: Mexico's running it. Two wins, no losses, plus-three goal differential. South Korea's in second on three points but unbe
+- PASS **date-grounding**
+  - reply: Wednesday, June 24, 2026 at 9:47 AM EDT.
+
+## 2026-06-24T13:49:49.139Z — 4/4 passed
+- PASS **world-cup-update**
+  - reply: Switzerland vs Canada in Group B today at three o'clock. Switzerland's the slight favourite — they've got better form an
+- PASS **predict-matchup**
+  - reply: France favored at fifty-five percent, draw twenty-four percent, Brazil twenty-two. Expected goals France one-point-seven
+- PASS **group-standings**
+  - reply: Mexico's running the show — six points, two wins. South Korea second on three. Czechia and South Africa are fighting for
+- PASS **date-grounding**
+  - reply: Wednesday, June 24, 2026 at 9:49 AM EDT.

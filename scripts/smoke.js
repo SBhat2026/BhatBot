@@ -23,7 +23,9 @@ const CASES = [
   { name: 'world-cup-update', prompt: 'Can you give me an update on the World Cup?',
     wantTool: 'world_cup', noStale: /next (men'?s )?world cup|don'?t have real-?time|2022/i },
   { name: 'predict-matchup', prompt: 'Predict France vs Brazil in the World Cup',
-    wantTool: 'world_cup', wantText: /%|percent|favored|chance|odds/i },
+    // Accept spoken-style output too: British spelling + spelled-out odds (the voice summarizer
+    // says "France favoured, fifty-five to twenty-two" rather than "55%").
+    wantTool: 'world_cup', wantText: /%|percent|favou?red|chance|odds|(twenty|thirty|forty|fifty|sixty|seventy|eighty)/i },
   { name: 'group-standings', prompt: "who's winning group A?",
     wantTool: 'world_cup' },
   { name: 'date-grounding', prompt: "What's today's date?",
