@@ -68,7 +68,7 @@
 <script src="./vendor/leaflet/leaflet.js"></script>
 <script>
   const $ = (id) => document.getElementById(id);
-  let map = null, signalled = false, useGoogle = false, gmap = null, googleKey = null;
+  let map = null, signalled = false, useGoogle = false, gmap = null, googleKey = null, mapId = null, hasVector = false;
   let dirService = null, dirRenderer = null, tilted = false;
   // pts: ordered [{lat,lon,label}] origin→stops→destination. lMarkers/lLine = Leaflet overlays.
   let pts = [], mode = 'driving', lMarkers = [], lLine = null;
@@ -179,19 +179,28 @@
     });
   }
   function googleInit(center, zoom) {
-    gmap = new google.maps.Map($('map'), { center, zoom: zoom || 13, mapTypeControl: true, streetViewControl: true,
-      fullscreenControl: false, rotateControl: true, tiltInteractionEnabled: true });
+    const opts = { center, zoom: zoom || 13, mapTypeControl: true, streetViewControl: true,
+      fullscreenControl: false, rotateControl: true, tiltInteractionEnabled: true, headingInteractionEnabled: true };
+    if (mapId) opts.mapId = mapId;   // vector map → real 3D buildings + smooth tilt/rotate
+    gmap = new google.maps.Map($('map'), opts);
+    hasVector = !!mapId;
     gmap.addListener('click', (e) => onMapClick(e.latLng.lat(), e.latLng.lng()));
     google.maps.event.addListenerOnce(gmap, 'tilesloaded', () => setTimeout(signalRendered, 400));
     useGoogle = true;
   }
-  // 3D toggle: Google's 45° aerial. Needs satellite/hybrid + high zoom to show building relief.
+  // 3D toggle. Vector map (mapId) → tilt the roadmap and Google renders 3D buildings natively
+  // (smooth, rotatable). Without a vector map → fall back to 45° hybrid aerial relief.
   function toggle3D() {
     if (!useGoogle || !gmap) { showErr('3D needs a Google Maps key (config.maps.googleKey).'); return; }
     tilted = !tilted;
     $('toggle3d').classList.toggle('go', tilted);
-    if (tilted) { gmap.setMapTypeId('hybrid'); if (gmap.getZoom() < 18) gmap.setZoom(18); gmap.setTilt(45); }
-    else { gmap.setTilt(0); gmap.setMapTypeId('roadmap'); }
+    if (tilted) {
+      if (gmap.getZoom() < 17) gmap.setZoom(18);
+      if (hasVector) { gmap.setTilt(60); gmap.setHeading(40); }       // native vector 3D buildings
+      else { gmap.setMapTypeId('hybrid'); gmap.setTilt(45); }         // raster aerial fallback
+    } else {
+      gmap.setTilt(0); gmap.setHeading(0); if (!hasVector) gmap.setMapTypeId('roadmap');
+    }
   }
 
   function showBadge(km, min, m) {
@@ -225,7 +234,7 @@
   }
 
   async function render(d) {
-    signalled = false; googleKey = d.googleKey || null;
+    signalled = false; googleKey = d.googleKey || null; mapId = d.mapId || null;
     try {
       if (googleKey) { try { await loadGoogle(googleKey); googleInit({ lat: (d.center && d.center[0]) || 20, lng: (d.center && d.center[1]) || 0 }, d.zoom); } catch (e) { useGoogle = false; } }
       if (!useGoogle) leafletBase();

@@ -3627,7 +3627,10 @@ ipcMain.on('molecule-ready', (e) => { try { if (pendingMol) e.sender.send('molec
 const protfunc = require('./lib/protfunc')({ getUrl: () => { try { return (loadConfig().protfunc && loadConfig().protfunc.url) || ''; } catch { return ''; } } });
 
 // --- Maps (Leaflet + OSM by default; Google geocoding when config.maps.googleKey present) ---
-const maps = require('./lib/maps')({ getKey: () => { try { return (loadConfig().maps && loadConfig().maps.googleKey) || ''; } catch { return ''; } } });
+const maps = require('./lib/maps')({
+  getKey: () => { try { return (loadConfig().maps && loadConfig().maps.googleKey) || ''; } catch { return ''; } },
+  getMapId: () => { try { return (loadConfig().maps && loadConfig().maps.mapId) || ''; } catch { return ''; } },
+});
 let mapsWindow = null, pendingMap = null, mapRenderedCb = null;
 function openMapsWindow(payload) {
   pendingMap = payload;
@@ -3843,7 +3846,7 @@ async function executeTool(name, input) {
           const payload = await maps.prepare(input);
           // Snapshot the rendered map so it shows inline (chat/phone) — the interactive window opens too.
           const snap = await openMapsWindowSnapshot(payload);
-          console.log('[maps] snapshot', snap ? Math.round(snap.length / 1024) + 'KB jpeg' : 'none (window-only)');
+          console.log('[maps] snapshot', snap ? Math.round(snap.length / 1024) + 'KB jpeg' : 'none (window-only)', '| backend:', payload.googleKey ? ('google' + (payload.mapId ? ' vector(' + payload.mapId + ')' : '')) : 'leaflet/osm');
           const img = snap ? { _image: snap, _imageMime: 'image/jpeg' } : {};
           if (payload.kind === 'route') {
             result = { success: true, kind: 'route', distance_km: payload.distance_km, duration_min: payload.duration_min, mode: payload.mode, ...img,
