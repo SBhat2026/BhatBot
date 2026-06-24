@@ -1079,12 +1079,25 @@ document.addEventListener('keydown', (e) => {
 // ("that's all", "we're done", "go to sleep", "stop listening", "dismissed", "goodbye").
 let convoMode = false;
 let ttsIdle = true;            // true once main signals speech has fully drained for the turn
-const STOP_RE = /^\s*(thanks[, ]*)?(that'?s (all|it|everything)|that'?ll be all|that will be all|that'?ll do|we'?re done|we are done|i'?m done|i am done|all done|done for now|(i'?m|i am) (satisfied|good|all set)|done with (the|this|my) project( for now)?|go to sleep|goto sleep|stop listening|stop the conversation|stand down|dismissed|good\s?bye|bye( bhatbot| jarvis)?|you can stop|that is all)\.?\s*$/i;
+// End-phrases that close conversation mode. Substring (not anchored) + a length guard below, so
+// "okay, that's all for now, thanks" still ends cleanly while a real query that happens to contain
+// "I'm done with my homework, what next?" (long) does NOT. Mirrors the phone path's VOICE_BYE +
+// `said.length < 40` so desktop and phone end-phrases stay consistent.
+const STOP_RE = /\b(that'?s (all|it|everything)|that'?ll (be all|do)|that will be all|we'?re done|we are done|i'?m done|i am done|all done|done for now|done with (the|this|my) project( for now)?|go ?to sleep|stop listening|stop the conversation|stand down|dismissed|good ?bye|bye bye|bye( bhatbot| jarvis)?|nothing else|talk later|see you|you can stop|that is all|(i'?m|i am) (satisfied|good|all set))\b/i;
+const STOP_MAXLEN = 48;        // an end-phrase is a short utterance; longer = a real request
 function setConvo(on) {
   convoMode = on;
   document.body.classList.toggle('convo', on);
   if (mic) mic.title = on ? 'Conversation mode ON — say "that\'s all" to stop' : 'Voice';
   if (on) tbar.textContent = '🎧 conversation open — talk freely, say "that\'s all" to end';
+}
+// Close conversation mode: stop re-arming the mic and give a brief JARVIS ack in the ONE voice
+// (ElevenLabs/Kokoro via speak() — never the rogue macOS `say`). setConvo(false) FIRST so the
+// onTtsIdle→maybeRearm that fires after the ack sees convo off and does not reopen the mic.
+function endConvo() {
+  setConvo(false);
+  tbar.textContent = '🎧 conversation closed — say "Jarvis" when you need me';
+  try { speak('Very good, sir. Say Jarvis when you need me.'); } catch {}
 }
 // Re-arm the mic for the next turn once: nothing is busy/recording and speech has drained.
 function maybeRearm() {
@@ -1102,7 +1115,9 @@ window.bhatbot.onWakeCommand((text) => {
 });
 // Barge-in: user spoke over Bhatbot → main already stopped the TTS; arm capture so their
 // interrupting words become the next command.
-window.bhatbot.onBargeIn(() => { if (!recording) startVoice(); });
+// Only reopen the mic on barge-in while a conversation is open — otherwise barging over the
+// closing "Very good, sir" ack (or an idle brief) would silently re-arm against the user's "that's all".
+window.bhatbot.onBargeIn(() => { if (convoMode && !recording) startVoice(); });
 
 // ===================== voice: STT + wake word =====================
 const mic = $('#mic');
@@ -1308,8 +1323,9 @@ async function onRecStop() {
 // guidance into the running task (barge-in steering) instead of starting a new request.
 function submitVoice(text) {
   const t = (text || '').trim(); if (!t) return;
-  // In conversation mode a stop phrase closes the loop instead of becoming a query.
-  if (convoMode && STOP_RE.test(t)) { setConvo(false); tbar.textContent = '🎧 conversation closed'; try { window.bhatbot.sayLocal('Going quiet. Say Jarvis when you need me.'); } catch {} return; }
+  // In conversation mode a SHORT stop phrase closes the loop instead of becoming a query
+  // (short-circuits before the agent ever sees it). Length guard keeps real requests through.
+  if (convoMode && t.length <= STOP_MAXLEN && STOP_RE.test(t)) { endConvo(); return; }
   if (busy) {
     window.bhatbot.sendGuidance(t);
     addThought('↳ steering (mid-task): ' + t);

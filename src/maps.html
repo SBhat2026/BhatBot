@@ -13,46 +13,77 @@
     font-size:12px; color:#5b708a; background:linear-gradient(180deg,rgba(10,15,23,.92),rgba(10,15,23,0)); z-index:1000; pointer-events:none; }
   #bar b { color:var(--accent); letter-spacing:.12em; }
   #title { color:#bcd0e4; }
-  #info { margin-left:auto; color:#9fb4c8; text-align:right; max-width:70%; }
-  /* Route summary badge — clear at-a-glance distance/ETA without crowding the map */
-  #badge { position:fixed; bottom:18px; left:14px; z-index:1000; display:none; background:rgba(10,15,23,.85);
+  #info { margin-left:auto; color:#9fb4c8; text-align:right; max-width:55%; }
+  /* Route planner panel — collapsible so it's not overwhelming */
+  #panel { position:fixed; top:34px; left:14px; z-index:1100; width:268px; background:rgba(10,15,23,.9);
+    border:1px solid rgba(0,200,255,.22); border-radius:10px; padding:10px; font-size:12px; }
+  #panel h4 { color:var(--accent); font-size:10px; letter-spacing:.14em; margin-bottom:8px; display:flex; align-items:center; gap:6px; }
+  #panel .row { display:flex; gap:6px; margin:5px 0; align-items:center; }
+  #panel input, #panel select { flex:1; background:rgba(0,200,255,.06); border:1px solid rgba(0,200,255,.2); color:#cfe2f3;
+    font:11px 'JetBrains Mono',monospace; padding:5px 7px; border-radius:5px; min-width:0; }
+  #panel .dot { width:9px; height:9px; border-radius:50%; flex:0 0 auto; }
+  .dot.a { background:#00c8ff; } .dot.b { background:#ff6b9d; } .dot.w { background:#ffcf6b; }
+  #panel button { cursor:pointer; background:rgba(0,200,255,.1); border:1px solid rgba(0,200,255,.3); color:#cfe2f3;
+    font:11px 'JetBrains Mono',monospace; padding:5px 9px; border-radius:5px; }
+  #panel button:hover { background:rgba(0,200,255,.2); }
+  #panel button.go { background:var(--accent); color:#04121b; border-color:var(--accent); font-weight:600; }
+  #panel .hint { color:#5b708a; font-size:10px; margin-top:6px; line-height:1.5; }
+  #panel .err { color:#ff9aa8; font-size:10px; margin-top:5px; display:none; }
+  #toggle3d { margin-left:auto; }
+  #collapse { cursor:pointer; color:#5b708a; background:none; border:none; font-size:14px; padding:0 2px; }
+  #stops { max-height:120px; overflow:auto; }
+  #badge { position:fixed; bottom:18px; left:14px; z-index:1000; display:none; background:rgba(10,15,23,.88);
     border:1px solid rgba(0,200,255,.25); border-radius:8px; padding:8px 12px; font-size:12px; line-height:1.5; }
   #badge b { color:var(--accent); }
   #badge .sub { color:#5b708a; font-size:10px; }
   #err { position:fixed; inset:0; display:none; align-items:center; justify-content:center; text-align:center; padding:30px; color:#ff8a99; font-size:13px; z-index:2000; }
   .leaflet-container { background:#0a0f17; }
-  .leaflet-control-layers, .leaflet-control-scale-line { font-family:'JetBrains Mono',monospace; }
-  .endpin { background:var(--accent); width:14px; height:14px; border-radius:50% 50% 50% 0; transform:rotate(-45deg);
-    border:2px solid #04121b; box-shadow:0 0 0 2px rgba(0,200,255,.4); }
+  .endpin { width:14px; height:14px; border-radius:50% 50% 50% 0; transform:rotate(-45deg); border:2px solid #04121b; }
+  .endpin.a { background:#00c8ff; box-shadow:0 0 0 2px rgba(0,200,255,.4); }
   .endpin.b { background:#ff6b9d; box-shadow:0 0 0 2px rgba(255,107,157,.4); }
+  .endpin.w { background:#ffcf6b; box-shadow:0 0 0 2px rgba(255,207,107,.4); }
 </style>
 </head>
 <body>
 <div id="bar"><b>◉ MAPS</b><span id="title"></span><span id="info"></span></div>
 <div id="map"></div>
+<div id="panel">
+  <h4>◧ ROUTE PLANNER <button id="toggle3d" title="3D tilt (Google)">3D</button> <button id="collapse" title="collapse">▾</button></h4>
+  <div id="body">
+    <div class="row"><span class="dot a"></span><input id="from" placeholder="From (or click map)" /></div>
+    <div class="row"><span class="dot b"></span><input id="to" placeholder="To" /></div>
+    <div id="stops"></div>
+    <div class="row">
+      <select id="mode"><option value="driving">Drive</option><option value="walking">Walk</option><option value="cycling">Bike</option></select>
+      <button id="route" class="go">Route</button>
+      <button id="clear">Clear</button>
+    </div>
+    <div class="hint">Click the map to drop From, then To. Click again to add a stop. Drag any pin to re-route.</div>
+    <div class="err" id="perr"></div>
+  </div>
+</div>
 <div id="badge"></div>
 <div id="err"></div>
 
 <script src="./vendor/leaflet/leaflet.js"></script>
 <script>
   const $ = (id) => document.getElementById(id);
-  let map = null, signalled = false;
+  let map = null, signalled = false, useGoogle = false, gmap = null, googleKey = null;
+  let dirService = null, dirRenderer = null, tilted = false;
+  // pts: ordered [{lat,lon,label}] origin→stops→destination. lMarkers/lLine = Leaflet overlays.
+  let pts = [], mode = 'driving', lMarkers = [], lLine = null;
 
   if (window.L) {
     L.Icon.Default.prototype.options.iconUrl = './vendor/leaflet/marker-icon.png';
     L.Icon.Default.prototype.options.iconRetinaUrl = './vendor/leaflet/marker-icon-2x.png';
     L.Icon.Default.prototype.options.shadowUrl = './vendor/leaflet/marker-shadow.png';
   }
-
-  // Tell main the map is fully drawn → it captures a PNG snapshot (inline visualization).
   function signalRendered() { if (signalled) return; signalled = true; try { window.bmaps && window.bmaps.rendered && window.bmaps.rendered(); } catch {} }
-  // Always signal eventually, even if a tile load stalls.
   setTimeout(signalRendered, 4500);
+  function pinKind(i) { return i === 0 ? 'a' : (i === pts.length - 1 ? 'b' : 'w'); }
+  function lPin(i) { return L.divIcon({ className: '', html: `<div class="endpin ${pinKind(i)}"></div>`, iconSize: [14, 14], iconAnchor: [7, 14] }); }
 
-  function pin(b) { return L.divIcon({ className: '', html: `<div class="endpin${b ? ' b' : ''}"></div>`, iconSize: [14, 14], iconAnchor: [7, 14] }); }
-
-  // Base map with Streets + Satellite layers (both free) and a scale bar. Not overwhelming:
-  // one small layers toggle, one scale — everything else is the map itself.
+  // ---------------- Leaflet base (free): Streets + Satellite, scale ----------------
   function leafletBase() {
     map = L.map('map', { zoomControl: true, attributionControl: false });
     const streets = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 });
@@ -61,37 +92,83 @@
     L.control.layers({ Streets: streets, Satellite: sat }, null, { position: 'topright', collapsed: true }).addTo(map);
     L.control.scale({ position: 'bottomright', imperial: true }).addTo(map);
     streets.on('load', () => setTimeout(signalRendered, 300));
+    map.on('click', (e) => onMapClick(e.latlng.lat, e.latlng.lng));
   }
 
-  function showPoint(d) {
-    leafletBase();
-    map.setView(d.center, d.zoom || 14);
-    L.marker(d.center, { icon: pin(false) }).addTo(map).bindPopup('<b>' + (d.label || '') + '</b>').openPopup();
-    $('title').textContent = d.label || '';
-    $('info').textContent = d.source === 'google' ? 'Google' : 'OpenStreetMap';
+  // ---------------- shared planner state ----------------
+  function setInputsFromPts() {
+    $('from').value = pts[0] ? (pts[0].label || `${pts[0].lat.toFixed(4)}, ${pts[0].lon.toFixed(4)}`) : '';
+    const last = pts.length > 1 ? pts[pts.length - 1] : null;
+    $('to').value = last ? (last.label || `${last.lat.toFixed(4)}, ${last.lon.toFixed(4)}`) : '';
+    const mids = pts.slice(1, -1);
+    $('stops').innerHTML = mids.map((p, i) => `<div class="row"><span class="dot w"></span><input value="${(p.label || p.lat.toFixed(4) + ',' + p.lon.toFixed(4)).replace(/"/g, '')}" data-stop="${i}" readonly /></div>`).join('');
+  }
+  async function onMapClick(lat, lon) {
+    if (pts.length >= 2) pts.splice(pts.length - 1, 0, { lat, lon });   // insert as a stop before destination
+    else pts.push({ lat, lon });
+    setInputsFromPts();
+    if (pts.length >= 2) recompute(); else drawMarkersOnly();
+  }
+  function showErr(m) { const e = $('perr'); if (!m) { e.style.display = 'none'; return; } e.textContent = m; e.style.display = 'block'; }
+
+  async function recompute() {
+    showErr('');
+    if (pts.length < 2) return;
+    if (useGoogle) return googleDirections();
+    return leafletRoute();
   }
 
-  function showRoute(d) {
-    leafletBase();
-    // Casing under the route line for contrast on any basemap.
-    L.polyline(d.geometry, { color: '#04121b', weight: 9, opacity: 0.6 }).addTo(map);
-    const line = L.polyline(d.geometry, { color: '#00c8ff', weight: 5, opacity: 0.95 }).addTo(map);
-    L.marker(d.geometry[0], { icon: pin(false) }).addTo(map).bindPopup('Start: ' + (d.from.label || ''));
-    L.marker(d.geometry[d.geometry.length - 1], { icon: pin(true) }).addTo(map).bindPopup('End: ' + (d.to.label || ''));
-    map.fitBounds(line.getBounds(), { padding: [60, 60] });
-    $('title').textContent = `${d.from.label.split(',')[0]} → ${d.to.label.split(',')[0]}`;
-    $('info').textContent = `${d.distance_km} km · ${d.duration_min} min (${d.mode})`;
-    showBadge(d);
+  // ---------------- Leaflet routing (OSRM via backend bridge) ----------------
+  function clearLeaflet() { lMarkers.forEach((m) => map.removeLayer(m)); lMarkers = []; if (lLine) { map.removeLayer(lLine); lLine = null; } }
+  function drawMarkersOnly() {
+    if (useGoogle) return; clearLeaflet();
+    pts.forEach((p, i) => addLeafletMarker(p, i));
+    if (pts.length === 1) map.setView([pts[0].lat, pts[0].lon], Math.max(map.getZoom(), 13));
+  }
+  function addLeafletMarker(p, i) {
+    const mk = L.marker([p.lat, p.lon], { icon: lPin(i), draggable: true }).addTo(map);
+    mk.on('dragend', () => { const ll = mk.getLatLng(); pts[i] = { lat: ll.lat, lon: ll.lng }; setInputsFromPts(); recompute(); });
+    mk.bindPopup((i === 0 ? 'Start' : i === pts.length - 1 ? 'End' : 'Stop') + (p.label ? ': ' + p.label.split(',')[0] : ''));
+    lMarkers.push(mk);
+  }
+  async function leafletRoute() {
+    const r = await window.bmaps.routePath(pts.map((p) => [p.lat, p.lon]), mode);
+    if (!r || !r.ok) return showErr(r && r.error || 'route failed');
+    clearLeaflet();
+    L.polyline(r.geometry, { color: '#04121b', weight: 9, opacity: 0.6 }).addTo(map);
+    lLine = L.polyline(r.geometry, { color: '#00c8ff', weight: 5, opacity: 0.95 }).addTo(map);
+    pts.forEach((p, i) => addLeafletMarker(p, i));
+    map.fitBounds(lLine.getBounds(), { padding: [60, 60] });
+    showBadge(r.distance_km, r.duration_min, r.mode);
   }
 
-  function showBadge(d) {
-    const b = $('badge'); b.style.display = 'block';
-    const h = Math.floor(d.duration_min / 60), m = Math.round(d.duration_min % 60);
-    const eta = h ? `${h} h ${m} min` : `${m} min`;
-    b.innerHTML = `<b>${eta}</b> · ${d.distance_km} km<div class="sub">${d.mode} · ${d.from.label.split(',')[0]} → ${d.to.label.split(',')[0]}</div>`;
+  // ---------------- Google routing + 3D ----------------
+  function gTravelMode() { return mode === 'walking' ? google.maps.TravelMode.WALKING : mode === 'cycling' ? google.maps.TravelMode.BICYCLING : google.maps.TravelMode.DRIVING; }
+  function googleDirections() {
+    if (!dirService) { dirService = new google.maps.DirectionsService(); dirRenderer = new google.maps.DirectionsRenderer({ map: gmap, draggable: true, polylineOptions: { strokeColor: '#00c8ff', strokeWeight: 5, strokeOpacity: 0.9 } });
+      dirRenderer.addListener('directions_changed', () => syncFromGoogle()); }
+    const origin = { lat: pts[0].lat, lng: pts[0].lon };
+    const destination = { lat: pts[pts.length - 1].lat, lng: pts[pts.length - 1].lon };
+    const waypoints = pts.slice(1, -1).map((p) => ({ location: { lat: p.lat, lng: p.lon }, stopover: true }));
+    dirService.route({ origin, destination, waypoints, travelMode: gTravelMode(), drivingOptions: { departureTime: new Date() } }, (res, status) => {
+      if (status !== 'OK') return showErr('Google directions: ' + status);
+      dirRenderer.setDirections(res);
+      const legs = res.routes[0].legs;
+      const dist = legs.reduce((s, l) => s + l.distance.value, 0) / 1000;
+      const dur = legs.reduce((s, l) => s + (l.duration_in_traffic || l.duration).value, 0) / 60;
+      showBadge(+dist.toFixed(1), Math.round(dur), mode);
+    });
   }
-
-  // ---- Google Maps JS rendering (when keyed): traffic, satellite, Street View. Falls back to Leaflet. ----
+  // Drag on the Google route → pull the new waypoints back into pts so further edits stay in sync.
+  function syncFromGoogle() {
+    try {
+      const r = dirRenderer.getDirections(); if (!r) return;
+      const legs = r.routes[0].legs; const np = [];
+      np.push({ lat: legs[0].start_location.lat(), lon: legs[0].start_location.lng() });
+      legs.forEach((l) => np.push({ lat: l.end_location.lat(), lon: l.end_location.lng() }));
+      pts = np; setInputsFromPts();
+    } catch {}
+  }
   function loadGoogle(key) {
     return new Promise((resolve, reject) => {
       if (window.google && window.google.maps) return resolve();
@@ -101,46 +178,77 @@
       document.head.appendChild(s);
     });
   }
-  function googlePoint(d) {
-    const c = { lat: d.center[0], lng: d.center[1] };
-    const gmap = new google.maps.Map($('map'), { center: c, zoom: d.zoom || 14, mapTypeControl: true, streetViewControl: true, fullscreenControl: false });
-    new google.maps.Marker({ position: c, map: gmap, title: d.label || '' });
-    new google.maps.TrafficLayer().setMap(gmap);
+  function googleInit(center, zoom) {
+    gmap = new google.maps.Map($('map'), { center, zoom: zoom || 13, mapTypeControl: true, streetViewControl: true,
+      fullscreenControl: false, rotateControl: true, tiltInteractionEnabled: true });
+    gmap.addListener('click', (e) => onMapClick(e.latLng.lat(), e.latLng.lng()));
     google.maps.event.addListenerOnce(gmap, 'tilesloaded', () => setTimeout(signalRendered, 400));
-    $('title').textContent = d.label || ''; $('info').textContent = 'Google';
+    useGoogle = true;
   }
-  function googleRoute(d) {
-    const gmap = new google.maps.Map($('map'), { mapTypeControl: true, streetViewControl: true, fullscreenControl: false });
-    const path = d.geometry.map(([la, lo]) => ({ lat: la, lng: lo }));
-    new google.maps.Polyline({ path, map: gmap, strokeColor: '#00c8ff', strokeWeight: 5, strokeOpacity: 0.9 });
-    const ends = [path[0], path[path.length - 1]];
-    ends.forEach((pt, i) => new google.maps.Marker({ position: pt, map: gmap, label: i ? 'B' : 'A' }));
-    const b = new google.maps.LatLngBounds(); path.forEach((p) => b.extend(p)); gmap.fitBounds(b);
-    new google.maps.TrafficLayer().setMap(gmap);
-    google.maps.event.addListenerOnce(gmap, 'tilesloaded', () => setTimeout(signalRendered, 400));
+  // 3D toggle: Google's 45° aerial. Needs satellite/hybrid + high zoom to show building relief.
+  function toggle3D() {
+    if (!useGoogle || !gmap) { showErr('3D needs a Google Maps key (config.maps.googleKey).'); return; }
+    tilted = !tilted;
+    $('toggle3d').classList.toggle('go', tilted);
+    if (tilted) { gmap.setMapTypeId('hybrid'); if (gmap.getZoom() < 18) gmap.setZoom(18); gmap.setTilt(45); }
+    else { gmap.setTilt(0); gmap.setMapTypeId('roadmap'); }
+  }
+
+  function showBadge(km, min, m) {
+    const b = $('badge'); b.style.display = 'block';
+    const h = Math.floor(min / 60), mm = Math.round(min % 60); const eta = h ? `${h} h ${mm} min` : `${mm} min`;
+    b.innerHTML = `<b>${eta}</b> · ${km} km<div class="sub">${m}${pts.length > 2 ? ' · ' + (pts.length - 2) + ' stop(s)' : ''}</div>`;
+    $('info').textContent = `${km} km · ${min} min (${m})`;
+  }
+
+  // ---------------- agent-driven payload (tool call) ----------------
+  function showPoint(d) {
+    $('title').textContent = d.label || ''; $('info').textContent = d.source === 'google' ? 'Google' : 'OpenStreetMap';
+    pts = [{ lat: d.center[0], lon: d.center[1], label: d.label }]; setInputsFromPts();
+    if (useGoogle) { gmap.setCenter({ lat: d.center[0], lng: d.center[1] }); gmap.setZoom(d.zoom || 14); new google.maps.Marker({ position: { lat: d.center[0], lng: d.center[1] }, map: gmap }); }
+    else { map.setView(d.center, d.zoom || 14); drawMarkersOnly(); }
+  }
+  function showRoute(d) {
     $('title').textContent = `${d.from.label.split(',')[0]} → ${d.to.label.split(',')[0]}`;
-    $('info').textContent = `${d.distance_km} km · ${d.duration_min} min (${d.mode})`;
-    showBadge(d);
+    pts = [{ lat: d.from.lat, lon: d.from.lon, label: d.from.label }, { lat: d.to.lat, lon: d.to.lon, label: d.to.label }];
+    mode = d.mode === 'foot' ? 'walking' : d.mode === 'bike' ? 'cycling' : 'driving'; $('mode').value = mode;
+    setInputsFromPts();
+    if (useGoogle) recompute();
+    else {
+      clearLeaflet();
+      L.polyline(d.geometry, { color: '#04121b', weight: 9, opacity: 0.6 }).addTo(map);
+      lLine = L.polyline(d.geometry, { color: '#00c8ff', weight: 5, opacity: 0.95 }).addTo(map);
+      pts.forEach((p, i) => addLeafletMarker(p, i));
+      map.fitBounds(lLine.getBounds(), { padding: [60, 60] });
+    }
+    showBadge(d.distance_km, d.duration_min, d.mode);
   }
 
   async function render(d) {
-    signalled = false;
+    signalled = false; googleKey = d.googleKey || null;
     try {
-      if (d.googleKey) {
-        try {
-          await loadGoogle(d.googleKey);
-          if (d.kind === 'route') googleRoute(d); else googlePoint(d);
-          return;
-        } catch (e) { /* fall back to Leaflet below */ }
-      }
+      if (googleKey) { try { await loadGoogle(googleKey); googleInit({ lat: (d.center && d.center[0]) || 20, lng: (d.center && d.center[1]) || 0 }, d.zoom); } catch (e) { useGoogle = false; } }
+      if (!useGoogle) leafletBase();
       if (d.kind === 'route') showRoute(d); else showPoint(d);
-      setTimeout(() => { if (map) map.invalidateSize(); }, 120);
-    } catch (e) {
-      $('err').style.display = 'flex';
-      $('err').textContent = 'Map failed: ' + (e && e.message ? e.message : e);
-      signalRendered();
-    }
+      if (!useGoogle) setTimeout(() => { if (map) map.invalidateSize(); }, 120);
+    } catch (e) { $('err').style.display = 'flex'; $('err').textContent = 'Map failed: ' + (e && e.message ? e.message : e); signalRendered(); }
   }
+
+  // ---------------- panel controls ----------------
+  $('mode').addEventListener('change', () => { mode = $('mode').value; if (pts.length >= 2) recompute(); });
+  $('clear').addEventListener('click', () => { pts = []; setInputsFromPts(); showErr(''); $('badge').style.display = 'none';
+    if (useGoogle) { if (dirRenderer) { dirRenderer.setMap(null); dirRenderer = null; dirService = null; } } else { clearLeaflet(); } });
+  $('route').addEventListener('click', async () => {
+    showErr(''); const f = $('from').value.trim(), t = $('to').value.trim();
+    if (!f || !t) return showErr('Enter both From and To (or click the map).');
+    const [ga, gb] = await Promise.all([window.bmaps.geocode(f), window.bmaps.geocode(t)]);
+    if (!ga || !ga.ok) return showErr('From: ' + (ga && ga.error || 'not found'));
+    if (!gb || !gb.ok) return showErr('To: ' + (gb && gb.error || 'not found'));
+    pts = [{ lat: ga.lat, lon: ga.lon, label: ga.label }, { lat: gb.lat, lon: gb.lon, label: gb.label }];
+    setInputsFromPts(); recompute();
+  });
+  $('toggle3d').addEventListener('click', toggle3D);
+  $('collapse').addEventListener('click', () => { const b = $('body'); const hidden = b.style.display === 'none'; b.style.display = hidden ? '' : 'none'; $('collapse').textContent = hidden ? '▾' : '▸'; });
 
   window.addEventListener('resize', () => { if (map) map.invalidateSize(); });
   if (window.bmaps) { window.bmaps.onMap(render); window.bmaps.ready(); }

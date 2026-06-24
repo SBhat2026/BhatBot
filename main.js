@@ -1965,7 +1965,7 @@ const TOOLS = [
       name: { type: 'string', description: 'Molecule name (common or IUPAC); resolved to a structure via PubChem.' },
       style: { type: 'string', enum: ['cartoon', 'stick', 'sphere', 'surface'], description: 'Render style. Default: cartoon for proteins, stick for small molecules.' }
     } } },
-  { name: 'maps', description: 'Show a MAP or get DIRECTIONS in an in-app map window. action:"show" (default) centers on a place/address with a marker; action:"route" draws driving/walking/cycling directions between two places and returns distance + ETA. Inputs: for show → query (place or address, e.g. "Eiffel Tower" or "1600 Amphitheatre Pkwy"); for route → from + to (+ optional mode: driving|walking|cycling). Uses OpenStreetMap (free, no key); if a Google Maps key is configured it upgrades geocoding accuracy. Use for "where is…", "how far / how long to get to…", "show me … on a map", trip planning.',
+  { name: 'maps', description: 'Show a MAP or get DIRECTIONS in an in-app map window. action:"show" (default) centers on a place/address with a marker; action:"route" draws driving/walking/cycling directions between two places and returns distance + ETA. Inputs: for show → query (place or address, e.g. "Eiffel Tower" or "1600 Amphitheatre Pkwy"); for route → from + to (+ optional mode: driving|walking|cycling). Uses OpenStreetMap (free, no key); if a Google Maps key is configured it upgrades geocoding accuracy and enables Google JS rendering + a 3D tilt view. Returns an inline map image AND opens an interactive window with a ROUTE PLANNER (type/click From-To, add stops, drag pins to re-route). Use for "where is…", "how far / how long to get to…", "show me … on a map", trip planning.',
     input_schema: { type: 'object', properties: {
       action: { type: 'string', enum: ['show', 'route'], description: 'show = center on a place (default); route = directions from→to.' },
       query: { type: 'string', description: 'Place or address to show (for action:show).' },
@@ -3641,6 +3641,10 @@ function openMapsWindow(payload) {
 }
 ipcMain.on('map-ready', (e) => { try { if (pendingMap) e.sender.send('map', pendingMap); } catch {} });
 ipcMain.on('map-rendered', () => { if (mapRenderedCb) { const cb = mapRenderedCb; mapRenderedCb = null; cb(); } });
+// In-window interactive route planner bridges (geocode + waypoint routing) — reuse the SAME
+// backend as the maps tool (Google when keyed, OSM/OSRM free otherwise). No CORS/UA issues.
+ipcMain.handle('maps-geocode', async (_e, q) => { try { return { ok: true, ...(await maps.geocode(q)) }; } catch (e) { return { ok: false, error: e.message }; } });
+ipcMain.handle('maps-route-path', async (_e, points, mode) => { try { return { ok: true, ...(await maps.routePath(points, mode)) }; } catch (e) { return { ok: false, error: e.message }; } });
 
 // Open the map AND capture a PNG snapshot once it's fully drawn → inline "visualization" the agent
 // can return as an image (chat/phone), not just the desktop window. Resolves base64 PNG or null.

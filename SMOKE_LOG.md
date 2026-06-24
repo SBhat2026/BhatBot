@@ -156,3 +156,13 @@ France edge it — 55% to win, with Brazil at 2
   - reply: Mexico are running away with it — two wins, six points. South Korea's got three on a draw and a win. Czechia and South A
 - PASS **date-grounding**
   - reply: Wednesday, June 24, 2026 at 10:07 AM EDT.
+
+## 2026-06-24T14:22:56.920Z — 4/4 passed
+- PASS **world-cup-update**
+  - reply: You're at matchday 14 of the group stage — things are tightening up. The standout game today is Switzerland versus Canad
+- PASS **predict-matchup**
+  - reply: France favoured at 55%, draw 24%, Brazil 22%. Expected to be 1.73 to 1.00 in shots.
+- PASS **group-standings**
+  - reply: Mexico's clear at the top with two wins. South Korea sitting second, then Czechia and South Africa tied on points.
+- PASS **date-grounding**
+  - reply: Wednesday, June 24, 2026 at 10:22 AM EDT.
