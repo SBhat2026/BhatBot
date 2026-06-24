@@ -3009,27 +3009,17 @@ tell application "System Events" to tell process "${esc(input.app)}" to click me
   return r.ok ? { success: true, result: r.out || 'done' } : { success: false, error: osaErr(r) };
 }
 
-async function visionLocal(input) {
-  if (!page) return { success: false, error: 'No active browser page — navigate somewhere first.' };
-  const model = loadConfig().visionModel || OLLAMA_VISION_MODEL; // swap via config.visionModel
-  const buf = await page.screenshot({ type: 'jpeg', quality: 60 });
-  sendToActivity('screenshot', { data: buf.toString('base64') });
-  try {
-    const res = await fetch(`${OLLAMA_URL}/api/generate`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model, stream: false,
-        prompt: input.prompt || 'Describe this screenshot in detail: layout, UI quality, readability, and any broken elements, errors, or empty states.',
-        images: [buf.toString('base64')]
-      })
-    });
-    if (!res.ok) return { success: false, error: `Ollama ${res.status} — is it running with ${model}?` };
-    const j = await res.json();
-    return { success: true, model, description: j.response };
-  } catch (e) {
-    return { success: false, error: `Ollama unreachable at ${OLLAMA_URL}: ${e.message}` };
-  }
-}
+// Vision tools (screen_parse / vision_click / vision_local) live in tools/vision.js (B-c). The heavy
+// OmniParser worker + screen capture + Playwright page stay here and are injected (getPage closes
+// over the mutable `page`). Thin wrappers below keep every internal caller unchanged. Deps resolve
+// via hoisting at call time (omniRequest/captureScreenPng/screenPoints/omniAvailable defined below).
+const vision = require('./tools/vision')({
+  getPage: () => page, ensureBrowser, captureScreenPng, screenPoints, omniRequest, omniAvailable,
+  sleep, sendToActivity, loadConfig, ollamaUrl: OLLAMA_URL, visionModelDefault: OLLAMA_VISION_MODEL,
+});
+const screenParse = (input) => vision.screenParse(input);
+const visionClick = (input) => vision.visionClick(input);
+const visionLocal = (input) => vision.visionLocal(input);
 
 function saveMemoryEntry(section, content) {
   if (!MEMORY_SECTIONS.includes(section)) return { success: false, error: 'Unknown section' };
@@ -5831,57 +5821,6 @@ function captureScreenPng() {
 // Logical screen size in POINTS (CGEvent click space). Retina-independent of capture pixels.
 function screenPoints() { try { const { screen } = require('electron'); const s = screen.getPrimaryDisplay().size; return { w: s.width, h: s.height }; } catch { return { w: 0, h: 0 }; } }
 
-async function screenParse(input) {
-  const target = input.target === 'browser' ? 'browser' : 'screen';
-  let b64, space;
-  if (target === 'browser') {
-    try { await ensureBrowser(); const buf = await page.screenshot({ type: 'png' }); b64 = buf.toString('base64'); const vp = page.viewportSize() || await page.evaluate(() => ({ width: innerWidth, height: innerHeight })); space = { w: vp.width, h: vp.height }; }
-    catch (e) { return { success: false, error: 'browser capture failed: ' + e.message }; }
-  } else {
-    const cap = await captureScreenPng();
-    if (cap.error) return { success: false, error: 'screen capture failed (' + cap.error + ') — grant Screen Recording permission to BhatBot.' };
-    b64 = cap.b64; space = screenPoints();
-  }
-  const res = await omniRequest({ cmd: 'parse', image_b64: b64, semantics: !!input.semantics }, input.semantics ? 180000 : 60000);
-  if (!res.ok) return { success: false, error: 'parse failed: ' + (res.error || 'unknown') + (omniAvailable() ? '' : ' (OmniParser not installed)') };
-  // Attach click coordinates in the right space (screen points / browser CSS px).
-  let elements = (res.elements || []).map((e) => ({ i: e.i, type: e.type, content: e.content, interactive: e.interactivity,
-    click: { x: Math.round(e.center[0] * space.w), y: Math.round(e.center[1] * space.h) } }));
-  if (input.query) { const q = String(input.query).toLowerCase(); elements = elements.filter((e) => (e.content || '').toLowerCase().includes(q)); }
-  const trimmed = elements.filter((e) => e.content || e.interactive).slice(0, 60);
-  return { success: true, target, space, count: trimmed.length, elements: trimmed,
-    note: `Parsed ${res.elements.length} elements. To click one, call vision_click with its click.x/click.y (target:"${target}").`,
-    _image: b64, _imageMime: 'image/png' };
-}
-async function visionClick(input) {
-  const target = input.target === 'browser' ? 'browser' : 'screen';
-  const x = Number(input.x), y = Number(input.y);
-  if (!isFinite(x) || !isFinite(y)) return { success: false, error: 'numeric x,y required (from screen_parse click coords)' };
-  if (target === 'browser') {
-    try {
-      await ensureBrowser();
-      if (input.double) await page.mouse.dblclick(x, y); else await page.mouse.click(x, y);
-      await page.waitForLoadState('domcontentloaded', { timeout: 8000 }).catch(() => {});
-      // Closed loop: re-screenshot so the model SEES the result; verify `expect` if given.
-      let verified, note;
-      if (input.expect) { try { verified = (await page.content()).toLowerCase().includes(String(input.expect).toLowerCase()); note = verified ? `Verified: "${input.expect}" present after click.` : `Could not confirm "${input.expect}" after click — re-read the page and replan.`; } catch {} }
-      return { success: true, clicked: { x, y }, target, verified, note, _image: await page.screenshot({ type: 'jpeg', quality: 60 }).then((b) => b.toString('base64')).catch(() => undefined), _imageMime: 'image/jpeg' };
-    } catch (e) { return { success: false, error: 'browser click failed: ' + e.message }; }
-  }
-  const res = await omniRequest({ cmd: 'click', x, y, double: !!input.double }, 10000);
-  if (!res.ok) return { success: false, error: 'click failed: ' + (res.error || 'unknown') + ' — grant Accessibility permission to BhatBot.' };
-  // Closed loop on native GUIs: after the OS click, settle then re-capture so the model can
-  // confirm the action landed (fire-and-assume is how silently-wrong actions compound). If
-  // `expect` is given, OmniParser-verify that the expected element/text is now on screen.
-  await sleep(400);
-  let b64, verified, note;
-  if (input.expect) {
-    try { const p = await screenParse({ target: 'screen', query: input.expect, semantics: false }); if (p.success) { b64 = p._image; verified = (p.elements || []).length > 0; note = verified ? `Verified: "${input.expect}" visible after click.` : `Could not confirm "${input.expect}" after click — it may not have landed; re-parse and replan.`; } } catch {}
-  }
-  if (!b64) { try { const cap = await captureScreenPng(); if (!cap.error) b64 = cap.b64; } catch {} }
-  if (b64) sendToActivity('screenshot', { data: b64 });
-  return { success: true, clicked: { x, y }, target, verified, note, _image: b64, _imageMime: b64 ? 'image/png' : undefined };
-}
 
 // Allowed Kokoro voices (guards against junk from the phone). British male/female first.
 const KOKORO_VOICES = ['bm_george', 'bm_lewis', 'bm_daniel', 'bm_fable', 'bf_emma', 'bf_isabella', 'bf_alice', 'bf_lily', 'am_michael', 'am_adam', 'af_bella', 'af_nicole'];
