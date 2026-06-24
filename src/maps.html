@@ -12,53 +12,86 @@
   #bar { position:fixed; top:0; left:0; right:0; display:flex; align-items:center; gap:12px; padding:7px 14px;
     font-size:12px; color:#5b708a; background:linear-gradient(180deg,rgba(10,15,23,.92),rgba(10,15,23,0)); z-index:1000; pointer-events:none; }
   #bar b { color:var(--accent); letter-spacing:.12em; }
+  #title { color:#bcd0e4; }
   #info { margin-left:auto; color:#9fb4c8; text-align:right; max-width:70%; }
+  /* Route summary badge — clear at-a-glance distance/ETA without crowding the map */
+  #badge { position:fixed; bottom:18px; left:14px; z-index:1000; display:none; background:rgba(10,15,23,.85);
+    border:1px solid rgba(0,200,255,.25); border-radius:8px; padding:8px 12px; font-size:12px; line-height:1.5; }
+  #badge b { color:var(--accent); }
+  #badge .sub { color:#5b708a; font-size:10px; }
   #err { position:fixed; inset:0; display:none; align-items:center; justify-content:center; text-align:center; padding:30px; color:#ff8a99; font-size:13px; z-index:2000; }
   .leaflet-container { background:#0a0f17; }
+  .leaflet-control-layers, .leaflet-control-scale-line { font-family:'JetBrains Mono',monospace; }
+  .endpin { background:var(--accent); width:14px; height:14px; border-radius:50% 50% 50% 0; transform:rotate(-45deg);
+    border:2px solid #04121b; box-shadow:0 0 0 2px rgba(0,200,255,.4); }
+  .endpin.b { background:#ff6b9d; box-shadow:0 0 0 2px rgba(255,107,157,.4); }
 </style>
 </head>
 <body>
 <div id="bar"><b>◉ MAPS</b><span id="title"></span><span id="info"></span></div>
 <div id="map"></div>
+<div id="badge"></div>
 <div id="err"></div>
 
 <script src="./vendor/leaflet/leaflet.js"></script>
 <script>
   const $ = (id) => document.getElementById(id);
-  let map = null;
+  let map = null, signalled = false;
 
-  // bundled marker images (offline)
   if (window.L) {
     L.Icon.Default.prototype.options.iconUrl = './vendor/leaflet/marker-icon.png';
     L.Icon.Default.prototype.options.iconRetinaUrl = './vendor/leaflet/marker-icon-2x.png';
     L.Icon.Default.prototype.options.shadowUrl = './vendor/leaflet/marker-shadow.png';
   }
 
+  // Tell main the map is fully drawn → it captures a PNG snapshot (inline visualization).
+  function signalRendered() { if (signalled) return; signalled = true; try { window.bmaps && window.bmaps.rendered && window.bmaps.rendered(); } catch {} }
+  // Always signal eventually, even if a tile load stalls.
+  setTimeout(signalRendered, 4500);
+
+  function pin(b) { return L.divIcon({ className: '', html: `<div class="endpin${b ? ' b' : ''}"></div>`, iconSize: [14, 14], iconAnchor: [7, 14] }); }
+
+  // Base map with Streets + Satellite layers (both free) and a scale bar. Not overwhelming:
+  // one small layers toggle, one scale — everything else is the map itself.
   function leafletBase() {
     map = L.map('map', { zoomControl: true, attributionControl: false });
-    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(map);
+    const streets = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 });
+    const sat = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { maxZoom: 19 });
+    streets.addTo(map);
+    L.control.layers({ Streets: streets, Satellite: sat }, null, { position: 'topright', collapsed: true }).addTo(map);
+    L.control.scale({ position: 'bottomright', imperial: true }).addTo(map);
+    streets.on('load', () => setTimeout(signalRendered, 300));
   }
 
   function showPoint(d) {
     leafletBase();
     map.setView(d.center, d.zoom || 14);
-    L.marker(d.center).addTo(map).bindPopup(d.label || '').openPopup();
+    L.marker(d.center, { icon: pin(false) }).addTo(map).bindPopup('<b>' + (d.label || '') + '</b>').openPopup();
     $('title').textContent = d.label || '';
     $('info').textContent = d.source === 'google' ? 'Google' : 'OpenStreetMap';
   }
 
   function showRoute(d) {
     leafletBase();
-    const line = L.polyline(d.geometry, { color: '#00c8ff', weight: 5, opacity: 0.85 }).addTo(map);
-    L.marker(d.geometry[0]).addTo(map).bindPopup('Start: ' + (d.from.label || ''));
-    L.marker(d.geometry[d.geometry.length - 1]).addTo(map).bindPopup('End: ' + (d.to.label || ''));
-    map.fitBounds(line.getBounds(), { padding: [50, 50] });
+    // Casing under the route line for contrast on any basemap.
+    L.polyline(d.geometry, { color: '#04121b', weight: 9, opacity: 0.6 }).addTo(map);
+    const line = L.polyline(d.geometry, { color: '#00c8ff', weight: 5, opacity: 0.95 }).addTo(map);
+    L.marker(d.geometry[0], { icon: pin(false) }).addTo(map).bindPopup('Start: ' + (d.from.label || ''));
+    L.marker(d.geometry[d.geometry.length - 1], { icon: pin(true) }).addTo(map).bindPopup('End: ' + (d.to.label || ''));
+    map.fitBounds(line.getBounds(), { padding: [60, 60] });
     $('title').textContent = `${d.from.label.split(',')[0]} → ${d.to.label.split(',')[0]}`;
     $('info').textContent = `${d.distance_km} km · ${d.duration_min} min (${d.mode})`;
+    showBadge(d);
   }
 
-  // ---- Google Maps JS rendering (when a key is configured): richer tiles, traffic, satellite,
-  //      Street View. Falls back to Leaflet/OSM if the script fails to load. ----
+  function showBadge(d) {
+    const b = $('badge'); b.style.display = 'block';
+    const h = Math.floor(d.duration_min / 60), m = Math.round(d.duration_min % 60);
+    const eta = h ? `${h} h ${m} min` : `${m} min`;
+    b.innerHTML = `<b>${eta}</b> · ${d.distance_km} km<div class="sub">${d.mode} · ${d.from.label.split(',')[0]} → ${d.to.label.split(',')[0]}</div>`;
+  }
+
+  // ---- Google Maps JS rendering (when keyed): traffic, satellite, Street View. Falls back to Leaflet. ----
   function loadGoogle(key) {
     return new Promise((resolve, reject) => {
       if (window.google && window.google.maps) return resolve();
@@ -73,21 +106,25 @@
     const gmap = new google.maps.Map($('map'), { center: c, zoom: d.zoom || 14, mapTypeControl: true, streetViewControl: true, fullscreenControl: false });
     new google.maps.Marker({ position: c, map: gmap, title: d.label || '' });
     new google.maps.TrafficLayer().setMap(gmap);
+    google.maps.event.addListenerOnce(gmap, 'tilesloaded', () => setTimeout(signalRendered, 400));
     $('title').textContent = d.label || ''; $('info').textContent = 'Google';
   }
   function googleRoute(d) {
     const gmap = new google.maps.Map($('map'), { mapTypeControl: true, streetViewControl: true, fullscreenControl: false });
     const path = d.geometry.map(([la, lo]) => ({ lat: la, lng: lo }));
-    new google.maps.Polyline({ path, map: gmap, strokeColor: '#00c8ff', strokeWeight: 5, strokeOpacity: 0.85 });
+    new google.maps.Polyline({ path, map: gmap, strokeColor: '#00c8ff', strokeWeight: 5, strokeOpacity: 0.9 });
     const ends = [path[0], path[path.length - 1]];
     ends.forEach((pt, i) => new google.maps.Marker({ position: pt, map: gmap, label: i ? 'B' : 'A' }));
     const b = new google.maps.LatLngBounds(); path.forEach((p) => b.extend(p)); gmap.fitBounds(b);
     new google.maps.TrafficLayer().setMap(gmap);
+    google.maps.event.addListenerOnce(gmap, 'tilesloaded', () => setTimeout(signalRendered, 400));
     $('title').textContent = `${d.from.label.split(',')[0]} → ${d.to.label.split(',')[0]}`;
     $('info').textContent = `${d.distance_km} km · ${d.duration_min} min (${d.mode})`;
+    showBadge(d);
   }
 
   async function render(d) {
+    signalled = false;
     try {
       if (d.googleKey) {
         try {
@@ -101,6 +138,7 @@
     } catch (e) {
       $('err').style.display = 'flex';
       $('err').textContent = 'Map failed: ' + (e && e.message ? e.message : e);
+      signalRendered();
     }
   }
 

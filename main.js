@@ -3628,7 +3628,7 @@ const protfunc = require('./lib/protfunc')({ getUrl: () => { try { return (loadC
 
 // --- Maps (Leaflet + OSM by default; Google geocoding when config.maps.googleKey present) ---
 const maps = require('./lib/maps')({ getKey: () => { try { return (loadConfig().maps && loadConfig().maps.googleKey) || ''; } catch { return ''; } } });
-let mapsWindow = null, pendingMap = null;
+let mapsWindow = null, pendingMap = null, mapRenderedCb = null;
 function openMapsWindow(payload) {
   pendingMap = payload;
   if (mapsWindow && !mapsWindow.isDestroyed()) { mapsWindow.show(); mapsWindow.focus(); try { mapsWindow.webContents.send('map', pendingMap); } catch {} return; }
@@ -3640,6 +3640,29 @@ function openMapsWindow(payload) {
   mapsWindow.on('closed', () => { mapsWindow = null; });
 }
 ipcMain.on('map-ready', (e) => { try { if (pendingMap) e.sender.send('map', pendingMap); } catch {} });
+ipcMain.on('map-rendered', () => { if (mapRenderedCb) { const cb = mapRenderedCb; mapRenderedCb = null; cb(); } });
+
+// Open the map AND capture a PNG snapshot once it's fully drawn → inline "visualization" the agent
+// can return as an image (chat/phone), not just the desktop window. Resolves base64 PNG or null.
+function openMapsWindowSnapshot(payload) {
+  openMapsWindow(payload);
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = async () => {
+      if (done) return; done = true; mapRenderedCb = null;
+      try {
+        await new Promise((r) => setTimeout(r, 350));   // let the final paint settle
+        const img = await mapsWindow.webContents.capturePage();
+        if (img.isEmpty()) return resolve(null);
+        // Downscale + JPEG so the inline vision block stays well under model image limits
+        // (a raw 1000×760 PNG is ~6MB; this is ~100-200KB).
+        resolve(img.resize({ width: 900 }).toJPEG(78).toString('base64'));
+      } catch { resolve(null); }
+    };
+    mapRenderedCb = finish;
+    setTimeout(finish, 7000);   // hard fallback if the renderer never signals
+  });
+}
 
 // Transient failure signatures worth one automatic retry (network/load races, not logic errors).
 const TRANSIENT_RE = /(timeout|timed out|ETIMEDOUT|ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|socket hang up|network|Target closed|Execution context|navigation|detached|not attached|temporarily|overloaded|try again|\b50[234]\b|\b429\b)/i;
@@ -3814,12 +3837,15 @@ async function executeTool(name, input) {
       case 'maps': {
         try {
           const payload = await maps.prepare(input);
-          openMapsWindow(payload);
+          // Snapshot the rendered map so it shows inline (chat/phone) — the interactive window opens too.
+          const snap = await openMapsWindowSnapshot(payload);
+          console.log('[maps] snapshot', snap ? Math.round(snap.length / 1024) + 'KB jpeg' : 'none (window-only)');
+          const img = snap ? { _image: snap, _imageMime: 'image/jpeg' } : {};
           if (payload.kind === 'route') {
-            result = { success: true, kind: 'route', distance_km: payload.distance_km, duration_min: payload.duration_min, mode: payload.mode,
+            result = { success: true, kind: 'route', distance_km: payload.distance_km, duration_min: payload.duration_min, mode: payload.mode, ...img,
               message: `Directions ${payload.from.label.split(',')[0]} → ${payload.to.label.split(',')[0]}: ${payload.distance_km} km, about ${payload.duration_min} min by ${payload.mode}. Map open.` };
           } else {
-            result = { success: true, kind: 'point', label: payload.label, source: payload.source,
+            result = { success: true, kind: 'point', label: payload.label, source: payload.source, ...img,
               message: `Showing ${payload.label} on the map.` };
           }
         } catch (e) { result = { success: false, error: e.message }; }
@@ -4360,7 +4386,7 @@ async function agentLoop(history, apiKey, event, opts = {}) {
       catch (e) { result = { success: false, error: 'tool threw: ' + (e && e.message || String(e)) }; }
       // Jarvis HUD: surface visuals inline in chat — generated images / design renders /
       // explicit screenshots as holo-cards, and 3D outputs as an in-chat spinning model.
-      const showImage = result._image && (['generate_image', 'make_figure', 'simulate', 'studio_write', 'ui_inspect', 'screen_parse', 'vision_click', 'molecule'].includes(block.name)
+      const showImage = result._image && (['generate_image', 'make_figure', 'simulate', 'studio_write', 'ui_inspect', 'screen_parse', 'vision_click', 'molecule', 'maps'].includes(block.name)
         || (block.name === 'browser' && block.input && block.input.action === 'screenshot'));
       const model3d = (block.name === 'generate_3d' || block.name === 'make_printable') && result.success && result.path ? result.path : undefined;
       sendToAll(event, 'tool-update', {
