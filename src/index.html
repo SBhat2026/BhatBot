@@ -57,7 +57,13 @@
     background: linear-gradient(180deg, #0c131d, #0a0f17);
   }
   .tb-left { display: flex; align-items: center; gap: 9px; }
-  .hud-ring { width: 18px; height: 18px; animation: spin 7s linear infinite; }
+  .hud-ring { width: 18px; height: 18px; animation: spin 7s linear infinite; transform-origin: 50% 50%; transition: stroke .3s, filter .3s; }
+  /* JARVIS reactor: the always-visible titlebar ring mirrors the agent's live state (set by setOrbState) */
+  .hud-ring[data-state="listening"] { animation-duration: 2.4s; stroke: #7fe3ff; filter: drop-shadow(0 0 4px rgba(0,200,255,.85)); }
+  .hud-ring[data-state="thinking"]  { animation-duration: 0.9s; stroke: #bdefff; filter: drop-shadow(0 0 3px rgba(0,200,255,.7)); }
+  .hud-ring[data-state="speaking"]  { animation: hudpulse .7s ease-in-out infinite; stroke: #7fe3ff; filter: drop-shadow(0 0 5px rgba(0,200,255,.9)); }
+  .hud-ring[data-state="error"]     { stroke: #e8b339 !important; animation-duration: 0.5s; filter: drop-shadow(0 0 5px rgba(232,179,57,.9)); }
+  @keyframes hudpulse { 0%,100% { transform: scale(1); opacity: .82; } 50% { transform: scale(1.18); opacity: 1; } }
   @keyframes spin { to { transform: rotate(360deg); } }
   .brand { font-weight: 700; letter-spacing: 3px; font-size: 12px; color: var(--text); position: relative; }
   .brand.glitch::before, .brand.glitch::after {
@@ -261,6 +267,10 @@
   #orb[data-state="thinking"] .ring.r4 { animation-duration: 0.9s; }
   #orb[data-state="thinking"] .core { animation: corepulse 1s ease-in-out infinite; }
   #orb[data-state="thinking"] .ticks { animation-duration: 8s; }
+  /* listening: gentle quickening + brighter core, distinct from the faster "thinking" churn */
+  #orb[data-state="listening"] .glow { animation-duration: 1.5s; }
+  #orb[data-state="listening"] .ring.r4 { animation-duration: 3s; border-top-color: rgba(127,227,255,.95); }
+  #orb[data-state="listening"] .core { background: #d8f6ff; }
   /* speaking: equalizer takes over, core swells */
   #orb[data-state="speaking"] .hex { display: none; }
   #orb[data-state="speaking"] .core { inset: 104px; }
@@ -663,6 +673,7 @@ function addErr(text) {
   d.className = 'msg err';
   d.textContent = '⚠ ' + text;
   chat.appendChild(d); scroll();
+  try { flashHudError(); } catch {}
 }
 function typeOut(el, text) {
   let i = 0;
@@ -1236,7 +1247,16 @@ recomputeVoiceFirst();
 
 // ---- orb state (idle / thinking / speaking) drives the voice-stage animation ----
 const orb = $('#orb');
-function setOrbState(s) { if (orb) orb.dataset.state = s; }
+const hudRing = document.querySelector('.hud-ring');
+// One call drives BOTH the voice-stage orb AND the always-visible titlebar reactor, so the JARVIS
+// status (idle/listening/thinking/speaking) is glanceable even outside voice-first mode.
+function setOrbState(s) { if (orb) orb.dataset.state = s; if (hudRing) hudRing.dataset.state = s; }
+function flashHudError() {
+  if (!hudRing) return;
+  const prev = hudRing.dataset.state && hudRing.dataset.state !== 'error' ? hudRing.dataset.state : 'idle';
+  hudRing.dataset.state = 'error';
+  setTimeout(() => { if (hudRing.dataset.state === 'error') hudRing.dataset.state = prev; }, 1100);
+}
 // ---- shortened caption: first sentence (or ~180 chars) of the spoken reply ----
 function shorten(text) {
   let s = String(text || '').replace(/```[\s\S]*?```/g, ' ').replace(/[*_`#>]/g, '').replace(/\[([^\]]+)\]\([^)]+\)/g, '$1').replace(/\s+/g, ' ').trim();
@@ -1271,7 +1291,7 @@ async function startVoice() {
   if (!voiceCfg.hasOpenAI) return startWebSpeech();   // fallback if no OpenAI key
   try { micStream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
   catch (e) { addErr('Mic permission denied: ' + e.message); return; }
-  recording = true; setMicRecording(true);
+  recording = true; setMicRecording(true); setOrbState('listening');
   tbar.textContent = '🎙 listening… (click mic to send)';
   audioChunks = [];
   mediaRecorder = new MediaRecorder(micStream, { mimeType: 'audio/webm' });
@@ -1302,7 +1322,7 @@ function watchSilence(stream) {
 
 function endVoice() {                 // manual mic click OR 5s silence
   if (!recording) return;
-  recording = false;
+  recording = false; if (orb && orb.dataset.state === 'listening') setOrbState('idle');
   try { if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop(); } catch {}
 }
 
@@ -1336,7 +1356,7 @@ function submitVoice(text) {
 let recog = null, finalText = '', manualStop = false, silenceTimer = null, restartTimer = null, starting = false;
 function startWebSpeech() {
   if (!SR) { addErr('No STT available — set openaiKey for Whisper.'); return; }
-  finalText = ''; manualStop = false; recording = true;
+  finalText = ''; manualStop = false; recording = true; setOrbState('listening');
   recog = new SR(); recog.lang = 'en-US'; recog.interimResults = true; recog.continuous = true;
   recog.onstart = () => { starting = false; };
   recog.onresult = (e) => {

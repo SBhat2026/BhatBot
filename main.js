@@ -22,6 +22,7 @@ const wsState = require('./lib/state');
 const wsMemory = require('./lib/memory');
 const semantic = require('./lib/semantic');           // #12 — embedding-based semantic/episodic recall (degrades gracefully)
 const toolselect = require('./lib/toolselect');        // W1 — per-turn tool retrieval (context-rot prevention)
+const { classifyDepth } = require('./lib/depth');       // A3 — per-turn response-depth → max_tokens + directive
 const { riskOf } = require('./lib/risk');              // W3 — per-tool key-risk classification (auto|confirm|stepup)
 const graph = require('./lib/graph');                  // W4 — knowledge-graph memory (entities + typed edges, multi-hop)
 const sandbox = require('./lib/sandbox');              // W6 — worker_threads isolation for community/dynamic plugin tools
@@ -1216,10 +1217,14 @@ async function anthropicRequest(body, apiKey, { retries = 5 } = {}) {
 }
 
 async function callClaude(messages, apiKey, model) {
+  const ut = lastUserText(messages);
+  const d = classifyDepth(ut);   // A3 — size the room to the turn
   return anthropicRequest({
     model,
-    max_tokens: 4096,
-    system: systemBlocks(lastUserText(messages)),
+    max_tokens: d.maxTokens,
+    // directive is a TRAILING block (after the cache_control'd static prompt) so per-turn sizing
+    // never invalidates the prompt cache.
+    system: [...systemBlocks(ut), { type: 'text', text: d.directive }],
     tools: activeTools(),
     // validateHistory AFTER capTokens: trimming can re-orphan a tool_use/tool_result pair.
     // This is the single chokepoint every Claude tool-loop call shares, so the API can never
@@ -1301,9 +1306,11 @@ async function anthropicStream(body, apiKey, onText, { retries = 3 } = {}) {
   }
 }
 function callClaudeStream(messages, apiKey, model, onText) {
+  const ut = lastUserText(messages);
+  const d = classifyDepth(ut);   // A3 — size the room to the turn
   return anthropicStream({
-    model, max_tokens: 4096,
-    system: systemBlocks(lastUserText(messages)),
+    model, max_tokens: d.maxTokens,
+    system: [...systemBlocks(ut), { type: 'text', text: d.directive }],
     // see callClaude: re-validate AFTER capTokens so trimming can't re-orphan a tool pair.
     tools: activeTools(), messages: validateHistory(capTokens(messages))
   }, apiKey, onText);
@@ -5852,6 +5859,21 @@ async function kokoroSynth(text, opts = {}) {
 // — but that's 250ms added to EVERY spoken sentence before the fallback kicks in. Mark the
 // provider dead for 10 min on quota/auth failures and skip straight to Kokoro/OpenAI.
 let _elDeadUntil = 0;
+
+// ONE source of truth for the JARVIS voice character (used by both the MP3 desktop path and the
+// μ-law phone path). JARVIS = composed, precise, dry — so: higher stability (even, unflappable),
+// strong similarity (hold the British clone timbre), LOW style (deadpan; theatrics ruin the wit),
+// measured speed. Every field is config-overridable live (D1 voice-customizability hooks here).
+function jarvisVoiceSettings(c) {
+  return {
+    stability: c.ttsStability != null ? c.ttsStability : 0.45,
+    similarity_boost: c.ttsSimilarity != null ? c.ttsSimilarity : 0.85,
+    style: c.ttsStyle != null ? c.ttsStyle : 0.22,        // dry deadpan; raise only if it sounds flat
+    use_speaker_boost: c.ttsSpeakerBoost != null ? c.ttsSpeakerBoost : true,
+    speed: Math.max(0.7, Math.min(1.2, Number(c.ttsSpeed) || 1.0)),  // deliberate, unhurried butler pace
+  };
+}
+
 async function elevenLabsSynth(t, c, opts = {}) {
   if (!c.elevenLabsKey) return { error: 'no elevenLabsKey' };
   if (Date.now() < _elDeadUntil) return { error: 'elevenlabs cooling down (quota/auth)', cooldown: true };
@@ -5864,13 +5886,7 @@ async function elevenLabsSynth(t, c, opts = {}) {
   const text = humanizeCadence(t, { breaks: supportsBreaks });
   // (3) Tuned conversational delivery — lower stability + a touch of style = livelier prosody
   // variation (less monotone); speaker_boost adds presence/warmth. All config-overridable.
-  const vs = {
-    stability: c.ttsStability != null ? c.ttsStability : 0.38,
-    similarity_boost: c.ttsSimilarity != null ? c.ttsSimilarity : 0.75,
-    style: c.ttsStyle != null ? c.ttsStyle : 0.40,   // a touch more expressive so the dry wit lands
-    use_speaker_boost: c.ttsSpeakerBoost != null ? c.ttsSpeakerBoost : true,
-    speed: Math.max(0.7, Math.min(1.2, Number(c.ttsSpeed) || 1.05))   // deliberate, natural pace (was 1.10); user-tunable live via "speak slower/faster" + settings slider
-  };
+  const vs = jarvisVoiceSettings(c);
   const body = { text, model_id: model, voice_settings: vs };
   // (2) Request stitching — give the model the surrounding sentences so prosody flows across
   // streamed chunks instead of resetting (no choppy "new sentence, fresh intonation" feel).
@@ -5900,13 +5916,7 @@ async function synthesizeUlaw(text, opts = {}) {
   const body = {
     text: humanizeCadence(normalizeForSpeech(t), { breaks: supportsBreaks }),
     model_id: model,
-    voice_settings: {
-      stability: c.ttsStability != null ? c.ttsStability : 0.38,
-      similarity_boost: c.ttsSimilarity != null ? c.ttsSimilarity : 0.75,
-      style: c.ttsStyle != null ? c.ttsStyle : 0.40,
-      use_speaker_boost: c.ttsSpeakerBoost != null ? c.ttsSpeakerBoost : true,
-      speed: Math.max(0.7, Math.min(1.2, Number(c.ttsSpeed) || 1.05)),
-    },
+    voice_settings: jarvisVoiceSettings(c),
   };
   if (opts.previousText) body.previous_text = String(opts.previousText).slice(-400);
   try {
