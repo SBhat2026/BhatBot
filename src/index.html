@@ -382,7 +382,11 @@
   .suit-card[data-status="working"] { border-left-color: var(--accent); box-shadow: 0 0 10px rgba(0,200,255,.12); }
   .suit-head { display: flex; justify-content: space-between; align-items: center; }
   .suit-role { color: var(--accent); font-size: 12.5px; letter-spacing: .04em; }
+  .suit-right { display: flex; align-items: center; gap: 8px; }
   .suit-status { font-size: 10px; text-transform: uppercase; letter-spacing: .08em; color: var(--text-dim); }
+  .suit-stop { cursor: pointer; color: var(--text-dim2); font-size: 11px; }
+  .suit-stop:hover { color: var(--err); }
+  .suit-card[data-status="done"] .suit-stop, .suit-card[data-status="failed"] .suit-stop, .suit-card[data-status="stopped"] .suit-stop { display: none; }
   .suit-task { font-size: 11.5px; color: var(--text-dim); }
   .suit-step { font-size: 11px; color: #7fe3ff; min-height: 13px; }
   .suit-out { font-size: 11px; color: var(--text); white-space: pre-wrap; max-height: 120px; overflow: auto; }
@@ -1298,9 +1302,9 @@ if (spd) {
     let el = document.getElementById('suit-card-' + id);
     if (!el) {
       el = document.createElement('div'); el.className = 'suit-card'; el.id = 'suit-card-' + id;
-      el.innerHTML = '<div class="suit-head"><b class="suit-role"></b><span class="suit-status"></span></div>'
+      el.innerHTML = '<div class="suit-head"><b class="suit-role"></b><span class="suit-right"><span class="suit-status"></span><span class="suit-stop" title="Stop this agent">⏹</span></span></div>'
         + '<div class="suit-task"></div><div class="suit-step"></div><div class="suit-out"></div>'
-        + '<div class="suit-fb"><input class="suit-fb-in" placeholder="Steer this suit… (Enter)" /></div>';
+        + '<div class="suit-fb"><input class="suit-fb-in" placeholder="Steer this agent… (Enter)" /></div>';
       listEl.appendChild(el);
       const inp = el.querySelector('.suit-fb-in');
       inp.addEventListener('keydown', (e) => {
@@ -1308,6 +1312,10 @@ if (spd) {
           try { window.bhatbot.sendFleetFeedback(id, inp.value.trim()); } catch {}
           el.querySelector('.suit-step').textContent = '📨 you: ' + inp.value.trim(); inp.value = '';
         }
+      });
+      el.querySelector('.suit-stop').addEventListener('click', () => {
+        try { window.bhatbot.sendFleetControl(id, 'stop'); } catch {}
+        el.querySelector('.suit-step').textContent = '⏹ stopping…';
       });
     }
     return el;

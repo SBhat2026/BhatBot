@@ -29,6 +29,7 @@ const sandbox = require('./lib/sandbox');              // W6 — worker_threads 
 const a2a = require('./lib/a2a');                       // W7 — agent-to-agent handoff envelope (future-proof subagent routing)
 const subagents = require('./lib/subagents');          // #20 — persistent specialized sub-agents (research/coding/lifeadmin)
 const agentTeam = require('./lib/orchestrator');        // C — parallel same-task ensemble + independent app-tester
+const planner = require('./lib/planner');               // B1 — decompose a goal into a task DAG for the team
 const ambient = require('./lib/ambient');              // #18 — opt-in proactive Calendar/Mail awareness (OFF by default)
 const { textHintFromSelector, splitForSpeech, estimateToolCost, stripReasoning } = require('./lib/pure');  // SPLIT_PLAN step 1
 const projects = require('./lib/projects');            // #24 — project memory + living auto-summary
@@ -2051,6 +2052,13 @@ const TOOLS = [
         items: { type: 'object', properties: { role: { type: 'string' }, task: { type: 'string' }, tools: { type: 'array', items: { type: 'string' } } }, required: ['task'] } },
       maxSteps: { type: 'number', description: 'Per-suit tool-loop budget (default 8, max 16).' }
     }, required: ['tasks'] } },
+  { name: 'plan_and_run', description: 'PLAN-AND-EXECUTE a high-level GOAL: BhatBot decomposes it into the fewest parallelizable subtasks (a task DAG), shows the plan in the Legion panel, then dispatches a guardrailed team layer-by-layer — independent steps run in parallel, dependent steps wait for and receive their upstream results — and returns the combined outcome. Use for a BIG multi-part goal ("build X with parts a/b/c", "research then draft then review"). dryRun:true returns the PLAN ONLY (no execution) so Siddhant can approve/adjust first. For several already-separate jobs use `fleet`; for one focused job use the direct tool.',
+    input_schema: { type: 'object', properties: {
+      goal: { type: 'string', description: 'the high-level goal to decompose and accomplish.' },
+      dryRun: { type: 'boolean', description: 'true = return the proposed plan WITHOUT running it (preview/approve first).' },
+      maxSteps: { type: 'number', description: 'max subtasks (default 6, hard cap 8).' },
+      maxParallel: { type: 'number', description: 'max agents running at once (default 4, hard cap 6).' }
+    }, required: ['goal'] } },
   { name: 'self_improve', description: 'Scan BhatBot\'s own tool-call AUDIT LOG for recurring failures and have Claude Code DRAFT a fix as a reviewable diff (it does NOT apply changes — Siddhant is the merge gate). Use when asked to "improve yourself" / "fix your recurring errors", or run it periodically. action:"scan" finds the top recurring failing tool (≥ minCount, default 3) and writes a proposed-fix .md to ~/.bhatbot/self-improve/ + notifies. dryRun:true just reports the failure clusters without invoking Claude Code.',
     input_schema: { type: 'object', properties: {
       action: { type: 'string', enum: ['scan'], description: 'scan the audit log + draft a fix.' },
@@ -3859,8 +3867,36 @@ async function executeTool(name, input) {
           maxSteps: input.maxSteps,
           onUpdate: (p) => fleetBroadcast(p),
           drainFeedback: (id) => fleetDrainFeedback(id),
+          shouldStop: (id) => fleetShouldStop(id),
         });
         try { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('fleet-update', { phase: 'done' }); } catch {}
+        break;
+      }
+      case 'plan_and_run': {
+        if (!input.goal) { result = { success: false, error: 'goal required' }; break; }
+        const p = await planner.plan(input.goal, { anthropicRequest, apiKey: getApiKey(), models: { sonnet: MODEL_SONNET } },
+          { maxSteps: input.maxSteps, maxParallel: input.maxParallel });
+        if (input.dryRun) { result = { success: true, dryRun: true, plan: { steps: p.steps, rationale: p.rationale, layers: p.layers.map((l) => l.map((s) => s.id)) } }; break; }
+        // Seed the Legion panel with ALL steps, then run layer-by-layer (parallel within a layer),
+        // feeding each step the results of the upstream steps it depends on.
+        fleetAgents.clear();
+        p.steps.forEach((s) => fleetAgents.set(s.id, { id: s.id, role: s.role, task: s.task, status: 'queued', step: '', text: '', feedback: [] }));
+        try { if (mainWindow && !mainWindow.isDestroyed()) { mainWindow.webContents.send('fleet-update', { phase: 'start', agents: p.steps.map((s) => ({ id: s.id, role: s.role, task: s.task })) }); mainWindow.webContents.send('show-panel', 'legion'); } } catch {}
+        sendToActivity('tool-update', { type: 'thinking', text: `🧠 plan: ${p.steps.length} steps in ${p.layers.length} layer(s)${p.fallback ? ' (fallback)' : ''}` });
+        const doneResults = {};
+        for (const layer of p.layers) {
+          const tasks = layer.map((s) => ({ id: s.id, role: s.role, tools: s.tools,
+            task: s.task + (s.dependsOn.length ? '\n\nUpstream results you build on:\n' + s.dependsOn.map((d) => `[${d}] ${String(doneResults[d] || '(none)').slice(0, 1500)}`).join('\n\n') : '') }));
+          const layerOut = await agentTeam.fleet(tasks, subagentDeps(), {
+            maxSteps: input.suitSteps,
+            onUpdate: (u) => fleetBroadcast(u),
+            drainFeedback: (id) => fleetDrainFeedback(id),
+            shouldStop: (id) => fleetShouldStop(id),
+          });
+          for (const a of (layerOut.agents || [])) doneResults[a.id] = a.result;
+        }
+        try { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('fleet-update', { phase: 'done' }); } catch {}
+        result = { success: true, mode: 'plan_and_run', goal: input.goal, rationale: p.rationale, steps: p.steps.map((s) => ({ id: s.id, role: s.role, result: doneResults[s.id] })) };
         break;
       }
       case 'screen_observe':
@@ -4062,11 +4098,19 @@ function fleetDrainFeedback(id) {
 }
 ipcMain.handle('fleet-feedback', (_e, { id, text }) => {
   const a = fleetAgents.get(id);
-  if (!a) return { ok: false, error: 'no such suit' };
+  if (!a) return { ok: false, error: 'no such agent' };
   a.feedback = a.feedback || []; a.feedback.push(String(text || ''));
   fleetBroadcast({ id, role: a.role, status: a.status, note: '📨 feedback queued' });
   return { ok: true };
 });
+// BhatBot/Siddhant keep full control: stop a single agent mid-run (checked by runRole each step).
+ipcMain.handle('fleet-control', (_e, { id, action }) => {
+  const a = fleetAgents.get(id);
+  if (!a) return { ok: false };
+  if (action === 'stop') { a.stopped = true; fleetBroadcast({ id, role: a.role, status: 'stopping', note: '⏹ stopping…' }); }
+  return { ok: true };
+});
+function fleetShouldStop(id) { const a = fleetAgents.get(id); return !!(a && a.stopped); }
 
 // Activity ring buffer — mirrors tool/thinking events so the phone's Activity tab can poll
 // them (the phone has no IPC). Both sendToActivity and the chat path (sendToAll) feed it.

@@ -218,3 +218,13 @@ South Korea's second with a draw and a win. Czechia and South Africa are
   - reply: 
 - FAIL **date-grounding** — error: API 400: {"type":"error","error":{"type":"invalid_request_error","message":"You have reached your specified API usage limits. You will regain access on 2026-07-01 at 00:00 UTC."},"request_id":"req_011CcQCmAUpSq2eawMM7wzFB"}; reply missing /2026/
   - reply: 
+
+## 2026-06-25T15:59:18.385Z — 4/4 passed
+- PASS **world-cup-update**
+  - reply: Colombia are leading Group K undefeated; Portugal sit second. Colombia-Portugal Saturday evening is the headliner—Portug
+- PASS **predict-matchup**
+  - reply: France favoured at 52% to Brazil's 24%, with a draw at 24%. Expected to be around 1.7 goals for France, 1.1 for Brazil —
+- PASS **group-standings**
+  - reply: Mexico are miles clear — three wins, nine points. South Africa second with four. South Korea and Czechia are fighting fo
+- PASS **date-grounding**
+  - reply: Thursday, June 25, 2026 at 11:59 AM EDT.

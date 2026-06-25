@@ -30,6 +30,7 @@ const sandbox = require('../lib/sandbox');
 const a2a = require('../lib/a2a');
 const toolselect = require('../lib/toolselect');
 const orchestrator = require('../lib/orchestrator');   // C — parallel ensemble + tester
+const planner = require('../lib/planner');             // B1 — goal → task DAG
 const { classifyDepth } = require('../lib/depth');      // A3 — response-depth tiers
 
 (async () => {
@@ -191,6 +192,44 @@ const { classifyDepth } = require('../lib/depth');      // A3 — response-depth
     ['orchestrator: fleet requires tasks', async () => {
       const r = await orchestrator.fleet([], {}, {});
       assert.equal(r.success, false);
+    }],
+    ['orchestrator: suit cannot spawn agents (no-recursion guardrail)', async () => {
+      let executed = null;
+      const deps = { models: { sonnet: 's', haiku: 'h' }, apiKey: 'x',
+        toolDefs: [{ name: 'read_file' }, { name: 'fleet' }],
+        executeTool: async (n) => { executed = n; return { success: true }; },
+        anthropicRequest: async () => ({ content: [{ type: 'tool_use', id: '1', name: 'fleet', input: {} }], stop_reason: 'tool_use', usage: {} }) };
+      await orchestrator.runRole({ name: 'x', persona: 'p' }, 'go', deps, { suit: true, maxSteps: 2 });
+      assert.notEqual(executed, 'fleet', 'fleet must never be executed by a suit');
+    }],
+    ['orchestrator: shouldStop halts an agent', async () => {
+      const deps = { models: { sonnet: 's', haiku: 'h' }, apiKey: 'x', toolDefs: [],
+        anthropicRequest: async () => ({ content: [{ type: 'tool_use', id: '1', name: 'x', input: {} }], stop_reason: 'tool_use', usage: {} }) };
+      const r = await orchestrator.runRole({ name: 'y', persona: 'p' }, 'go', deps, { suit: true, maxSteps: 9, shouldStop: () => true });
+      assert.equal(r.steps, 0, 'stopped before any step');
+    }],
+  ]);
+
+  // ---- B1: planner (goal → task DAG) ----
+  await run([
+    ['planner: decomposes goal into a dependency-ordered DAG', async () => {
+      const deps = { models: { sonnet: 's' }, apiKey: 'x',
+        anthropicRequest: async () => ({ content: [{ type: 'text', text: JSON.stringify({ steps: [{ id: 'a', role: 'r1', task: 'fetch' }, { id: 'b', role: 'r2', task: 'write', dependsOn: ['a'] }], rationale: 'split' }) }] }) };
+      const r = await planner.plan('goal', deps, {});
+      assert.ok(r.success && r.steps.length === 2);
+      assert.equal(r.layers.length, 2, 'dependent step → second layer');
+      assert.equal(r.layers[0][0].id, 'a'); assert.equal(r.layers[1][0].id, 'b');
+    }],
+    ['planner: cycle → safe single-step fallback', async () => {
+      const deps = { models: { sonnet: 's' }, apiKey: 'x',
+        anthropicRequest: async () => ({ content: [{ type: 'text', text: JSON.stringify({ steps: [{ id: 'a', task: 'x', dependsOn: ['b'] }, { id: 'b', task: 'y', dependsOn: ['a'] }] }) }] }) };
+      const r = await planner.plan('g', deps, {});
+      assert.ok(r.fallback === true && r.steps.length === 1);
+    }],
+    ['planner: layers cap width at HARD_MAX_WIDTH', () => {
+      const steps = Array.from({ length: 9 }, (_, i) => ({ id: 's' + i, role: 'r', task: 't', dependsOn: [] }));
+      const ls = planner.layers(steps);
+      assert.ok(ls[0].length <= planner.HARD_MAX_WIDTH, 'first layer within width cap');
     }],
   ]);
 

@@ -19,6 +19,7 @@ contextBridge.exposeInMainWorld('bhatbot', {
   importVoiceSamples: () => ipcRenderer.invoke('import-voice-samples'),             // D — clone/improve voice from audio files
   onFleetUpdate: (cb) => ipcRenderer.on('fleet-update', (_e, d) => cb(d)),           // C-Fleet — live suit relay
   sendFleetFeedback: (id, text) => ipcRenderer.invoke('fleet-feedback', { id, text }),
+  sendFleetControl: (id, action) => ipcRenderer.invoke('fleet-control', { id, action }),
   getHealth: () => ipcRenderer.invoke('get-health'),
   transcribeAudio: (data) => ipcRenderer.invoke('transcribe-audio', data),
   synthesizeSpeech: (text) => ipcRenderer.invoke('synthesize-speech', { text }),
