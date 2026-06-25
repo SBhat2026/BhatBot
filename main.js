@@ -5652,15 +5652,23 @@ async function runScheduledTask(s) {
 // Windows
 // ---------------------------------------------------------------------------
 function createWindow() {
-  const { width } = screen.getPrimaryDisplay().workAreaSize;
+  // Open as a LARGE, MOVABLE, RESIZABLE window (not OS-fullscreen) so it can be dragged by the custom
+  // titlebar and resized from the edges. Restore the last bounds if we saved them.
+  const { width, height } = screen.getPrimaryDisplay().workAreaSize;
+  const saved = (() => { try { return loadConfig().mainBounds; } catch { return null; } })();
+  const w = saved && saved.width > 300 ? saved.width : Math.round(width * 0.92);
+  const h = saved && saved.height > 300 ? saved.height : Math.round(height * 0.92);
   mainWindow = new BrowserWindow({
-    width: 430, height: 650, x: width - 450, y: 50,
-    frame: false, fullscreen: true, alwaysOnTop: false, skipTaskbar: false, resizable: true, maximizable: true,
-    minWidth: 360, minHeight: 400, backgroundColor: '#090d13',
+    width: w, height: h,
+    x: saved ? saved.x : Math.round((width - w) / 2), y: saved ? saved.y : Math.round((height - h) / 2),
+    frame: false, fullscreen: false, alwaysOnTop: false, skipTaskbar: false, resizable: true, maximizable: true, movable: true,
+    minWidth: 380, minHeight: 420, backgroundColor: '#090d13',
     webPreferences: { nodeIntegration: false, contextIsolation: true, webviewTag: true, preload: path.join(__dirname, 'preload.js') }
   });
   mainWindow.loadFile(path.join(__dirname, 'src', 'index.html'));
-  mainWindow.setFullScreen(true);   // always open fullscreen (still resizable — can exit via ⌃⌘F)
+  // Remember where Siddhant leaves it (size + position) for next launch.
+  const saveMainBounds = () => { try { saveConfig({ mainBounds: mainWindow.getBounds() }); } catch {} };
+  mainWindow.on('resized', saveMainBounds); mainWindow.on('moved', saveMainBounds);
 }
 
 // Activity is now an in-window panel (#activity-panel in index.html). This is a no-op kept so
@@ -5681,7 +5689,7 @@ function studioWebContents() {
 function toggleWindow() {
   if (!mainWindow) return createWindow();
   if (mainWindow.isVisible() && mainWindow.isFocused()) mainWindow.hide();
-  else { if (!mainWindow.isFullScreen()) mainWindow.setFullScreen(true); mainWindow.show(); mainWindow.focus(); }
+  else { mainWindow.show(); mainWindow.focus(); }   // keep its windowed bounds (movable/resizable)
 }
 
 // --- Nexus (embedded research navigator) ---
