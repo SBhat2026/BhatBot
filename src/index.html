@@ -353,6 +353,26 @@
   #bootbar { margin-top: 14px; height: 3px; background: rgba(21,33,47,.6); border-radius: 2px; overflow: hidden; box-shadow: 0 0 10px rgba(0,200,255,.25); }
   #bootbar i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, #0a4a63, #00c8ff); transition: width .25s linear; box-shadow: 0 0 12px #00c8ff; }
   #boot.gone { opacity: 0; pointer-events: none; }
+  /* D — JARVIS voice tuning popover */
+  #voicepanel { position: fixed; right: 14px; bottom: 96px; width: 248px; z-index: 50;
+    background: rgba(11,17,25,.97); border: 1px solid var(--accent); border-radius: 10px;
+    padding: 12px 14px; box-shadow: 0 8px 30px rgba(0,0,0,.55), 0 0 18px rgba(0,200,255,.18);
+    font-size: 12px; color: var(--text); }
+  #voicepanel[hidden] { display: none; }
+  .vp-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+  .vp-head b { color: var(--accent); letter-spacing: .12em; font-size: 12px; }
+  #vp-close { cursor: pointer; color: var(--text-dim); }
+  #vp-close:hover { color: var(--accent); }
+  .vp-row { display: flex; justify-content: space-between; margin: 8px 0 3px; color: var(--text-dim); text-transform: uppercase; letter-spacing: .06em; font-size: 10.5px; }
+  .vp-row i { color: var(--accent); font-style: normal; }
+  .vp-slider { width: 100%; accent-color: var(--accent); cursor: pointer; }
+  .vp-hint { color: var(--text-dim2); font-size: 9.5px; margin-bottom: 4px; }
+  .vp-chk { display: flex; align-items: center; gap: 6px; margin: 10px 0; color: var(--text-dim); cursor: pointer; }
+  .vp-btn { width: 100%; margin-top: 6px; padding: 7px; background: transparent; color: var(--accent);
+    border: 1px solid var(--accent); border-radius: 6px; cursor: pointer; font-size: 11.5px; }
+  .vp-btn:hover { background: rgba(0,200,255,.12); }
+  .vp-status { margin-top: 8px; font-size: 10.5px; color: var(--text-dim2); min-height: 12px; }
+  .vp-status.ok { color: var(--ok); } .vp-status.err { color: var(--err); }
 </style>
 </head>
 <body>
@@ -450,8 +470,26 @@
     <button class="ibtn" id="mic" title="Voice">🎙</button>
     <button class="ibtn" id="spk" title="Speak replies (Jarvis voice)">🔊</button>
     <input id="spd" type="range" min="0.7" max="1.2" step="0.02" value="1.05" title="Speaking speed (Slower ↔ Faster)" aria-label="Speaking speed" />
+    <button class="ibtn" id="vcfg" title="JARVIS voice tuning + import samples">🎚</button>
     <button class="ibtn" id="vfirst" title="Voice-first: speak replies, don't print them">🎧</button>
     <button class="ibtn" id="send" title="Send">▶</button>
+  </div>
+
+  <!-- D — JARVIS voice tuning popover (live; synth reads config per-utterance) -->
+  <div id="voicepanel" hidden>
+    <div class="vp-head"><b>◈ JARVIS VOICE</b><span id="vp-close" title="Close">✕</span></div>
+    <label class="vp-row">Stability <i id="vp-stab-v"></i></label>
+    <input id="vp-stab" class="vp-slider" type="range" min="0" max="1" step="0.01" />
+    <div class="vp-hint">higher = steadier / unflappable</div>
+    <label class="vp-row">Similarity <i id="vp-sim-v"></i></label>
+    <input id="vp-sim" class="vp-slider" type="range" min="0" max="1" step="0.01" />
+    <div class="vp-hint">higher = closer to the clone timbre</div>
+    <label class="vp-row">Style <i id="vp-style-v"></i></label>
+    <input id="vp-style" class="vp-slider" type="range" min="0" max="1" step="0.01" />
+    <div class="vp-hint">low = dry deadpan · high = theatrical</div>
+    <label class="vp-chk"><input id="vp-boost" type="checkbox" /> Speaker boost (presence)</label>
+    <button id="vp-import" class="vp-btn">⬆ Import voice samples → clone</button>
+    <div id="vp-status" class="vp-status"></div>
   </div>
 
   <div id="statusbar">
@@ -1193,6 +1231,42 @@ if (spd) {
   spd.addEventListener('input', () => { setSpdTitle(spd.value); try { window.bhatbot.setTtsSpeed(parseFloat(spd.value)); } catch {} });
   setSpdTitle(spd.value);
 }
+
+// ---- D: JARVIS voice tuning popover (live; synth reads config per utterance) ----
+(() => {
+  const panel = document.getElementById('voicepanel'); const btn = document.getElementById('vcfg');
+  if (!panel || !btn) return;
+  const stab = $('#vp-stab'), sim = $('#vp-sim'), sty = $('#vp-style'), boost = $('#vp-boost'),
+        stabV = $('#vp-stab-v'), simV = $('#vp-sim-v'), styV = $('#vp-style-v'),
+        importBtn = $('#vp-import'), statusEl = $('#vp-status');
+  const fmt = (v) => Number(v).toFixed(2);
+  async function load() {
+    try {
+      const s = await window.bhatbot.getVoiceSettings();
+      stab.value = s.stability; sim.value = s.similarity_boost; sty.value = s.style; boost.checked = !!s.use_speaker_boost;
+      stabV.textContent = fmt(s.stability); simV.textContent = fmt(s.similarity_boost); styV.textContent = fmt(s.style);
+      importBtn.style.display = s.hasElevenLabs ? '' : 'none';
+      statusEl.className = 'vp-status'; statusEl.textContent = s.hasElevenLabs ? '' : 'Set elevenLabsKey to clone a voice.';
+    } catch {}
+  }
+  const bind = (el, key, label) => el.addEventListener('input', () => {
+    label.textContent = fmt(el.value);
+    try { window.bhatbot.setVoiceSetting(key, parseFloat(el.value)); } catch {}
+  });
+  bind(stab, 'ttsStability', stabV); bind(sim, 'ttsSimilarity', simV); bind(sty, 'ttsStyle', styV);
+  boost.addEventListener('change', () => { try { window.bhatbot.setVoiceSetting('ttsSpeakerBoost', boost.checked); } catch {} });
+  btn.addEventListener('click', () => { const show = panel.hidden; panel.hidden = !show; if (show) load(); });
+  $('#vp-close').addEventListener('click', () => { panel.hidden = true; });
+  importBtn.addEventListener('click', async () => {
+    statusEl.className = 'vp-status'; statusEl.textContent = 'Pick clean speech samples (1–5 min)…';
+    try {
+      const r = await window.bhatbot.importVoiceSamples();
+      if (r.canceled) { statusEl.textContent = ''; return; }
+      if (r.success) { statusEl.className = 'vp-status ok'; statusEl.textContent = `✓ Cloned "${r.name}" — now the active voice.`; }
+      else { statusEl.className = 'vp-status err'; statusEl.textContent = '⚠ ' + (r.error || 'clone failed'); }
+    } catch (e) { statusEl.className = 'vp-status err'; statusEl.textContent = '⚠ ' + e.message; }
+  });
+})();
 
 // ---- voice-first + ambient mode ----
 // ambient  = pure voice surface: input bar hidden, orb stage, wake-word listening only.

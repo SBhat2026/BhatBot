@@ -198,3 +198,13 @@ South Korea's second with a draw and a win. Czechia and South Africa are
   - reply: Mexico's running away with it — three wins, nine points. South Africa's in second, but three points back.
 - PASS **date-grounding**
   - reply: Wednesday, June 24, 2026 at 11:15 PM EDT.
+
+## 2026-06-25T13:06:24.556Z — 4/4 passed
+- PASS **world-cup-update**
+  - reply: Colombia's running away with Group K — they've already clinched knockout, beat DR Congo and Uzbekistan. Portugal still i
+- PASS **predict-matchup**
+  - reply: France favoured at just over half — 52% to win, Brazil 24%. Draw's in the mix at 24%. Expected goals France 1.66, Brazil
+- PASS **group-standings**
+  - reply: Mexico's running it — three wins, nine points, goal differential of plus-six. South Africa are second but already five p
+- PASS **date-grounding**
+  - reply: Thursday, June 25, 2026 at 9:06 AM EDT.

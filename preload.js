@@ -14,6 +14,9 @@ contextBridge.exposeInMainWorld('bhatbot', {
   getMemoryPath: () => ipcRenderer.invoke('get-memory-path'),
   getVoiceConfig: () => ipcRenderer.invoke('get-voice-config'),
   setTtsSpeed: (v) => ipcRenderer.invoke('set-tts-speed', v),
+  getVoiceSettings: () => ipcRenderer.invoke('get-voice-settings'),                 // D — current JARVIS voice params
+  setVoiceSetting: (key, value) => ipcRenderer.invoke('set-voice-setting', { key, value }),
+  importVoiceSamples: () => ipcRenderer.invoke('import-voice-samples'),             // D — clone/improve voice from audio files
   getHealth: () => ipcRenderer.invoke('get-health'),
   transcribeAudio: (data) => ipcRenderer.invoke('transcribe-audio', data),
   synthesizeSpeech: (text) => ipcRenderer.invoke('synthesize-speech', { text }),

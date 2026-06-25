@@ -5763,6 +5763,67 @@ ipcMain.handle('set-tts-speed', (_e, v) => {
   saveConfig({ ttsSpeed: n });
   return n;
 });
+
+// D — voice customizability. Read/write the JARVIS voice character live (synth reads config
+// per-utterance, so a change takes effect on the very next spoken line — no restart).
+ipcMain.handle('get-voice-settings', () => {
+  const c = loadConfig();
+  return { ...jarvisVoiceSettings(c), provider: c.ttsProvider || (c.elevenLabsKey ? 'elevenlabs' : null),
+    voiceId: c.ttsVoice || c.elevenLabsVoiceId || 'pNInz6obpgDQGcFmaJgB', hasElevenLabs: !!c.elevenLabsKey };
+});
+const VOICE_SETTING_KEYS = {
+  ttsStability: [0, 1], ttsSimilarity: [0, 1], ttsStyle: [0, 1], ttsSpeed: [0.7, 1.2],
+};
+ipcMain.handle('set-voice-setting', (_e, { key, value }) => {
+  if (key === 'ttsSpeakerBoost') { const b = !!value; saveConfig({ ttsSpeakerBoost: b }); return { key, value: b }; }
+  const range = VOICE_SETTING_KEYS[key];
+  if (!range) return { error: 'unknown voice setting: ' + key };
+  const n = Math.max(range[0], Math.min(range[1], Number(value)));
+  if (!isFinite(n)) return { error: 'invalid value' };
+  saveConfig({ [key]: n });
+  return { key, value: n };
+});
+
+// Build/improve the JARVIS voice clone from audio sample files via ElevenLabs Instant Voice Cloning
+// (POST /v1/voices/add, multipart). On success returns the new voice_id; caller persists it as the
+// active voice so the next line uses the clone. Needs config.elevenLabsKey.
+async function elevenLabsAddVoice(name, filePaths) {
+  const c = loadConfig();
+  if (!c.elevenLabsKey) return { error: 'no elevenLabsKey — set it in config to clone a voice' };
+  if (!filePaths || !filePaths.length) return { error: 'no sample files' };
+  try {
+    const form = new FormData();
+    form.append('name', name || 'JARVIS');
+    form.append('description', 'BhatBot JARVIS voice (Instant Voice Clone from imported samples)');
+    for (const fp of filePaths) {
+      const buf = fs.readFileSync(fp);
+      form.append('files', new Blob([buf]), path.basename(fp));
+    }
+    const r = await fetch('https://api.elevenlabs.io/v1/voices/add', {
+      method: 'POST', headers: { 'xi-api-key': c.elevenLabsKey }, body: form,
+    });
+    if (!r.ok) return { error: `elevenlabs ${r.status}: ${(await r.text()).slice(0, 240)}` };
+    const j = await r.json();
+    return { success: true, voiceId: j.voice_id, name: name || 'JARVIS' };
+  } catch (e) { return { error: e.message }; }
+}
+ipcMain.handle('import-voice-samples', async () => {
+  const c = loadConfig();
+  if (!c.elevenLabsKey) return { error: 'Set elevenLabsKey in config first to clone a voice.' };
+  const win = BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0];
+  const pick = await dialog.showOpenDialog(win, {
+    title: 'Pick JARVIS voice samples (clean speech, 1–5 min total)',
+    properties: ['openFile', 'multiSelections'],
+    filters: [{ name: 'Audio', extensions: ['mp3', 'wav', 'm4a', 'flac', 'ogg', 'webm'] }],
+  });
+  if (pick.canceled || !pick.filePaths.length) return { canceled: true };
+  const out = await elevenLabsAddVoice('JARVIS', pick.filePaths);
+  if (out.success) {
+    // Make the new clone the active voice immediately (both keys synth reads).
+    saveConfig({ ttsProvider: 'elevenlabs', ttsVoice: out.voiceId, elevenLabsVoiceId: out.voiceId });
+  }
+  return out;
+});
 // ---------------------------------------------------------------------------
 // Kokoro — local neural TTS (free, offline, high quality). A python worker is
 // kept WARM (model loaded once, ~1.2s) so each reply only pays synth time
