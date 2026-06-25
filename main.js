@@ -3884,16 +3884,44 @@ async function executeTool(name, input) {
         try { if (mainWindow && !mainWindow.isDestroyed()) { mainWindow.webContents.send('fleet-update', { phase: 'start', agents: p.steps.map((s) => ({ id: s.id, role: s.role, task: s.task })) }); mainWindow.webContents.send('show-panel', 'legion'); } } catch {}
         sendToActivity('tool-update', { type: 'thinking', text: `🧠 plan: ${p.steps.length} steps in ${p.layers.length} layer(s)${p.fallback ? ' (fallback)' : ''}` });
         const doneResults = {};
+        const plDeps = { anthropicRequest, apiKey: getApiKey(), models: { sonnet: MODEL_SONNET } };
+        const MAX_FIX = 2;   // autonomous self-fix attempts per failed step before escalating to Siddhant
         for (const layer of p.layers) {
-          const tasks = layer.map((s) => ({ id: s.id, role: s.role, tools: s.tools,
-            task: s.task + (s.dependsOn.length ? '\n\nUpstream results you build on:\n' + s.dependsOn.map((d) => `[${d}] ${String(doneResults[d] || '(none)').slice(0, 1500)}`).join('\n\n') : '') }));
+          const upstream = (s) => s.dependsOn.length ? '\n\nUpstream results you build on:\n' + s.dependsOn.map((d) => `[${d}] ${String(doneResults[d] || '(none)').slice(0, 1500)}`).join('\n\n') : '';
+          const tasks = layer.map((s) => ({ id: s.id, role: s.role, tools: s.tools, task: s.task + upstream(s) }));
           const layerOut = await agentTeam.fleet(tasks, subagentDeps(), {
             maxSteps: input.suitSteps,
             onUpdate: (u) => fleetBroadcast(u),
             drainFeedback: (id) => fleetDrainFeedback(id),
             shouldStop: (id) => fleetShouldStop(id),
           });
-          for (const a of (layerOut.agents || [])) doneResults[a.id] = a.result;
+          // AUTONOMOUS RECOVERY: a hard-failed step gets diagnosed + retried by BhatBot itself —
+          // alerting Siddhant on SERIOUS issues but continuing to fix without waiting for him; only
+          // escalating ("needs your input") after MAX_FIX attempts are exhausted.
+          for (let i = 0; i < layer.length; i++) {
+            const s = layer[i];
+            let a = (layerOut.agents || []).find((x) => x.id === s.id) || {};
+            let attempt = 0;
+            while (a.error && !fleetShouldStop(s.id) && attempt < MAX_FIX) {
+              attempt++;
+              const diag = await planner.diagnose({ task: s.task }, a.result, plDeps);
+              if (diag.severity === 'serious') {
+                const msg = `⚠ Agent "${s.role}" hit a serious issue (${diag.reason}). Self-fixing — attempt ${attempt}/${MAX_FIX}; I'll keep working on it.`;
+                sendToActivity('tool-update', { type: 'thinking', text: msg }); try { telegramNotify(msg); } catch {} try { speakDesktop(`Heads up, sir. ${s.role} hit a serious snag — I'm on it.`); } catch {}
+              }
+              fleetBroadcast({ id: s.id, role: s.role, status: 'working', note: (diag.severity === 'serious' ? '⚠ ' : '↻ ') + 'self-fix: ' + diag.reason });
+              const fixOut = await agentTeam.fleet([{ id: s.id, role: s.role, tools: s.tools, task: diag.fix + upstream(s) }], subagentDeps(), {
+                onUpdate: (u) => fleetBroadcast(u), drainFeedback: (id) => fleetDrainFeedback(id), shouldStop: (id) => fleetShouldStop(id),
+              });
+              a = (fixOut.agents || [])[0] || a;
+            }
+            if (a.error) {
+              const msg = `⚠ Agent "${s.role}" is still failing after ${MAX_FIX} self-fix attempts — needs your input.`;
+              sendToActivity('tool-update', { type: 'thinking', text: msg }); try { telegramNotify(msg); } catch {} try { speakDesktop(`Sir, ${s.role} is stuck after a couple of fixes — I could use your input.`); } catch {}
+              fleetBroadcast({ id: s.id, role: s.role, status: 'failed', note: msg });
+            }
+            doneResults[s.id] = a.result;
+          }
         }
         try { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('fleet-update', { phase: 'done' }); } catch {}
         result = { success: true, mode: 'plan_and_run', goal: input.goal, rationale: p.rationale, steps: p.steps.map((s) => ({ id: s.id, role: s.role, result: doneResults[s.id] })) };

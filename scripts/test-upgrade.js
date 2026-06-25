@@ -231,6 +231,17 @@ const { classifyDepth } = require('../lib/depth');      // A3 — response-depth
       const ls = planner.layers(steps);
       assert.ok(ls[0].length <= planner.HARD_MAX_WIDTH, 'first layer within width cap');
     }],
+    ['planner: diagnose returns severity + corrected fix', async () => {
+      const deps = { models: { sonnet: 's' }, apiKey: 'x',
+        anthropicRequest: async () => ({ content: [{ type: 'text', text: JSON.stringify({ severity: 'serious', reason: 'missing dep', fix: 'install X then retry' }) }] }) };
+      const d = await planner.diagnose({ task: 'do thing' }, 'Error: module not found', deps);
+      assert.equal(d.severity, 'serious'); assert.equal(d.fix, 'install X then retry');
+    }],
+    ['planner: diagnose degrades gracefully (keeps original task)', async () => {
+      const deps = { models: { sonnet: 's' }, apiKey: 'x', anthropicRequest: async () => { throw new Error('boom'); } };
+      const d = await planner.diagnose({ task: 'orig' }, 'err', deps);
+      assert.equal(d.severity, 'minor'); assert.equal(d.fix, 'orig');
+    }],
   ]);
 
   // ---- A3: response-depth classifier ----
