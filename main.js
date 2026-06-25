@@ -4157,13 +4157,36 @@ function sendToActivity(channel, data) {
 // FLEET (Iron Legion) live registry — id → live card state; the renderer's Legion panel mirrors it,
 // and per-agent feedback typed in that panel lands in each suit's queue (drained mid-run by runRole).
 const fleetAgents = new Map();
+const agentWindows = new Map();   // id → pop-out monitor BrowserWindow (Manus-style live screen)
 function fleetBroadcast(payload) {
   if (payload && payload.id) {
     const cur = fleetAgents.get(payload.id) || { id: payload.id, feedback: [] };
     fleetAgents.set(payload.id, { ...cur, ...payload, feedback: cur.feedback || [], ts: Date.now() });
   }
   try { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('fleet-update', payload); } catch {}
+  // mirror to any open per-agent monitor windows (each filters to its own id)
+  for (const [, w] of agentWindows) { try { if (w && !w.isDestroyed()) w.webContents.send('fleet-update', payload); } catch {} }
 }
+// Open a dedicated live-monitor window for one agent (its own "screen" — current step, rolling log,
+// latest output, and any image the agent is looking at). Mirrors Manus/computer-use monitoring.
+function openAgentWindow(id) {
+  const asset = path.join(__dirname, 'assets', 'agentmon.html');
+  if (!fs.existsSync(asset)) return { success: false, error: 'agentmon.html missing' };
+  let w = agentWindows.get(id);
+  if (w && !w.isDestroyed()) { w.show(); w.focus(); return { success: true }; }
+  w = new BrowserWindow({
+    width: 560, height: 680, resizable: true, minWidth: 360, minHeight: 360,
+    title: 'Agent · ' + id, backgroundColor: '#0a0f17',
+    webPreferences: { contextIsolation: true, preload: path.join(__dirname, 'preload-agentmon.js') },
+  });
+  w.loadFile(asset, { query: { id } });
+  agentWindows.set(id, w);
+  w.on('closed', () => agentWindows.delete(id));
+  // push the current snapshot once loaded so a mid-run pop-out isn't blank
+  w.webContents.once('did-finish-load', () => { const a = fleetAgents.get(id); if (a) { try { w.webContents.send('fleet-update', a); } catch {} } });
+  return { success: true };
+}
+ipcMain.handle('open-agent-window', (_e, id) => openAgentWindow(id));
 function fleetDrainFeedback(id) {
   const a = fleetAgents.get(id);
   if (!a || !a.feedback || !a.feedback.length) return [];

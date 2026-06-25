@@ -302,6 +302,26 @@
   #orb[data-state="speaking"] .eq i:nth-child(5){ animation-delay:.4s } #orb[data-state="speaking"] .eq i:nth-child(6){ animation-delay:.5s }
   #orb[data-state="speaking"] .eq i:nth-child(7){ animation-delay:.6s }
   @keyframes veq { 0%,100% { height: 9px; opacity: .6; } 50% { height: 40px; opacity: 1; } }
+  /* depth layers (no DOM change): a rotating RADAR SWEEP + a breathing outer HALO; intensity per state */
+  #orb::before { content:''; position:absolute; inset:6px; border-radius:50%; pointer-events:none;
+    background: conic-gradient(from 0deg, transparent 0 288deg, rgba(0,200,255,.30) 346deg, transparent 360deg);
+    -webkit-mask: radial-gradient(circle, transparent 0 27%, #000 30% 49%, transparent 50%);
+            mask: radial-gradient(circle, transparent 0 27%, #000 30% 49%, transparent 50%);
+    animation: spin 6s linear infinite; opacity:.5; }
+  #orb::after { content:''; position:absolute; inset:-12px; border-radius:50%; pointer-events:none;
+    border:1px solid rgba(0,200,255,.10); box-shadow: inset 0 0 30px rgba(0,200,255,.12); animation: corepulse 5s ease-in-out infinite; }
+  #orb[data-state="listening"]::before { animation-duration:3s; opacity:.75; }
+  #orb[data-state="thinking"]::before  { animation-duration:1.3s; opacity:.9; }
+  #orb[data-state="speaking"]::before  { opacity:.22; }
+  /* PLANNING — deliberate/computational: segmented arcs STEP-rotate (lattice assembling), core steady-bright */
+  #orb[data-state="planning"] .ring.r1 { animation: steprot 2.2s steps(12) infinite; border-style: dashed; border-color: rgba(127,227,255,.75); }
+  #orb[data-state="planning"] .ring.r2 { animation: spinrev 6s linear infinite; }
+  #orb[data-state="planning"] .ring.r3 { animation: steprot 3s steps(8) infinite reverse; border-color: rgba(150,230,255,.85); }
+  #orb[data-state="planning"] .ring.r4 { animation: spin 2.4s linear infinite; }
+  #orb[data-state="planning"] .hex { animation-duration: 9s; opacity:.5; }
+  #orb[data-state="planning"] .core { animation: corepulse 2.4s ease-in-out infinite; }
+  #orb[data-state="planning"]::before { animation: steprot 3s steps(24) infinite; opacity:.85; }
+  @keyframes steprot { from { transform: rotate(0); } to { transform: rotate(360deg); } }
   #vcap { max-width: 600px; text-align: center; color: var(--text); font-size: 15px; line-height: 1.55; min-height: 1.2em;
     transition: opacity .3s; }
   #vcap:empty { opacity: 0; }
@@ -407,6 +427,8 @@
   .suit-status { font-size: 10px; text-transform: uppercase; letter-spacing: .08em; color: var(--text-dim); }
   .suit-stop { cursor: pointer; color: var(--text-dim2); font-size: 11px; }
   .suit-stop:hover { color: var(--err); }
+  .suit-pop { cursor: pointer; color: var(--text-dim2); font-size: 12px; }
+  .suit-pop:hover { color: var(--accent); }
   .suit-card[data-status="done"] .suit-stop, .suit-card[data-status="failed"] .suit-stop, .suit-card[data-status="stopped"] .suit-stop { display: none; }
   .suit-task { font-size: 11.5px; color: var(--text-dim); }
   .suit-step { font-size: 11px; color: #7fe3ff; min-height: 13px; }
@@ -1333,10 +1355,11 @@ if (spd) {
     let el = document.getElementById('suit-card-' + id);
     if (!el) {
       el = document.createElement('div'); el.className = 'suit-card'; el.id = 'suit-card-' + id;
-      el.innerHTML = '<div class="suit-head"><b class="suit-role"></b><span class="suit-right"><span class="suit-status"></span><span class="suit-stop" title="Stop this agent">⏹</span></span></div>'
+      el.innerHTML = '<div class="suit-head"><b class="suit-role"></b><span class="suit-right"><span class="suit-status"></span><span class="suit-pop" title="Open this agent in its own window">⤢</span><span class="suit-stop" title="Stop this agent">⏹</span></span></div>'
         + '<div class="suit-task"></div><div class="suit-step"></div><div class="suit-out"></div>'
         + '<div class="suit-fb"><input class="suit-fb-in" placeholder="Steer this agent… (Enter)" /></div>';
       listEl.appendChild(el);
+      el.querySelector('.suit-pop').addEventListener('click', () => { try { window.bhatbot.openAgentWindow(id); } catch {} });
       const inp = el.querySelector('.suit-fb-in');
       inp.addEventListener('keydown', (e) => {
         if (e.key === 'Enter' && inp.value.trim()) {
@@ -1354,8 +1377,8 @@ if (spd) {
   const setStatus = (el, s) => { if (!s) return; el.querySelector('.suit-status').textContent = s; el.dataset.status = s; };
   window.bhatbot.onFleetUpdate((d) => {
     if (!d) return;
-    if (d.phase === 'start') { listEl.innerHTML = ''; (d.agents || []).forEach((a) => { const el = card(a.id); el.querySelector('.suit-role').textContent = '🦾 ' + (a.role || a.id); el.querySelector('.suit-task').textContent = a.task || ''; setStatus(el, 'queued'); }); return; }
-    if (d.phase === 'done') return;
+    if (d.phase === 'start') { listEl.innerHTML = ''; (d.agents || []).forEach((a) => { const el = card(a.id); el.querySelector('.suit-role').textContent = '🦾 ' + (a.role || a.id); el.querySelector('.suit-task').textContent = a.task || ''; setStatus(el, 'queued'); }); try { if (curPanel === 'chat' && voiceFirst) setOrbState('planning'); } catch {} return; }
+    if (d.phase === 'done') { try { if (orb && orb.dataset.state === 'planning') setOrbState('idle'); } catch {} return; }
     if (!d.id) return;
     const el = card(d.id);
     if (d.role) el.querySelector('.suit-role').textContent = '🦾 ' + d.role;

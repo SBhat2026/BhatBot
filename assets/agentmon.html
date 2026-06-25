@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Agent Monitor</title>
+<style>
+  :root { --bg:#0a0f17; --panel:#0e1622; --line:#1d2b3a; --accent:#00c8ff; --text:#dfeaf3; --dim:#6f8597;
+          --ok:#2fe08a; --err:#ff4d5e; --font-ui:-apple-system,'Segoe UI',Inter,Roboto,sans-serif;
+          --font-mono:'JetBrains Mono',ui-monospace,monospace; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:13px/1.45 var(--font-ui); display:flex; flex-direction:column; height:100vh; }
+  header { display:flex; align-items:center; justify-content:space-between; padding:10px 14px; border-bottom:1px solid var(--line); background:var(--panel); }
+  header b { color:var(--accent); font-family:var(--font-mono); letter-spacing:.06em; font-size:13px; }
+  #status { font-family:var(--font-mono); font-size:10.5px; text-transform:uppercase; letter-spacing:.08em; color:var(--dim);
+            border:1px solid var(--line); border-radius:20px; padding:3px 10px; }
+  #status[data-s="working"] { color:var(--accent); border-color:var(--accent); box-shadow:0 0 10px rgba(0,200,255,.18); }
+  #status[data-s="done"] { color:var(--ok); border-color:var(--ok); }
+  #status[data-s="failed"], #status[data-s="stopped"] { color:var(--err); border-color:var(--err); }
+  #task { padding:8px 14px; color:var(--dim); font-size:12px; border-bottom:1px solid var(--line); }
+  #screen { flex:0 0 auto; margin:10px 14px 0; border:1px solid var(--line); border-radius:8px; overflow:hidden; background:#070b11;
+            display:none; }
+  #screen img { display:block; width:100%; max-height:300px; object-fit:contain; }
+  #screen .cap { font-family:var(--font-mono); font-size:9.5px; color:var(--dim); padding:3px 8px; border-top:1px solid var(--line); }
+  #now { padding:10px 14px; color:#7fe3ff; font-family:var(--font-mono); font-size:12px; min-height:16px; }
+  #log { flex:1; overflow:auto; padding:0 14px 8px; }
+  .row { font-family:var(--font-mono); font-size:11px; color:var(--dim); padding:2px 0; border-bottom:1px dashed rgba(29,43,58,.5); }
+  .row .t { color:#46627d; margin-right:8px; }
+  #out { margin:8px 14px 14px; padding:10px 12px; background:var(--panel); border:1px solid var(--line); border-radius:8px;
+         font-size:12.5px; white-space:pre-wrap; max-height:200px; overflow:auto; }
+  #out:empty { display:none; }
+</style>
+</head>
+<body>
+  <header><b id="role">🦾 agent</b><span id="status" data-s="">idle</span></header>
+  <div id="task"></div>
+  <div id="screen"><img id="shot" alt="agent screen" /><div class="cap">live view</div></div>
+  <div id="now">awaiting activity…</div>
+  <div id="log"></div>
+  <div id="out"></div>
+  <script>
+    const $ = (s) => document.querySelector(s);
+    const roleEl=$('#role'), stEl=$('#status'), taskEl=$('#task'), nowEl=$('#now'), logEl=$('#log'), outEl=$('#out'), screenEl=$('#screen'), shotEl=$('#shot');
+    function addRow(txt) { const r=document.createElement('div'); r.className='row'; const ts=new Date().toLocaleTimeString().replace(/.*?(\d+:\d+:\d+).*/,'$1'); r.innerHTML='<span class="t">'+ts+'</span>'+txt; logEl.appendChild(r); logEl.scrollTop=logEl.scrollHeight; }
+    if (window.agentmon) {
+      roleEl.textContent = '🦾 ' + window.agentmon.id;
+      window.agentmon.onUpdate((d) => {
+        if (d.phase) return;
+        if (d.role) roleEl.textContent = '🦾 ' + d.role;
+        if (d.task) taskEl.textContent = d.task;
+        if (d.status) { stEl.textContent = d.status; stEl.dataset.s = d.status; }
+        if (d.step) { nowEl.textContent = '▸ ' + d.step; addRow('▸ ' + d.step); }
+        if (d.note) { nowEl.textContent = d.note; addRow(d.note); }
+        if (d.shot) { screenEl.style.display='block'; shotEl.src = 'data:' + (d.shotMime||'image/jpeg') + ';base64,' + d.shot; }
+        if (d.text) outEl.textContent = (d.status==='done'?'✓ ':'') + String(d.text);
+      });
+    }
+  </script>
+</body>
+</html>

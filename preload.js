@@ -20,6 +20,7 @@ contextBridge.exposeInMainWorld('bhatbot', {
   onFleetUpdate: (cb) => ipcRenderer.on('fleet-update', (_e, d) => cb(d)),           // C-Fleet — live suit relay
   sendFleetFeedback: (id, text) => ipcRenderer.invoke('fleet-feedback', { id, text }),
   sendFleetControl: (id, action) => ipcRenderer.invoke('fleet-control', { id, action }),
+  openAgentWindow: (id) => ipcRenderer.invoke('open-agent-window', id),
   getHealth: () => ipcRenderer.invoke('get-health'),
   transcribeAudio: (data) => ipcRenderer.invoke('transcribe-audio', data),
   synthesizeSpeech: (text) => ipcRenderer.invoke('synthesize-speech', { text }),
