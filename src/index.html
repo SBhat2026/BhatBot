@@ -98,6 +98,7 @@
 
   /* ---------------- swappable stage panels (Nexus / Studio / Activity / Notes) ---------------- */
   .stage-panel { display: none; flex: 1; min-height: 0; flex-direction: column; }
+  .stage-panel.active { display: flex; }
   .panel-head { display: flex; align-items: center; justify-content: space-between; padding: 9px 16px; border-bottom: 1px solid var(--line); background: var(--surface); }
   .panel-head b { color: var(--accent); letter-spacing: .08em; font-size: 13px; }
   .panel-back { cursor: pointer; color: var(--text-dim); font-size: 12px; padding: 2px 9px; border: 1px solid var(--line); border-radius: 5px; }
@@ -1142,9 +1143,15 @@ window.bhatbot.onSessionNote((n) => {
   const tab = document.querySelector('#ctxbar .tab[data-panel="notes"]');
   if (tab) { tab.style.color = '#39d7ff'; setTimeout(() => { if (curPanel !== 'notes') tab.style.color = ''; }, 4000); }   // pulse to signal a new note
 });
-// Space ends the session (generate the note now) — only when not typing in the input box.
+// Space ends the session (generate the note now) — ONLY when genuinely idle on the chat stage, never
+// while typing anywhere (inputs, the embedded Code terminal/webview, Nexus/Studio, etc.).
+function isTypingTarget(el) {
+  if (!el) return false; const t = el.tagName;
+  return t === 'INPUT' || t === 'TEXTAREA' || t === 'SELECT' || t === 'WEBVIEW' || el.isContentEditable;
+}
 document.addEventListener('keydown', (e) => {
-  if (e.code === 'Space' && document.activeElement !== $('#ta')) {
+  const codeOpen = (document.getElementById('codepanel') || {}).classList && document.getElementById('codepanel').classList.contains('open');
+  if (e.code === 'Space' && !isTypingTarget(document.activeElement) && curPanel === 'chat' && !codeOpen) {
     e.preventDefault(); window.bhatbot.endSession();
   }
 });

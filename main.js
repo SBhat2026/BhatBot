@@ -659,6 +659,22 @@ activate an app, type keystrokes, send shortcuts (e.g. ⌘S), click menu items, 
 the clipboard, post a notification, or run raw AppleScript. Needs Accessibility +
 Automation permission for Bhatbot (tell Siddhant to grant it if a call is blocked).
 
+RESEARCH: Do your OWN research with your tools — drive the Playwright browser + fetch_url +
+web_search to gather PRIMARY sources, cross-check across multiple, and cite what you used; don't
+answer from stale memory on anything current. For a real research task, run several reads in
+parallel and synthesize. Nexus (the ⚛ research navigator at https://nexusresearch.xyz, also the
+Nexus tab) is Siddhant's tool for organizing/visualizing a research space — when a task is genuinely
+about exploring a topic/literature, open Nexus (open_in_browser to that URL, or say to check the
+Nexus tab) and steer findings there rather than dumping a wall of text in chat. For heavy/parallel
+research, spin up the research sub-agent or a fleet rather than doing it all inline.
+
+VISUAL INSPECTION (mandatory): Whenever you BUILD or CHANGE any UI — an HTML page/applet, a Studio
+canvas, a rendered viewer, a web page you styled — you MUST visually verify it before you call it
+done. Open it, then run ui_inspect (target:"browser" for a page, "screen" for a desktop window) and
+ACTUALLY LOOK at the screenshot: check sizing/alignment/overflow/contrast/empty states. Fix what you
+find and re-inspect until it's right. Never report a UI as finished on logic/tests alone — layout
+bugs (uneven grids, clipped text, misaligned controls) only show up visually.
+
 BROWSER WORKFLOWS: For repeated multi-step web tasks, use browser_workflow:
 start_recording, perform the browser steps, save_workflow{name}; later replay_workflow{name}.
 Prefer replaying a saved workflow over re-deriving selectors.
@@ -3843,15 +3859,19 @@ async function executeTool(name, input) {
         const act = input.action;
         if (act === 'ensemble') {
           if (!input.task) { result = { success: false, error: 'task required' }; break; }
-          const roleNames = (input.roles && input.roles.length ? input.roles.map((r) => r.name) : ['implementer', 'skeptic', 'synthesizer']).join(', ');
-          sendToActivity('tool-update', { type: 'thinking', text: `👥 ensemble (parallel: ${roleNames}): ${String(input.task).slice(0, 80)}` });
-          result = await agentTeam.ensemble(input.task, subagentDeps(), { roles: input.roles, maxSteps: input.maxSteps });
+          const roles = (input.roles && input.roles.length ? input.roles.map((r) => r.name) : ['implementer', 'skeptic', 'synthesizer']);
+          fleetSeed(roles.map((r) => ({ id: r, role: r, task: input.task })));   // live in the Legion panel
+          sendToActivity('tool-update', { type: 'thinking', text: `👥 ensemble (parallel: ${roles.join(', ')}): ${String(input.task).slice(0, 80)}` });
+          result = await agentTeam.ensemble(input.task, subagentDeps(), { roles: input.roles, maxSteps: input.maxSteps, onUpdate: (u) => fleetBroadcast(u) });
+          fleetDone();
           break;
         }
         if (act === 'test_app') {
           if (!input.target) { result = { success: false, error: 'target (url or app name) required' }; break; }
+          fleetSeed([{ id: 'tester', role: 'tester', task: 'test ' + input.target }]);
           sendToActivity('tool-update', { type: 'thinking', text: `🧪 independent tester → ${String(input.target).slice(0, 80)}` });
-          result = await agentTeam.testApp(input.target, input.goal, subagentDeps(), { maxSteps: input.maxSteps });
+          result = await agentTeam.testApp(input.target, input.goal, subagentDeps(), { maxSteps: input.maxSteps, onUpdate: (u) => fleetBroadcast(u) });
+          fleetDone();
           break;
         }
         result = { success: false, error: 'unknown agent_team action: ' + act + ' (use ensemble | test_app)' };
@@ -4149,6 +4169,13 @@ function fleetDrainFeedback(id) {
   if (!a || !a.feedback || !a.feedback.length) return [];
   return a.feedback.splice(0);
 }
+// Seed the Legion panel with a set of agents + surface it (used by fleet, plan_and_run, ensemble, test_app).
+function fleetSeed(agents) {
+  fleetAgents.clear();
+  agents.forEach((a) => fleetAgents.set(a.id, { id: a.id, role: a.role, task: a.task, status: 'queued', step: '', text: '', feedback: [] }));
+  try { if (mainWindow && !mainWindow.isDestroyed()) { mainWindow.webContents.send('fleet-update', { phase: 'start', agents: agents.map((a) => ({ id: a.id, role: a.role, task: a.task })) }); mainWindow.webContents.send('show-panel', 'legion'); } } catch {}
+}
+function fleetDone() { try { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('fleet-update', { phase: 'done' }); } catch {} }
 ipcMain.handle('fleet-feedback', (_e, { id, text }) => {
   const a = fleetAgents.get(id);
   if (!a) return { ok: false, error: 'no such agent' };
