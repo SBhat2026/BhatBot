@@ -23,15 +23,28 @@
     --warn: #ffb02e;
     --err: #ff4d5e;
     --line: #15212f;
+    /* ── TYPE SYSTEM — fonts categorized by which aspect of BhatBot the text pertains to ──
+       --font-ui      : CONVERSATION & content — chat replies, agent/suit outputs, holo text, the
+                        chat input. Clean proportional sans → maximum readability.
+       --font-system  : HUD CHROME / IDENTITY — brand, tab bar, status bar, telemetry, panel titles,
+                        agent role/status labels. Monospace = the J.A.R.V.I.S. console look.
+       --font-data    : CODE & STRUCTURED DATA — terminal, chess move list, FEN/JSON/metrics.
+                        Monospace for alignment + an "instrument readout" feel. */
+    --font-ui: -apple-system, 'SF Pro Text', 'Segoe UI', Inter, Roboto, system-ui, sans-serif;
+    --font-system: 'JetBrains Mono', ui-monospace, 'SF Mono', monospace;
+    --font-data: 'JetBrains Mono', ui-monospace, 'SF Mono', monospace;
   }
   * { margin: 0; padding: 0; box-sizing: border-box; }
   html, body { height: 100%; }
-  /* Keep the sci-fi monospace ONLY on HUD chrome/labels; everything readable stays sans. */
-  .brand, #ctxbar .tag, #statusbar, #metrics, .panel-head b, .suit-role, .suit-status, #moves { font-family: 'JetBrains Mono', ui-monospace, monospace; }
+  /* Apply the type system by category (see :root). Content defaults to --font-ui (set on body);
+     chrome/identity and code/data opt into their categories below. */
+  .brand, #ctxbar .tag, .panel-head b { font-family: var(--font-system); }                 /* identity / titles */
+  #statusbar, #metrics, #count, .suit-role, .suit-status { font-family: var(--font-system); } /* HUD readouts */
+  #moves, #activity-list, #codepanel, .mono { font-family: var(--font-data); }              /* code & structured data */
   body {
-    /* Clean, readable proportional font for all content; the cyan + letter-spacing keep the JARVIS
-       feel. Chrome bits that want the techy look opt back in via .mono. (xterm sets its own mono.) */
-    font-family: -apple-system, 'SF Pro Text', 'Segoe UI', Inter, Roboto, system-ui, sans-serif;
+    /* CONVERSATION/content category — readable sans (see :root type system). Chrome/data categories
+       opt into mono via their own rules. */
+    font-family: var(--font-ui);
     background: var(--bg);
     color: var(--text);
     font-size: 16px;
