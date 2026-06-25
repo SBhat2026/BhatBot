@@ -74,6 +74,15 @@ const HOTKEY = 'CommandOrControl+Shift+B';
 const MODEL_SONNET = 'claude-sonnet-4-6';      // corrected from stale spec id
 const MODEL_HAIKU = 'claude-haiku-4-5';        // corrected from stale spec id
 const MAX_AGENT_ITERATIONS = 20;   // step ceiling; complex tasks need headroom to retry/replan
+// TIER-2 THROUGHPUT: tools that are READ-ONLY / side-effect-free / order-independent, so when the
+// model fires several in one turn they can run CONCURRENTLY (the higher per-minute cap serves the
+// burst — proven 4×+ in scripts/parallel-bench). Stateful/mutating tools (browser page, run_shell,
+// write_file, vision_click, screen_parse's shared worker, save_memory, system/media_control) are
+// deliberately EXCLUDED and always run sequentially in order.
+const PARALLEL_SAFE = new Set([
+  'read_file', 'list_directory', 'fetch_url', 'web_search', 'news', 'world_cup', 'notion_search',
+  'ask_ai', 'keychain_lookup', 'onepassword_lookup', 'predict_function', 'maps', 'molecule', 'weather',
+]);
 const EXEC_PATH = `${process.env.PATH || ''}:/usr/local/bin:/opt/homebrew/bin:/Library/Frameworks/Python.framework/Versions/Current/bin:/Library/Frameworks/Python.framework/Versions/3.13/bin`;
 // SPLIT_PLAN step 7: raw shell exec + destructive-command pattern lists live in lib/shell.js now.
 // The confirm/autonomous/remote gating that CONSULTS these stays below (woven into IPC/window state).
@@ -1001,7 +1010,7 @@ function leadsWithToolResult(m) {
 // Trim oldest turns until the message payload fits a token budget. Tier-1 cap is 50k
 // input tokens/min; we keep messages well under that (system+tools eat the rest) so a
 // single big call can't blow the limit. Pairing-safe: never start on an orphan tool_result.
-function capTokens(messages, maxTok = 20000) {
+function capTokens(messages, maxTok = 32000) {   // tier-2 headroom → keep more conversation in working memory (was 20k)
   if (!Array.isArray(messages)) return messages;
   let msgs = messages.slice();
   while (msgs.length > 2 && estimateTokens(msgs) > maxTok) {
@@ -2036,6 +2045,12 @@ const TOOLS = [
         items: { type: 'object', properties: { name: { type: 'string' }, persona: { type: 'string' }, tools: { type: 'array', items: { type: 'string' } } }, required: ['name', 'persona'] } },
       maxSteps: { type: 'number', description: 'Per-agent tool-loop budget (default 8 ensemble / 12 test_app, max 16).' }
     }, required: ['action'] } },
+  { name: 'fleet', description: 'IRON LEGION — run SEVERAL DISTINCT tasks AT ONCE, each handled by its own autonomous suit (sub-agent) in PARALLEL, surfaced in a LIVE "Legion" panel where Siddhant watches each suit and can steer it in real time. Use when he gives multiple separate jobs to do simultaneously ("do X, Y and Z at the same time"), or to split a big build across parallel workers (one suit per feature / file / site-section, plus a tester suit). Pass tasks:[{role,task,tools?}] (2–6). Returns when all suits finish, with each suit\'s result. NOTE: for the SAME task from multiple angles use agent_team ensemble instead; for ONE focused job use a single tool/subagent.',
+    input_schema: { type: 'object', properties: {
+      tasks: { type: 'array', description: '2–6 distinct jobs to run concurrently. Each {role (short label, e.g. "frontend"), task (what that suit should do), tools?(string[] to scope its toolset)}.',
+        items: { type: 'object', properties: { role: { type: 'string' }, task: { type: 'string' }, tools: { type: 'array', items: { type: 'string' } } }, required: ['task'] } },
+      maxSteps: { type: 'number', description: 'Per-suit tool-loop budget (default 8, max 16).' }
+    }, required: ['tasks'] } },
   { name: 'self_improve', description: 'Scan BhatBot\'s own tool-call AUDIT LOG for recurring failures and have Claude Code DRAFT a fix as a reviewable diff (it does NOT apply changes — Siddhant is the merge gate). Use when asked to "improve yourself" / "fix your recurring errors", or run it periodically. action:"scan" finds the top recurring failing tool (≥ minCount, default 3) and writes a proposed-fix .md to ~/.bhatbot/self-improve/ + notifies. dryRun:true just reports the failure clusters without invoking Claude Code.',
     input_schema: { type: 'object', properties: {
       action: { type: 'string', enum: ['scan'], description: 'scan the audit log + draft a fix.' },
@@ -3831,6 +3846,23 @@ async function executeTool(name, input) {
         result = { success: false, error: 'unknown agent_team action: ' + act + ' (use ensemble | test_app)' };
         break;
       }
+      case 'fleet': {
+        const tasks = input.tasks;
+        if (!Array.isArray(tasks) || !tasks.length) { result = { success: false, error: 'tasks: array of {role, task} required' }; break; }
+        const norm = tasks.slice(0, 6).map((t, i) => ({ id: 'suit-' + (i + 1), role: t.role || ('suit-' + (i + 1)), task: t.task, tools: Array.isArray(t.tools) ? t.tools : undefined }));
+        fleetAgents.clear();
+        norm.forEach((t) => fleetAgents.set(t.id, { id: t.id, role: t.role, task: t.task, status: 'queued', step: '', text: '', feedback: [] }));
+        // Launch the Legion panel + seed the cards, then run all suits in parallel with live relay.
+        try { if (mainWindow && !mainWindow.isDestroyed()) { mainWindow.webContents.send('fleet-update', { phase: 'start', agents: norm.map((t) => ({ id: t.id, role: t.role, task: t.task })) }); mainWindow.webContents.send('show-panel', 'legion'); } } catch {}
+        sendToActivity('tool-update', { type: 'thinking', text: `🦾 Legion: ${norm.length} suits launched in parallel` });
+        result = await agentTeam.fleet(norm, subagentDeps(), {
+          maxSteps: input.maxSteps,
+          onUpdate: (p) => fleetBroadcast(p),
+          drainFeedback: (id) => fleetDrainFeedback(id),
+        });
+        try { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('fleet-update', { phase: 'done' }); } catch {}
+        break;
+      }
       case 'screen_observe':
         result = await screenObserve(input); break;
       case 'play_chess': {
@@ -4012,6 +4044,29 @@ function sendToActivity(channel, data) {
   try { if (activityWindow && !activityWindow.isDestroyed()) activityWindow.webContents.send(channel, data); } catch {}
   pushActivity(channel, data);
 }
+
+// FLEET (Iron Legion) live registry — id → live card state; the renderer's Legion panel mirrors it,
+// and per-agent feedback typed in that panel lands in each suit's queue (drained mid-run by runRole).
+const fleetAgents = new Map();
+function fleetBroadcast(payload) {
+  if (payload && payload.id) {
+    const cur = fleetAgents.get(payload.id) || { id: payload.id, feedback: [] };
+    fleetAgents.set(payload.id, { ...cur, ...payload, feedback: cur.feedback || [], ts: Date.now() });
+  }
+  try { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('fleet-update', payload); } catch {}
+}
+function fleetDrainFeedback(id) {
+  const a = fleetAgents.get(id);
+  if (!a || !a.feedback || !a.feedback.length) return [];
+  return a.feedback.splice(0);
+}
+ipcMain.handle('fleet-feedback', (_e, { id, text }) => {
+  const a = fleetAgents.get(id);
+  if (!a) return { ok: false, error: 'no such suit' };
+  a.feedback = a.feedback || []; a.feedback.push(String(text || ''));
+  fleetBroadcast({ id, role: a.role, status: a.status, note: '📨 feedback queued' });
+  return { ok: true };
+});
 
 // Activity ring buffer — mirrors tool/thinking events so the phone's Activity tab can poll
 // them (the phone has no IPC). Both sendToActivity and the chat path (sendToAll) feed it.
@@ -4206,13 +4261,12 @@ async function agentLoop(history, apiKey, event, opts = {}) {
     const thinkText = response.content.filter((b) => b.type === 'text').map((b) => b.text).join('');
     if (thinkText && !stream) sendToAll(event, 'tool-update', { type: 'thinking', text: thinkText });
 
-    const toolResults = [];
-    for (const block of response.content) {
-      if (block.type !== 'tool_use') continue;
+    const toolUses = response.content.filter((b) => b.type === 'tool_use');
+    // Execute ONE tool end-to-end: emit start, run, emit done (+ inline visuals), return its
+    // tool_result block. A thrown tool used to escape the loop, leaving the assistant tool_use with
+    // NO matching tool_result → the next API call 400s. Always resolve to a result so pairing holds.
+    const runOneTool = async (block) => {
       sendToAll(event, 'tool-update', { type: 'tool_start', name: block.name, input: block.input });
-      // A thrown tool used to escape the loop, leaving this assistant tool_use with NO matching
-      // tool_result → the next API call 400s ("tool_use without tool_result") and the whole
-      // conversation is poisoned. Always resolve to a result object so the pairing holds.
       let result;
       try { result = await executeTool(block.name, block.input); }
       catch (e) { result = { success: false, error: 'tool threw: ' + (e && e.message || String(e)) }; }
@@ -4237,7 +4291,19 @@ async function agentLoop(history, apiKey, event, opts = {}) {
       } else {
         trContent = JSON.stringify(result).slice(0, 24 * 1024);   // cap tool_result tokens (was 100KB)
       }
-      toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: trContent, is_error: result.success === false });
+      return { type: 'tool_result', tool_use_id: block.id, content: trContent, is_error: result.success === false };
+    };
+
+    // TIER-2 THROUGHPUT: if the model fired several INDEPENDENT read-only tools this turn, run them
+    // CONCURRENTLY (order preserved by map); otherwise keep the safe sequential path for anything
+    // stateful/mutating. Results stay in tool_use order so pairing/validation is unaffected.
+    let toolResults;
+    if (toolUses.length > 1 && toolUses.every((b) => PARALLEL_SAFE.has(b.name))) {
+      sendToAll(event, 'tool-update', { type: 'thinking', text: `⚡ running ${toolUses.length} reads in parallel` });
+      toolResults = await Promise.all(toolUses.map(runOneTool));
+    } else {
+      toolResults = [];
+      for (const block of toolUses) toolResults.push(await runOneTool(block));
     }
 
     // Live feedback: fold any queued guidance into this same user turn (avoids

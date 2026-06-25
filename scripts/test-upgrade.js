@@ -178,6 +178,20 @@ const { classifyDepth } = require('../lib/depth');      // A3 — response-depth
       const r = await orchestrator.testApp('', 'goal', {}, {});
       assert.equal(r.success, false);
     }],
+    ['orchestrator: fleet runs distinct tasks + applies live feedback', async () => {
+      let sawFeedback = false; const updates = [];
+      const deps = { models: { sonnet: 's', haiku: 'h' }, apiKey: 'x', toolDefs: [],
+        anthropicRequest: async (b) => { if (JSON.stringify(b.messages).includes('Live feedback')) sawFeedback = true; return { content: [{ type: 'text', text: 'done' }], stop_reason: 'end_turn', usage: {} }; } };
+      const r = await orchestrator.fleet([{ role: 'a', task: 't1' }, { role: 'b', task: 't2' }], deps,
+        { onUpdate: (p) => updates.push(p), drainFeedback: (id) => (id === 'suit-1' ? ['go faster'] : []) });
+      assert.ok(r.success && r.agents.length === 2, 'two suits completed');
+      assert.ok(sawFeedback, 'live feedback folded into a suit turn');
+      assert.ok(updates.some((u) => u.status === 'done'), 'emitted done update');
+    }],
+    ['orchestrator: fleet requires tasks', async () => {
+      const r = await orchestrator.fleet([], {}, {});
+      assert.equal(r.success, false);
+    }],
   ]);
 
   // ---- A3: response-depth classifier ----

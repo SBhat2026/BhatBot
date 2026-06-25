@@ -208,3 +208,13 @@ South Korea's second with a draw and a win. Czechia and South Africa are
   - reply: Mexico's running it — three wins, nine points, goal differential of plus-six. South Africa are second but already five p
 - PASS **date-grounding**
   - reply: Thursday, June 25, 2026 at 9:06 AM EDT.
+
+## 2026-06-25T15:19:56.684Z — 0/4 passed
+- FAIL **world-cup-update** — error: API 400: {"type":"error","error":{"type":"invalid_request_error","message":"You have reached your specified API usage limits. You will regain access on 2026-07-01 at 00:00 UTC."},"request_id":"req_011CcQCkyCAPafw72b3uvz16"}; tool world_cup not called
+  - reply: 
+- FAIL **predict-matchup** — error: API 400: {"type":"error","error":{"type":"invalid_request_error","message":"You have reached your specified API usage limits. You will regain access on 2026-07-01 at 00:00 UTC."},"request_id":"req_011CcQCm2SNTQ4Y8to7QQSC3"}; tool world_cup not called; reply missing /%|percent|favou?red|chance|odds|(twenty|thirty|forty|fifty|sixty|seventy|eighty)/i
+  - reply: 
+- FAIL **group-standings** — error: API 400: {"type":"error","error":{"type":"invalid_request_error","message":"You have reached your specified API usage limits. You will regain access on 2026-07-01 at 00:00 UTC."},"request_id":"req_011CcQCm5H2sUXXoZwmjpGYU"}; tool world_cup not called
+  - reply: 
+- FAIL **date-grounding** — error: API 400: {"type":"error","error":{"type":"invalid_request_error","message":"You have reached your specified API usage limits. You will regain access on 2026-07-01 at 00:00 UTC."},"request_id":"req_011CcQCmAUpSq2eawMM7wzFB"}; reply missing /2026/
+  - reply: 
