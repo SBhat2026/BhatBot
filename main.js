@@ -28,6 +28,7 @@ const graph = require('./lib/graph');                  // W4 — knowledge-graph
 const sandbox = require('./lib/sandbox');              // W6 — worker_threads isolation for community/dynamic plugin tools
 const a2a = require('./lib/a2a');                       // W7 — agent-to-agent handoff envelope (future-proof subagent routing)
 const subagents = require('./lib/subagents');          // #20 — persistent specialized sub-agents (research/coding/lifeadmin)
+const agentTeam = require('./lib/orchestrator');        // C — parallel same-task ensemble + independent app-tester
 const ambient = require('./lib/ambient');              // #18 — opt-in proactive Calendar/Mail awareness (OFF by default)
 const { textHintFromSelector, splitForSpeech, estimateToolCost, stripReasoning } = require('./lib/pure');  // SPLIT_PLAN step 1
 const projects = require('./lib/projects');            // #24 — project memory + living auto-summary
@@ -121,6 +122,10 @@ let browser = null;
 let page = null;
 let browserContext = null;   // kept so we can persist cookies/localStorage (storageState) across launches
 const BROWSER_STATE = path.join(os.homedir(), '.bhatbot', 'browser-profile.json');
+// A REAL on-disk Chrome profile dir (launchPersistentContext). Unlike the storageState blob above,
+// a persistent profile keeps Google/2FA sessions signed in across launches reliably (Google often
+// rejects a restored storageState as a security risk). Sign in ONCE and it stays signed in.
+const BROWSER_PROFILE_DIR = path.join(os.homedir(), '.bhatbot', 'browser-profile-dir');
 let recordingSteps = null;   // array while recording a browser workflow, else null
 
 // Persist the browser session (cookies + localStorage) so logins survive across
@@ -2021,6 +2026,16 @@ const TOOLS = [
       background: { type: 'boolean', description: 'For run: true = start it in parallel and return immediately (you get notified on completion); false = wait for the result.' },
       maxSteps: { type: 'number', description: 'For run/handoff: tool-loop budget (default 8, max 16).' }
     }, required: ['action'] } },
+  { name: 'agent_team', description: 'Deploy MULTIPLE agents on ONE task IN PARALLEL (real wall-clock speedup + deeper planning). Two modes: action:"ensemble"{task, roles?} runs the SAME task through several agents that each take a DIFFERENT role (default: implementer / skeptic / synthesizer) all at once, then synthesizes their takes into one decisive answer — use for hard reasoning, planning, design decisions, or any "look at this from multiple angles / be thorough" request. action:"test_app"{target, goal?} unleashes an INDEPENDENT QA agent that drives a website or app like a real user (own browser + vision), probes flows/edge-cases, and reports concrete bugs + a verdict — use to "test my site/app", verify a build, or QA a deploy. Optionally pass custom `roles` (each {name, persona, tools?}) to form a bespoke team.',
+    input_schema: { type: 'object', properties: {
+      action: { type: 'string', enum: ['ensemble', 'test_app'], description: 'ensemble = N agents, same task, parallel, synthesized. test_app = one independent tester drives a site/app.' },
+      task: { type: 'string', description: 'For ensemble: the single task all agents tackle in parallel.' },
+      target: { type: 'string', description: 'For test_app: a URL (https://… or a domain) or a Mac app name to test.' },
+      goal: { type: 'string', description: 'For test_app: what to verify / acceptance criteria (optional).' },
+      roles: { type: 'array', description: 'For ensemble (optional): custom team — array of {name, persona, tools?(string[])}. Omit for the default implementer/skeptic/synthesizer trio.',
+        items: { type: 'object', properties: { name: { type: 'string' }, persona: { type: 'string' }, tools: { type: 'array', items: { type: 'string' } } }, required: ['name', 'persona'] } },
+      maxSteps: { type: 'number', description: 'Per-agent tool-loop budget (default 8 ensemble / 12 test_app, max 16).' }
+    }, required: ['action'] } },
   { name: 'self_improve', description: 'Scan BhatBot\'s own tool-call AUDIT LOG for recurring failures and have Claude Code DRAFT a fix as a reviewable diff (it does NOT apply changes — Siddhant is the merge gate). Use when asked to "improve yourself" / "fix your recurring errors", or run it periodically. action:"scan" finds the top recurring failing tool (≥ minCount, default 3) and writes a proposed-fix .md to ~/.bhatbot/self-improve/ + notifies. dryRun:true just reports the failure clusters without invoking Claude Code.',
     input_schema: { type: 'object', properties: {
       action: { type: 'string', enum: ['scan'], description: 'scan the audit log + draft a fix.' },
@@ -2369,34 +2384,34 @@ function scheduleSaveBounds() { clearTimeout(_boundsDeb); _boundsDeb = setTimeou
 
 let browserLaunching = null;
 async function ensureBrowser() {
-  if (browser && page) return;
+  if (browserContext && page) return;
   if (browserLaunching) return browserLaunching;     // de-dupe concurrent launches (race → 2 browsers)
   browserLaunching = (async () => {
     const { chromium } = require('playwright');
-    // Browser is now its OWN dedicated, visible desktop window (headless:false) — NOT fullscreen,
-    // sized 1280x800 and positioned on the desktop. --no-sandbox: Chromium often fails to start
-    // from a packaged/Finder-launched Electron app without it. Realistic UA + viewport reduce
-    // bot-blocking that makes pages look broken/empty.
+    // Browser is its OWN dedicated, visible desktop window (headless:false) — NOT fullscreen, sized
+    // 1280x860 and positioned on the desktop. --no-sandbox: Chromium often fails to start from a
+    // packaged/Finder-launched Electron app without it. Realistic UA + viewport reduce bot-blocking.
     // Restore where you last left the window (movable/resizable — shove it aside, it stays put).
     const sb = loadConfig().browserBounds;
     const winArgs = (sb && sb.width > 200 && sb.height > 200)
       ? [`--window-size=${Math.round(sb.width)},${Math.round(sb.height)}`, `--window-position=${Math.round(sb.left)},${Math.round(sb.top)}`]
       : ['--window-size=1280,860', '--window-position=140,120'];
-    browser = await chromium.launch({
+    const geo = await browserGeo();              // real coords → location-aware results work
+    // PERSISTENT profile (vs a throwaway context): the on-disk profile dir keeps Google/2FA logins
+    // alive across launches, so signing into siddhantpramod2008@gmail.com once (incl. the 2FA step)
+    // sticks. Combines launch args + context opts in one call.
+    const freshProfile = !fs.existsSync(BROWSER_PROFILE_DIR);
+    fs.mkdirSync(BROWSER_PROFILE_DIR, { recursive: true });
+    browserContext = await chromium.launchPersistentContext(BROWSER_PROFILE_DIR, {
       headless: false,
       args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-blink-features=AutomationControlled',
              '--disable-dev-shm-usage', ...winArgs],
-    });
-    const geo = await browserGeo();              // real coords → location-aware results work
-    const ctxOpts = {
       userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
       viewport: null, locale: 'en-US',          // viewport:null → page fills the real window
       permissions: ['geolocation'],             // auto-grant the location prompt instead of stalling
       ...(geo ? { geolocation: geo } : {}),
-    };
-    // Restore a prior session if we have one → cookies/logins persist across launches.
-    if (fs.existsSync(BROWSER_STATE)) ctxOpts.storageState = BROWSER_STATE;
-    browserContext = await browser.newContext(ctxOpts);
+    });
+    browser = browserContext.browser();         // null for persistent contexts — expected; close via the context
     // Auto-handle JS dialogs on every page/tab (popups otherwise block the agent).
     browserContext.on('page', (p) => attachPageHandlers(p));
     // Watch-my-mouse: forward Siddhant's in-page actions to Node, and install the listeners on
@@ -2405,8 +2420,17 @@ async function ensureBrowser() {
       await browserContext.exposeBinding('__bhatbotUserEvent', (src, detail) => onUserBrowserEvent(detail));
       await browserContext.addInitScript(OBSERVER_SCRIPT);
     } catch (e) { console.error('[browser] observer install failed:', e.message); }
-    page = await browserContext.newPage();
+    page = browserContext.pages()[0] || await browserContext.newPage();
     attachPageHandlers(page);
+    // First ever launch of the profile → land on Google sign-in (email prefilled) so Siddhant just
+    // completes the one-time 2FA; after that the persistent profile stays signed in.
+    if (freshProfile) {
+      const acct = (loadConfig().browserAccount || '').trim();
+      const url = acct
+        ? 'https://accounts.google.com/AccountChooser?Email=' + encodeURIComponent(acct) + '&continue=' + encodeURIComponent('https://mail.google.com/')
+        : 'https://accounts.google.com/';
+      page.goto(url, { waitUntil: 'domcontentloaded' }).catch(() => {});
+    }
   })();
   try { await browserLaunching; } finally { browserLaunching = null; }
 }
@@ -2429,7 +2453,7 @@ async function browserAction(input) {
   openActivityWindow();
   try { await ensureBrowser(); }
   catch (e) {
-    browser = null; page = null; browserLaunching = null;
+    browser = null; page = null; browserContext = null; browserLaunching = null;
     return { success: false, error: `Browser failed to launch: ${e.message.split('\n')[0]}. Fix: run \`cd ~/bhatbot && npx playwright install chromium\` once.` };
   }
   // Screenshots stream to the activity window AND are returned as `_image`
@@ -2530,7 +2554,7 @@ async function browserAction(input) {
   } catch (e) {
     const msg = String(e && e.message || e);
     // A dead/crashed page can't recover in place — reset so the next call relaunches clean.
-    if (/Target closed|crashed|Browser has been closed|Execution context was destroyed/i.test(msg)) { await saveBrowserState(); try { await browser.close(); } catch {} browser = null; page = null; browserContext = null; }
+    if (/Target closed|crashed|Browser has been closed|Execution context was destroyed/i.test(msg)) { await saveBrowserState(); try { await (browserContext || browser).close(); } catch {} browser = null; page = null; browserContext = null; }
     return { success: false, error: `Browser ${input.action} failed: ${msg.split('\n')[0]}` };
   } finally {
     if (isMut) await agentActing(false);
@@ -3787,6 +3811,24 @@ async function executeTool(name, input) {
         }
         if (act === 'a2a_log') { result = { success: true, handoffs: a2a.recent(input.n || 20) }; break; }
         result = { success: false, error: 'unknown subagent action: ' + act };
+        break;
+      }
+      case 'agent_team': {
+        const act = input.action;
+        if (act === 'ensemble') {
+          if (!input.task) { result = { success: false, error: 'task required' }; break; }
+          const roleNames = (input.roles && input.roles.length ? input.roles.map((r) => r.name) : ['implementer', 'skeptic', 'synthesizer']).join(', ');
+          sendToActivity('tool-update', { type: 'thinking', text: `👥 ensemble (parallel: ${roleNames}): ${String(input.task).slice(0, 80)}` });
+          result = await agentTeam.ensemble(input.task, subagentDeps(), { roles: input.roles, maxSteps: input.maxSteps });
+          break;
+        }
+        if (act === 'test_app') {
+          if (!input.target) { result = { success: false, error: 'target (url or app name) required' }; break; }
+          sendToActivity('tool-update', { type: 'thinking', text: `🧪 independent tester → ${String(input.target).slice(0, 80)}` });
+          result = await agentTeam.testApp(input.target, input.goal, subagentDeps(), { maxSteps: input.maxSteps });
+          break;
+        }
+        result = { success: false, error: 'unknown agent_team action: ' + act + ' (use ensemble | test_app)' };
         break;
       }
       case 'screen_observe':
@@ -6808,7 +6850,7 @@ app.on('will-quit', async () => {
   globalShortcut.unregisterAll();
   try { await saveBrowserBounds(); } catch {}
   try { await saveBrowserState(); } catch {}
-  try { if (browser) await browser.close(); } catch {}
+  try { if (browserContext) await browserContext.close(); else if (browser) await browser.close(); } catch {}
   try { if (wakeProc) wakeProc.kill(); } catch {}
   try { if (ptyProc) ptyProc.kill(); } catch {}
   try { if (kokoroProc) kokoroProc.kill(); } catch {}

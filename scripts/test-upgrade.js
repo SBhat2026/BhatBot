@@ -29,6 +29,8 @@ const graph = require('../lib/graph');
 const sandbox = require('../lib/sandbox');
 const a2a = require('../lib/a2a');
 const toolselect = require('../lib/toolselect');
+const orchestrator = require('../lib/orchestrator');   // C — parallel ensemble + tester
+const { classifyDepth } = require('../lib/depth');      // A3 — response-depth tiers
 
 (async () => {
   // ---- W3 risk classification ----
@@ -144,6 +146,46 @@ const toolselect = require('../lib/toolselect');
       await new Promise((r) => setTimeout(r, 30));
       assert.ok(sent.some((m) => m.event === 'clear'), 'sent clear to flush queued audio on barge-in');
     }],
+  ]);
+
+  // ---- C: parallel multi-agent orchestrator ----
+  await run([
+    ['orchestrator: ensemble runs N roles in parallel + synthesizes', async () => {
+      let calls = 0;
+      const deps = { models: { sonnet: 's', haiku: 'h' }, apiKey: 'x', toolDefs: [{ name: 'read_file' }],
+        anthropicRequest: async (b) => { calls++; return { content: [{ type: 'text', text: 'take ' + calls }], stop_reason: 'end_turn', usage: {} }; } };
+      const r = await orchestrator.ensemble('plan the thing', deps, {});
+      assert.ok(r.success, 'ensemble succeeds');
+      assert.equal(r.takes.length, 3, 'default trio produced 3 takes');
+      assert.equal(calls, 4, '3 role calls + 1 synthesis call');
+      assert.deepEqual(r.roles, ['implementer', 'skeptic', 'synthesizer']);
+    }],
+    ['orchestrator: runRole enforces tool allowlist', async () => {
+      let denied = null;
+      const deps = { models: { sonnet: 's', haiku: 'h' }, apiKey: 'x', toolDefs: [{ name: 'read_file' }, { name: 'run_shell' }],
+        executeTool: async () => ({ success: true }),
+        anthropicRequest: async () => ({ content: [{ type: 'tool_use', id: '1', name: 'run_shell', input: {} }], stop_reason: 'tool_use', usage: {} }) };
+      // role only allowed read_file; asking for run_shell must be refused (not executed)
+      const r = await orchestrator.runRole({ name: 'scoped', persona: 'p', tools: ['read_file'] }, 'go', deps, { maxSteps: 1 });
+      assert.equal(r.role, 'scoped');
+      assert.ok(r.steps >= 1, 'loop ran');
+    }],
+    ['orchestrator: ensemble requires a task', async () => {
+      const r = await orchestrator.ensemble('', {}, {});
+      assert.equal(r.success, false);
+    }],
+    ['orchestrator: testApp requires a target', async () => {
+      const r = await orchestrator.testApp('', 'goal', {}, {});
+      assert.equal(r.success, false);
+    }],
+  ]);
+
+  // ---- A3: response-depth classifier ----
+  await run([
+    ['depth: ack for trivial', () => assert.equal(classifyDepth('ok thanks').depth, 'ack')],
+    ['depth: deep for planning', () => assert.equal(classifyDepth('plan the migration and explain the tradeoffs').depth, 'deep')],
+    ['depth: detailed for how/why', () => assert.equal(classifyDepth('how does prompt caching work?').depth, 'detailed')],
+    ['depth: maxTokens scales with depth', () => assert.ok(classifyDepth('plan X in detail').maxTokens > classifyDepth('ok').maxTokens)],
   ]);
 
   console.log(`\n${failed ? '❌' : '✅'} ${passed} passed, ${failed} failed`);
