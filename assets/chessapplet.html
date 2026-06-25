@@ -16,10 +16,10 @@
                    padding:6px 10px; font-size:13px; cursor:pointer; }
   button:hover, select:hover { border-color:var(--accent); }
   #status { min-height:18px; color:var(--light); font-size:13px; }
-  #board { display:grid; grid-template-columns:repeat(8,1fr); width:min(78vw,520px); aspect-ratio:1;
+  #board { display:grid; grid-template-columns:repeat(8,1fr); grid-template-rows:repeat(8,1fr); width:min(78vw,520px); aspect-ratio:1;
            border:2px solid var(--line); border-radius:8px; overflow:hidden; box-shadow:0 0 24px rgba(0,200,255,.12); }
   .sqr { position:relative; display:flex; align-items:center; justify-content:center; font-size:min(8vw,40px);
-         user-select:none; cursor:pointer; }
+         min-height:0; aspect-ratio:1; user-select:none; cursor:pointer; }
   .sqr.l { background:#1b2735; } .sqr.d { background:#111a26; }
   .sqr.sel { box-shadow:inset 0 0 0 3px var(--sel); }
   .sqr.legal::after { content:''; position:absolute; width:26%; height:26%; border-radius:50%; background:var(--legal); }
