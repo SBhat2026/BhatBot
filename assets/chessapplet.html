@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>BhatBot Chess — Standard + Atomic</title>
+<style>
+  :root { --bg:#0a0f17; --panel:#0e1622; --line:#1d2b3a; --accent:#00c8ff; --text:#dfeaf3; --dim:#6f8597;
+          --light:#9fb4c7; --dark:#33485c; --sel:#00c8ff; --legal:rgba(0,200,255,.45); --boom:#ff5a3c; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:14px/1.4 -apple-system,Segoe UI,Roboto,sans-serif;
+         display:flex; flex-direction:column; align-items:center; padding:14px; gap:12px; }
+  h1 { font-size:15px; letter-spacing:.12em; color:var(--accent); margin:0; font-weight:600; }
+  .bar { display:flex; gap:8px; align-items:center; flex-wrap:wrap; justify-content:center; }
+  select, button { background:var(--panel); color:var(--text); border:1px solid var(--line); border-radius:6px;
+                   padding:6px 10px; font-size:13px; cursor:pointer; }
+  button:hover, select:hover { border-color:var(--accent); }
+  #status { min-height:18px; color:var(--light); font-size:13px; }
+  #board { display:grid; grid-template-columns:repeat(8,1fr); width:min(78vw,520px); aspect-ratio:1;
+           border:2px solid var(--line); border-radius:8px; overflow:hidden; box-shadow:0 0 24px rgba(0,200,255,.12); }
+  .sqr { position:relative; display:flex; align-items:center; justify-content:center; font-size:min(8vw,40px);
+         user-select:none; cursor:pointer; }
+  .sqr.l { background:#1b2735; } .sqr.d { background:#111a26; }
+  .sqr.sel { box-shadow:inset 0 0 0 3px var(--sel); }
+  .sqr.legal::after { content:''; position:absolute; width:26%; height:26%; border-radius:50%; background:var(--legal); }
+  .sqr.legal.cap::after { width:84%; height:84%; background:transparent; border:3px solid var(--legal); border-radius:50%; }
+  .sqr.boom { animation:boom .5s ease; }
+  @keyframes boom { 0%{ box-shadow:inset 0 0 0 0 var(--boom);} 50%{ box-shadow:inset 0 0 30px 6px var(--boom);} 100%{ box-shadow:none;} }
+  .wp { color:#eef6ff; text-shadow:0 1px 2px #000; } .bp { color:#7d98ad; text-shadow:0 1px 1px #000; }
+  #moves { width:min(78vw,520px); max-height:120px; overflow:auto; font-family:ui-monospace,monospace; font-size:12px;
+           color:var(--dim); background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:8px 10px; }
+</style>
+</head>
+<body>
+  <h1>◈ BHATBOT CHESS</h1>
+  <div class="bar">
+    <select id="variant"><option value="standard">Standard</option><option value="atomic">Atomic</option></select>
+    <select id="opp"><option value="human">2 players</option><option value="bot">vs Bot (Black)</option></select>
+    <button id="new">↻ New game</button>
+  </div>
+  <div id="status">White to move.</div>
+  <div id="board"></div>
+  <div id="moves"></div>
+
+  <script src="./vendor/atomic.js"></script>
+  <script type="module">
+    import { Chess } from './vendor/chess.esm.js';
+    const GLYPH = { wp:'♙',wn:'♘',wb:'♗',wr:'♖',wq:'♕',wk:'♔', bp:'♟',bn:'♞',bb:'♝',br:'♜',bq:'♛',bk:'♚' };
+    const FILES = 'abcdefgh';
+
+    // Unified browser game over chess.js (standard) + the validated atomic engine (window.ChessAtomic).
+    class BGame {
+      constructor(variant){ this.variant = variant; if (variant==='atomic') this.e = new window.ChessAtomic(); else this.c = new Chess(); }
+      turn(){ return this.variant==='atomic' ? this.e.turn : this.c.turn(); }
+      legalUci(){ return this.variant==='atomic' ? this.e.legal().map(m=>this.e.toUci(m))
+                                                 : this.c.moves({verbose:true}).map(m=>m.from+m.to+(m.promotion||'')); }
+      grid(){
+        const g = Array.from({length:8},()=>Array(8).fill(null));
+        if (this.variant==='atomic'){ for (let dr=0;dr<8;dr++){ const rank=7-dr; for (let f=0;f<8;f++){ const p=this.e.b[rank][f]; if (p) g[dr][f]={t:p.t,c:p.c}; } } }
+        else { const b=this.c.board(); for (let dr=0;dr<8;dr++) for (let f=0;f<8;f++){ const p=b[dr][f]; if (p) g[dr][f]={t:p.type,c:p.color}; } }
+        return g;
+      }
+      move(uci){ if (this.variant==='atomic') return this.e.doMove(uci);
+                 const m=this.c.move({from:uci.slice(0,2),to:uci.slice(2,4),promotion:uci[4]||undefined});
+                 return m ? {ok:true,san:m.san,uci,explosions:[]} : {ok:false}; }
+      over(){ return this.variant==='atomic' ? !!this.e.over : this.c.isGameOver(); }
+      result(){ if (this.variant==='atomic') return this.e.over;
+                if (!this.c.isGameOver()) return null; if (this.c.isCheckmate()) return this.c.turn()==='w'?'0-1':'1-0'; return '1/2-1/2'; }
+      inCheck(){ return this.variant==='atomic' ? false : this.c.inCheck(); }
+    }
+
+    let game, sel=null, history=[];
+    const boardEl=document.getElementById('board'), statusEl=document.getElementById('status'), movesEl=document.getElementById('moves');
+    const variantSel=document.getElementById('variant'), oppSel=document.getElementById('opp');
+
+    const params = new URLSearchParams(location.search);
+    if (params.get('variant')==='atomic') variantSel.value='atomic';
+
+    function newGame(){ game=new BGame(variantSel.value); sel=null; history=[]; render(); setStatus(); }
+    function setStatus(extra){
+      const r=game.result();
+      if (r){ statusEl.textContent = r==='1/2-1/2' ? 'Draw.' : (r==='1-0'?'White wins! 🏆':'Black wins! 🏆'); return; }
+      statusEl.textContent = (game.turn()==='w'?'White':'Black')+' to move.' + (game.inCheck()?' — Check!':'') + (extra?'  '+extra:'');
+    }
+    function render(boomSquares){
+      const g=game.grid(); boardEl.innerHTML='';
+      const legal = sel ? game.legalUci().filter(u=>u.slice(0,2)===sel) : [];
+      const legalTo = new Set(legal.map(u=>u.slice(2,4)));
+      for (let dr=0;dr<8;dr++) for (let f=0;f<8;f++){
+        const name=FILES[f]+(8-dr); const cell=g[dr][f];
+        const d=document.createElement('div');
+        d.className='sqr '+(((dr+f)%2)?'d':'l');
+        if (sel===name) d.classList.add('sel');
+        if (legalTo.has(name)){ d.classList.add('legal'); if (cell) d.classList.add('cap'); }
+        if (boomSquares && boomSquares.includes(name)) d.classList.add('boom');
+        if (cell){ d.textContent=GLYPH[cell.c+cell.t]; d.classList.add(cell.c==='w'?'wp':'bp'); }
+        d.onclick=()=>onClick(name);
+        boardEl.appendChild(d);
+      }
+    }
+    function onClick(name){
+      if (game.over()) return;
+      const g=game.grid(); const [f,r]=[FILES.indexOf(name[0]),8-Number(name[1])]; const cell=g[r][f];
+      if (sel){
+        const legal=game.legalUci().filter(u=>u.slice(0,2)===sel && u.slice(2,4)===name);
+        if (legal.length){ const uci = legal.find(u=>u[4]==='q') || legal[0]; doMove(uci); sel=null; return; }
+      }
+      sel = (cell && cell.c===game.turn()) ? name : null; render();
+    }
+    function doMove(uci){
+      const res=game.move(uci); if (!res||!res.ok) return;
+      history.push((Math.ceil((history.length+1)/2))+'. '+res.san); movesEl.textContent=history.join('  '); movesEl.scrollTop=movesEl.scrollHeight;
+      render(res.explosions); setStatus(res.explosions&&res.explosions.length?'💥 '+res.explosions.join(' '):'');
+      if (!game.over() && oppSel.value==='bot' && game.turn()==='b') setTimeout(botMove, 350);
+    }
+    function botMove(){
+      const moves=game.legalUci(); if (!moves.length) return;
+      // light heuristic: prefer captures (atomic: explosions), else random
+      const g=game.grid();
+      const caps=moves.filter(u=>{ const tf=FILES.indexOf(u[2]), tr=8-Number(u[3]); return g[tr][tf]; });
+      const pool=caps.length?caps:moves; doMove(pool[Math.floor(Math.random()*pool.length)]);
+    }
+    document.getElementById('new').onclick=newGame;
+    variantSel.onchange=newGame; oppSel.onchange=()=>{ if (oppSel.value==='bot' && game.turn()==='b' && !game.over()) setTimeout(botMove,300); };
+    newGame();
+  </script>
+</body>
+</html>

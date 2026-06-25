@@ -2003,8 +2003,11 @@ const TOOLS = [
       taxon: { type: 'string', enum: ['auto', 'insect', 'mammal'], description: 'Organism calibration. Default auto (inferred).' },
       show_structure: { type: 'boolean', description: 'Open the saliency-colored 3D structure in the viewer (default true).' }
     }, required: ['sequence'] } },
-  { name: 'play_chess', description: 'Open a playable chess game in its own window for Siddhant. Full rules engine (legal moves, castling, en passant, promotion, check/checkmate/stalemate) with a built-in AI opponent powered by the Stockfish online API at three strengths. Use whenever he wants to play chess. Optional difficulty.',
-    input_schema: { type: 'object', properties: { difficulty: { type: 'string', enum: ['easy', 'medium', 'hard'], description: 'AI strength: easy (casual), medium (depth 8), hard (depth 14). Default medium.' } } } },
+  { name: 'play_chess', description: 'Open a playable chess game in its own window for Siddhant. Default = standard chess vs a Stockfish AI (difficulty easy/medium/hard). Pass variant:"atomic" for ATOMIC chess (captures explode adjacent non-pawn pieces; win by exploding the king) or variant:"standard" to use the offline applet — both variants run a fully legal-move-enforced engine (chess.js + custom atomic) with an optional built-in bot. Use whenever he wants to play chess.',
+    input_schema: { type: 'object', properties: {
+      difficulty: { type: 'string', enum: ['easy', 'medium', 'hard'], description: 'Stockfish strength for the default standard-AI board: easy/medium/hard. Default medium.' },
+      variant: { type: 'string', enum: ['standard', 'atomic'], description: 'Open the offline legal-enforced applet in this variant (atomic = exploding captures). Omit for the classic Stockfish-AI board.' }
+    } } },
   { name: 'screen_observe', description: 'WATCH SIDDHANT\'S WHOLE SCREEN to learn how he works — use this when he SAYS to (e.g. "watch my screen", "start watching", "learn how I do this"). Covers ANY app, not just the browser (that is browser_observe). His command IS the consent, so you do NOT need to ask again — just start. Flow: action:"start"{minutes:1-30} begins a time-boxed session that notes what he is doing every ~25s via the LOCAL vision model (no screenshots are saved; passwords/codes/cards are skipped). When he is done, action:"review" returns the notes — narrate them and ASK which to remember; action:"save"{items:[...approved plain-English habits]} writes ONLY approved items to long-term memory. "stop" ends early; "status" shows whether active + recent notes; "snapshot" describes the screen once. Never auto-start without his word.',
     input_schema: { type: 'object', properties: {
       action: { type: 'string', enum: ['start', 'stop', 'status', 'review', 'save', 'snapshot', 'clear'], description: 'start a watch session, stop it, check status, review the notes, save approved items, take a one-shot snapshot, or clear the buffer.' },
@@ -3947,8 +3950,13 @@ async function executeTool(name, input) {
       case 'screen_observe':
         result = await screenObserve(input); break;
       case 'play_chess': {
-        result = openChessWindow(input.difficulty);
-        if (result && result.success) result.result = `Chess board is open${input.difficulty ? ` (${input.difficulty})` : ''} — make your move.`;
+        if (input.variant === 'atomic' || input.variant === 'standard') {
+          result = openChessApplet(input.variant);
+          if (result && result.success) result.result = `${input.variant === 'atomic' ? 'Atomic' : 'Standard'} chess applet is open — full legal-move enforcement${input.variant === 'atomic' ? ' with exploding captures' : ''}. Make your move.`;
+        } else {
+          result = openChessWindow(input.difficulty);
+          if (result && result.success) result.result = `Chess board is open${input.difficulty ? ` (${input.difficulty})` : ''} — make your move.`;
+        }
         break;
       }
       case 'save_memory':
@@ -5716,6 +5724,23 @@ function openChessWindow(difficulty) {
     const apply = () => wc.executeJavaScript(`(()=>{const s=document.getElementById('diff'); if(s){s.value=${JSON.stringify(diff)}; s.dispatchEvent(new Event('change'));}})()`).catch(() => {});
     if (wc.isLoading()) wc.once('did-finish-load', apply); else apply();
   }
+  return { success: true };
+}
+
+// Offline chess applet (standard + atomic), full legal-move enforcement (chess.js + lib/chessatomic).
+// Loaded straight from assets/ so its ./vendor/ deps resolve; variant passed via query string.
+let chessAppletWindow = null;
+function openChessApplet(variant) {
+  const asset = path.join(__dirname, 'assets', 'chessapplet.html');
+  if (!fs.existsSync(asset)) return { success: false, error: 'chessapplet.html asset is missing.' };
+  const v = variant === 'atomic' ? 'atomic' : 'standard';
+  if (chessAppletWindow && !chessAppletWindow.isDestroyed()) { chessAppletWindow.show(); chessAppletWindow.focus(); chessAppletWindow.loadFile(asset, { query: { variant: v } }); return { success: true }; }
+  chessAppletWindow = new BrowserWindow({
+    width: 600, height: 760, resizable: true, minWidth: 420, minHeight: 560,
+    title: 'BhatBot Chess — ' + v, backgroundColor: '#0a0f17', webPreferences: { contextIsolation: true },
+  });
+  chessAppletWindow.loadFile(asset, { query: { variant: v } });
+  chessAppletWindow.on('closed', () => { chessAppletWindow = null; });
   return { success: true };
 }
 

@@ -261,6 +261,36 @@ const { classifyDepth } = require('../lib/depth');      // A3 — response-depth
     }],
   ]);
 
+  // ---- Chess core (standard via chess.js + atomic engine) ----
+  await run([
+    ['chess: standard starts with 20 legal moves', () => {
+      const { Game } = require('../lib/chesscore');
+      assert.equal(new Game('standard').legalMovesUci().length, 20);
+    }],
+    ['chess: atomic starts with 20 legal moves', () => {
+      const { Game } = require('../lib/chesscore');
+      assert.equal(new Game('atomic').legalMovesUci().length, 20);
+    }],
+    ['chess: atomic capture explodes both pawns (no survivor on the square)', () => {
+      const { Atomic } = require('../lib/chesscore');
+      const a = new Atomic(); a.doMove('e2e4'); a.doMove('d7d5');
+      const c0 = a.counts(); const r = a.doMove('e4d5');
+      assert.ok(r.ok); const c1 = a.counts();
+      assert.equal(c1.w, c0.w - 1); assert.equal(c1.b, c0.b - 1);   // capturer + captured both gone
+    }],
+    ['chess: 12 random games (both variants) never spawn a piece or play illegal', () => {
+      const { Game } = require('../lib/chesscore');
+      for (const v of ['standard', 'atomic']) for (let i = 0; i < 6; i++) {
+        const g = new Game(v); let total = g.pieceCount().w + g.pieceCount().b, plies = 0;
+        while (!g.isGameOver() && plies < 80) {
+          const m = g.legalMovesUci(); if (!m.length) break;
+          const r = g.move(m[(i * 7 + plies) % m.length]); assert.ok(r.ok, 'engine accepts its own legal move');
+          const t = g.pieceCount().w + g.pieceCount().b; assert.ok(t <= total, 'no piece spawned'); total = t; plies++;
+        }
+      }
+    }],
+  ]);
+
   // ---- A3: response-depth classifier ----
   await run([
     ['depth: ack for trivial', () => assert.equal(classifyDepth('ok thanks').depth, 'ack')],

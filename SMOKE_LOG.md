@@ -238,3 +238,13 @@ South Korea's second with a draw and a win. Czechia and South Africa are
   - reply: Mexico's running away with it—three wins, no losses. South Africa's in second with a win and two draws, but Mexico's alr
 - PASS **date-grounding**
   - reply: Thursday, June 25, 2026 at 12:16 PM EDT.
+
+## 2026-06-25T16:35:59.121Z — 4/4 passed
+- PASS **world-cup-update**
+  - reply: Colombia and Portugal are about to play for Group K next Saturday at 7:30. Colombia's already through — they're 6 points
+- PASS **predict-matchup**
+  - reply: France favoured at 52%, with Brazil and a draw both sitting around 24% each. Expected goals favour France slightly—1.66 
+- PASS **group-standings**
+  - reply: Mexico. Three wins, nine points, already through. South Africa second, Korea third, Czechia's mathematically alive but u
+- PASS **date-grounding**
+  - reply: Thursday, June 25, 2026 at 12:35 PM EDT.
