@@ -3877,6 +3877,15 @@ async function executeTool(name, input) {
         const p = await planner.plan(input.goal, { anthropicRequest, apiKey: getApiKey(), models: { sonnet: MODEL_SONNET } },
           { maxSteps: input.maxSteps, maxParallel: input.maxParallel });
         if (input.dryRun) { result = { success: true, dryRun: true, plan: { steps: p.steps, rationale: p.rationale, layers: p.layers.map((l) => l.map((s) => s.id)) } }; break; }
+        // Skeptic PRE-FLIGHT: review the plan before committing agents to it; adopt a corrected plan
+        // if the skeptic returns one, and surface any warnings.
+        if (!p.fallback && p.steps.length > 1 && input.critique !== false) {
+          try {
+            const crit = await planner.critique(input.goal, p.steps, { anthropicRequest, apiKey: getApiKey(), models: { sonnet: MODEL_SONNET } });
+            if (crit.warnings && crit.warnings.length) sendToActivity('tool-update', { type: 'thinking', text: '🧐 plan review: ' + crit.warnings.join(' · ') });
+            if (crit.revisedSteps && crit.revisedSteps.length) { p.steps = crit.revisedSteps; p.layers = planner.layers(crit.revisedSteps); sendToActivity('tool-update', { type: 'thinking', text: '🧐 adopted a revised plan from the skeptic' }); }
+          } catch {}
+        }
         // Seed the Legion panel with ALL steps, then run layer-by-layer (parallel within a layer),
         // feeding each step the results of the upstream steps it depends on.
         fleetAgents.clear();
@@ -3898,9 +3907,17 @@ async function executeTool(name, input) {
           // AUTONOMOUS RECOVERY: a hard-failed step gets diagnosed + retried by BhatBot itself —
           // alerting Siddhant on SERIOUS issues but continuing to fix without waiting for him; only
           // escalating ("needs your input") after MAX_FIX attempts are exhausted.
+          // Soft-failure verify: a step that "finished" but didn't really satisfy its task is flagged
+          // as an error so the same self-heal loop recovers it (catches hallucinated "done").
+          const verifyIfOn = async (a, s) => {
+            if (a.error || input.verify === false) return a;
+            const v = await planner.verifyStep({ task: s.task }, a.result, plDeps);
+            if (!v.ok) { fleetBroadcast({ id: s.id, role: s.role, status: 'working', note: '✗ verify: ' + v.reason }); return { ...a, error: true, result: 'verification failed: ' + v.reason + ' | output: ' + String(a.result || '').slice(0, 500) }; }
+            return a;
+          };
           for (let i = 0; i < layer.length; i++) {
             const s = layer[i];
-            let a = (layerOut.agents || []).find((x) => x.id === s.id) || {};
+            let a = await verifyIfOn((layerOut.agents || []).find((x) => x.id === s.id) || {}, s);
             let attempt = 0;
             while (a.error && !fleetShouldStop(s.id) && attempt < MAX_FIX) {
               attempt++;
@@ -3913,7 +3930,7 @@ async function executeTool(name, input) {
               const fixOut = await agentTeam.fleet([{ id: s.id, role: s.role, tools: s.tools, task: diag.fix + upstream(s) }], subagentDeps(), {
                 onUpdate: (u) => fleetBroadcast(u), drainFeedback: (id) => fleetDrainFeedback(id), shouldStop: (id) => fleetShouldStop(id),
               });
-              a = (fixOut.agents || [])[0] || a;
+              a = await verifyIfOn((fixOut.agents || [])[0] || a, s);   // re-verify the fixed result too
             }
             if (a.error) {
               const msg = `⚠ Agent "${s.role}" is still failing after ${MAX_FIX} self-fix attempts — needs your input.`;

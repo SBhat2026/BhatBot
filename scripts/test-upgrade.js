@@ -242,6 +242,23 @@ const { classifyDepth } = require('../lib/depth');      // A3 — response-depth
       const d = await planner.diagnose({ task: 'orig' }, 'err', deps);
       assert.equal(d.severity, 'minor'); assert.equal(d.fix, 'orig');
     }],
+    ['planner: verifyStep flags an unsatisfied step (soft failure)', async () => {
+      const deps = { models: { sonnet: 's', haiku: 'h' }, apiKey: 'x',
+        anthropicRequest: async () => ({ content: [{ type: 'text', text: JSON.stringify({ ok: false, reason: 'incomplete' }) }] }) };
+      const v = await planner.verifyStep({ task: 't' }, 'half done', deps);
+      assert.equal(v.ok, false);
+    }],
+    ['planner: verifyStep never false-fails on its own error', async () => {
+      const deps = { models: { sonnet: 's', haiku: 'h' }, apiKey: 'x', anthropicRequest: async () => { throw new Error('x'); } };
+      const v = await planner.verifyStep({ task: 't' }, 'r', deps);
+      assert.equal(v.ok, true);
+    }],
+    ['planner: critique can return a validated revised plan', async () => {
+      const deps = { models: { sonnet: 's' }, apiKey: 'x',
+        anthropicRequest: async () => ({ content: [{ type: 'text', text: JSON.stringify({ ok: false, warnings: ['missing X'], revisedSteps: [{ id: 'a', role: 'r', task: 't1' }, { id: 'b', role: 'r2', task: 't2', dependsOn: ['a'] }] }) }] }) };
+      const c = await planner.critique('g', [{ id: 'a', role: 'r', task: 't', dependsOn: [] }], deps);
+      assert.equal(c.warnings[0], 'missing X'); assert.equal(c.revisedSteps.length, 2);
+    }],
   ]);
 
   // ---- A3: response-depth classifier ----
