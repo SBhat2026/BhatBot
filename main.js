@@ -24,6 +24,9 @@ const wsMemory = require('./lib/memory');
 const semantic = require('./lib/semantic');           // #12 — embedding-based semantic/episodic recall (degrades gracefully)
 const toolselect = require('./lib/toolselect');        // W1 — per-turn tool retrieval (context-rot prevention)
 const { classifyDepth } = require('./lib/depth');       // A3 — per-turn response-depth → max_tokens + directive
+const depthmodel = require('./lib/depthmodel');         // Phase 3 #1 — learned depth model (heuristic = fallback)
+const taper = require('./lib/taper');                   // Phase 3 #2 — conversation-position ceiling taper
+const episodic = require('./lib/episodic');             // Phase 3 #3 — episodic VECTOR recall (read-path only)
 const { riskOf } = require('./lib/risk');              // W3 — per-tool key-risk classification (auto|confirm|stepup)
 const graph = require('./lib/graph');                  // W4 — knowledge-graph memory (entities + typed edges, multi-hop)
 const sandbox = require('./lib/sandbox');              // W6 — worker_threads isolation for community/dynamic plugin tools
@@ -916,10 +919,40 @@ async function refreshSemanticRecall(query) {
   } catch { _semanticRecall = { key: query || '', text: '' }; }
 }
 
+// Tier 2 (Phase 3 #3) — EPISODIC VECTOR recall. Pre-warmed like the other async tiers; buildMemoryBlock
+// (sync) reads the query-keyed cache. Embeds the query, cosine-ranks past-session notes, injects only
+// the top-k (≤10) instead of the lexical idf set — and flags a "seen this before?" hit when the top
+// match is a near-duplicate of the current question, so the agent can confirm/extend rather than
+// regenerate. Read-path only; never writes a note. Falls back to lexical recallEpisodic on empty.
+let _episodicVec = { key: '', text: '', seen: null };
+async function refreshEpisodicVec(query) {
+  try {
+    const c = loadConfig();
+    if (c.episodicVectorRecall === false) { _episodicVec = { key: '', text: '', seen: null }; return; }
+    const key = notionRecallKey(query);
+    if (!key || key === _episodicVec.key) return;                       // dedupe identical consecutive turns
+    const embedModel = (c.models && c.models.embed) || c.embedModel || 'nomic-embed-text';
+    const k = c.episodicVectorK || 8;
+    const scored = await Promise.race([
+      episodic.recall({ notesDir: NOTES_DIR, query: key, k, embedModel }),
+      new Promise((r) => setTimeout(() => r([]), 4000)),                // never block a turn >4s
+    ]);
+    const arr = Array.isArray(scored) ? scored : [];
+    const seen = episodic.seenBefore(arr, c.episodicSeenThreshold || episodic.SEEN_THRESHOLD);
+    _episodicVec = { key, text: episodic.format(arr), seen: seen.hit ? seen : null };
+    if (seen.hit) console.log(`[episodic] ↺ seen-before hit (cos=${seen.score.toFixed(3)}): "${seen.entry.title}" — surfacing to agent before generation`);
+  } catch { _episodicVec = { key: query || '', text: '', seen: null }; }
+}
+
 function buildMemoryBlock(query) {
   const cfg = loadConfig();
   const longTerm = memoryRetrieve(query, cfg.memoryTopK || 14);                              // tier 3
-  const episodic = cfg.episodicRecall === false ? '' : recallEpisodic(query, cfg.episodicK || 3);  // tier 2
+  // tier 2: prefer the pre-warmed VECTOR recall (Phase 3 #3); fall back to lexical recallEpisodic.
+  const vecHit = (_episodicVec.text && _episodicVec.key === notionRecallKey(query)) ? _episodicVec.text : '';
+  const episodicMem = cfg.episodicRecall === false ? ''
+    : (vecHit || recallEpisodic(query, cfg.episodicK || 3));
+  const seenBlock = (_episodicVec.seen && _episodicVec.key === notionRecallKey(query))
+    ? `\n\n## ⚠ POSSIBLY ANSWERED BEFORE (episodic near-match, cos=${_episodicVec.seen.score.toFixed(2)})\n\nA past session already covered something very close to this: "${_episodicVec.seen.entry.title}" — ${_episodicVec.seen.entry.body}\nConfirm/extend/correct that rather than regenerating from scratch if it still applies.` : '';
   const working = (sessionSpoken && sessionSpoken.length)                                     // tier 1
     ? sessionSpoken.slice(-6).map((s) => '- ' + String(s).slice(0, 160)).join('\n') : '';
   const shared = (_notionRecall.text && _notionRecall.key === notionRecallKey(query)) ? _notionRecall.text : '';  // tier 4
@@ -931,7 +964,8 @@ function buildMemoryBlock(query) {
   if (semBank) out += '\n\n## SEMANTIC RECALL (embedding match — facts + past turns)\n\n' + semBank;
   if (graphHits) out += '\n\n## KNOWLEDGE GRAPH (related entities — multi-hop)\n\n' + graphHits;
   if (shared) out += '\n\n## SHARED BANK (Notion — written by any agent/surface)\n\n' + shared;
-  if (episodic) out += '\n\n## RECALLED FROM PAST SESSIONS (episodic)\n\n' + episodic;
+  if (episodicMem) out += '\n\n## RECALLED FROM PAST SESSIONS (episodic)\n\n' + episodicMem;
+  if (seenBlock) out += seenBlock;
   if (working) out += '\n\n## THIS SESSION SO FAR (working)\n\n' + working;
   try { const proj = projects.contextBlock(); if (proj) out += '\n\n' + proj; } catch {}   // #24 active project context
   return out ? redactSecrets(out) : '';
@@ -1364,14 +1398,25 @@ async function anthropicRequest(body, apiKey, { retries = 5 } = {}) {
 // feed back into classifyDepth → tighter OTPM budgeting and cheaper long conversations, while a
 // genuinely big answer still earns room because clipping pushes its tier's ceiling back up.
 const DEPTH_LOG = path.join(os.homedir(), '.bhatbot', 'depth.jsonl');
+let _recentOut = [];                                   // rolling window of recent output sizes (this process)
+function rollingPriorOut() { return _recentOut.length ? Math.round(_recentOut.reduce((a, b) => a + b, 0) / _recentOut.length) : 0; }
 function logDepthOutcome(d, resp, surface) {
   try {
     const u = (resp && resp.usage) || {};
     const out = u.output_tokens || 0; if (!out) return;
+    // Phase 3 #1: enrich the row with the LEARNING FEATURES (carried on d.feats by sizeTurn) so the
+    // learned depth model can train on real signal — query length, intent/tier, position, prior-out
+    // rolling mean, correction flag — not just tier+alloc. Legacy rows (no feats) still parse fine.
+    const f = d.feats || {};
     const row = { ts: Date.now(), depth: d.depth, alloc: d.maxTokens, out,
-      clipped: (resp.stop_reason === 'max_tokens') ? 1 : 0, surface: surface || '?' };
+      clipped: (resp.stop_reason === 'max_tokens') ? 1 : 0, surface: surface || '?',
+      qlen: f.qlen || 0, f_ack: f.f_ack || 0, f_detail: f.f_detail || 0, f_deep: f.f_deep || 0,
+      position: f.position || 0, priorOut: f.priorOut || 0, correction: f.correction || 0,
+      taper: d.taperFactor != null ? d.taperFactor : 1, src: d.source || 'heuristic' };
     fs.mkdirSync(path.dirname(DEPTH_LOG), { recursive: true });
     fs.appendFileSync(DEPTH_LOG, JSON.stringify(row) + '\n');
+    _recentOut.push(out); if (_recentOut.length > 8) _recentOut.shift();   // feed next turn's priorOut
+    try { depthmodel.maybeRetrain({ logPath: DEPTH_LOG }); } catch {}        // auto-retrain every 500 rows
   } catch {}
 }
 // Cached learned ceilings (recomputed at most every 60s — the log only grows, no need per-call).
@@ -1412,6 +1457,40 @@ function predictedOutputTokens(userText) {
   try { return classifyDepth(userText, depthCal()).maxTokens; } catch { return 1024; }
 }
 
+// Phase 3 — unified per-turn sizing. The LEARNED depth model (lib/depthmodel) is the PRIMARY ceiling
+// when it has ≥200 rows and a confident fit; otherwise the classifyDepth+depthCal HEURISTIC is the
+// silent fallback (no error surfaced). The conversation-position TAPER then decays the ceiling on long
+// threads, suspended on a genuinely-new-task signal. Every decision logs its taper factor + source.
+let _lastDepth = { depth: 'conversational', taperFactor: 1, source: 'heuristic', position: 1 };  // for HUD
+function userTurnCount(messages) { try { return (messages || []).filter((m) => m && m.role === 'user').length || 1; } catch { return 1; } }
+function sizeTurn(ut, messages) {
+  const base = classifyDepth(ut, depthCal());                 // heuristic tier + ceiling (the fallback)
+  let out = { depth: base.depth, maxTokens: base.maxTokens, directive: base.directive };
+  try {
+    const position = userTurnCount(messages);
+    let correction = 0; try { correction = CORRECTION_RE.test(ut || '') ? 1 : 0; } catch {}
+    const feats = {
+      qlen: Math.ceil((ut || '').length / 4),
+      f_ack: base.depth === 'ack' ? 1 : 0, f_detail: base.depth === 'detailed' ? 1 : 0, f_deep: base.depth === 'deep' ? 1 : 0,
+      position, priorOut: rollingPriorOut(), depth: base.depth, correction,
+    };
+    // 1) learned model (primary) — null ⇒ keep heuristic ceiling
+    let source = 'heuristic';
+    const pred = depthmodel.predict(feats);
+    if (pred && pred.maxTokens > 0) { out.maxTokens = pred.maxTokens; source = `model(c=${pred.confidence.toFixed(2)})`; }
+    // 2) conversation-position taper (explicit multiplier; also a model feature via `position`)
+    const tap = taper.factor({ position, text: ut, tier: base.depth });
+    const sizedBefore = out.maxTokens;
+    out.maxTokens = Math.max(256, Math.round(out.maxTokens * tap.factor));
+    out.feats = feats; out.taperFactor = tap.factor; out.taperReset = tap.reset; out.source = source;
+    _lastDepth = { depth: base.depth, taperFactor: tap.factor, source, position, reset: tap.reset };
+    if (loadConfig().depthDebug) console.log(`[depth] tier=${base.depth} pos=${position} src=${source} base=${base.maxTokens} sized=${sizedBefore} taper=${tap.factor.toFixed(2)}${tap.reset ? ' RESET(' + tap.reason + ')' : ''} → max_tokens=${out.maxTokens}`);
+    // surface to the VANGUARD HUD (best-effort; renderer ignores if no panel)
+    try { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('depth-update', _lastDepth); } catch {}
+  } catch {}
+  return out;
+}
+
 // Clip-aware continuation (Phase 1, Deliverable #4). When a response hit its max_tokens ceiling
 // while generating PROSE (no tool_use in the content — a clipped tool call can't be safely resumed,
 // its JSON args are truncated), transparently continue it as ONE logical answer with a raised
@@ -1441,7 +1520,7 @@ async function continueClipped(resp, reissue, { maxRounds = 2 } = {}) {
 
 async function callClaude(messages, apiKey, model) {
   const ut = lastUserText(messages);
-  const d = classifyDepth(ut, depthCal());   // A3 — size the room to the turn (learned ceiling)
+  const d = sizeTurn(ut, messages);          // Phase 3 — learned ceiling (heuristic fallback) + position taper
   const r0 = await anthropicRequest({
     model,
     max_tokens: d.maxTokens,
@@ -1542,7 +1621,7 @@ async function anthropicStream(body, apiKey, onText, { retries = 3 } = {}) {
 }
 async function callClaudeStream(messages, apiKey, model, onText) {
   const ut = lastUserText(messages);
-  const d = classifyDepth(ut, depthCal());   // A3 — size the room to the turn (learned ceiling)
+  const d = sizeTurn(ut, messages);          // Phase 3 — learned ceiling (heuristic fallback) + position taper
   const r0 = await anthropicStream({
     model, max_tokens: d.maxTokens,
     system: [...systemBlocks(ut), { type: 'text', text: d.directive }],
@@ -4705,7 +4784,7 @@ async function agentLoop(history, apiKey, event, opts = {}) {
 
   // Passive auto-recall from the shared Notion bank — fold relevant facts (written by the Mac,
   // the cloud backend, or any other agent) into the memory block before we answer. Bounded to 4s.
-  await Promise.all([refreshNotionRecall(lastUserText(history)), refreshSemanticRecall(lastUserText(history))]);
+  await Promise.all([refreshNotionRecall(lastUserText(history)), refreshSemanticRecall(lastUserText(history)), refreshEpisodicVec(lastUserText(history))]);
 
   // W1 — context-rot prevention: inject only the tools relevant to THIS turn (top-k by embedding
   // similarity + a small always-present CORE set), computed ONCE here and reused across every
@@ -5299,13 +5378,13 @@ async function fastReply(history, apiKey, event, opts = {}) {
   // Right-size the fast (no-tools) path too: learned depth ceiling, capped at 2048 since this path
   // is for quick conversational replies — a trivial "ack" no longer reserves 1024 output tokens.
   const ut = lastUserText(history);
-  const d = classifyDepth(ut, depthCal());
+  const d = sizeTurn(ut, history);           // Phase 3 — learned ceiling + position taper (fast no-tools path)
   const r = await anthropicStream({
     model: MODEL_HAIKU, max_tokens: Math.min(d.maxTokens, 2048),
     system: [...systemBlocks(ut), { type: 'text', text: d.directive }],   // cache_control'd static block → cheap + low TTFT
     messages: capTokens(history)                    // NO tools → faster first token, no tool-decision detour
   }, apiKey, onText);
-  logDepthOutcome({ depth: d.depth, maxTokens: Math.min(d.maxTokens, 2048) }, r, 'fast');
+  logDepthOutcome({ depth: d.depth, maxTokens: Math.min(d.maxTokens, 2048), feats: d.feats, taperFactor: d.taperFactor, source: d.source }, r, 'fast');
   if (parser) parser.finish(); else if (stream && ttsSeq != null) ttsStreamFlush(ttsSeq);
   const text = stripReasoning(r.content.filter((b) => b.type === 'text').map((b) => b.text).join('\n')).replace(/<\/?speak>/g, '').trim();
   return { text, history: [...history, { role: 'assistant', content: text }], _provider: 'anthropic', _model: MODEL_HAIKU, _streamed: !!(stream && ttsSeq != null) };
