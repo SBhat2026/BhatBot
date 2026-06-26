@@ -17,7 +17,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const router = require('../lib/router');
+const router = require('../lib/agents/select');
 const orch = require('../lib/agents/orchestrator');
 const protocol = require('../lib/agents/protocol');
 const { ROLE_TOOLS } = require('../lib/agents/roles');

@@ -372,15 +372,19 @@ A task escalates when **any** fires:
 
 ### Cost governor (keeps it < $10/mo)
 
-`router.js` tracks `state.metrics.cost_month_usd`. At 80% of `$10` it forces
+The DAG agent selector tracks `state.metrics.cost_month_usd`. At 80% of `$10` it forces
 `local-only mode` for everything except tasks explicitly tagged `[claude]`, and notifies.
 Reset monthly. Estimated steady-state: ~90% tokens local ($0) + occasional Sonnet coding
 bursts → well under $10.
 
-### Module: `lib/router.js` (scaffolded)
+### Module: `lib/agents/select.js` (DAG agent model/provider selector)
+
+> Phase 2: the former top-level `lib/router.js` was retired. The main CHAT routing path lives
+> in `main.js` (`chooseModel` + `callModel` preflight). The DAG role agents' provider/model
+> selection moved here, into the agents package where its only consumers live.
 
 ```js
-const router = require('./lib/router');
+const router = require('./lib/agents/select');
 const choice = await router.pick(task, { config, metrics });
 // → { provider:'ollama'|'anthropic'|'trellis'|'replicate', model, reason }
 const out = await router.run(choice, prompt, { tools });   // unified call surface

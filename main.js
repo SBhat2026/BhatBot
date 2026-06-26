@@ -12,6 +12,7 @@ const darkbloom = require('./darkbloom');
 const credentials = require('./lib/credentials');
 const worldcup = require('./lib/worldcup');               // FIFA WC 2026 live bracket + prediction engine
 const news = require('./lib/news');                       // NYT news skim (RSS, no key; Top Stories API if nytApiKey set)
+const websearch = require('./lib/websearch');             // web_search — ranked results (Brave/Serper/Tavily if keyed, else free DuckDuckGo)
 const { classify } = require('./taskClassifier');
 const { startMcpServer, stopMcpServer } = require('./mcp-server');
 // Workspace multi-agent stack (Architecture v2) — orchestrator delegates big projects to
@@ -1124,6 +1125,10 @@ const MODEL_PRICES = {                              // USD / 1M tokens: [input, 
   'claude-opus-4-8':   [15, 75, 18.75, 1.50],
   'claude-sonnet-4-6': [3, 15, 3.75, 0.30],
   'claude-haiku-4-5':  [1, 5, 1.25, 0.10],
+  // Cross-provider TEXT-offload models (Phase 2, Deliverable #4) — no cache tiers, so cacheWrite/
+  // cacheRead mirror input (unused in practice; offload usage carries only input/output tokens).
+  'gpt-4o-mini':       [0.15, 0.60, 0.15, 0.15],
+  'gemini-2.0-flash':  [0.10, 0.40, 0.10, 0.10],
 };
 const COSTS_PATH = path.join(os.homedir(), '.bhatbot', 'costs.json');
 function priceFor(model) {
@@ -1575,6 +1580,13 @@ function lastUserText(messages) {
 // fast) then Gemini as a fallback — neither touches the Anthropic quota. Returns {text,provider,model}
 // or null if no provider is configured/available. Tool turns never come here (those providers can't
 // run the tool loop). This is the live-path home for the offload chains lib/router.js only modeled.
+// Phase 2, Deliverable #4 — when an offload response omits usage, estimate tokens from text length
+// (~4 chars/token) so EVERY offloaded call is still recorded in the ledger, never silently $0.
+function estOffloadUsage(flatMsgs, system, outText) {
+  const inChars = (system || '').length + (flatMsgs || []).reduce((a, m) => a + (m.content || '').length, 0);
+  return { input_tokens: Math.ceil(inChars / 4), output_tokens: Math.ceil((outText || '').length / 4) };
+}
+
 async function offloadText(messages, system) {
   const c = loadConfig();
   const flat = (messages || []).map((m) => ({
@@ -1592,7 +1604,10 @@ async function offloadText(messages, system) {
         body: JSON.stringify({ model, messages: msgs }), signal: AbortSignal.timeout(60000),
       });
       const j = await r.json();
-      if (r.ok) { const t = j.choices?.[0]?.message?.content || ''; if (t.trim()) { console.log('[rate] offloaded to openai'); return { text: t, provider: 'openai', model }; } }
+      if (r.ok) { const t = j.choices?.[0]?.message?.content || ''; if (t.trim()) {
+        const u = j.usage ? { input_tokens: j.usage.prompt_tokens || 0, output_tokens: j.usage.completion_tokens || 0 } : estOffloadUsage(flat, system, t);
+        recordCost(model, u);   // Deliverable #4: offload calls now hit the same daily ledger as Anthropic
+        console.log('[rate] offloaded to openai'); return { text: t, provider: 'openai', model }; } }
     } catch (e) { console.warn('[rate] openai offload failed:', e.message); }
   }
   if (c.geminiKey) {
@@ -1605,7 +1620,11 @@ async function offloadText(messages, system) {
         body: JSON.stringify(body), signal: AbortSignal.timeout(60000),
       });
       const j = await r.json();
-      if (r.ok) { const t = j.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('') || ''; if (t.trim()) { console.log('[rate] offloaded to gemini'); return { text: t, provider: 'gemini', model }; } }
+      if (r.ok) { const t = j.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('') || ''; if (t.trim()) {
+        const um = j.usageMetadata || {};
+        const u = (um.promptTokenCount != null) ? { input_tokens: um.promptTokenCount || 0, output_tokens: um.candidatesTokenCount || 0 } : estOffloadUsage(flat, system, t);
+        recordCost(model, u);   // Deliverable #4: offload calls now hit the same daily ledger as Anthropic
+        console.log('[rate] offloaded to gemini'); return { text: t, provider: 'gemini', model }; } }
     } catch (e) { console.warn('[rate] gemini offload failed:', e.message); }
   }
   return null;
@@ -2377,6 +2396,11 @@ const TOOLS = [
       section: { type: 'string', enum: ['world', 'us', 'politics', 'business', 'technology', 'science', 'home'], description: 'News section (default world).' },
       limit: { type: 'number', description: 'How many headlines (default 6, max ~15).' }
     } } },
+  { name: 'web_search', description: 'Search the web and get back ranked results (title, URL, short summary) WITHOUT already knowing a URL. Use this FIRST for any live/current/factual lookup where you do not have a specific page in mind — then fetch_url or browser the most promising result for the full text. Parallel-safe (read-only). query required; limit default 6 (max 12). Free by default (DuckDuckGo); uses Brave/Serper/Tavily automatically if a key is configured.',
+    input_schema: { type: 'object', properties: {
+      query: { type: 'string', description: 'The search query.' },
+      limit: { type: 'number', description: 'How many results (default 6, max 12).' }
+    }, required: ['query'] } },
   { name: 'self_fix', description: 'SELF-HEALING: have BhatBot fix its OWN code with its built-in Claude Code, verified + auto-reverted on failure. Given a problem description and a `verify` shell command that must exit 0 when fixed, it: snapshots git, runs Claude Code headless to edit the repo, runs verify, and KEEPS the change only if verify passes (else git-reverts). Use when a capability is broken / a tool keeps failing / the World Cup harness logs a FAIL. Self-aware loop: pair with the iteration log. apply:false drafts only (no edits).',
     input_schema: { type: 'object', properties: {
       problem: { type: 'string', description: 'What is broken + any error/log excerpt.' },
@@ -2457,6 +2481,17 @@ const TOOLS = [
       taskId: { type: 'string', description: 'Short id for the pending question (with awaitReply), e.g. "deploy-retry". Auto-generated if omitted.' }
     }, required: ['message'] } }
 ];
+
+// Phase 2, Deliverable #2 — STARTUP VALIDATION: every DAG role's tool-allowlist must reference
+// only real, live tools. A role assigned only phantom tools would silently run tool-less. Warn
+// loudly on a mismatch; NEVER block launch (wrapped in try/catch, log-only).
+try {
+  const { validateRoleTools } = require('./lib/agents/roles');
+  const v = validateRoleTools(TOOLS.map((t) => t.name));
+  if (v.ok) console.log(`[roles] ✓ tool-allowlist validation passed (${TOOLS.length} live tools; all role tools resolve)`);
+  else { console.warn(`[roles] ⚠ ${v.missing.length} role tool reference(s) not in the live catalog — those agents will run WITHOUT those tools:`);
+    for (const m of v.missing) console.warn(`[roles]   ⚠ ${m.role}.${m.scope}: "${m.name}" is not a live tool`); }
+} catch (e) { console.warn('[roles] tool-allowlist validation skipped:', e.message); }
 
 // shell safety: HARD_BLOCKED / CONFIRM_PATTERNS / runShell moved to lib/shell.js (SPLIT_PLAN step 7),
 // constructed near EXEC_PATH at the top. The confirm/autonomous/remote gates that consult them remain below.
@@ -3806,6 +3841,7 @@ const TRANSIENT_RE = /(timeout|timed out|ETIMEDOUT|ECONNRESET|ECONNREFUSED|ENOTF
 // submit / write / shell could do real damage). Pure fetches and page reads are safe.
 function isRetryableTool(name, input) {
   if (name === 'fetch_url' || name === 'ui_inspect' || name === 'vision_local') return true;
+  if (name === 'web_search' || name === 'news') return true;
   if (name === 'read_file' || name === 'list_directory') return true;
   if (name === 'browser') return ['navigate', 'get_text', 'screenshot'].includes(input && input.action);
   return false;
@@ -4430,6 +4466,14 @@ async function executeTool(name, input) {
         result = nr.error ? { success: false, error: nr.error } : { success: true, result: news.format(nr), items: nr.items };
         break;
       }
+      case 'web_search': {
+        const sr = await websearch.search({ query: input && input.query, limit: input && input.limit, config: loadConfig() });
+        if (sr.ok) {
+          if (sr.usd) recordToolCost('web_search', sr.usd);   // only the keyed providers cost anything; DDG is $0
+          result = { success: true, result: websearch.format(sr), items: sr.items, provider: sr.provider };
+        } else result = { success: false, error: sr.error };
+        break;
+      }
       case 'self_fix':
         result = await selfFix(input || {}); break;
       case 'self_heal': {
@@ -4474,6 +4518,7 @@ async function executeTool(name, input) {
         if (typeof result.stdout === 'string') result.stdout = security.sanitizeExternalContent(result.stdout, 'shell');
         if (typeof result.stderr === 'string') result.stderr = security.sanitizeExternalContent(result.stderr, 'shell');
       } else if (name === 'browser' && typeof result.text === 'string') result.text = security.sanitizeExternalContent(result.text, 'browser');
+      else if (name === 'web_search' && typeof result.result === 'string') result.result = security.sanitizeExternalContent(result.result, 'web-search');
     }
   } catch {}
   auditLog(name, auditInput, result, Date.now() - __auditT0, _lastUsage);   // log handles + LLM-step telemetry, never resolved secrets

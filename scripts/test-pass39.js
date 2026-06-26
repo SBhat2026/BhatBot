@@ -37,7 +37,7 @@ const NO_THINK = { think: false };   // mirror production isThinkingModel handli
   }, { userFacing: false });
 
   await timed('router offload picks', async () => {
-    const router = require(path.join(ROOT, 'lib/router'));
+    const router = require(path.join(ROOT, 'lib/agents/select'));
     const conf = { openaiKey: 'x', geminiKey: 'x' };
     const adapters = { ollamaUp: async () => false, openaiChat: () => {}, geminiChat: () => {} };
     const r1 = await router.pick({ agent: 'research', goal: 'find docs' }, { config: conf, adapters });
