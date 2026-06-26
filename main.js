@@ -1,6 +1,6 @@
 'use strict';
 
-const { app, BrowserWindow, globalShortcut, ipcMain, shell, dialog, screen, webContents, systemPreferences, desktopCapturer } = require('electron');
+const { app, BrowserWindow, globalShortcut, ipcMain, shell, dialog, screen, webContents, systemPreferences, desktopCapturer, powerMonitor } = require('electron');
 // Electron/Chromium blocks audio autoplay after async calls → desktop TTS was silent.
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
 const path = require('path');
@@ -124,6 +124,18 @@ function resolvePython() {
 const OLLAMA_URL = 'http://localhost:11434';
 const OLLAMA_VISION_MODEL = 'gemma3:12b'; // local, free, offline second-opinion vision
 const KEEP_IMAGES = 2;                     // max screenshots retained in history
+
+// --- Wattage gating: heavy local ML (OmniParser caption model, gemma3 vision) and the recurring
+// ambient watcher are battery hogs. powerMonitor.isOnBatteryPower() lets us throttle/skip them on
+// battery so the laptop isn't drained by background work. config.powerSaver:false disables gating.
+function onBatteryPower() {
+  try { return powerMonitor.isOnBatteryPower(); } catch { return false; }
+}
+function powerSaverOn() {
+  try { return loadConfig().powerSaver !== false; } catch { return true; }
+}
+// True when we should AVOID heavy local compute (on battery + saver enabled).
+function shouldSpareWatts() { return powerSaverOn() && onBatteryPower(); }
 
 let mainWindow = null;
 let activityWindow = null;
@@ -1046,23 +1058,56 @@ function capTokens(messages, maxTok = 32000) {   // tier-2 headroom → keep mor
 
 // Centralized Anthropic call with exponential backoff on 429 / 529 / 5xx, honoring the
 // Retry-After header. Transient rate limits self-heal instead of erroring to the user.
-// --- Rolling per-minute input-token tracker (the rate limit is input-tokens/minute) ---
-let _tokWin = [];   // [ [epochMs, inputTokens], ... ]
-function recordTokens(n) {
+// --- Rolling per-minute, PER-MODEL token tracker. Anthropic enforces BOTH input-tokens/min (ITPM)
+// AND output-tokens/min (OTPM), and the caps differ per model (Sonnet's are far higher than
+// Haiku's). A single global input bucket (the old design) ignored OTPM entirely — the likeliest
+// throttle on long, generation-heavy turns — and wasted Sonnet's headroom. We now track in+out per
+// model in separate rolling 60s windows. ---
+const _win = { in: {}, out: {} };          // { in: { model: [[ts,n],…] }, out: {…} }
+function _winPush(bucket, model, n) {
   if (!n) return;
-  const now = Date.now(); _tokWin.push([now, n]);
-  const cut = now - 60000; while (_tokWin.length && _tokWin[0][0] < cut) _tokWin.shift();
+  const now = Date.now(); const key = model || 'default';
+  const arr = (bucket[key] = bucket[key] || []); arr.push([now, n]);
+  const cut = now - 60000; while (arr.length && arr[0][0] < cut) arr.shift();
 }
-function tokensUsedLastMin() {
-  const cut = Date.now() - 60000; while (_tokWin.length && _tokWin[0][0] < cut) _tokWin.shift();
-  return _tokWin.reduce((s, e) => s + e[1], 0);
+function _winSum(bucket, model) {
+  const key = model || 'default'; const arr = bucket[key]; if (!arr) return 0;
+  const cut = Date.now() - 60000; while (arr.length && arr[0][0] < cut) arr.shift();
+  return arr.reduce((s, e) => s + e[1], 0);
 }
-function rateBudget() {
+function recordTokens(model, inTok, outTok) { _winPush(_win.in, model, inTok); _winPush(_win.out, model, outTok); }
+// Tier-2 per-model caps (ITPM / OTPM). Conservative within the published tier-2 ranges
+// (ITPM 100K–450K, OTPM 8K–90K). Override per model via config.rateLimits[model] = {itpm,otpm}.
+const RATE_LIMITS = {
+  'claude-sonnet-4-6': { itpm: 450000, otpm: 90000 },
+  'claude-haiku-4-5':  { itpm: 100000, otpm: 50000 },
+  'claude-opus-4-8':   { itpm: 100000, otpm: 16000 },
+};
+function rateLimitsFor(model) {
   const c = loadConfig();
-  const limit = c.rateLimitTokens || 50000;            // tier-1 default; raise in config if account tier is higher
-  const safe = Math.floor(limit * (c.rateLimitSafetyFrac || 0.9));   // leave headroom
-  const used = tokensUsedLastMin();
-  return { limit, safe, used, free: Math.max(0, safe - used) };
+  const override = (c.rateLimits && c.rateLimits[model]) || {};
+  const base = RATE_LIMITS[model] || RATE_LIMITS[MODEL_HAIKU];
+  // legacy single knob still respected as an ITPM floor if someone set it
+  const itpm = override.itpm || base.itpm || c.rateLimitTokens || 100000;
+  const otpm = override.otpm || base.otpm || 0;        // 0 ⇒ OTPM untracked for this model
+  return { itpm, otpm };
+}
+function rateBudget(model = MODEL_HAIKU) {
+  const c = loadConfig();
+  const frac = c.rateLimitSafetyFrac || 0.9;           // leave headroom
+  const { itpm, otpm } = rateLimitsFor(model);
+  const inSafe = Math.floor(itpm * frac);
+  const outSafe = otpm ? Math.floor(otpm * frac) : Infinity;
+  const inUsed = _winSum(_win.in, model);
+  const outUsed = _winSum(_win.out, model);
+  const inFree = Math.max(0, inSafe - inUsed);
+  const outFree = outSafe === Infinity ? Infinity : Math.max(0, outSafe - outUsed);
+  return {
+    model, itpm, otpm,
+    inSafe, inUsed, inFree, outSafe, outUsed, outFree,
+    // back-compat aliases (callers that predate OTPM read .safe/.used/.free as the INPUT budget)
+    limit: itpm, safe: inSafe, used: inUsed, free: inFree,
+  };
 }
 // --- Real per-model cost ledger (token→USD), persisted per day in ~/.bhatbot/costs.json ---
 // Unlike the old crude "audit lines × $0.004", this prices ACTUAL usage from each API
@@ -1173,17 +1218,27 @@ function routerStats() {
 function requestTokenEstimate(messages) {
   return estimateTokens({ system: buildSystemPrompt(lastUserText(messages)), tools: TOOLS, messages: capTokens(messages) });
 }
-// Token-budget hardening: the per-minute cap is a ROLLING 60s window, so if a step would
-// exceed it we can just wait for old usage to age out, then continue — turning a hard abort
-// into a brief pause. Returns true once `need` tokens are free (or false on timeout).
-async function waitForBudget(need, maxWaitMs = 75000) {
+// Token-budget hardening: the per-minute caps are ROLLING 60s windows, so if a step would
+// exceed either the INPUT or OUTPUT budget we can wait for old usage to age out, then continue —
+// turning a hard abort into a brief pause. Returns true once both `needIn` input and `needOut`
+// output tokens are free for `model` (or false on timeout).
+function budgetOk(model, needIn, needOut) {
+  const b = rateBudget(model);
+  return b.inFree >= needIn && (b.outFree === Infinity || b.outFree >= needOut);
+}
+async function waitForBudget(model, needIn, needOut = 0, maxWaitMs = 75000) {
   const start = Date.now(); let announced = false;
   while (Date.now() - start < maxWaitMs) {
-    if (rateBudget().free >= need) return true;
-    if (!announced) { sendToActivity('tool-update', { type: 'thinking', text: `⏳ pacing for the token rate limit — continuing in a moment (${Math.round(need / 1000)}k needed)` }); announced = true; }
+    if (budgetOk(model, needIn, needOut)) return true;
+    if (!announced) {
+      const b = rateBudget(model);
+      const which = b.inFree < needIn ? `${Math.round(needIn / 1000)}k in` : `${Math.round(needOut / 1000)}k out`;
+      sendToActivity('tool-update', { type: 'thinking', text: `⏳ pacing for the ${model.replace(/^claude-/, '')} rate limit — continuing in a moment (${which} needed)` });
+      announced = true;
+    }
     await sleep(3000);
   }
-  return rateBudget().free >= need;
+  return budgetOk(model, needIn, needOut);
 }
 async function ollamaUp() {
   try { const r = await fetch(`${OLLAMA_URL}/api/tags`, { signal: AbortSignal.timeout(700) }); return r.ok; } catch { return false; }
@@ -1235,7 +1290,7 @@ async function anthropicRequest(body, apiKey, { retries = 5 } = {}) {
     }
     if (res.ok) {
       const j = await res.json();
-      try { const u = j.usage || {}; recordTokens((u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0)); recordCost(body.model, u); noteUsage(body.model, u); } catch {}
+      try { const u = j.usage || {}; recordTokens(body.model, (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0), u.output_tokens || 0); recordCost(body.model, u); noteUsage(body.model, u); } catch {}
       return j;
     }
     const retryable = res.status === 429 || res.status === 529 || res.status >= 500;
@@ -1248,16 +1303,73 @@ async function anthropicRequest(body, apiKey, { retries = 5 } = {}) {
       attempt++; continue;
     }
     const bodyText = await res.text().catch(() => '');
-    if (res.status === 429) throw new Error("Rate limit reached (tier-1 cap, 50k tokens/min). I waited and retried but it's still busy — give it a minute, or add credits at console.anthropic.com to raise the limit.");
+    if (res.status === 429) throw new Error("Rate limit reached (per-model ITPM/OTPM cap). I waited and retried but it's still busy — give it a minute, or raise rateLimits in config / your Anthropic tier.");
     if (res.status === 529) throw new Error('Anthropic is overloaded right now. Try again shortly.');
     throw new Error(`API ${res.status}: ${bodyText.slice(0, 300)}`);
   }
 }
 
+// ---------------------------------------------------------------------------
+// Depth LEARNING (OTPM optimization). The static depth tiers (depth.js) over-allocate output room
+// for some turns and clip others. Here EVERY response becomes a training row: we log the predicted
+// depth tier, the max_tokens we allocated, the tokens the model ACTUALLY produced, and whether it
+// clipped (stop_reason==='max_tokens'). depthCal() then learns a right-sized ceiling per tier from
+// that dataset (p90 of real usage + margin; grown when clipping is frequent). The learned ceilings
+// feed back into classifyDepth → tighter OTPM budgeting and cheaper long conversations, while a
+// genuinely big answer still earns room because clipping pushes its tier's ceiling back up.
+const DEPTH_LOG = path.join(os.homedir(), '.bhatbot', 'depth.jsonl');
+function logDepthOutcome(d, resp, surface) {
+  try {
+    const u = (resp && resp.usage) || {};
+    const out = u.output_tokens || 0; if (!out) return;
+    const row = { ts: Date.now(), depth: d.depth, alloc: d.maxTokens, out,
+      clipped: (resp.stop_reason === 'max_tokens') ? 1 : 0, surface: surface || '?' };
+    fs.mkdirSync(path.dirname(DEPTH_LOG), { recursive: true });
+    fs.appendFileSync(DEPTH_LOG, JSON.stringify(row) + '\n');
+  } catch {}
+}
+// Cached learned ceilings (recomputed at most every 60s — the log only grows, no need per-call).
+let _depthCal = null, _depthCalAt = 0;
+function depthCal() {
+  try {
+    if (_depthCal && Date.now() - _depthCalAt < 60000) return _depthCal;
+    const TIERS = require('./lib/depth').TIERS;
+    let rows = [];
+    try {
+      const lines = fs.readFileSync(DEPTH_LOG, 'utf8').trim().split('\n');
+      rows = lines.slice(-600).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+    } catch {}
+    const byTier = {};
+    for (const r of rows) { (byTier[r.depth] = byTier[r.depth] || []).push(r); }
+    const cal = {};
+    for (const tier of Object.keys(TIERS)) {
+      const rs = byTier[tier] || [];
+      if (rs.length < 8) continue;                       // need a sample before trusting it
+      const outs = rs.map((r) => r.out).sort((a, b) => a - b);
+      const p90 = outs[Math.min(outs.length - 1, Math.floor(outs.length * 0.9))];
+      const clipRate = rs.reduce((s, r) => s + (r.clipped || 0), 0) / rs.length;
+      const def = TIERS[tier].maxTokens;
+      // Right-size to p90 + 30% margin; round to 128. Clipping (model wanted more) overrides upward.
+      let ceil = Math.ceil((p90 * 1.3) / 128) * 128;
+      if (clipRate > 0.12) ceil = Math.max(ceil, Math.round(def * 1.5));   // frequently truncated → grow
+      // Never collapse below a usable floor for the tier, never exceed 2× its static default.
+      ceil = Math.max(Math.min(def, 256), Math.min(ceil, def * 2));
+      cal[tier] = ceil;
+    }
+    _depthCal = cal; _depthCalAt = Date.now();
+    return cal;
+  } catch { return {}; }
+}
+// Predicted output size for a turn = its (learned) depth ceiling. Used by the OTPM preflight so
+// generation-heavy turns pace against the output cap, not just context-heavy ones.
+function predictedOutputTokens(userText) {
+  try { return classifyDepth(userText, depthCal()).maxTokens; } catch { return 1024; }
+}
+
 async function callClaude(messages, apiKey, model) {
   const ut = lastUserText(messages);
-  const d = classifyDepth(ut);   // A3 — size the room to the turn
-  return anthropicRequest({
+  const d = classifyDepth(ut, depthCal());   // A3 — size the room to the turn (learned ceiling)
+  const r = await anthropicRequest({
     model,
     max_tokens: d.maxTokens,
     // directive is a TRAILING block (after the cache_control'd static prompt) so per-turn sizing
@@ -1270,6 +1382,8 @@ async function callClaude(messages, apiKey, model) {
     // which entry point (chat/voice/telegram/cloud-bridge/pacing re-entry) built the messages.
     messages: validateHistory(capTokens(messages))
   }, apiKey);
+  logDepthOutcome(d, r, 'tool');             // every response → dataset
+  return r;
 }
 
 // Streaming variant — emits text deltas via onText(delta) as they arrive (first word in
@@ -1295,7 +1409,7 @@ async function anthropicStream(body, apiKey, onText, { retries = 3 } = {}) {
         await sleep(waitMs + Math.random() * 400); attempt++; continue;
       }
       const t = await res.text().catch(() => '');
-      if (res.status === 429) throw new Error("Rate limit reached (tier-1 cap, 50k tokens/min). I waited and retried but it's still busy — give it a minute, or add credits at console.anthropic.com.");
+      if (res.status === 429) throw new Error("Rate limit reached (per-model ITPM/OTPM cap). I waited and retried but it's still busy — give it a minute, or raise rateLimits in config / your Anthropic tier.");
       if (res.status === 529) throw new Error('Anthropic is overloaded right now. Try again shortly.');
       throw new Error(`API ${res.status}: ${t.slice(0, 300)}`);
     }
@@ -1336,22 +1450,24 @@ async function anthropicStream(body, apiKey, onText, { retries = 3 } = {}) {
         } else if (ev.type === 'error') { throw new Error('stream error: ' + JSON.stringify(ev.error).slice(0, 200)); }
       }
     }
-    try { recordTokens((usage.input_tokens || 0) + (usage.output_tokens || 0)); recordCost(body.model, usage); noteUsage(body.model, usage); } catch {}
+    try { recordTokens(body.model, (usage.input_tokens || 0) + (usage.cache_read_input_tokens || 0) + (usage.cache_creation_input_tokens || 0), usage.output_tokens || 0); recordCost(body.model, usage); noteUsage(body.model, usage); } catch {}
     return {
       content: blocks.filter(Boolean).map((b) => b.type === 'tool_use' ? { type: 'tool_use', id: b.id, name: b.name, input: b.input || {} } : { type: 'text', text: b.text }),
       stop_reason: stop_reason || 'end_turn', usage
     };
   }
 }
-function callClaudeStream(messages, apiKey, model, onText) {
+async function callClaudeStream(messages, apiKey, model, onText) {
   const ut = lastUserText(messages);
-  const d = classifyDepth(ut);   // A3 — size the room to the turn
-  return anthropicStream({
+  const d = classifyDepth(ut, depthCal());   // A3 — size the room to the turn (learned ceiling)
+  const r = await anthropicStream({
     model, max_tokens: d.maxTokens,
     system: [...systemBlocks(ut), { type: 'text', text: d.directive }],
     // see callClaude: re-validate AFTER capTokens so trimming can't re-orphan a tool pair.
     tools: activeTools(), messages: validateHistory(capTokens(messages))
   }, apiKey, onText);
+  logDepthOutcome(d, r, 'tool-stream');       // every response → dataset
+  return r;
 }
 
 function lastUserText(messages) {
@@ -1391,12 +1507,19 @@ async function callModel(messages, apiKey, allowDarkbloom, onText) {
     }
   }
 
-  // Preflight rate-limit check: if this request would blow the per-minute token budget,
+  // The model is chosen BEFORE the preflight so the rate check uses that model's OWN per-minute
+  // caps (Sonnet's are ~4× Haiku's) instead of a single global number.
+  const claudeModel = (route === 'sonnet' || route === 'db_directive') ? MODEL_SONNET : MODEL_HAIKU;
+
+  // Preflight rate-limit check: if this request would blow the per-minute INPUT or OUTPUT budget,
   // either run it on a local Ollama model (free, no quota) or — if local is unavailable
   // / mode='notify' — abort with a clear message so the caller can reset for next task.
+  // estOut = the learned/predicted output size for this turn (depth calibration), so OTPM-heavy
+  // generation turns pace too, not just big-context ones.
   let est = requestTokenEstimate(messages);
-  let budget = rateBudget();
-  if (est > budget.free) {
+  let estOut = predictedOutputTokens(lastUserText(messages));
+  let budget = rateBudget(claudeModel);
+  if (est > budget.inFree || (budget.outFree !== Infinity && estOut > budget.outFree)) {
     const mode = cfg.rateLimitMode || 'local';
     // First-turn simple queries → answer locally on Ollama (free, no quota). Not mid-task
     // (Ollama can't run tools, so hijacking a tool loop would break it).
@@ -1407,27 +1530,29 @@ async function callModel(messages, apiKey, allowDarkbloom, onText) {
         if (text) { if (onText) try { onText(text); } catch {} return { content: [{ type: 'text', text }], stop_reason: 'end_turn', _provider: 'ollama', _model: lm, _rateFallback: true }; }
       } catch (e) { console.warn('[rate] ollama fallback failed:', e.message); }
     }
-    // HARDENING: if the step fits within the per-minute cap, WAIT for the rolling window to
+    // HARDENING: if the step fits within the per-minute caps, WAIT for the rolling windows to
     // drain and then continue — long multi-step tasks pause ~a minute instead of aborting.
-    if (est <= budget.safe) {
-      if (await waitForBudget(est)) { budget = rateBudget(); }
+    if (est <= budget.inSafe && (budget.outSafe === Infinity || estOut <= budget.outSafe)) {
+      if (await waitForBudget(claudeModel, est, estOut)) { budget = rateBudget(claudeModel); }
     }
-    // If still over (request alone bigger than the whole cap, or wait timed out) → trim the
+    // If still over on INPUT (request alone bigger than the cap, or wait timed out) → trim the
     // context harder and re-estimate before giving up.
-    if (est > rateBudget().free) {
-      messages = capTokens(messages, Math.max(6000, Math.floor(budget.safe * 0.5)));
+    if (est > rateBudget(claudeModel).inFree) {
+      messages = capTokens(messages, Math.max(6000, Math.floor(budget.inSafe * 0.5)));
       est = requestTokenEstimate(messages);
-      if (est <= budget.safe) await waitForBudget(est);
+      if (est <= budget.inSafe) await waitForBudget(claudeModel, est, estOut);
     }
-    budget = rateBudget();
-    if (est > budget.free) {
-      const err = new Error(`⚠ This step needs ~${Math.round(est / 1000)}k tokens, over your ~${Math.round(budget.safe / 1000)}k/min cap even after pacing. I've reset the context — retry in a minute, or raise rateLimitTokens in config if your Anthropic tier is higher.`);
+    budget = rateBudget(claudeModel);
+    if (est > budget.inFree || (budget.outFree !== Infinity && estOut > budget.outFree)) {
+      const overOut = budget.outFree !== Infinity && estOut > budget.outFree;
+      const err = new Error(overOut
+        ? `⚠ This step would emit ~${Math.round(estOut / 1000)}k output tokens, over your ${claudeModel.replace(/^claude-/, '')} ~${Math.round(budget.outSafe / 1000)}k/min OUTPUT cap even after pacing. Retry in a minute, or raise rateLimits.${claudeModel}.otpm in config.`
+        : `⚠ This step needs ~${Math.round(est / 1000)}k input tokens, over your ${claudeModel.replace(/^claude-/, '')} ~${Math.round(budget.inSafe / 1000)}k/min cap even after pacing. I've reset the context — retry in a minute, or raise rateLimits.${claudeModel}.itpm in config.`);
       err.rateBudget = true;
       throw err;
     }
   }
 
-  const claudeModel = (route === 'sonnet' || route === 'db_directive') ? MODEL_SONNET : MODEL_HAIKU;
   const r = onText
     ? await callClaudeStream(messages, apiKey, claudeModel, onText)
     : await callClaude(messages, apiKey, claudeModel);
@@ -4025,8 +4150,16 @@ async function executeTool(name, input) {
         result = { success: !insp.error, pass: insp.pass, findings: insp.findings, model: insp.model, error: insp.error, _image: b64, _imageMime: 'image/jpeg' };
         break;
       }
-      case 'screen_parse':
-        result = await screenParse(input); break;
+      case 'screen_parse': {
+        // Wattage gate: the semantics:true caption pass loads a heavy ML model (~60s, hot GPU).
+        // On battery (power-saver on) force it off — detection still works, just no icon captions.
+        let spIn = input;
+        if (input.semantics && shouldSpareWatts()) {
+          spIn = { ...input, semantics: false };
+          sendToActivity('tool-update', { type: 'thinking', text: '🔋 on battery — skipping the slow icon-caption pass (semantics off) to save power' });
+        }
+        result = await screenParse(spIn); break;
+      }
       case 'vision_click':
         result = await visionClick(input); break;
       case 'ask_ai':
@@ -4907,11 +5040,16 @@ async function fastReply(history, apiKey, event, opts = {}) {
     if (disp) { try { event && event.sender && event.sender.send('tool-update', { type: 'token', text: disp }); } catch {} }
   } : null;
   sendToAll(event, 'tool-update', { type: 'provider_used', provider: 'anthropic', model: MODEL_HAIKU });
+  // Right-size the fast (no-tools) path too: learned depth ceiling, capped at 2048 since this path
+  // is for quick conversational replies — a trivial "ack" no longer reserves 1024 output tokens.
+  const ut = lastUserText(history);
+  const d = classifyDepth(ut, depthCal());
   const r = await anthropicStream({
-    model: MODEL_HAIKU, max_tokens: 1024,
-    system: systemBlocks(lastUserText(history)),   // cache_control'd static block → cheap + low TTFT
+    model: MODEL_HAIKU, max_tokens: Math.min(d.maxTokens, 2048),
+    system: [...systemBlocks(ut), { type: 'text', text: d.directive }],   // cache_control'd static block → cheap + low TTFT
     messages: capTokens(history)                    // NO tools → faster first token, no tool-decision detour
   }, apiKey, onText);
+  logDepthOutcome({ depth: d.depth, maxTokens: Math.min(d.maxTokens, 2048) }, r, 'fast');
   if (parser) parser.finish(); else if (stream && ttsSeq != null) ttsStreamFlush(ttsSeq);
   const text = stripReasoning(r.content.filter((b) => b.type === 'text').map((b) => b.text).join('\n')).replace(/<\/?speak>/g, '').trim();
   return { text, history: [...history, { role: 'assistant', content: text }], _provider: 'anthropic', _model: MODEL_HAIKU, _streamed: !!(stream && ttsSeq != null) };
@@ -5556,6 +5694,7 @@ function startAmbient() {
     if (_ambientTimer) clearInterval(_ambientTimer);
     const tick = async () => {
       try {
+        if (shouldSpareWatts()) return;                 // on battery + power-saver → skip background poll
         const res = await ambient.scan();
         if (!res || res.skipped || !res.signals || !res.signals.length) return;
         const brief = ambient.digest(res.signals);
