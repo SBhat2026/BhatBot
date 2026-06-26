@@ -77,6 +77,8 @@ app.get('/api/:token/morning', guard, async (_q, res) => {
 app.get('/api/:token/activity', guard, (req, res) => { noStore(res); res.json(db.getActivity(req.query.since)); });
 app.get('/api/:token/audit', guard, (req, res) => { noStore(res); res.json({ entries: db.getAuditLog(Number(req.query.limit) || 100) }); });
 app.get('/api/:token/config', guard, (_q, s) => { noStore(s); s.json({ nexusUrl: process.env.NEXUS_URL || '', mac: relay.macStatus() }); });
+// Phase 4 — relayed fleet-agent activity, so other bots/surfaces (phone PWA, Telegram) can see what each agent is doing.
+app.get('/api/:token/agentlog', guard, (req, res) => { noStore(res); res.json({ entries: relay.recentAgentLog(Number(req.query.n) || 30) }); });
 
 // ---- contacts (Mac imports them here; agent + butler use them for who's-who) ---
 app.post('/api/:token/contacts', guard, (req, res) => {

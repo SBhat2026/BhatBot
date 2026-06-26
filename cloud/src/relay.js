@@ -9,6 +9,8 @@
 const crypto = require('crypto');
 
 let macSocket = null;          // the single connected Mac executor (single-user)
+const agentLog = [];           // Phase 4 — relayed fleet-agent activity (bounded ring), served to other bots
+function recentAgentLog(n = 30) { return agentLog.slice(-n); }
 let macInfo = null;            // { connectedAt, host }
 const pending = new Map();     // reqId → { resolve, timer }
 let queue = [];                // commands captured while the Mac is asleep → drained on reconnect
@@ -47,6 +49,9 @@ function attachMac(ws, meta = {}) {
       const p = pending.get(msg.id); pending.delete(msg.id); clearTimeout(p.timer);
       p.resolve(msg.result);
     }
+    // Phase 4 — agent-log relay: the Mac hub pushes each fleet agent's activity here so OTHER bots/
+    // surfaces (phone PWA, Telegram) can see what every agent is doing. Bounded ring; served read-only.
+    else if (msg.type === 'agentlog' && msg.entry) { agentLog.push(msg.entry); if (agentLog.length > 200) agentLog.shift(); }
     // msg.type === 'pong' / 'hello' → keepalive, ignore
   });
   ws.on('close', () => { if (macSocket === ws) { macSocket = null; macInfo = null; } rejectAll('Mac disconnected'); });
@@ -68,4 +73,4 @@ function macExec(tool, input, timeoutMs = 60000) {
   });
 }
 
-module.exports = { attachMac, macExec, macOnline, macStatus, queueExec, drainQueue, setDrainNotifier };
+module.exports = { attachMac, macExec, macOnline, macStatus, queueExec, drainQueue, setDrainNotifier, recentAgentLog };

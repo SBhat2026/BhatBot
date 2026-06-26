@@ -3914,11 +3914,28 @@ function sendToActivity(channel, data) {
 // and per-agent feedback typed in that panel lands in each suit's queue (drained mid-run by runRole).
 const fleetAgents = new Map();
 const agentWindows = new Map();   // id → pop-out monitor BrowserWindow (Manus-style live screen)
+// Phase 4 — shared FLEET LOG: a bounded ring of every agent's live activity, so BhatBot is the hub
+// that (a) keeps cross-agent situational awareness in one place and (b) RELAYS each line to the cloud
+// brain → other bots/surfaces (phone PWA, Telegram, sibling executors). recentFleetLog() exposes it.
+const fleetLog = [];
+function recentFleetLog(n = 20) { return fleetLog.slice(-n); }
+function relayAgentLog(payload) {
+  try {
+    if (!payload || !payload.id) return;
+    const line = payload.step || payload.text || payload.status || (payload.tool && ('→ ' + payload.tool)) || '';
+    if (!line) return;
+    const entry = { id: payload.id, role: payload.role || (fleetAgents.get(payload.id) || {}).role || '', codename: payload.codename, line: String(line).slice(0, 240), ts: Date.now() };
+    fleetLog.push(entry); if (fleetLog.length > 200) fleetLog.shift();
+    // relay to the cloud brain so other bots see what each agent is doing (fire-and-forget; no-op if offline)
+    try { if (_cloudBridge && _cloudBridge.send) _cloudBridge.send({ type: 'agentlog', entry }); } catch {}
+  } catch {}
+}
 function fleetBroadcast(payload) {
   if (payload && payload.id) {
     const cur = fleetAgents.get(payload.id) || { id: payload.id, feedback: [] };
     fleetAgents.set(payload.id, { ...cur, ...payload, feedback: cur.feedback || [], ts: Date.now() });
   }
+  relayAgentLog(payload);   // hub: capture + relay each agent's log to the cloud → other bots
   try { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('fleet-update', payload); } catch {}
   // mirror to any open per-agent monitor windows (each filters to its own id)
   for (const [, w] of agentWindows) { try { if (w && !w.isDestroyed()) w.webContents.send('fleet-update', payload); } catch {} }
