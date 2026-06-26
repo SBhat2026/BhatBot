@@ -14,3 +14,4 @@ OmniParser/
 # Phase 3 — learned depth model artifact (lives in ~/.bhatbot, never committed)
 depth-model.json
 .episodic-vec.json
+.phase4-backup/

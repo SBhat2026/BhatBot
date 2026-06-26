@@ -10,6 +10,7 @@ const { exec, spawn, spawnSync } = require('child_process');
 const crypto = require('crypto');
 const darkbloom = require('./darkbloom');
 const credentials = require('./lib/credentials');
+const configsec = require('./lib/configsec');          // Phase 4 #1 — plaintext-secret migration + write-time guard
 const worldcup = require('./lib/worldcup');               // FIFA WC 2026 live bracket + prediction engine
 const news = require('./lib/news');                       // NYT news skim (RSS, no key; Top Stories API if nytApiKey set)
 const websearch = require('./lib/websearch');             // web_search — ranked results (Brave/Serper/Tavily if keyed, else free DuckDuckGo)
@@ -307,14 +308,58 @@ function latMark(label) {
 // ---------------------------------------------------------------------------
 // Config / memory
 // ---------------------------------------------------------------------------
-function loadConfig() {
+// Mint + persist a safeStorage vault handle for a secret value (in-app only).
+function vaultStore(label, value) { return credentials.store(label, '', '', value); }
+
+// RAW config: CRED_REF_* handles left INTACT. Used as the write base + by migration so resolved
+// plaintext is never re-serialized back to disk.
+function loadConfigRaw() {
   try { return JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')); } catch { return {}; }
 }
-function saveConfig(patch) {
-  const next = { ...loadConfig(), ...patch };
+// Internal write that BYPASSES the plaintext validator — only ever called with ref-only/cleared
+// values (migration). Never expose to tool/code-edit paths.
+function saveConfigRaw(next) {
   fs.mkdirSync(path.dirname(CONFIG_PATH), { recursive: true });
   fs.writeFileSync(CONFIG_PATH, JSON.stringify(next, null, 2));
+  _cfgCache = null;
   return next;
+}
+// Phase 4 #1 — runtime read with CRED_REF_* resolved in-process via safeStorage. Cached by file
+// mtime so we don't decrypt on every call (loadConfig is hot). Outside the app (no safeStorage),
+// resolveRefs leaves handles untouched (callers fall back to process.env where it matters).
+let _cfgCache = null, _cfgRawMtime = -1;
+function loadConfig() {
+  try {
+    const st = fs.statSync(CONFIG_PATH);
+    if (_cfgCache && st.mtimeMs === _cfgRawMtime) return _cfgCache;
+    const resolved = credentials.resolveRefs(loadConfigRaw());
+    _cfgCache = resolved; _cfgRawMtime = st.mtimeMs;
+    return resolved;
+  } catch { return loadConfigRaw(); }
+}
+function saveConfig(patch) {
+  // WRITE-TIME guard (Phase 4 #1): a plaintext credential must never land on disk. When the app's
+  // safeStorage is up we AUTO-VAULT it (replace with a CRED_REF); otherwise the write is REJECTED
+  // (throws PLAINTEXT_CRED_BLOCKED). This also fences self_fix/self_heal out of persisting new keys.
+  const safePatch = configsec.sanitizeWrite(patch, credentials.canStore() ? { store: vaultStore } : {});
+  const next = { ...loadConfigRaw(), ...safePatch };   // base = RAW (refs intact)
+  return saveConfigRaw(next);
+}
+// One-shot startup migration: encrypt any plaintext secrets into the vault, leave CRED_REF handles.
+// Idempotent (ref values skipped); only runs when safeStorage is available.
+function migrateSecretsToVault() {
+  try {
+    if (!credentials.canStore()) return { skipped: 'safeStorage unavailable' };
+    const raw = loadConfigRaw();
+    const before = configsec.findPlaintext(raw);
+    if (!before.length) return { migrated: [], alreadyClean: true };
+    const { next, migrated } = configsec.migrate(raw, { store: vaultStore });
+    if (migrated.length) saveConfigRaw(next);
+    console.log(`[configsec] migrated ${migrated.length} plaintext secret(s) → vault: ${migrated.join(', ')}`);
+    const leftover = configsec.findPlaintext(loadConfigRaw());
+    if (leftover.length) console.warn(`[configsec] ⚠ ${leftover.length} secret(s) could not be vaulted: ${leftover.map((h) => h.path).join(', ')}`);
+    return { migrated, leftover: leftover.map((h) => h.path) };
+  } catch (e) { console.warn('[configsec] migration error:', e.message); return { error: e.message }; }
 }
 function getApiKey() {
   return process.env.ANTHROPIC_API_KEY || loadConfig().apiKey || '';
@@ -7589,6 +7634,7 @@ function primeAppAutomation(force = false) {
 // ---------------------------------------------------------------------------
 app.whenReady().then(() => {
   try {
+    migrateSecretsToVault();   // Phase 4 #1 — vault any plaintext secrets BEFORE anything (cloud bridge, MCP) reads them
     createWindow();
     mainWindow.show();
     if (!globalShortcut.register(HOTKEY, toggleWindow)) console.warn('Hotkey failed — may be claimed by another app.');
