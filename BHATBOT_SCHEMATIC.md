@@ -94,11 +94,12 @@ Tier-2 limits now modeled **per model**, tracking **both** input and output:
 
 ---
 
-## 4. Full Tool Catalog (55 tools)
+## 4. Full Tool Catalog (56 tools)
 
 ### Files & shell
 - **read_file** — read a UTF-8 text file (100KB max).
-- **write_file** — write a UTF-8 file, mkdir -p parent.
+- **write_file** — write a UTF-8 file, mkdir -p parent (new files / full rewrites).
+- **edit_file** — surgical exact-string patch of an existing file (atomic, unique-match-or-fail, diff preview). *Phase 1 — the big OTPM win vs full rewrites.*
 - **list_directory** — list dir entries with name + type.
 - **run_shell** — run a shell command (60s; destructive-pattern gated).
 

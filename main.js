@@ -43,6 +43,8 @@ const jobsBus = require('./lib/jobs');                // P5  — background job 
 const scheduler = require('./lib/scheduler');         // proactive scheduler (recurring/one-off autonomous tasks)
 const simulate = require('./lib/simulate');           // physics/chem/math simulation sandbox (scipy/sympy/rdkit/openmm/pyscf…)
 const selfheal = require('./lib/selfheal');           // autonomous self-healing (DISABLED by default; verify-gated self_fix loop)
+const vanguard = require('./lib/vanguard');           // Phase 1 — unified VANGUARD fleet codename roster (OVERMIND/FORGE/ORACLE/…)
+const { createAdmission } = require('./lib/admission'); // Phase 1 — budget-aware fleet admission controller (convoy fix)
 
 const DB_MODELS = { db_speech: 'gpt-oss-20b', db_directive: 'gemma-4-26b' };
 
@@ -1015,6 +1017,11 @@ function chooseModel(lastUserMessage) {
     ];
     const hit = sonnet.some((p) => p.test(lastUserMessage || ''));
     model = hit ? MODEL_SONNET : MODEL_HAIKU; task = hit ? 'reasoning' : 'simple';
+    // TELEMETRY NUDGE (Phase 1, Deliverable #3): router.jsonl now DRIVES, not just records. If the
+    // cheap 'simple' route has been getting corrected a lot, the regex is under-calling it — escalate.
+    if (model === MODEL_HAIKU && task === 'simple' && routeCorrectionRate('simple') > 0.34) {
+      model = MODEL_SONNET; task = 'simple-nudged';
+    }
   }
   _lastModel = model; _lastRouterTask = task;       // remembered for router telemetry (#13)
   return model;
@@ -1213,6 +1220,27 @@ function routerStats() {
       .sort((a, b) => b.decisions - a.decisions);
   } catch { return []; }
 }
+// Cached per-taskType correction rate from router.jsonl telemetry (Phase 1, Deliverable #3). Lets
+// chooseModel learn from its own mistakes (escalate routes that get corrected a lot) instead of only
+// logging them. Cached 60s — the log only grows, no need to re-read per turn.
+let _rcrCache = null, _rcrAt = 0;
+function routeCorrectionRate(taskType) {
+  try {
+    if (!_rcrCache || Date.now() - _rcrAt > 60000) {
+      _rcrCache = {};
+      for (const r of routerStats()) {
+        const tt = String(r.route || '').split(' → ')[0].trim();
+        const p = _rcrCache[tt] || { d: 0, c: 0 };
+        p.d += r.decisions || 0; p.c += r.corrected || 0;
+        _rcrCache[tt] = p;
+      }
+      _rcrAt = Date.now();
+    }
+    const e = _rcrCache[taskType];
+    if (!e || (e.d + e.c) < 12) return 0;          // need a sample before trusting the signal
+    return e.c / (e.d + e.c);
+  } catch { return 0; }
+}
 
 // Estimated input tokens a Claude request would cost (system + tools + trimmed messages).
 function requestTokenEstimate(messages) {
@@ -1242,6 +1270,19 @@ async function waitForBudget(model, needIn, needOut = 0, maxWaitMs = 75000) {
 }
 async function ollamaUp() {
   try { const r = await fetch(`${OLLAMA_URL}/api/tags`, { signal: AbortSignal.timeout(700) }); return r.ok; } catch { return false; }
+}
+// VANGUARD admission controller (Phase 1) — shared token-reservation ledger over the SAME rolling
+// rate windows as the main preflight (rateBudget). Sub-agent calls acquire/release through this so
+// concurrent suits self-throttle to live budget instead of convoying into the rate limit together.
+const admission = createAdmission({
+  freeBudget: (m) => rateBudget(m),
+  sleep,
+  log: (t) => { try { sendToActivity('tool-update', { type: 'thinking', text: t }); } catch {} },
+});
+// Live fleet width = how many ~4k-output suits the current OTPM budget can carry (clamped [3,12]).
+// Replaces the old hardcoded parallel caps; the per-request admission reservation does the fine pacing.
+function fleetWidth(model = MODEL_SONNET, perAgentOut = 4096) {
+  try { return admission.width(model, perAgentOut, { min: 3, max: 12 }); } catch { return 3; }
 }
 // qwen3-family models burn seconds on <think> tokens before answering — for an assistant
 // reply that's pure mute latency. Ollama honors `think:false` for them (unknown fields are
@@ -1366,10 +1407,37 @@ function predictedOutputTokens(userText) {
   try { return classifyDepth(userText, depthCal()).maxTokens; } catch { return 1024; }
 }
 
+// Clip-aware continuation (Phase 1, Deliverable #4). When a response hit its max_tokens ceiling
+// while generating PROSE (no tool_use in the content — a clipped tool call can't be safely resumed,
+// its JSON args are truncated), transparently continue it as ONE logical answer with a raised
+// ceiling. The INITIAL clip is logged by the caller as a strong "needs more" depth signal before
+// this runs. Bounded (maxRounds, CLIP_HARD_CAP, skips trivial output) so it can't loop or run away,
+// and only continues while OTPM budget is actually free. `reissue(contMessages, round)` performs one
+// more (tool-less, text-only) model call and returns its response, or null to decline.
+const CLIP_HARD_CAP = 12000;   // ceiling for a single continued answer's per-round output budget
+async function continueClipped(resp, reissue, { maxRounds = 2 } = {}) {
+  let r = resp, rounds = 0;
+  while (r && r.stop_reason === 'max_tokens' && rounds < maxRounds) {
+    const blocks = r.content || [];
+    if (blocks.some((b) => b.type === 'tool_use')) break;          // never resume a clipped tool call
+    const soFar = blocks.filter((b) => b.type === 'text').map((b) => b.text).join('');
+    if (soFar.trim().length < 40) break;                           // nothing meaningful to continue
+    rounds++;
+    const next = await reissue([
+      { role: 'assistant', content: blocks },
+      { role: 'user', content: 'Continue your previous answer EXACTLY where it was cut off. Do not repeat or re-introduce anything already written — pick up mid-sentence if needed.' },
+    ], rounds);
+    if (!next) break;                                              // reissue declined (e.g. no budget)
+    const addText = (next.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('');
+    r = { content: [{ type: 'text', text: soFar + addText }], stop_reason: next.stop_reason, usage: r.usage, _continued: rounds };
+  }
+  return r;
+}
+
 async function callClaude(messages, apiKey, model) {
   const ut = lastUserText(messages);
   const d = classifyDepth(ut, depthCal());   // A3 — size the room to the turn (learned ceiling)
-  const r = await anthropicRequest({
+  const r0 = await anthropicRequest({
     model,
     max_tokens: d.maxTokens,
     // directive is a TRAILING block (after the cache_control'd static prompt) so per-turn sizing
@@ -1382,8 +1450,18 @@ async function callClaude(messages, apiKey, model) {
     // which entry point (chat/voice/telegram/cloud-bridge/pacing re-entry) built the messages.
     messages: validateHistory(capTokens(messages))
   }, apiKey);
-  logDepthOutcome(d, r, 'tool');             // every response → dataset
-  return r;
+  logDepthOutcome(d, r0, 'tool');            // every response → dataset; clipped:1 = the "needs more" signal
+  if (d.depth === 'ack') return r0;          // trivial exchange — never worth continuing
+  // Clip-aware auto-retry: if it truncated on prose, finish the thought (tool-less, budget-gated).
+  return continueClipped(r0, async (cont, round) => {
+    const raised = Math.min(d.maxTokens * (round + 1), CLIP_HARD_CAP);
+    if (!budgetOk(model, 0, raised)) return null;
+    return anthropicRequest({
+      model, max_tokens: raised,
+      system: [...systemBlocks(ut), { type: 'text', text: d.directive }],
+      messages: validateHistory(capTokens([...messages, ...cont]))   // tool-less: continuation is pure text
+    }, apiKey);
+  });
 }
 
 // Streaming variant — emits text deltas via onText(delta) as they arrive (first word in
@@ -1460,14 +1538,24 @@ async function anthropicStream(body, apiKey, onText, { retries = 3 } = {}) {
 async function callClaudeStream(messages, apiKey, model, onText) {
   const ut = lastUserText(messages);
   const d = classifyDepth(ut, depthCal());   // A3 — size the room to the turn (learned ceiling)
-  const r = await anthropicStream({
+  const r0 = await anthropicStream({
     model, max_tokens: d.maxTokens,
     system: [...systemBlocks(ut), { type: 'text', text: d.directive }],
     // see callClaude: re-validate AFTER capTokens so trimming can't re-orphan a tool pair.
     tools: activeTools(), messages: validateHistory(capTokens(messages))
   }, apiKey, onText);
-  logDepthOutcome(d, r, 'tool-stream');       // every response → dataset
-  return r;
+  logDepthOutcome(d, r0, 'tool-stream');      // every response → dataset; clipped:1 = the "needs more" signal
+  if (d.depth === 'ack') return r0;
+  // Clip-aware auto-retry — continuation tokens stream straight on via onText (seamless to the user).
+  return continueClipped(r0, async (cont, round) => {
+    const raised = Math.min(d.maxTokens * (round + 1), CLIP_HARD_CAP);
+    if (!budgetOk(model, 0, raised)) return null;
+    return anthropicStream({
+      model, max_tokens: raised,
+      system: [...systemBlocks(ut), { type: 'text', text: d.directive }],
+      messages: validateHistory(capTokens([...messages, ...cont]))   // tool-less continuation
+    }, apiKey, onText);
+  });
 }
 
 function lastUserText(messages) {
@@ -1482,6 +1570,47 @@ function lastUserText(messages) {
 // Claude for everything needing tools, reasoning, memory, or as fallback.
 // `allowDarkbloom` is only true on the first turn (Darkbloom path is single-shot,
 // no tool loop). Returns Anthropic-shaped response so agentLoop is unchanged.
+// Cross-provider TEXT offload rung (Phase 1, Deliverable #3). Used by callModel when the Anthropic
+// per-minute window is the binding constraint on a TOOL-LESS turn: run the turn on OpenAI (key live,
+// fast) then Gemini as a fallback — neither touches the Anthropic quota. Returns {text,provider,model}
+// or null if no provider is configured/available. Tool turns never come here (those providers can't
+// run the tool loop). This is the live-path home for the offload chains lib/router.js only modeled.
+async function offloadText(messages, system) {
+  const c = loadConfig();
+  const flat = (messages || []).map((m) => ({
+    role: m.role === 'assistant' ? 'assistant' : 'user',
+    content: typeof m.content === 'string' ? m.content
+      : (Array.isArray(m.content) ? m.content.filter((b) => b.type === 'text').map((b) => b.text).join('\n') : ''),
+  })).filter((m) => m.content);
+  if (!flat.length) return null;
+  if (c.openaiKey) {
+    try {
+      const model = c.openaiModel || 'gpt-4o-mini';
+      const msgs = system ? [{ role: 'system', content: system }, ...flat] : flat;
+      const r = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + c.openaiKey },
+        body: JSON.stringify({ model, messages: msgs }), signal: AbortSignal.timeout(60000),
+      });
+      const j = await r.json();
+      if (r.ok) { const t = j.choices?.[0]?.message?.content || ''; if (t.trim()) { console.log('[rate] offloaded to openai'); return { text: t, provider: 'openai', model }; } }
+    } catch (e) { console.warn('[rate] openai offload failed:', e.message); }
+  }
+  if (c.geminiKey) {
+    try {
+      const model = c.geminiModel || 'gemini-2.0-flash';
+      const contents = flat.map((x) => ({ role: x.role === 'assistant' ? 'model' : 'user', parts: [{ text: x.content }] }));
+      const body = { contents }; if (system) body.systemInstruction = { parts: [{ text: system }] };
+      const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': c.geminiKey },
+        body: JSON.stringify(body), signal: AbortSignal.timeout(60000),
+      });
+      const j = await r.json();
+      if (r.ok) { const t = j.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('') || ''; if (t.trim()) { console.log('[rate] offloaded to gemini'); return { text: t, provider: 'gemini', model }; } }
+    } catch (e) { console.warn('[rate] gemini offload failed:', e.message); }
+  }
+  return null;
+}
+
 async function callModel(messages, apiKey, allowDarkbloom, onText) {
   const cfg = loadConfig();
   const route = classify(lastUserText(messages));
@@ -1509,7 +1638,7 @@ async function callModel(messages, apiKey, allowDarkbloom, onText) {
 
   // The model is chosen BEFORE the preflight so the rate check uses that model's OWN per-minute
   // caps (Sonnet's are ~4× Haiku's) instead of a single global number.
-  const claudeModel = (route === 'sonnet' || route === 'db_directive') ? MODEL_SONNET : MODEL_HAIKU;
+  let claudeModel = (route === 'sonnet' || route === 'db_directive') ? MODEL_SONNET : MODEL_HAIKU;
 
   // Preflight rate-limit check: if this request would blow the per-minute INPUT or OUTPUT budget,
   // either run it on a local Ollama model (free, no quota) or — if local is unavailable
@@ -1518,6 +1647,16 @@ async function callModel(messages, apiKey, allowDarkbloom, onText) {
   // generation turns pace too, not just big-context ones.
   let est = requestTokenEstimate(messages);
   let estOut = predictedOutputTokens(lastUserText(messages));
+  // OTPM-AWARE ROUTING (Phase 1, Deliverable #3): when OUTPUT is the binding constraint, Sonnet's
+  // 90k OTPM beats Haiku's 50k — so a Haiku-routed turn whose predicted output would crowd Haiku's
+  // live output window upgrades to Sonnet when Sonnet has materially more output headroom right now.
+  // (Skipped under the daily $ governor, which forces Haiku.)
+  if (claudeModel === MODEL_HAIKU && !overBudget()) {
+    const hB = rateBudget(MODEL_HAIKU), sB = rateBudget(MODEL_SONNET);
+    if (estOut > hB.outFree && sB.outFree > estOut && sB.outFree > hB.outFree) {
+      claudeModel = MODEL_SONNET; _lastModel = MODEL_SONNET; _lastRouterTask = 'otpm-upgrade';
+    }
+  }
   let budget = rateBudget(claudeModel);
   if (est > budget.inFree || (budget.outFree !== Infinity && estOut > budget.outFree)) {
     const mode = cfg.rateLimitMode || 'local';
@@ -1529,6 +1668,13 @@ async function callModel(messages, apiKey, allowDarkbloom, onText) {
         const text = (await ollamaChat(messages, buildSystemPrompt(lastUserText(messages)), lm) || '').trim();
         if (text) { if (onText) try { onText(text); } catch {} return { content: [{ type: 'text', text }], stop_reason: 'end_turn', _provider: 'ollama', _model: lm, _rateFallback: true }; }
       } catch (e) { console.warn('[rate] ollama fallback failed:', e.message); }
+    }
+    // CROSS-PROVIDER TEXT OFFLOAD (Phase 1, Deliverable #3): Anthropic is the binding constraint and
+    // this is a tool-less turn → spread it onto OpenAI/Gemini (no Anthropic quota) instead of stalling.
+    // Brings the offload rungs that previously lived only in the unused lib/router.js into the LIVE path.
+    if (allowDarkbloom && !toolish) {
+      const off = await offloadText(messages, buildSystemPrompt(lastUserText(messages)));
+      if (off && off.text) { if (onText) try { onText(off.text); } catch {} return { content: [{ type: 'text', text: off.text }], stop_reason: 'end_turn', _provider: off.provider, _model: off.model, _rateFallback: true }; }
     }
     // HARDENING: if the step fits within the per-minute caps, WAIT for the rolling windows to
     // drain and then continue — long multi-step tasks pause ~a minute instead of aborting.
@@ -1965,8 +2111,10 @@ const MEMORY_SECTIONS = ['Personal', 'Active Projects', 'Preferences & Patterns'
 const TOOLS = [
   { name: 'read_file', description: 'Read a UTF-8 text file (100KB max). Absolute paths.',
     input_schema: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } },
-  { name: 'write_file', description: 'Write a UTF-8 file, mkdir -p on parent.',
+  { name: 'write_file', description: 'Write a UTF-8 file, mkdir -p on parent. Use for NEW files or full rewrites; to change a few lines of an EXISTING file prefer edit_file (far cheaper in output tokens).',
     input_schema: { type: 'object', properties: { path: { type: 'string' }, content: { type: 'string' } }, required: ['path', 'content'] } },
+  { name: 'edit_file', description: 'Surgically patch an EXISTING UTF-8 text file by replacing an exact string — instead of rewriting the whole file (saves large amounts of output). old_string must occur EXACTLY ONCE (include enough surrounding context to be unique); 0 or >1 matches fails with the file left unchanged. Pass replace_all:true to replace every occurrence. Write is atomic (temp+rename); returns a diff preview. For a brand-new file use write_file.',
+    input_schema: { type: 'object', properties: { path: { type: 'string' }, old_string: { type: 'string' }, new_string: { type: 'string' }, replace_all: { type: 'boolean', description: 'replace EVERY occurrence (default false → old_string must be unique)' } }, required: ['path', 'old_string', 'new_string'] } },
   { name: 'list_directory', description: 'List directory entries with name + type.',
     input_schema: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } },
   { name: 'run_shell', description: 'Run a shell command (60s). rm/rmdir/trash require user confirmation. Homebrew + claude CLI on PATH.',
@@ -3414,7 +3562,7 @@ async function runProjectDetached(projectId, w, cfg, input) {
   try {
     const res = await orchestrator.run(input.goal, {
       wsDir: w.dir, config: cfg, adapters: orchestratorAdapters(w.dir),
-      maxTasks: input.max_tasks || 12, concurrency: 3,
+      maxTasks: input.max_tasks || 12, concurrency: fleetWidth(),   // Phase 1 — live budget-driven width (was hardcoded 3)
       shouldStop: () => jobsBus.isCancelled(projectId),
       getGuidance: () => jobsBus.takeGuidance(projectId),
       onTask: (t, phase, extra) => {
@@ -3663,13 +3811,37 @@ function isRetryableTool(name, input) {
   return false;
 }
 
-// Deps injected into persistent sub-agents (#20): the scoped model call, the full tool registry
-// (sub-agents filter it to their allowlist), executeTool, the key, and the model ids.
+// VANGUARD-paced Anthropic call for every fleet/ensemble/sub-agent request (Phase 1). Replaces the
+// raw anthropicRequest in the injected deps so each suit (a) RESERVES its estimated in/out budget on
+// the shared admission ledger and waits if the live rolling window can't fit it yet — killing the
+// convoy where N suits drained the OTPM window at once and all rate-limited together — and (b) gets
+// the same clip-aware auto-continue the main turn has. Reservation is ALWAYS released, even on error.
+async function pacedSubagentRequest(body, apiKey, opts) {
+  const model = body.model || MODEL_SONNET;
+  const needIn = Math.max(1, estimateTokens(body));
+  const needOut = body.max_tokens || 4096;
+  await admission.acquire(model, needIn, needOut, { label: 'suit' });
+  try {
+    const r0 = await anthropicRequest(body, apiKey, opts);
+    if (r0 && r0.stop_reason === 'max_tokens') logDepthOutcome({ depth: 'detailed', maxTokens: needOut }, r0, 'fleet'); // suit clip = "needs more" signal
+    return continueClipped(r0, async (cont, round) => {
+      const raised = Math.min(needOut * (round + 1), CLIP_HARD_CAP);
+      if (!budgetOk(model, 0, raised)) return null;
+      return anthropicRequest({ ...body, max_tokens: raised, tools: undefined, messages: [...body.messages, ...cont] }, apiKey, opts); // tool-less continuation
+    });
+  } finally {
+    admission.release(model, needIn, needOut);
+  }
+}
+
+// Deps injected into persistent sub-agents (#20) and every fleet system: the (paced) scoped model
+// call, the full tool registry (sub-agents filter it to their allowlist), executeTool, the key,
+// and the model ids. onStep surfaces the VANGUARD codename for the suit.
 function subagentDeps() {
   return {
-    anthropicRequest, executeTool, toolDefs: TOOLS, apiKey: getApiKey(),
+    anthropicRequest: pacedSubagentRequest, executeTool, toolDefs: TOOLS, apiKey: getApiKey(),
     models: { sonnet: MODEL_SONNET, haiku: MODEL_HAIKU },
-    onStep: (name, tool) => sendToActivity('tool-update', { type: 'thinking', text: `🤝 ${name} → ${tool}` }),
+    onStep: (name, tool) => sendToActivity('tool-update', { type: 'thinking', text: `🤝 ${vanguard.codename(name)} → ${tool}` }),
   };
 }
 
@@ -3678,6 +3850,42 @@ const projectSummarize = async (prompt) => {
   const j = await anthropicRequest({ model: MODEL_HAIKU, max_tokens: 400, system: 'You write tight, factual project summaries.', messages: [{ role: 'user', content: prompt }] }, getApiKey());
   return (j.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim();
 };
+
+// edit_file (Phase 1, Deliverable #1) — surgical single-string patch. Safety posture: the file must
+// already exist + be readable; old_string must match exactly (unique unless replace_all); a 0/>1
+// match is a FAILED patch that changes nothing; the write is atomic (temp file + rename on the same
+// filesystem) so a crash mid-write can never leave a half-written file. NOT in PARALLEL_SAFE — two
+// concurrent edits to the same file would race. Returns a compact diff preview.
+function editFileDiff(oldStr, newStr) {
+  const minus = String(oldStr).split('\n').map((l) => '- ' + l);
+  const plus = String(newStr).split('\n').map((l) => '+ ' + l);
+  return [...minus, ...plus].join('\n').slice(0, 2000);
+}
+function applyEdit(input) {
+  const fp = input && input.path;
+  const oldStr = input && input.old_string;
+  const newStr = input && input.new_string;
+  if (!fp) return { success: false, error: 'path required' };
+  if (typeof oldStr !== 'string' || typeof newStr !== 'string') return { success: false, error: 'old_string and new_string must both be strings' };
+  if (oldStr === newStr) return { success: false, error: 'old_string and new_string are identical — nothing to change' };
+  if (oldStr === '') return { success: false, error: 'old_string is empty — use write_file to create/replace a file' };
+  let orig;
+  try { orig = fs.readFileSync(fp, 'utf8'); }
+  catch (e) { return { success: false, error: `cannot read ${fp}: ${e.message}. Use write_file to create a new file.` }; }
+  const count = orig.split(oldStr).length - 1;
+  if (count === 0) return { success: false, error: 'old_string not found — file unchanged. Read the file and match exactly, including whitespace/indentation.' };
+  if (count > 1 && !input.replace_all) return { success: false, error: `old_string matches ${count} times — not unique. Add surrounding context to disambiguate, or pass replace_all:true.` };
+  const updated = input.replace_all ? orig.split(oldStr).join(newStr) : orig.replace(oldStr, newStr);
+  const tmp = `${fp}.bbtmp-${process.pid}-${Date.now()}`;
+  try {
+    fs.writeFileSync(tmp, updated);
+    fs.renameSync(tmp, fp);                                   // atomic replace; orig untouched until this point
+  } catch (e) {
+    try { if (fs.existsSync(tmp)) fs.unlinkSync(tmp); } catch {}
+    return { success: false, error: `write failed (file left unchanged): ${e.message}` };
+  }
+  return { success: true, path: fp, replacements: input.replace_all ? count : 1, diff: editFileDiff(oldStr, newStr) };
+}
 
 async function executeTool(name, input) {
   let result;
@@ -3713,6 +3921,8 @@ async function executeTool(name, input) {
         fs.mkdirSync(path.dirname(input.path), { recursive: true });
         fs.writeFileSync(input.path, input.content);
         result = { success: true, path: input.path }; break;
+      case 'edit_file':
+        result = applyEdit(input); break;
       case 'list_directory':
         result = { success: true, entries: fs.readdirSync(input.path, { withFileTypes: true })
           .map((e) => ({ name: e.name, type: e.isDirectory() ? 'dir' : 'file' })) }; break;
@@ -4012,14 +4222,15 @@ async function executeTool(name, input) {
       case 'fleet': {
         const tasks = input.tasks;
         if (!Array.isArray(tasks) || !tasks.length) { result = { success: false, error: 'tasks: array of {role, task} required' }; break; }
-        const norm = tasks.slice(0, 6).map((t, i) => ({ id: 'suit-' + (i + 1), role: t.role || ('suit-' + (i + 1)), task: t.task, tools: Array.isArray(t.tools) ? t.tools : undefined }));
+        const norm = tasks.slice(0, fleetWidth()).map((t, i) => ({ id: 'suit-' + (i + 1), role: t.role || ('suit-' + (i + 1)), task: t.task, tools: Array.isArray(t.tools) ? t.tools : undefined }));
         fleetAgents.clear();
-        norm.forEach((t) => fleetAgents.set(t.id, { id: t.id, role: t.role, task: t.task, status: 'queued', step: '', text: '', feedback: [] }));
+        norm.forEach((t) => fleetAgents.set(t.id, { id: t.id, role: t.role, codename: vanguard.codename(t.role), task: t.task, status: 'queued', step: '', text: '', feedback: [] }));
         // Launch the Legion panel + seed the cards, then run all suits in parallel with live relay.
-        try { if (mainWindow && !mainWindow.isDestroyed()) { mainWindow.webContents.send('fleet-update', { phase: 'start', agents: norm.map((t) => ({ id: t.id, role: t.role, task: t.task })) }); mainWindow.webContents.send('show-panel', 'legion'); } } catch {}
-        sendToActivity('tool-update', { type: 'thinking', text: `🦾 Legion: ${norm.length} suits launched in parallel` });
+        try { if (mainWindow && !mainWindow.isDestroyed()) { mainWindow.webContents.send('fleet-update', { phase: 'start', agents: norm.map((t) => ({ id: t.id, role: t.role, codename: vanguard.codename(t.role), task: t.task })) }); mainWindow.webContents.send('show-panel', 'legion'); } } catch {}
+        sendToActivity('tool-update', { type: 'thinking', text: `🦾 VANGUARD: ${norm.length} suits launched (${norm.map((t) => vanguard.codename(t.role)).join(', ')})` });
         result = await agentTeam.fleet(norm, subagentDeps(), {
           maxSteps: input.maxSteps,
+          maxParallel: fleetWidth(),                 // Phase 1 — budget-driven upper bound (admission paces the rest)
           onUpdate: (p) => fleetBroadcast(p),
           drainFeedback: (id) => fleetDrainFeedback(id),
           shouldStop: (id) => fleetShouldStop(id),
@@ -4030,7 +4241,7 @@ async function executeTool(name, input) {
       case 'plan_and_run': {
         if (!input.goal) { result = { success: false, error: 'goal required' }; break; }
         const p = await planner.plan(input.goal, { anthropicRequest, apiKey: getApiKey(), models: { sonnet: MODEL_SONNET } },
-          { maxSteps: input.maxSteps, maxParallel: input.maxParallel });
+          { maxSteps: input.maxSteps, maxParallel: input.maxParallel || fleetWidth() });   // Phase 1 — live budget-driven width
         if (input.dryRun) { result = { success: true, dryRun: true, plan: { steps: p.steps, rationale: p.rationale, layers: p.layers.map((l) => l.map((s) => s.id)) } }; break; }
         // Skeptic PRE-FLIGHT: review the plan before committing agents to it; adopt a corrected plan
         // if the skeptic returns one, and surface any warnings.
@@ -4044,8 +4255,8 @@ async function executeTool(name, input) {
         // Seed the Legion panel with ALL steps, then run layer-by-layer (parallel within a layer),
         // feeding each step the results of the upstream steps it depends on.
         fleetAgents.clear();
-        p.steps.forEach((s) => fleetAgents.set(s.id, { id: s.id, role: s.role, task: s.task, status: 'queued', step: '', text: '', feedback: [] }));
-        try { if (mainWindow && !mainWindow.isDestroyed()) { mainWindow.webContents.send('fleet-update', { phase: 'start', agents: p.steps.map((s) => ({ id: s.id, role: s.role, task: s.task })) }); mainWindow.webContents.send('show-panel', 'legion'); } } catch {}
+        p.steps.forEach((s) => fleetAgents.set(s.id, { id: s.id, role: s.role, codename: vanguard.codename(s.role), task: s.task, status: 'queued', step: '', text: '', feedback: [] }));
+        try { if (mainWindow && !mainWindow.isDestroyed()) { mainWindow.webContents.send('fleet-update', { phase: 'start', agents: p.steps.map((s) => ({ id: s.id, role: s.role, codename: vanguard.codename(s.role), task: s.task })) }); mainWindow.webContents.send('show-panel', 'legion'); } } catch {}
         sendToActivity('tool-update', { type: 'thinking', text: `🧠 plan: ${p.steps.length} steps in ${p.layers.length} layer(s)${p.fallback ? ' (fallback)' : ''}` });
         const doneResults = {};
         const plDeps = { anthropicRequest, apiKey: getApiKey(), models: { sonnet: MODEL_SONNET } };
