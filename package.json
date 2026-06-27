@@ -24,7 +24,8 @@
     "test:configsec": "node scripts/test-configsec.js",
     "test:reflect": "node scripts/test-reflect-security.js",
     "test:selfheal": "node scripts/test-selfheal.js",
-    "verify": "node scripts/verify-syntax.js && node scripts/test-upgrade.js && node scripts/test-tools-extract.js && node scripts/test-configsec.js && node scripts/test-reflect-security.js && node scripts/test-selfheal.js",
+    "test:patrol": "node scripts/test-patrol.js",
+    "verify": "node scripts/verify-syntax.js && node scripts/test-upgrade.js && node scripts/test-tools-extract.js && node scripts/test-configsec.js && node scripts/test-reflect-security.js && node scripts/test-selfheal.js && node scripts/test-patrol.js",
     "verify:full": "npm run verify && npm run test:browser && npm run smoke && npm run eval"
   },
   "dependencies": {
