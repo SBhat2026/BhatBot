@@ -12,40 +12,43 @@ scheduler, simulate, agents/, …). This plan extends that pattern to the tool/r
 🟢 **Classifier-critical surface extracted + verified booting + live-tool-tested.** Done: step 1
 (`lib/pure.js`), step 2 (`lib/audit.js`), step 3 (`tools/creation.js`), step 4 (`lib/simulate.js`),
 step 5 (`tools/vision.js`), **step 7's payoff** — raw `exec()` + `HARD_BLOCKED`/`CONFIRM_PATTERNS` in
-`lib/shell.js` (DI factory) — and **step 7 system/media**: `tools/system.js` (systemControl) +
-`tools/media.js` (mediaControl + all Spotify helpers). After each: `node -c`, standalone module
-smoke, full `npm run verify` (541 files + 10 export contracts + 48/0), a clean Electron boot (all
-markers), and **end-to-end through the RUNNING agent** (`/api/<token>/chat`): a normal turn,
-`system_control` (desktop notification fired), `media_control` (now-playing), `self_reflect` — **zero
-runtime errors in app.log**. Visual: Vanguard tab + Inter font confirmed in a live screenshot.
+`lib/shell.js` (DI factory) — **step 7 system/media**: `tools/system.js` (systemControl) +
+`tools/media.js` (mediaControl + all Spotify helpers), and **step 6 browser**: `tools/browser.js`
+(browserAction + browserWorkflow). After each: `node -c`, full `npm run verify` (544 files + 11
+export contracts + 48/0 + 18 tool tests), and functional proof — system/media end-to-end through the
+RUNNING agent (notification fired, now-playing, self_reflect, zero app.log errors) + **browser against
+a real headless Chromium** (`npm run test:browser`, 17/17). Visual: Vanguard tab + Inter font confirmed live.
 
 The strongest classifier signal — one file holding the agent loop AND raw shell exec AND the
-destructive-command list AND system/media automation — is now decomposed: shell, system, and media
-capability each live in their own reviewable module, separated from the agent loop.
+destructive-command list AND system/media/browser automation — is now decomposed: shell, system,
+media, and browser capability each live in their own reviewable module, separated from the agent loop.
 
-**main.js size: 524KB → 431KB.** The literal <150KB target is NOT yet met and is deliberately deferred
+**main.js size: 524KB → 421KB.** The literal <150KB target is NOT met and is deliberately deferred
 (see below) — it is a navigability goal, secondary to the classifier mitigation, which is done.
 
-### Why <150KB is deferred (the honest blocker)
-The only clusters large enough to close the 431→150KB gap are **step 6 browser**, **step 8
-window-manager**, and **step 9 executeTool + agentLoop**. All three are blocked on the same problem:
-they *reassign* module-scoped mutable state, not just read it.
-- `browserAction` does `browser = null; page = null; browserContext = null` on its error/crash paths
-  (main.js ~1948, ~2049), and `recordingSteps` is shared with `onUserBrowserEvent` (a page-event
-  handler that must stay in main). A read-only `getPage()` accessor (the pattern vision.js uses) is
-  insufficient — extraction needs a full shared **holder object** (`B.page`…) rewired across **22**
-  external `page` sites, or injected reset callbacks + a 15-member ctx.
-- `mainWindow` is referenced at **42** sites across IPC handlers, fleet, and every window opener.
-- `executeTool`/`agentLoop` touch essentially everything.
+### Step 6 (browser) — done, the holder trick
+`browserAction` reassigns `page`/`browser`/`browserContext` on its error/crash paths and shares
+`recordingSteps` with `onUserBrowserEvent`. Rather than a file-wide `B.page` rewrite, the **accessor/
+reset closures are defined in main and reassign main's own `let`s** (`resetBrowser`, `recStart/Stop/
+Push`, `getPage`), and only *passed* to the module — single source of truth stays in main, zero
+external call-site churn. `ensureBrowser` + all browser state + `browserObserve`/`screenObserve` (heavy
+human-observation timer/buffer state, not unit-testable) stay in main. Verified via a real-Chromium
+node test (scripts/test-browser-extract.js) since dev Electron boot is keychain-blocked (see below).
 
-This is the *runtime-only* failure class (`node -c` and require-smokes can't see a missing-ctx
-binding inside a function body) that already produced the `classifyMode` regression. Doing all three
-blind in one pass would very likely ship latent ReferenceErrors on paths I cannot exercise via curl
-(browser error-reset, 2FA login, workflow record/replay, observe, fleet, voice, IPC panels). Per this
-plan's own rule ("do incrementally with a per-tool smoke test each"), these want a boot-check per step.
-**Recommended next:** extract step 6 browser via a `B = {page,browser,context,launching}` holder,
-boot-check a real navigation + a recorded workflow, commit; then step 8, then step 9. The confirm/
-autonomous/remote GATES stay in main.js by design (woven into IPC + activity-window state).
+### Why <150KB is still deferred — and now hard-blocked this session
+Remaining big clusters: **step 8 window-manager** (`mainWindow` at **42** sites: IPC, fleet, every
+window opener) and **step 9 executeTool + agentLoop** (touch everything). Both *require* a live GUI
+boot to verify (windows, IPC panels, fleet, the agent turn loop) — `node -c`/require-smokes can't see
+the runtime-only missing-ctx failure class that produced the `classifyMode` regression.
+
+**Blocker:** the dev build (`npm start`) can't boot headlessly right now — `migrateSecretsToVault()`
+triggers a macOS Keychain ACL modal ("Electron wants to use … Bhatbot Safe Storage") that needs the
+login password / an "Always Allow" click. This is a dev-binary artifact (the unsigned node_modules
+electron lost its ACL); it does **not** affect the packaged signed app (separate keychain item). With
+no boot, steps 8–9 are NOT safely verifiable, so they are intentionally left undone rather than shipped
+blind on a branch that merges unsupervised. **Next (needs a human at the Mac):** click "Always Allow"
+on one `npm start` (or run the packaged app), then extract step 8 (window-manager holder) → boot-check
+each window opener; then step 9. The confirm/autonomous/remote GATES stay in main.js by design.
 
 ## The DI pattern (the crux)
 Everything currently shares module-scoped mutable state (`page`, `browser`, `mainWindow`,
