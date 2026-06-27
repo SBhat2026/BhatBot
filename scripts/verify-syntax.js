@@ -40,6 +40,7 @@ const CONTRACTS = {
   './lib/configsec': ['sanitizeWrite', 'migrate', 'findPlaintext'],
   './lib/agents/select': ['pick', 'run', 'shouldEscalate'],
   './tools/system': ['__factory'],   // factory: module.exports is a function
+  './tools/media': ['__factory'],    // factory: module.exports is a function
 };
 let missing = 0;
 for (const [mod, exps] of Object.entries(CONTRACTS)) {
