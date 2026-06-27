@@ -6029,6 +6029,25 @@ async function kokoroSynth(text, opts = {}) {
 // — but that's 250ms added to EVERY spoken sentence before the fallback kicks in. Mark the
 // provider dead for 10 min on quota/auth failures and skip straight to Kokoro/OpenAI.
 let _elDeadUntil = 0;
+// ElevenLabs CONCURRENCY GUARD. EL subscriptions cap concurrent requests (6 on this plan); a burst of
+// simultaneous synths (multiple surfaces speaking at startup) all fired before the first 429 set the
+// cooldown → "concurrent_limit_exceeded" storm. Serialize EL requests through a small limiter so at
+// most `ttsMaxConcurrent` (default 2, well under the cap) run at once; queued calls re-check the
+// cooldown AFTER acquiring, so once one request 429s, the rest bail instantly instead of piling on.
+function _makeLimiter(max) {
+  let active = 0; const q = [];
+  const pump = () => {
+    if (active >= max || !q.length) return;
+    active++; const { fn, res, rej } = q.shift();
+    Promise.resolve().then(fn).then((v) => { active--; res(v); pump(); }, (e) => { active--; rej(e); pump(); });
+  };
+  return (fn) => new Promise((res, rej) => { q.push({ fn, res, rej }); pump(); });
+}
+let _elLimiter = null;
+function elLimit(fn) {
+  if (!_elLimiter) _elLimiter = _makeLimiter(Math.max(1, Number(loadConfig().ttsMaxConcurrent) || 2));
+  return _elLimiter(fn);
+}
 
 // ONE source of truth for the JARVIS voice character (used by both the MP3 desktop path and the
 // μ-law phone path). JARVIS = composed, precise, dry — so: higher stability (even, unflappable),
@@ -6062,14 +6081,17 @@ async function elevenLabsSynth(t, c, opts = {}) {
   // streamed chunks instead of resetting (no choppy "new sentence, fresh intonation" feel).
   if (opts.previousText) body.previous_text = String(opts.previousText).slice(-400);
   if (opts.nextText) body.next_text = String(opts.nextText).slice(0, 400);
-  const r = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}?output_format=mp3_44100_128&optimize_streaming_latency=3`, {
-    method: 'POST', headers: { 'xi-api-key': c.elevenLabsKey, 'Content-Type': 'application/json' },
-    body: JSON.stringify(body)
+  return elLimit(async () => {
+    if (Date.now() < _elDeadUntil) return { error: 'elevenlabs cooling down (quota/auth)', cooldown: true };   // a queued sibling already 429'd
+    const r = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}?output_format=mp3_44100_128&optimize_streaming_latency=3`, {
+      method: 'POST', headers: { 'xi-api-key': c.elevenLabsKey, 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    if (r.ok) { const buf = Buffer.from(await r.arrayBuffer()); return { success: true, audio: buf.toString('base64'), mimeType: 'audio/mpeg', via: 'elevenlabs' }; }
+    const errText = (await r.text()).slice(0, 200);
+    if (r.status === 401 || r.status === 429 || /quota_exceeded/.test(errText)) _elDeadUntil = Date.now() + 600000;
+    return { error: `elevenlabs ${r.status}: ${errText}`, status: r.status };
   });
-  if (r.ok) { const buf = Buffer.from(await r.arrayBuffer()); return { success: true, audio: buf.toString('base64'), mimeType: 'audio/mpeg', via: 'elevenlabs' }; }
-  const errText = (await r.text()).slice(0, 200);
-  if (r.status === 401 || r.status === 429 || /quota_exceeded/.test(errText)) _elDeadUntil = Date.now() + 600000;
-  return { error: `elevenlabs ${r.status}: ${errText}`, status: r.status };
 }
 
 // Synthesize directly to 8kHz μ-law (Twilio Media Streams' native format) — no MP3 decode/transcode
@@ -6090,13 +6112,16 @@ async function synthesizeUlaw(text, opts = {}) {
   };
   if (opts.previousText) body.previous_text = String(opts.previousText).slice(-400);
   try {
-    const r = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}?output_format=ulaw_8000&optimize_streaming_latency=4`, {
-      method: 'POST', headers: { 'xi-api-key': c.elevenLabsKey, 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    return await elLimit(async () => {                              // share the concurrency guard with the desktop path
+      if (Date.now() < _elDeadUntil) return { error: 'elevenlabs cooling down', cooldown: true };
+      const r = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}?output_format=ulaw_8000&optimize_streaming_latency=4`, {
+        method: 'POST', headers: { 'xi-api-key': c.elevenLabsKey, 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      });
+      if (r.ok) return { success: true, ulaw: Buffer.from(await r.arrayBuffer()) };
+      const errText = (await r.text()).slice(0, 200);
+      if (r.status === 401 || r.status === 429 || /quota_exceeded/.test(errText)) _elDeadUntil = Date.now() + 600000;
+      return { error: `elevenlabs ${r.status}: ${errText}`, status: r.status };
     });
-    if (r.ok) return { success: true, ulaw: Buffer.from(await r.arrayBuffer()) };
-    const errText = (await r.text()).slice(0, 200);
-    if (r.status === 401 || r.status === 429 || /quota_exceeded/.test(errText)) _elDeadUntil = Date.now() + 600000;
-    return { error: `elevenlabs ${r.status}: ${errText}`, status: r.status };
   } catch (e) { return { error: e.message }; }
 }
 
