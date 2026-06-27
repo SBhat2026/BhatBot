@@ -958,7 +958,7 @@ const admission = createAdmission({
 // Live fleet width = how many ~4k-output suits the current OTPM budget can carry (clamped [3,12]).
 // Replaces the old hardcoded parallel caps; the per-request admission reservation does the fine pacing.
 function fleetWidth(model = MODEL_SONNET, perAgentOut = 4096) {
-  try { return admission.width(model, perAgentOut, { min: 3, max: 12 }); } catch { return 3; }
+  try { return admission.width(model, perAgentOut, { min: 3, max: 24 }); } catch { return 3; }   // Phase 5: cap raised 12→24 (always-plugged desktop); admission still paces against live OTPM
 }
 // qwen3-family models burn seconds on <think> tokens before answering — for an assistant
 // reply that's pure mute latency. Ollama honors `think:false` for them (unknown fields are
@@ -3601,7 +3601,7 @@ async function executeTool(name, input) {
         if (act === 'ensemble') {
           if (!input.task) { result = { success: false, error: 'task required' }; break; }
           const roles = (input.roles && input.roles.length ? input.roles.map((r) => r.name) : ['implementer', 'skeptic', 'synthesizer']);
-          fleetSeed(roles.map((r) => ({ id: r, role: r, task: input.task })));   // live in the Legion panel
+          fleetSeed(roles.map((r) => ({ id: r, role: r, task: input.task })));   // live in the Vanguard panel
           sendToActivity('tool-update', { type: 'thinking', text: `👥 ensemble (parallel: ${roles.join(', ')}): ${String(input.task).slice(0, 80)}` });
           result = await agentTeam.ensemble(input.task, subagentDeps(), { roles: input.roles, maxSteps: input.maxSteps, onUpdate: (u) => fleetBroadcast(u) });
           fleetDone();
@@ -3624,8 +3624,8 @@ async function executeTool(name, input) {
         const norm = tasks.slice(0, fleetWidth()).map((t, i) => ({ id: 'suit-' + (i + 1), role: t.role || ('suit-' + (i + 1)), task: t.task, tools: Array.isArray(t.tools) ? t.tools : undefined }));
         fleetAgents.clear();
         norm.forEach((t) => fleetAgents.set(t.id, { id: t.id, role: t.role, codename: vanguard.codename(t.role), task: t.task, status: 'queued', step: '', text: '', feedback: [] }));
-        // Launch the Legion panel + seed the cards, then run all suits in parallel with live relay.
-        try { if (mainWindow && !mainWindow.isDestroyed()) { mainWindow.webContents.send('fleet-update', { phase: 'start', agents: norm.map((t) => ({ id: t.id, role: t.role, codename: vanguard.codename(t.role), task: t.task })) }); mainWindow.webContents.send('show-panel', 'legion'); } } catch {}
+        // Launch the Vanguard panel + seed the cards, then run all suits in parallel with live relay.
+        try { if (mainWindow && !mainWindow.isDestroyed()) { mainWindow.webContents.send('fleet-update', { phase: 'start', agents: norm.map((t) => ({ id: t.id, role: t.role, codename: vanguard.codename(t.role), task: t.task })) }); mainWindow.webContents.send('show-panel', 'vanguard'); } } catch {}
         sendToActivity('tool-update', { type: 'thinking', text: `🦾 VANGUARD: ${norm.length} suits launched (${norm.map((t) => vanguard.codename(t.role)).join(', ')})` });
         result = await agentTeam.fleet(norm, subagentDeps(), {
           maxSteps: input.maxSteps,
@@ -3651,11 +3651,11 @@ async function executeTool(name, input) {
             if (crit.revisedSteps && crit.revisedSteps.length) { p.steps = crit.revisedSteps; p.layers = planner.layers(crit.revisedSteps); sendToActivity('tool-update', { type: 'thinking', text: '🧐 adopted a revised plan from the skeptic' }); }
           } catch {}
         }
-        // Seed the Legion panel with ALL steps, then run layer-by-layer (parallel within a layer),
+        // Seed the Vanguard panel with ALL steps, then run layer-by-layer (parallel within a layer),
         // feeding each step the results of the upstream steps it depends on.
         fleetAgents.clear();
         p.steps.forEach((s) => fleetAgents.set(s.id, { id: s.id, role: s.role, codename: vanguard.codename(s.role), task: s.task, status: 'queued', step: '', text: '', feedback: [] }));
-        try { if (mainWindow && !mainWindow.isDestroyed()) { mainWindow.webContents.send('fleet-update', { phase: 'start', agents: p.steps.map((s) => ({ id: s.id, role: s.role, codename: vanguard.codename(s.role), task: s.task })) }); mainWindow.webContents.send('show-panel', 'legion'); } } catch {}
+        try { if (mainWindow && !mainWindow.isDestroyed()) { mainWindow.webContents.send('fleet-update', { phase: 'start', agents: p.steps.map((s) => ({ id: s.id, role: s.role, codename: vanguard.codename(s.role), task: s.task })) }); mainWindow.webContents.send('show-panel', 'vanguard'); } } catch {}
         sendToActivity('tool-update', { type: 'thinking', text: `🧠 plan: ${p.steps.length} steps in ${p.layers.length} layer(s)${p.fallback ? ' (fallback)' : ''}` });
         const doneResults = {};
         const plDeps = { anthropicRequest, apiKey: getApiKey(), models: { sonnet: MODEL_SONNET } };
@@ -3913,7 +3913,7 @@ function sendToActivity(channel, data) {
   pushActivity(channel, data);
 }
 
-// FLEET (Iron Legion) live registry — id → live card state; the renderer's Legion panel mirrors it,
+// FLEET (VANGUARD) live registry — id → live card state; the renderer's Vanguard panel mirrors it,
 // and per-agent feedback typed in that panel lands in each suit's queue (drained mid-run by runRole).
 const fleetAgents = new Map();
 const agentWindows = new Map();   // id → pop-out monitor BrowserWindow (Manus-style live screen)
@@ -3968,11 +3968,11 @@ function fleetDrainFeedback(id) {
   if (!a || !a.feedback || !a.feedback.length) return [];
   return a.feedback.splice(0);
 }
-// Seed the Legion panel with a set of agents + surface it (used by fleet, plan_and_run, ensemble, test_app).
+// Seed the Vanguard panel with a set of agents + surface it (used by fleet, plan_and_run, ensemble, test_app).
 function fleetSeed(agents) {
   fleetAgents.clear();
   agents.forEach((a) => fleetAgents.set(a.id, { id: a.id, role: a.role, task: a.task, status: 'queued', step: '', text: '', feedback: [] }));
-  try { if (mainWindow && !mainWindow.isDestroyed()) { mainWindow.webContents.send('fleet-update', { phase: 'start', agents: agents.map((a) => ({ id: a.id, role: a.role, task: a.task })) }); mainWindow.webContents.send('show-panel', 'legion'); } } catch {}
+  try { if (mainWindow && !mainWindow.isDestroyed()) { mainWindow.webContents.send('fleet-update', { phase: 'start', agents: agents.map((a) => ({ id: a.id, role: a.role, task: a.task })) }); mainWindow.webContents.send('show-panel', 'vanguard'); } } catch {}
 }
 function fleetDone() { try { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('fleet-update', { phase: 'done' }); } catch {} }
 ipcMain.handle('fleet-feedback', (_e, { id, text }) => {

@@ -420,9 +420,9 @@
   .vp-btn:hover { background: rgba(0,200,255,.12); }
   .vp-status { margin-top: 8px; font-size: 10.5px; color: var(--text-dim2); min-height: 12px; }
   .vp-status.ok { color: var(--ok); } .vp-status.err { color: var(--err); }
-  /* C-Fleet — Iron Legion live cards */
+  /* C-Fleet — VANGUARD live cards */
   #fleet-list { overflow: auto; padding: 12px 14px; flex: 1; display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; align-content: start; }
-  #fleet-list:empty::before { content: 'No legion active — give BhatBot several jobs at once (or call the fleet tool) to launch parallel suits.'; color: var(--text-dim2); font-size: 12.5px; }
+  #fleet-list:empty::before { content: 'No Vanguard active — give BhatBot several jobs at once (or call the fleet tool) to launch parallel suits.'; color: var(--text-dim2); font-size: 12.5px; }
   .suit-card { border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 8px; padding: 10px 12px; background: var(--surface); display: flex; flex-direction: column; gap: 5px; }
   .suit-card[data-status="done"] { border-left-color: var(--ok); }
   .suit-card[data-status="failed"] { border-left-color: var(--err); }
@@ -476,7 +476,7 @@
     <span class="tag tab" data-panel="studio" id="open-studio" title="Live design canvas">▦ Studio</span>
     <span class="tag tab" data-panel="code" id="open-terminal" title="Embedded Claude Code">⌗ Code</span>
     <span class="tag tab" data-panel="activity" title="Live agent activity log">📊 Activity</span>
-    <span class="tag tab" data-panel="legion" title="Agent legion — live parallel suits">🦾 Legion</span>
+    <span class="tag tab" data-panel="vanguard" title="Agent Vanguard — live parallel suits">🦾 Vanguard</span>
     <span class="tag" id="open-browser" title="Agent browser (own desktop window)">🌐 Browser</span>
     <span class="tag ctx" id="ctxtag">⬡ …</span>
   </div>
@@ -514,9 +514,9 @@
     <div id="activity-list"></div>
   </div>
 
-  <!-- C-Fleet: Iron Legion live panel — one card per parallel suit, steerable in real time -->
-  <div id="legion-panel" class="stage-panel">
-    <div class="panel-head"><b>🦾 AGENT LEGION</b><span class="panel-back" data-back>← Chat</span></div>
+  <!-- C-Fleet: VANGUARD live panel — one card per parallel suit, steerable in real time -->
+  <div id="vanguard-panel" class="stage-panel">
+    <div class="panel-head"><b>🦾 AGENT VANGUARD</b><span class="panel-back" data-back>← Chat</span></div>
     <div id="fleet-list"></div>
   </div>
 
@@ -1353,7 +1353,7 @@ if (spd) {
   });
 })();
 
-// ---- C-Fleet (Iron Legion): live per-suit cards + real-time feedback ----
+// ---- C-Fleet (VANGUARD): live per-suit cards + real-time feedback ----
 (() => {
   const listEl = document.getElementById('fleet-list');
   if (!listEl || !window.bhatbot.onFleetUpdate) return;
