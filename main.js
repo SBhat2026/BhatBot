@@ -442,7 +442,7 @@ function loadProjectContext() {
   catch { return ''; }
 }
 
-const { STATIC_PROMPT } = require('./lib/prompts');
+const { STATIC_PROMPT } = require('./lib/static-prompt');   // modePrompts stays on ./lib/prompts (separate module)
 
 // Defensive: never let API keys / app passwords reach the model context, even if
 // one accidentally lands in memory.md or CLAUDE.md. Secrets live in config.json only.
