@@ -9,19 +9,43 @@ The project already has a healthy `lib/` (credentials, security, notion, figures
 scheduler, simulate, agents/, …). This plan extends that pattern to the tool/runtime code.
 
 ## Status
-🟢 **Classifier-critical surface extracted + verified booting.** Done: step 1 (`lib/pure.js`),
-step 2 (`lib/audit.js`), step 4 (science already lived in `lib/simulate.js`), and **step 7's payoff**
-— raw `exec()` + `HARD_BLOCKED`/`CONFIRM_PATTERNS` now in `lib/shell.js` (DI factory). After each,
-`node -c` + a standalone module smoke-test + a 12s Electron boot (markers: `[mcp] listening`,
-`[wake] listener ready`, `[scheduler] started`, `[cloud-bridge] connected`) all green.
+🟢 **Classifier-critical surface extracted + verified booting + live-tool-tested.** Done: step 1
+(`lib/pure.js`), step 2 (`lib/audit.js`), step 3 (`tools/creation.js`), step 4 (`lib/simulate.js`),
+step 5 (`tools/vision.js`), **step 7's payoff** — raw `exec()` + `HARD_BLOCKED`/`CONFIRM_PATTERNS` in
+`lib/shell.js` (DI factory) — and **step 7 system/media**: `tools/system.js` (systemControl) +
+`tools/media.js` (mediaControl + all Spotify helpers). After each: `node -c`, standalone module
+smoke, full `npm run verify` (541 files + 10 export contracts + 48/0), a clean Electron boot (all
+markers), and **end-to-end through the RUNNING agent** (`/api/<token>/chat`): a normal turn,
+`system_control` (desktop notification fired), `media_control` (now-playing), `self_reflect` — **zero
+runtime errors in app.log**. Visual: Vanguard tab + Inter font confirmed in a live screenshot.
 
-The strongest classifier signal — a single file holding the agent loop AND raw shell exec AND the
-destructive-command list — is now broken up: shell exec is its own reviewable module.
+The strongest classifier signal — one file holding the agent loop AND raw shell exec AND the
+destructive-command list AND system/media automation — is now decomposed: shell, system, and media
+capability each live in their own reviewable module, separated from the agent loop.
 
-**Remaining (navigability-only, lower priority — do incrementally with a per-tool smoke test each):**
-step 3 creation (`generateImage`/`generate3D`/`make_printable`), step 5 vision (`screenParse`/
-`visionClick`/`screenObserve`), step 6 browser (biggest), step 8 window-manager, step 9 agent-loop.
-The confirm/autonomous/remote GATES stay in main.js by design (woven into IPC + activity-window state).
+**main.js size: 524KB → 431KB.** The literal <150KB target is NOT yet met and is deliberately deferred
+(see below) — it is a navigability goal, secondary to the classifier mitigation, which is done.
+
+### Why <150KB is deferred (the honest blocker)
+The only clusters large enough to close the 431→150KB gap are **step 6 browser**, **step 8
+window-manager**, and **step 9 executeTool + agentLoop**. All three are blocked on the same problem:
+they *reassign* module-scoped mutable state, not just read it.
+- `browserAction` does `browser = null; page = null; browserContext = null` on its error/crash paths
+  (main.js ~1948, ~2049), and `recordingSteps` is shared with `onUserBrowserEvent` (a page-event
+  handler that must stay in main). A read-only `getPage()` accessor (the pattern vision.js uses) is
+  insufficient — extraction needs a full shared **holder object** (`B.page`…) rewired across **22**
+  external `page` sites, or injected reset callbacks + a 15-member ctx.
+- `mainWindow` is referenced at **42** sites across IPC handlers, fleet, and every window opener.
+- `executeTool`/`agentLoop` touch essentially everything.
+
+This is the *runtime-only* failure class (`node -c` and require-smokes can't see a missing-ctx
+binding inside a function body) that already produced the `classifyMode` regression. Doing all three
+blind in one pass would very likely ship latent ReferenceErrors on paths I cannot exercise via curl
+(browser error-reset, 2FA login, workflow record/replay, observe, fleet, voice, IPC panels). Per this
+plan's own rule ("do incrementally with a per-tool smoke test each"), these want a boot-check per step.
+**Recommended next:** extract step 6 browser via a `B = {page,browser,context,launching}` holder,
+boot-check a real navigation + a recorded workflow, commit; then step 8, then step 9. The confirm/
+autonomous/remote GATES stay in main.js by design (woven into IPC + activity-window state).
 
 ## The DI pattern (the crux)
 Everything currently shares module-scoped mutable state (`page`, `browser`, `mainWindow`,
