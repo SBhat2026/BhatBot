@@ -19,8 +19,10 @@
     "ft:eval": "node scripts/ft-eval.js",
     "ft:cycle": "node scripts/ft-cycle.js",
     "test:upgrade": "node scripts/test-upgrade.js",
-    "verify": "node scripts/verify-syntax.js && node scripts/test-upgrade.js",
-    "verify:full": "npm run verify && npm run smoke && npm run eval"
+    "test:tools": "node scripts/test-tools-extract.js",
+    "test:browser": "node scripts/test-browser-extract.js",
+    "verify": "node scripts/verify-syntax.js && node scripts/test-upgrade.js && node scripts/test-tools-extract.js",
+    "verify:full": "npm run verify && npm run test:browser && npm run smoke && npm run eval"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
