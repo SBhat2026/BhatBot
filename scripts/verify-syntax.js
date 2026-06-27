@@ -41,6 +41,7 @@ const CONTRACTS = {
   './lib/agents/select': ['pick', 'run', 'shouldEscalate'],
   './tools/system': ['__factory'],   // factory: module.exports is a function
   './tools/media': ['__factory'],    // factory: module.exports is a function
+  './tools/browser': ['__factory'],  // factory: module.exports is a function
 };
 let missing = 0;
 for (const [mod, exps] of Object.entries(CONTRACTS)) {
