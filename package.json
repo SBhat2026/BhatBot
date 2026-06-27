@@ -29,7 +29,8 @@
     "test:admission": "node scripts/test-admission.js",
     "test:narrate": "node scripts/test-narrate.js",
     "test:rstate": "node scripts/test-runtime-state.js",
-    "verify": "node scripts/verify-syntax.js && node scripts/test-upgrade.js && node scripts/test-tools-extract.js && node scripts/test-configsec.js && node scripts/test-reflect-security.js && node scripts/test-selfheal.js && node scripts/test-patrol.js && node scripts/test-introspect.js && node scripts/test-admission.js && node scripts/test-narrate.js && node scripts/test-runtime-state.js",
+    "test:toolselect": "node scripts/test-toolselect.js",
+    "verify": "node scripts/verify-syntax.js && node scripts/test-upgrade.js && node scripts/test-tools-extract.js && node scripts/test-configsec.js && node scripts/test-reflect-security.js && node scripts/test-selfheal.js && node scripts/test-patrol.js && node scripts/test-introspect.js && node scripts/test-admission.js && node scripts/test-narrate.js && node scripts/test-runtime-state.js && node scripts/test-toolselect.js",
     "verify:full": "npm run verify && npm run test:browser && npm run smoke && npm run eval"
   },
   "dependencies": {
