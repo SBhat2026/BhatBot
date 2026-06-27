@@ -26,4 +26,29 @@ for (const f of files) {
 }
 if (bad) { console.error(`\n${bad} file(s) failed to parse`); process.exit(1); }
 console.log(`✓ ${files.length} JS files parse cleanly`);
+
+// EXPORT-CONTRACT check (added after the lib/prompts.js name-collision regression that broke every
+// agent turn — runtime-only, so --check missed it). For modules main.js destructures at require-time,
+// a missing export = a runtime crash node --check can't see. Assert the critical exports actually exist.
+const CONTRACTS = {
+  './lib/prompts': ['classifyMode', 'selectModePrompt'],
+  './lib/static-prompt': ['STATIC_PROMPT'],
+  './lib/introspect': ['buildSelfPortrait'],
+  './lib/reflect': ['reflect', 'resolveDesire'],
+  './lib/narrate': ['render', 'drill'],
+  './lib/runtime-state': ['pushActivity', 'getActivity', 'snapshot', 'bind'],
+  './lib/configsec': ['sanitizeWrite', 'migrate', 'findPlaintext'],
+  './lib/agents/select': ['pick', 'run', 'shouldEscalate'],
+  './tools/system': ['__factory'],   // factory: module.exports is a function
+};
+let missing = 0;
+for (const [mod, exps] of Object.entries(CONTRACTS)) {
+  let m; try { m = require(path.join(ROOT, mod)); } catch (e) { missing++; console.error(`✗ ${mod} failed to load: ${e.message}`); continue; }
+  for (const name of exps) {
+    if (name === '__factory') { if (typeof m !== 'function') { missing++; console.error(`✗ ${mod} should export a factory function`); } continue; }
+    if (typeof m[name] === 'undefined') { missing++; console.error(`✗ ${mod} is missing export "${name}"`); }
+  }
+}
+if (missing) { console.error(`\n${missing} export-contract violation(s)`); process.exit(1); }
+console.log(`✓ export contracts intact (${Object.keys(CONTRACTS).length} modules)`);
 process.exit(0);
