@@ -11,6 +11,7 @@ const crypto = require('crypto');
 const darkbloom = require('./darkbloom');
 const credentials = require('./lib/credentials');
 const configsec = require('./lib/configsec');          // Phase 4 #1 — plaintext-secret migration + write-time guard
+const makePatrol = require('./lib/patrol');            // Feat-2 — ambient health watch → Telegram/call relay
 const worldcup = require('./lib/worldcup');               // FIFA WC 2026 live bracket + prediction engine
 const news = require('./lib/news');                       // NYT news skim (RSS, no key; Top Stories API if nytApiKey set)
 const websearch = require('./lib/websearch');             // web_search — ranked results (Brave/Serper/Tavily if keyed, else free DuckDuckGo)
@@ -4068,6 +4069,7 @@ function appendToLastUser(history, text) {
 
 async function agentLoop(history, apiKey, event, opts = {}) {
   agentState = 'running';
+  _userSpokeSinceOpen = true;     // Feat-1: the user engaged → don't pop the idle briefing offer
   const _turnT0 = Date.now(); const _usd0 = costToday().usd;   // router telemetry (#13)
   pendingGuidance = [];          // fresh per task
   const usedGuidance = [];       // collected for the post-task "learn this?" prompt
@@ -4841,6 +4843,25 @@ function startCloudBridge() {
 }
 // First-open-of-the-day brief, fetched from the cloud (server-gated to once/day across all
 // surfaces — whichever of phone/computer opens first speaks it). Spoken via the desktop voice.
+// Feat-1 — BRIEFING ON DEMAND. No auto-delivered briefing. Instead, when the app opens and Siddhant
+// hasn't said anything within a short idle window, BhatBot proactively OFFERS one (spoken + on-screen),
+// listing the kinds; he picks (or declines), and the agent delivers only the chosen kind. The static
+// prompt tells the model to ask which if he says yes without specifying.
+let _userSpokeSinceOpen = false, _briefingOffered = false;
+function offerBriefingOnOpen() {
+  try {
+    const c = loadConfig();
+    if (c.briefingOfferOnOpen === false) return;            // opt-out
+    const delayMs = Math.max(5, Number(c.briefingOfferDelaySec) || 25) * 1000;
+    setTimeout(() => {
+      if (_userSpokeSinceOpen || _briefingOffered) return;  // he already engaged → don't interrupt
+      _briefingOffered = true;
+      const offer = 'Would you like a briefing, sir? I can pull recent news, your important emails, recent texts, or recent calls — just tell me which, or say no.';
+      sendToActivity('tool-update', { type: 'thinking', text: '🗞️ ' + offer });
+      try { speakDesktop(offer, { full: true }); } catch {}
+    }, delayMs);
+  } catch {}
+}
 async function maybeMorningBrief() {
   try {
     const c = loadConfig();
@@ -5387,8 +5408,16 @@ async function selfHealTick() {
   if (!selfheal.enabled(loadConfig)) return;
   if (agentState !== 'idle') return;                   // never fix mid-task
   try { scanSelfTestLogs(); } catch {}
-  try { const r = await selfheal.tick(loadConfig, selfHealDeps()); if (r && r.fixed) console.log('[self-heal]', r.changed); }
-  catch (e) { console.error('[self-heal] tick failed:', e.message); }
+  try {
+    const r = await selfheal.tick(loadConfig, selfHealDeps());
+    if (r && r.fixed) {
+      console.log('[self-heal]', r.changed);
+      // Feat-2 — relay what it fixed. Crash-sourced fixes are urgent → also call.
+      const summary = `🔧 Self-repair: fixed an issue${r.changed ? ' (' + String(r.changed).slice(0, 200) + ')' : ''}. Verified and kept locally.`;
+      try { telegramNotify(summary); } catch {}
+      if (r.source === 'runtimeErrors' || r.urgent) { try { notifyUser(summary, 'call'); } catch {} }
+    }
+  } catch (e) { console.error('[self-heal] tick failed:', e.message); }
 }
 function startSelfHeal() {
   if (!selfheal.enabled(loadConfig)) { console.log('[self-heal] disabled (config.selfHeal.enabled !== true)'); return; }
@@ -5398,12 +5427,41 @@ function startSelfHeal() {
   setTimeout(selfHealTick, 60 * 1000);
 }
 function stopSelfHeal() { if (_selfHealTimer) { clearInterval(_selfHealTimer); _selfHealTimer = null; } console.log('[self-heal] stopped'); }
+// Feat-2 — ambient proactive defaults + patrol. Self-heal auto-FIXES (verify-gated, auto-revert,
+// never pushes); patrol MONITORS health and RELAYS to Telegram (calls if urgent). Both enabled by
+// default per Siddhant's request; toggle via config.selfHeal.enabled / config.patrol.enabled.
+let _crashCount = 0;
+function crashCount() { return _crashCount; }
+function enableProactiveDefaults() {
+  try {
+    const c = loadConfigRaw();
+    const patch = { selfHeal: { ...(c.selfHeal || {}), enabled: true },
+                    patrol: { intervalMin: 15, ...(c.patrol || {}), enabled: (c.patrol && c.patrol.enabled === false) ? false : true } };
+    saveConfig(patch);
+    console.log('[proactive] self-heal + patrol enabled (toggle: config.selfHeal.enabled / config.patrol.enabled)');
+  } catch (e) { console.warn('[proactive] enable failed:', e.message); }
+}
+let _patrol = null;
+function startPatrol() {
+  try {
+    _patrol = makePatrol({
+      loadConfig, telegramNotify,
+      notifyUser: (m, u) => notifyUser(m, u || 'call'),
+      cloudConnected: () => !!(_cloudBridge && _cloudBridge.connected && _cloudBridge.connected()),
+      selfhealStatus: () => { try { return selfheal.status(loadConfig); } catch { return {}; } },
+      crashCount, shouldSpare: shouldSpareWatts, log: (m) => console.log(m),
+    });
+    _patrol.start();
+  } catch (e) { console.warn('[patrol] start failed:', e.message); }
+}
 // Runtime-crash trigger: an uncaught error is a mistake worth fixing. Guarded (enabled + trigger).
 process.on('uncaughtException', (e) => {
+  _crashCount++;
   console.error('[uncaught]', e && e.stack || e);
   try { selfheal.enqueue({ key: 'crash:' + String(e && e.message).slice(0, 60), source: 'runtimeErrors', problem: 'BhatBot threw an uncaught exception: ' + (e && e.stack ? e.stack.slice(0, 600) : String(e)) + '. Find and fix the root cause.', verify: 'node scripts/verify-syntax.js' }, loadConfig); } catch {}
 });
 process.on('unhandledRejection', (e) => {
+  _crashCount++;
   console.error('[unhandledRejection]', e && e.stack || e);
   try { selfheal.enqueue({ key: 'reject:' + String(e && e.message).slice(0, 60), source: 'runtimeErrors', problem: 'BhatBot had an unhandled promise rejection: ' + (e && e.stack ? e.stack.slice(0, 600) : String(e)) + '. Find and fix the root cause.', verify: 'node scripts/verify-syntax.js' }, loadConfig); } catch {}
 });
@@ -6900,13 +6958,16 @@ app.whenReady().then(() => {
     setTimeout(() => { try { primeAppAutomation(false); } catch {} }, 3500);
     initMcpServer();
     startCloudBridge();   // connect to the cloud backend as its Mac executor (if configured)
-    setTimeout(() => { maybeMorningBrief(); }, 6000);   // first-open-of-day brief (cloud-gated)
+    offerBriefingOnOpen();   // Feat-1: no auto-briefing — OFFER one if idle after open (he picks the kind)
     setTimeout(() => { syncMemoryFromNotion(); }, 8000);   // write-through reconcile from the Notion SoT
     startTelegramBridge();
-    scheduleBriefing();
+    // Feat-1: clock-scheduled auto morning briefing removed — briefings are on demand now. (scheduleBriefing()
+    // remains available; re-enable by calling it if you ever want the timed brief back.)
     startScheduler();   // proactive recurring/one-off tasks
     startAmbient();     // #18 opt-in ambient awareness (no-op unless config.ambient.enabled)
-    startSelfHeal();    // autonomous self-healing (no-op unless config.selfHeal.enabled)
+    enableProactiveDefaults();   // Feat-2: turn on self-heal + ambient patrol by default (Siddhant asked for it)
+    startSelfHeal();    // autonomous self-healing (verify-gated, auto-revert, never pushes)
+    startPatrol();      // Feat-2: ambient health watch → relay via Telegram, call if urgent
     // Pre-warm local Kokoro TTS so the first spoken reply isn't cold (~0.8s load), then give a
     // short spoken "ready" confirmation once warm (ambient mode has no visual chat affordance,
     // so the greeting tells you BhatBot is live and listening). Fires once.
