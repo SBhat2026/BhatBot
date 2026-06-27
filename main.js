@@ -12,6 +12,7 @@ const darkbloom = require('./darkbloom');
 const credentials = require('./lib/credentials');
 const configsec = require('./lib/configsec');          // Phase 4 #1 — plaintext-secret migration + write-time guard
 const makePatrol = require('./lib/patrol');            // Feat-2 — ambient health watch → Telegram/call relay
+const rstate = require('./lib/runtime-state');         // live state feed: ~/.bhatbot/state.json + events.jsonl
 const worldcup = require('./lib/worldcup');               // FIFA WC 2026 live bracket + prediction engine
 const news = require('./lib/news');                       // NYT news skim (RSS, no key; Top Stories API if nytApiKey set)
 const websearch = require('./lib/websearch');             // web_search — ranked results (Brave/Serper/Tavily if keyed, else free DuckDuckGo)
@@ -148,6 +149,7 @@ function shouldSpareWatts() { return powerSaverOn() && onBatteryPower(); }
 let mainWindow = null;
 let activityWindow = null;
 let agentState = 'idle'; // 'running' | 'paused' | 'stopped'
+let _lastUserText = '';  // most recent user turn (for the runtime-state snapshot)
 let browser = null;
 let page = null;
 let browserContext = null;   // kept so we can persist cookies/localStorage (storageState) across launches
@@ -3991,23 +3993,10 @@ function fleetShouldStop(id) { const a = fleetAgents.get(id); return !!(a && a.s
 
 // Activity ring buffer — mirrors tool/thinking events so the phone's Activity tab can poll
 // them (the phone has no IPC). Both sendToActivity and the chat path (sendToAll) feed it.
-const activityFeed = [];
-let activitySeq = 0;
-function pushActivity(channel, data) {
-  try {
-    if (channel !== 'tool-update' && channel !== 'tool-start' && channel !== 'tool-result') return;
-    const d = data || {};
-    let text = d.text || d.note || d.name || d.type || '';
-    if (typeof text !== 'string') text = JSON.stringify(text);
-    if (!text) return;
-    activityFeed.push({ id: ++activitySeq, t: Date.now(), kind: d.type || d.kind || channel, text: String(text).slice(0, 400) });
-    if (activityFeed.length > 200) activityFeed.splice(0, activityFeed.length - 200);
-  } catch {}
-}
-function getActivity(since) {
-  const s = Number(since) || 0;
-  return { seq: activitySeq, events: activityFeed.filter((e) => e.id > s) };
-}
+// Activity ring + live state feed live in lib/runtime-state.js now (Phase 4 split). state.json
+// (live snapshot) + events.jsonl (structured log) are the direct line to BhatBot's current state.
+const pushActivity = rstate.pushActivity;
+const getActivity = rstate.getActivity;
 
 // Public funnel host (for Twilio webhooks + the phone's "open this URL"). Detected from
 // Tailscale, cached in config.publicHost. Returns bare host (no scheme), or '' if unknown.
@@ -4070,6 +4059,8 @@ function appendToLastUser(history, text) {
 async function agentLoop(history, apiKey, event, opts = {}) {
   agentState = 'running';
   _userSpokeSinceOpen = true;     // Feat-1: the user engaged → don't pop the idle briefing offer
+  try { _lastUserText = lastUserText(history) || _lastUserText; } catch {}
+  try { rstate.event('turn', { text: String(_lastUserText).slice(0, 160) }); } catch {}
   const _turnT0 = Date.now(); const _usd0 = costToday().usd;   // router telemetry (#13)
   pendingGuidance = [];          // fresh per task
   const usedGuidance = [];       // collected for the post-task "learn this?" prompt
@@ -5436,7 +5427,7 @@ function enableProactiveDefaults() {
   try {
     const c = loadConfigRaw();
     const patch = { selfHeal: { ...(c.selfHeal || {}), enabled: true },
-                    patrol: { intervalMin: 15, ...(c.patrol || {}), enabled: (c.patrol && c.patrol.enabled === false) ? false : true } };
+                    patrol: { intervalMin: 5, batteryAware: false, ...(c.patrol || {}), enabled: (c.patrol && c.patrol.enabled === false) ? false : true } };
     saveConfig(patch);
     console.log('[proactive] self-heal + patrol enabled (toggle: config.selfHeal.enabled / config.patrol.enabled)');
   } catch (e) { console.warn('[proactive] enable failed:', e.message); }
@@ -5449,7 +5440,12 @@ function startPatrol() {
       notifyUser: (m, u) => notifyUser(m, u || 'call'),
       cloudConnected: () => !!(_cloudBridge && _cloudBridge.connected && _cloudBridge.connected()),
       selfhealStatus: () => { try { return selfheal.status(loadConfig); } catch { return {}; } },
-      crashCount, shouldSpare: shouldSpareWatts, log: (m) => console.log(m),
+      crashCount,
+      // Always-plugged desktop → monitor aggressively. Battery-awareness is opt-IN now (default off).
+      shouldSpare: () => (loadConfig().patrol || {}).batteryAware === true ? shouldSpareWatts() : false,
+      snapshot: () => { try { return rstate.snapshot(); } catch { return {}; } },
+      recentEvents: (n) => { try { return rstate.recentEvents(n); } catch { return []; } },
+      log: (m) => console.log(m),
     });
     _patrol.start();
   } catch (e) { console.warn('[patrol] start failed:', e.message); }
@@ -5457,11 +5453,13 @@ function startPatrol() {
 // Runtime-crash trigger: an uncaught error is a mistake worth fixing. Guarded (enabled + trigger).
 process.on('uncaughtException', (e) => {
   _crashCount++;
+  try { rstate.event('error', { kind: 'uncaughtException', message: String(e && e.message || e).slice(0, 300) }); } catch {}
   console.error('[uncaught]', e && e.stack || e);
   try { selfheal.enqueue({ key: 'crash:' + String(e && e.message).slice(0, 60), source: 'runtimeErrors', problem: 'BhatBot threw an uncaught exception: ' + (e && e.stack ? e.stack.slice(0, 600) : String(e)) + '. Find and fix the root cause.', verify: 'node scripts/verify-syntax.js' }, loadConfig); } catch {}
 });
 process.on('unhandledRejection', (e) => {
   _crashCount++;
+  try { rstate.event('error', { kind: 'unhandledRejection', message: String(e && e.message || e).slice(0, 300) }); } catch {}
   console.error('[unhandledRejection]', e && e.stack || e);
   try { selfheal.enqueue({ key: 'reject:' + String(e && e.message).slice(0, 60), source: 'runtimeErrors', problem: 'BhatBot had an unhandled promise rejection: ' + (e && e.stack ? e.stack.slice(0, 600) : String(e)) + '. Find and fix the root cause.', verify: 'node scripts/verify-syntax.js' }, loadConfig); } catch {}
 });
@@ -6990,6 +6988,18 @@ app.whenReady().then(() => {
     // remains available; re-enable by calling it if you ever want the timed brief back.)
     startScheduler();   // proactive recurring/one-off tasks
     startAmbient();     // #18 opt-in ambient awareness (no-op unless config.ambient.enabled)
+    // Live state feed (state.json + events.jsonl) — bind main's live values, then persist on a loop.
+    rstate.bind({
+      agent: () => ({ state: agentState, lastUser: String(_lastUserText || '').slice(0, 200) }),
+      health: () => ({
+        cloud: !!(_cloudBridge && _cloudBridge.connected && _cloudBridge.connected()),
+        elevenLabsCooldownMs: Math.max(0, _elDeadUntil - Date.now()),
+        crashes: _crashCount,
+        selfHeal: (() => { try { return selfheal.status(loadConfig); } catch { return {}; } })(),
+      }),
+      jobs: () => { try { return jobsBus.active(); } catch { return []; } },
+    });
+    rstate.startSnapshotLoop(5000);
     enableProactiveDefaults();   // Feat-2: turn on self-heal + ambient patrol by default (Siddhant asked for it)
     startSelfHeal();    // autonomous self-healing (verify-gated, auto-revert, never pushes)
     startPatrol();      // Feat-2: ambient health watch → relay via Telegram, call if urgent
