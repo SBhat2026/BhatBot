@@ -5,7 +5,10 @@
 // and plays each aloud. Run: node scripts/speak-punct-test.js
 const fs = require('fs'), os = require('os'), path = require('path'), { execFileSync } = require('child_process');
 const c = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.bhatbot', 'config.json'), 'utf8'));
-const TOKEN = c.mcpToken;
+// Phase 4 vaulted mcpToken (CRED_REF handle; safeStorage is Electron-only) → prefer BHATBOT_MCP_TOKEN.
+const TOKEN = (process.env.BHATBOT_MCP_TOKEN || '').trim()
+  || (c.mcpToken && !/^CRED_REF/i.test(String(c.mcpToken)) ? c.mcpToken : '');
+if (!TOKEN) { console.error('✗ no usable mcpToken — set BHATBOT_MCP_TOKEN (see `[mcp] listening` in the app log).'); process.exit(2); }
 const endpoint = `http://127.0.0.1:${c.mcpPort || 8788}/api/${TOKEN}/tts`;
 
 const samples = [
