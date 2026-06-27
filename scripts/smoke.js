@@ -16,7 +16,11 @@ const path = require('path');
 
 const c = (() => { try { return JSON.parse(fs.readFileSync(path.join(os.homedir(), '.bhatbot', 'config.json'), 'utf8')); } catch { return {}; } })();
 const URL = `http://127.0.0.1:${c.mcpPort || 8788}`;
-const TOKEN = c.mcpToken;
+// Phase 4 vaulted mcpToken (config holds a CRED_REF handle; safeStorage is Electron-only). Prefer
+// the BHATBOT_MCP_TOKEN env var (real token is in the app log: `[mcp] listening …/mcp/<token>`).
+const TOKEN = (process.env.BHATBOT_MCP_TOKEN || '').trim()
+  || (c.mcpToken && !/^CRED_REF/i.test(String(c.mcpToken)) ? c.mcpToken : '');
+if (!TOKEN) { console.error('✗ no usable mcpToken — set BHATBOT_MCP_TOKEN (see `[mcp] listening` in the app log).'); process.exit(2); }
 const LOG = path.join(__dirname, '..', 'SMOKE_LOG.md');
 
 const CASES = [

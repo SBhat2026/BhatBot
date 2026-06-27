@@ -26,11 +26,28 @@ function cfg() {
   try { return JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')); }
   catch { return {}; }
 }
+// Phase 4 vaulted mcpToken → config.json now holds a CRED_REF_* handle, not the literal token,
+// and safeStorage only decrypts INSIDE the running Electron app (not this plain-node CLI). So if
+// the configured token is a handle, fall back to the BHATBOT_MCP_TOKEN env var (the real token is
+// printed in the app's startup log: `[mcp] listening on …/mcp/<token>`). No new plaintext on disk.
+function resolveToken(c) {
+  const env = (process.env.BHATBOT_MCP_TOKEN || '').trim();
+  if (env) return env;
+  const t = c.mcpToken;
+  if (t && !/^CRED_REF/i.test(String(t))) return t;
+  if (t && /^CRED_REF/i.test(String(t))) {
+    console.error('✗ mcpToken is vaulted (CRED_REF handle) — this CLI can\'t decrypt it (safeStorage is Electron-only).');
+    console.error('  Fix: copy the token from the app log line `[mcp] listening on …/mcp/<TOKEN>` and run:');
+    console.error('       export BHATBOT_MCP_TOKEN=<TOKEN>    (or: npm run logs | grep "mcp] listening")');
+    process.exit(2);
+  }
+  console.error('✗ no mcpToken in ~/.bhatbot/config.json — is the app set up?');
+  process.exit(2);
+}
 function base() {
   const c = cfg();
   const port = c.mcpPort || 8788;
-  const token = c.mcpToken;
-  if (!token) { console.error('✗ no mcpToken in ~/.bhatbot/config.json — is the app set up?'); process.exit(2); }
+  const token = resolveToken(c);
   return { url: `http://127.0.0.1:${port}`, token };
 }
 const C = { dim: (s) => `\x1b[2m${s}\x1b[0m`, cyan: (s) => `\x1b[36m${s}\x1b[0m`, red: (s) => `\x1b[31m${s}\x1b[0m`, green: (s) => `\x1b[32m${s}\x1b[0m`, yellow: (s) => `\x1b[33m${s}\x1b[0m`, bold: (s) => `\x1b[1m${s}\x1b[0m` };
