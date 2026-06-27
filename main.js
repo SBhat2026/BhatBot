@@ -13,6 +13,9 @@ const credentials = require('./lib/credentials');
 const configsec = require('./lib/configsec');          // Phase 4 #1 — plaintext-secret migration + write-time guard
 const makePatrol = require('./lib/patrol');            // Feat-2 — ambient health watch → Telegram/call relay
 const rstate = require('./lib/runtime-state');         // live state feed: ~/.bhatbot/state.json + events.jsonl
+const introspect = require('./lib/introspect');        // Phase 5 — self-portrait (pure telemetry aggregation)
+const reflect = require('./lib/reflect');              // Phase 5 — desire engine (bounded Opus, hardcoded prompt)
+const narrate = require('./lib/narrate');              // Phase 5 — first-person JARVIS narration of desires
 const worldcup = require('./lib/worldcup');               // FIFA WC 2026 live bracket + prediction engine
 const news = require('./lib/news');                       // NYT news skim (RSS, no key; Top Stories API if nytApiKey set)
 const websearch = require('./lib/websearch');             // web_search — ranked results (Brave/Serper/Tavily if keyed, else free DuckDuckGo)
@@ -3856,6 +3859,28 @@ async function executeTool(name, input) {
         }
         if (a === 'run') { result = { success: true, ...(await selfheal.tick(loadConfig, selfHealDeps())) }; break; }
         result = { success: false, error: 'unknown self_heal action: ' + a };
+        break;
+      }
+      case 'self_reflect': {
+        // PROACTIVE self-reflection: introspect → (scope filter) → reflect (Opus) → narrate. Surfaces
+        // OPINIONS only; never triggers self_fix/self_improve. Pipeline degrades gracefully on sparse telemetry.
+        const scope = (input && input.scope) || 'all';
+        const depth = (input && input.depth) || 'full';
+        const focus = (input && input.focus) || '';
+        const toolNames = TOOLS.map((t) => t.name);
+        let roleNames = []; try { roleNames = Object.keys(require('./lib/agents/roles').ROLES); } catch {}
+        const portrait = introspect.buildSelfPortrait({ toolNames, roleNames, repoDir: __dirname });
+        // scope → keep only that dimension (+ always history + gaps so continuity/honesty survive)
+        const dimMap = { performance: 'performance', capability: 'capabilities', knowledge: 'knowledge', structural: 'structure' };
+        let scoped = portrait;
+        if (scope !== 'all' && dimMap[scope]) scoped = { generated_at: portrait.generated_at, [dimMap[scope]]: portrait[dimMap[scope]], history: portrait.history, _gaps: portrait._gaps };
+        const rf = await reflect.reflect(scoped, { anthropicRequest, apiKey: getApiKey(), focus, scope });
+        if (rf.error && !rf.desires.length) { result = { success: false, error: 'reflection failed: ' + rf.error, portrait_gaps: portrait._gaps }; break; }
+        const drillish = /how (would|do|did) you|implement|build it|go deeper|more detail|walk me through/i.test(focus);
+        let text;
+        if (drillish) { let schematic = ''; try { schematic = fs.readFileSync(path.join(__dirname, 'BHATBOT_SCHEMATIC.md'), 'utf8'); } catch {} text = await narrate.drill(rf.desires, { focus, anthropicRequest, apiKey: getApiKey(), schematic }); }
+        else text = narrate.render(rf.desires, { mode: depth === 'brief' ? 'top' : 'full' });
+        result = { success: true, result: text, desires: rf.desires, scope };
         break;
       }
       default:
