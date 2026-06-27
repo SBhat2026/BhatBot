@@ -48,6 +48,43 @@ them unverified on a branch that merges unsupervised.
 **To continue:** on one `npm start`, click **"Always Allow"** (or just launch the packaged app once) →
 dev boots resume → steps 8–9 can proceed with a boot-check per window opener / per agent turn.
 
+## Hardening + test coverage (the bulk of the session, since boot-testing was blocked)
+With live-boot testing unavailable, I pivoted to making the branch robust via pure-node tests +
+audits — all run in `npm run verify` (no app/keychain needed). The suite grew from 1 → **12 suites,
+~260 assertions**, guarding every high-risk / recently-changed / unsupervised subsystem:
+
+| Suite | What it locks |
+|---|---|
+| verify-syntax | parse (544 files) + 11 export contracts (catches the require-time regression class like classifyMode) |
+| test-upgrade | existing 48 (planner/chess/depth) |
+| test-tools-extract | system + media factories (18) |
+| test-browser-extract | browser factory vs real Chromium (17, in `test:browser`/`verify:full`) |
+| test-configsec | Phase-4 "no plaintext creds" core (56) — findPlaintext nesting, sanitizeWrite reject/vault, migrate idempotency, resolveRefs |
+| test-reflect-security | self-model NOT jailbreakable via tool path (15) — injection can't reach the system prompt |
+| test-selfheal | autonomous-fix rails (25) — gate/cap/cooldown/frozen-zone/never-push |
+| test-patrol | alert anti-spam + urgency (12) — relay-on-change, quiet-hours, battery skip |
+| test-introspect | graceful degradation + honesty (23) |
+| test-admission | proves the Phase-5A parallel boost is budget-bound & deadlock-free (10) |
+| test-narrate | voice-layer prose + drill injection-safety (20) |
+| test-runtime-state | state.json/events feed (16) — atomic write, ring cap, graceful getters |
+
+### Hardening change (beyond tests)
+- **self-heal verify gate strengthened**: default was `node scripts/verify-syntax.js` (parse only) →
+  now the full **`npm run verify`** (all 260 assertions). An auto-fix that parses but breaks behavior
+  now gets reverted. Fails closed. Configurable via `config.selfHeal.verify`.
+
+### Audit findings
+- ✅ Credential vault is sound — refs are always uppercase (`store()` uppercases), so no
+  re-vaulting/corruption risk; `findPlaintext`/`resolveRefs` correct across nesting/arrays.
+- 🔧 **Fixed regression**: vault migration broke `bhatctl`/`smoke`/`complex-eval`/`speak-punct-test`
+  (mcpToken → CRED_REF handle they can't decrypt) → all now use `BHATBOT_MCP_TOKEN`.
+- ℹ️ Cosmetic quirk (left as-is): `runtime-state.event('activity',{kind})` — the `...data` spread lets
+  the inner `kind` win the label; harmless (patrol filters `kind==='error'`, set correctly elsewhere).
+- ℹ️ Judgment call (left to you): patrol urgent escalations (cloud-down >30m, task stuck >20m) re-fire
+  every 30/20 min and bypass quiet-hours — a multi-hour overnight outage would call repeatedly. Tunable
+  via `config.patrol`.
+
 ## Not done (deliberately, with reasons in SPLIT_PLAN.md)
 - Step 8 (window-manager), step 9 (executeTool/agentLoop) — boot-verification blocked (above).
 - Merge sequence + MARK-VIII tag — awaiting your go-ahead (push is your call).
+- Lower-risk modules (toolselect, orchestrator) left untested — diminishing returns vs. the above.
