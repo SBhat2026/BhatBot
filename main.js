@@ -5897,6 +5897,10 @@ function setWakeMute(on) {
 }
 function stopDesktopTTS() {
   ttsPlaySeq++;
+  // Invalidate any in-flight streaming drain: its captured seq no longer matches ttsStreamSeq, so
+  // the drain loop breaks cleanly on its next check instead of spinning through the rest of the
+  // queue firing synth+playFile calls that silently no-op (the "voice cut off mid-reply" bug).
+  ttsStreamSeq = ttsPlaySeq; ttsStreamQ = []; ttsStreamBuf = '';
   if (ttsPlayProc) { try { ttsPlayProc.kill(); } catch {} ttsPlayProc = null; }
   setTtsActive(false);
   setWakeMute(false);   // clear any name-clip wake suppression on interrupt
@@ -5928,6 +5932,15 @@ async function speakDesktop(text, opts = {}) {
   if (c.ttsEnabled === false) return { success: false, skipped: 'tts disabled' };
   let t = String(text || '').trim();
   if (!t) return { success: false };
+  // Stream-coexistence: if a streamed reply is currently being spoken, DON'T clobber it.
+  // stopDesktopTTS would bump ttsPlaySeq and the in-flight drain's remaining sentences would
+  // silently drop in playFile → the reply gets cut off mid-sentence. Instead, queue this line
+  // into the live stream so it speaks right after, in the same voice. New turns / barge-in still
+  // preempt (they go through ttsStreamStart / stopDesktopTTS with opts.interrupt).
+  if (!opts.interrupt && ttsStreamSeq === ttsPlaySeq && (ttsStreamDraining || ttsStreamQ.length || ttsStreamBuf.length)) {
+    if (!opts.full && t.length > 500) { try { const s = await summarizeForSpeech(t); if (s && s.success && s.text) t = s.text; } catch {} }
+    if (ttsStreamSeq === ttsPlaySeq) { ttsStreamEnqueue(ttsStreamSeq, t); return { success: true, via: 'tts-stream-queued' }; }
+  }
   stopDesktopTTS();
   const seq = ++ttsPlaySeq;
   // Single consistent voice: always synthesize through the configured provider (no more
@@ -6300,6 +6313,13 @@ ipcMain.handle('transcribe-audio', (_e, { audioBuffer, mimeType }) => transcribe
 // screen / can be read in full on demand). Haiku first (tiny + fast + negligible quota);
 // if Haiku is rate-limited/unavailable, fall back to the local model so voice never dies.
 const SPEECH_SYS = "You are J.A.R.V.I.S., a refined British butler, distilling a written reply into spoken form for Siddhant. Convey the actual MEANING and outcome — the direct answer, the key result or conclusion, any important numbers/names, and what was done or recommended — not merely the topic. Stay faithful; never invent or add. Speak naturally in 1–3 flowing sentences as you would aloud. No markdown, lists, code, or preamble — just the spoken line.";
+// Trim a possibly-truncated tail back to the last complete sentence so a spoken summary that hit
+// the token cap never ends on a half-sentence (a direct cause of "the voice gets cut off").
+function trimToSentence(s) {
+  const str = String(s || '').trim();
+  const m = str.match(/^[\s\S]*[.!?]["')\]]?(?=\s|$)/);
+  return (m && m[0].trim()) || str;
+}
 async function summarizeForSpeech(text) {
   const t = (text || '').trim();
   if (!t) return { error: 'empty text' };
@@ -6309,10 +6329,11 @@ async function summarizeForSpeech(text) {
   if (apiKey && requestTokenEstimate([{ role: 'user', content: t.slice(0, 8000) }]) < rateBudget().free) {
     try {
       const j = await anthropicRequest({
-        model: MODEL_HAIKU, max_tokens: 280, system: SPEECH_SYS,
+        model: MODEL_HAIKU, max_tokens: 512, system: SPEECH_SYS,   // 512 (was 280): a 1-3 sentence summary must never be hard-truncated mid-word
         messages: [{ role: 'user', content: t.slice(0, 8000) }]
       }, apiKey, { retries: 1 });
-      const out = (j.content || []).filter(b => b.type === 'text').map(b => b.text).join(' ').trim();
+      let out = (j.content || []).filter(b => b.type === 'text').map(b => b.text).join(' ').trim();
+      if (j && j.stop_reason === 'max_tokens') out = trimToSentence(out);   // belt-and-suspenders: never speak a truncated tail
       if (out) return { success: true, text: out, via: 'haiku' };
     } catch (e) { console.warn('[summary] haiku failed → local:', e.message); }
   }
@@ -6320,7 +6341,8 @@ async function summarizeForSpeech(text) {
   if (await ollamaUp()) {
     try {
       const lm = cfg.localModel || 'qwen3:latest';
-      const out = (await ollamaChat([{ role: 'user', content: t.slice(0, 8000) }], SPEECH_SYS, lm) || '').trim();
+      // stripReasoning: local models (qwen3 etc.) leak <think>…</think> — those tags must never be spoken.
+      const out = stripReasoning((await ollamaChat([{ role: 'user', content: t.slice(0, 8000) }], SPEECH_SYS, lm) || '')).trim();
       if (out) return { success: true, text: out, via: 'ollama' };
     } catch (e) { console.warn('[summary] ollama failed:', e.message); }
   }
