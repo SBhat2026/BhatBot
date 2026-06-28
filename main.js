@@ -287,8 +287,8 @@ const WORKFLOW_DIR = path.join(os.homedir(), '.bhatbot', 'workflows');
 const NOTES_DIR = path.join(os.homedir(), '.bhatbot', 'notes');
 const pendingConfirms = new Map();
 let pendingGuidance = [];   // live feedback queued mid-task (steering)
-let nexusWindow = null, studioWindow = null, terminalWindow = null, chessWindow = null, worldCupWindow = null;
-let studioWatcher = null, ptyProc = null, wakeProc = null;
+let terminalWindow = null;   // other secondary-window state (nexus/studio/chess/worldcup/viewer/mol/maps) lives in window-manager.js
+let ptyProc = null, wakeProc = null;   // studioWatcher moved to window-manager.js
 
 const STUDIO_DIR = path.join(os.homedir(), '.bhatbot', 'studio');
 const STUDIO_INDEX = path.join(STUDIO_DIR, 'index.html');
@@ -2656,29 +2656,20 @@ const MESH_PY = path.join(os.homedir(), '.bhatbot', 'mesh-venv', 'bin', 'python'
 // Open a 3D file (STL/GLB/OBJ) in an INTERACTIVE in-app three.js viewer — its own desktop
 // window (orbit / zoom / pan), offline. The model bytes are streamed over IPC once the
 // viewer signals ready (no file:// fetch / CSP issues).
-let viewerWindow = null, pendingModel = null;
-function openInteractive3D(p) {
-  try {
-    if (!p || !fs.existsSync(p)) return;
-    const ext = path.extname(p).slice(1).toLowerCase();
-    const data = fs.readFileSync(p).toString('base64');
-    const info = (fs.statSync(p).size / 1048576).toFixed(2) + ' MB';
-    pendingModel = { data, ext, name: path.basename(p), info };
-    if (viewerWindow && !viewerWindow.isDestroyed()) {
-      viewerWindow.show(); viewerWindow.focus();
-      viewerWindow.webContents.send('model', pendingModel);
-      return;
-    }
-    viewerWindow = new BrowserWindow({
-      width: 920, height: 740, x: 180, y: 100, title: 'Bhatbot 3D Viewer',
-      backgroundColor: '#0a0f17', fullscreen: false, alwaysOnTop: false,
-      webPreferences: { contextIsolation: true, nodeIntegration: false, preload: path.join(__dirname, 'src', 'preload-viewer.js') },
-    });
-    viewerWindow.loadFile(path.join(__dirname, 'src', 'viewer.html'));
-    viewerWindow.on('closed', () => { viewerWindow = null; });
-  } catch (e) { console.warn('[viewer]', e.message); }
-}
-ipcMain.on('viewer-ready', (e) => { try { if (pendingModel) e.sender.send('model', pendingModel); } catch {} });
+// Secondary window openers live in window-manager.js (SPLIT_PLAN step 8). main keeps mainWindow +
+// createWindow + the terminal/pty + fleet windows; everything else (Nexus/Studio/Chess/World Cup/
+// Molecule/Maps/3D viewer) is created + state-owned there. Thin consts below keep all call sites
+// (creation.js ctx, executeTool dispatch, IPC handlers, hotkey) unchanged. createWindow is a hoisted
+// function decl so it resolves here even though it's defined further down.
+const wm = require('./window-manager')({
+  BrowserWindow, screen, webContents,
+  getMainWindow: () => mainWindow, createWindow,
+  paths: { STUDIO_DIR, STUDIO_INDEX, CHESS_HTML, NEXUS_URL },
+});
+const { toggleWindow, studioWebContents, openNexusWindow, ensureStudio, openStudioWindow,
+  openChessWindow, openChessApplet, openWorldCupWindow, openInteractive3D,
+  openMoleculeWindow, openMapsWindow, openMapsWindowSnapshot } = wm;
+ipcMain.on('viewer-ready', (e) => wm.sendPendingModel(e));
 // Creation tools (image / image→3D / printable STL) live in tools/creation.js (B-b decomposition).
 // Electron window glue (openStudioWindow/openInteractive3D) + lazy lastImagePath are injected; the
 // thin wrappers below keep existing call sites unchanged. Deps resolve via hoisting at call time.
@@ -2714,18 +2705,7 @@ const molecule = require('./lib/molecule')({
   simPython: SIM_PY, pymolBin: PYMOL_BIN, dataDir: MOL_DIR,
   scriptPath: path.join(__dirname, 'scripts', 'mol_prep.py'), run: runChild,
 });
-let molWindow = null, pendingMol = null;
-function openMoleculeWindow(payload) {
-  pendingMol = payload;
-  if (molWindow && !molWindow.isDestroyed()) { molWindow.show(); molWindow.focus(); try { molWindow.webContents.send('molecule', pendingMol); } catch {} return; }
-  molWindow = new BrowserWindow({
-    width: 960, height: 760, x: 160, y: 90, title: 'Bhatbot Molecule Viewer',
-    backgroundColor: '#0a0f17', webPreferences: { contextIsolation: true, nodeIntegration: false, preload: path.join(__dirname, 'src', 'preload-molecule.js') },
-  });
-  molWindow.loadFile(path.join(__dirname, 'src', 'molecule.html'));
-  molWindow.on('closed', () => { molWindow = null; });
-}
-ipcMain.on('molecule-ready', (e) => { try { if (pendingMol) e.sender.send('molecule', pendingMol); } catch {} });
+ipcMain.on('molecule-ready', (e) => wm.sendPendingMol(e));
 
 // --- FABLE / ProtFunc tie-in: predict protein FUNCTION → SEE it on the saliency-colored structure ---
 const protfunc = require('./lib/protfunc')({ getUrl: () => { try { return (loadConfig().protfunc && loadConfig().protfunc.url) || ''; } catch { return ''; } } });
@@ -2735,45 +2715,12 @@ const maps = require('./lib/maps')({
   getKey: () => { try { return (loadConfig().maps && loadConfig().maps.googleKey) || ''; } catch { return ''; } },
   getMapId: () => { try { return (loadConfig().maps && loadConfig().maps.mapId) || ''; } catch { return ''; } },
 });
-let mapsWindow = null, pendingMap = null, mapRenderedCb = null;
-function openMapsWindow(payload) {
-  pendingMap = payload;
-  if (mapsWindow && !mapsWindow.isDestroyed()) { mapsWindow.show(); mapsWindow.focus(); try { mapsWindow.webContents.send('map', pendingMap); } catch {} return; }
-  mapsWindow = new BrowserWindow({
-    width: 1000, height: 760, x: 150, y: 80, title: 'Bhatbot Maps',
-    backgroundColor: '#0a0f17', webPreferences: { contextIsolation: true, nodeIntegration: false, preload: path.join(__dirname, 'src', 'preload-maps.js') },
-  });
-  mapsWindow.loadFile(path.join(__dirname, 'src', 'maps.html'));
-  mapsWindow.on('closed', () => { mapsWindow = null; });
-}
-ipcMain.on('map-ready', (e) => { try { if (pendingMap) e.sender.send('map', pendingMap); } catch {} });
-ipcMain.on('map-rendered', () => { if (mapRenderedCb) { const cb = mapRenderedCb; mapRenderedCb = null; cb(); } });
+ipcMain.on('map-ready', (e) => wm.sendPendingMap(e));
+ipcMain.on('map-rendered', () => wm.fireMapRendered());
 // In-window interactive route planner bridges (geocode + waypoint routing) — reuse the SAME
 // backend as the maps tool (Google when keyed, OSM/OSRM free otherwise). No CORS/UA issues.
 ipcMain.handle('maps-geocode', async (_e, q) => { try { return { ok: true, ...(await maps.geocode(q)) }; } catch (e) { return { ok: false, error: e.message }; } });
 ipcMain.handle('maps-route-path', async (_e, points, mode) => { try { return { ok: true, ...(await maps.routePath(points, mode)) }; } catch (e) { return { ok: false, error: e.message }; } });
-
-// Open the map AND capture a PNG snapshot once it's fully drawn → inline "visualization" the agent
-// can return as an image (chat/phone), not just the desktop window. Resolves base64 PNG or null.
-function openMapsWindowSnapshot(payload) {
-  openMapsWindow(payload);
-  return new Promise((resolve) => {
-    let done = false;
-    const finish = async () => {
-      if (done) return; done = true; mapRenderedCb = null;
-      try {
-        await new Promise((r) => setTimeout(r, 350));   // let the final paint settle
-        const img = await mapsWindow.webContents.capturePage();
-        if (img.isEmpty()) return resolve(null);
-        // Downscale + JPEG so the inline vision block stays well under model image limits
-        // (a raw 1000×760 PNG is ~6MB; this is ~100-200KB).
-        resolve(img.resize({ width: 900 }).toJPEG(78).toString('base64'));
-      } catch { resolve(null); }
-    };
-    mapRenderedCb = finish;
-    setTimeout(finish, 7000);   // hard fallback if the renderer never signals
-  });
-}
 
 // Transient failure signatures worth one automatic retry (network/load races, not logic errors).
 const TRANSIENT_RE = /(timeout|timed out|ETIMEDOUT|ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|socket hang up|network|Target closed|Execution context|navigation|detached|not attached|temporarily|overloaded|try again|\b50[234]\b|\b429\b)/i;
@@ -3366,8 +3313,9 @@ async function executeTool(name, input) {
         try {
           const sw = studioWebContents();
           if (sw) { const img = await sw.capturePage(); if (img && !img.isEmpty()) shot = img.resize({ width: 1200 }).toJPEG(75).toString('base64'); }
-          if (!shot && studioWindow && !studioWindow.isDestroyed()) {     // legacy fallback
-            const img = await studioWindow.webContents.capturePage();
+          const sWin = wm.getStudioWindow();
+          if (!shot && sWin && !sWin.isDestroyed()) {     // legacy fallback
+            const img = await sWin.webContents.capturePage();
             shot = img.resize({ width: 1200 }).toJPEG(75).toString('base64');
           }
         } catch (e) { console.warn('Studio screenshot failed:', e.message); }
@@ -5124,124 +5072,10 @@ function createWindow() {
 // existing call sites (e.g. browserAction) don't break; activity events route to mainWindow.
 function openActivityWindow() {}
 
-// The <webview> guest hosting Studio lives inside mainWindow; find its WebContents so we can
-// capturePage() it for the design vision-feedback loop.
-function studioWebContents() {
-  try {
-    if (!mainWindow || mainWindow.isDestroyed()) return null;
-    return webContents.getAllWebContents().find((wc) => {
-      try { return wc.hostWebContents && wc.hostWebContents.id === mainWindow.webContents.id && /studio/.test(wc.getURL()); } catch { return false; }
-    }) || null;
-  } catch { return null; }
-}
+// Nexus/Studio/Chess/ChessApplet/WorldCup/toggle window openers + studioWebContents moved to
+// window-manager.js (SPLIT_PLAN step 8). createWindow + openTerminalWindow + the fleet windows
+// stay in main (mainWindow/pty coupling). Thin consts at the top of the file keep call sites intact.
 
-function toggleWindow() {
-  if (!mainWindow) return createWindow();
-  if (mainWindow.isVisible() && mainWindow.isFocused()) mainWindow.hide();
-  else { if (!mainWindow.isFullScreen()) mainWindow.setFullScreen(true); mainWindow.show(); mainWindow.focus(); }
-}
-
-// --- Nexus (embedded research navigator) ---
-function openNexusWindow() {
-  if (nexusWindow && !nexusWindow.isDestroyed()) { nexusWindow.show(); nexusWindow.focus(); return; }
-  const { width, height } = screen.getPrimaryDisplay().workAreaSize;
-  nexusWindow = new BrowserWindow({
-    width: Math.min(1400, width - 80), height: Math.min(900, height - 80),
-    resizable: true, maximizable: true, minWidth: 480, minHeight: 360,
-    title: 'Nexus — Research Navigator', backgroundColor: '#090d13',
-    webPreferences: { contextIsolation: true }
-  });
-  nexusWindow.loadURL(NEXUS_URL);
-  nexusWindow.on('closed', () => { nexusWindow = null; });
-}
-
-// --- Studio (live HTML preview; auto-reloads when files change) ---
-function ensureStudio() {
-  if (!fs.existsSync(STUDIO_INDEX)) {
-    fs.mkdirSync(STUDIO_DIR, { recursive: true });
-    fs.writeFileSync(STUDIO_INDEX, `<!doctype html><html><head><meta charset="utf-8"><style>
-      body{font-family:'JetBrains Mono',monospace;background:#090d13;color:#5b708a;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;text-align:center}
-      div{max-width:520px;line-height:1.7}b{color:#00c8ff}</style></head><body>
-      <div><b>BHATBOT STUDIO</b><br>Live preview canvas.<br>Ask Bhatbot to design something (it writes <code>~/.bhatbot/studio/index.html</code>) and it renders here instantly.</div>
-      </body></html>`);
-  }
-}
-function openStudioWindow() {
-  ensureStudio();
-  if (studioWindow && !studioWindow.isDestroyed()) { studioWindow.show(); studioWindow.focus(); return; }
-  const { width } = screen.getPrimaryDisplay().workAreaSize;
-  studioWindow = new BrowserWindow({
-    width: 940, height: 720, x: Math.max(20, Math.floor(width / 2) - 470), y: 50,
-    resizable: true, maximizable: true, minWidth: 420, minHeight: 320,
-    title: 'Bhatbot Studio', backgroundColor: '#090d13', webPreferences: { contextIsolation: true }
-  });
-  studioWindow.loadFile(STUDIO_INDEX);
-  try { if (studioWatcher) studioWatcher.close(); } catch {}
-  let deb = null;
-  studioWatcher = fs.watch(STUDIO_DIR, () => {
-    clearTimeout(deb);
-    deb = setTimeout(() => { try { if (studioWindow && !studioWindow.isDestroyed()) studioWindow.reload(); } catch {} }, 200);
-  });
-  studioWindow.on('closed', () => { try { studioWatcher && studioWatcher.close(); } catch {} studioWatcher = null; });
-}
-
-// --- Chess (playable game window; rules engine inline, Stockfish online API for the AI) ---
-function openChessWindow(difficulty) {
-  try {
-    fs.mkdirSync(STUDIO_DIR, { recursive: true });
-    const asset = path.join(__dirname, 'assets', 'chess.html');
-    if (fs.existsSync(asset)) fs.copyFileSync(asset, CHESS_HTML);   // keep the playable copy fresh
-  } catch {}
-  if (!fs.existsSync(CHESS_HTML)) return { success: false, error: 'chess.html asset is missing.' };
-  if (chessWindow && !chessWindow.isDestroyed()) { chessWindow.show(); chessWindow.focus(); }
-  else {
-    chessWindow = new BrowserWindow({
-      width: 720, height: 840, resizable: true, maximizable: true, minWidth: 380, minHeight: 480,
-      title: 'BhatBot Chess', backgroundColor: '#0a0f17', webPreferences: { contextIsolation: true }
-    });
-    chessWindow.loadFile(CHESS_HTML);
-    chessWindow.on('closed', () => { chessWindow = null; });
-  }
-  const diff = ['easy', 'medium', 'hard'].includes(difficulty) ? difficulty : null;
-  if (diff) {
-    const wc = chessWindow.webContents;
-    const apply = () => wc.executeJavaScript(`(()=>{const s=document.getElementById('diff'); if(s){s.value=${JSON.stringify(diff)}; s.dispatchEvent(new Event('change'));}})()`).catch(() => {});
-    if (wc.isLoading()) wc.once('did-finish-load', apply); else apply();
-  }
-  return { success: true };
-}
-
-// Offline chess applet (standard + atomic), full legal-move enforcement (chess.js + lib/chessatomic).
-// Loaded straight from assets/ so its ./vendor/ deps resolve; variant passed via query string.
-let chessAppletWindow = null;
-function openChessApplet(variant) {
-  const asset = path.join(__dirname, 'assets', 'chessapplet.html');
-  if (!fs.existsSync(asset)) return { success: false, error: 'chessapplet.html asset is missing.' };
-  const v = variant === 'atomic' ? 'atomic' : 'standard';
-  if (chessAppletWindow && !chessAppletWindow.isDestroyed()) { chessAppletWindow.show(); chessAppletWindow.focus(); chessAppletWindow.loadFile(asset, { query: { variant: v } }); return { success: true }; }
-  chessAppletWindow = new BrowserWindow({
-    width: 600, height: 760, resizable: true, minWidth: 420, minHeight: 560,
-    title: 'BhatBot Chess — ' + v, backgroundColor: '#0a0f17', webPreferences: { contextIsolation: true },
-  });
-  chessAppletWindow.loadFile(asset, { query: { variant: v } });
-  chessAppletWindow.on('closed', () => { chessAppletWindow = null; });
-  return { success: true };
-}
-
-// --- Live World Cup 2026 viewer (auto-refreshing bracket + odds) ---
-function openWorldCupWindow() {
-  const asset = path.join(__dirname, 'assets', 'worldcup.html');
-  if (!fs.existsSync(asset)) return { success: false, error: 'worldcup.html asset missing' };
-  if (worldCupWindow && !worldCupWindow.isDestroyed()) { worldCupWindow.show(); worldCupWindow.focus(); return { success: true }; }
-  worldCupWindow = new BrowserWindow({
-    width: 1040, height: 860, resizable: true, minWidth: 520, minHeight: 480,
-    title: 'World Cup 2026', backgroundColor: '#090d13',
-    webPreferences: { contextIsolation: true, preload: path.join(__dirname, 'preload-worldcup.js') }
-  });
-  worldCupWindow.loadFile(asset);
-  worldCupWindow.on('closed', () => { worldCupWindow = null; });
-  return { success: true };
-}
 // Snapshot for the viewer — adds per-match win/draw/loss predictions for the upcoming fixtures.
 ipcMain.handle('wc-snapshot', async () => {
   try {
