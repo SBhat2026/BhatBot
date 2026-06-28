@@ -22,6 +22,9 @@ contextBridge.exposeInMainWorld('bhatbot', {
   sendFleetControl: (id, action) => ipcRenderer.invoke('fleet-control', { id, action }),
   openAgentWindow: (id) => ipcRenderer.invoke('open-agent-window', id),
   getHealth: () => ipcRenderer.invoke('get-health'),
+  getBiometrics: (opts) => ipcRenderer.invoke('get-biometrics', opts),                  // Health panel — Garmin biometrics
+  onBiometricsUpdate: (cb) => ipcRenderer.on('biometrics-update', (_e, d) => cb(d)),     // proactive monitor pushes
+  getOpsStatus: () => ipcRenderer.invoke('get-ops-status'),                              // Manage panel — what BhatBot is running
   transcribeAudio: (data) => ipcRenderer.invoke('transcribe-audio', data),
   synthesizeSpeech: (text) => ipcRenderer.invoke('synthesize-speech', { text }),
   playTTS: (text, full) => ipcRenderer.invoke('play-tts', { text, full }),

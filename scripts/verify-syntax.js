@@ -46,6 +46,9 @@ const CONTRACTS = {
   './window-manager': ['__factory'], // factory: module.exports is a function (SPLIT_PLAN step 8)
   './lib/history': ['validateHistory', 'evictOldImages', 'isRetryableTool', 'TRANSIENT_RE'],  // SPLIT_PLAN step 9
   './lib/selfdrive': ['startSession', 'runCycle', 'pickDesire', 'status', 'enabled', 'checkFrozenIntegrity', 'budgetPlan', 'requestStop', 'isRunning'],  // Phase 6 on-demand self-improvement
+  './lib/health': ['trends', 'flags', 'portrait', 'brief', 'insights', 'normalize'],   // Health — biometric analysis
+  './lib/garmin': ['available', 'sync', 'status', 'login', 'readHistory'],             // Health — Garmin link
+  './lib/opsstatus': ['gather'],                                                        // Manage — ops aggregator
 };
 let missing = 0;
 for (const [mod, exps] of Object.entries(CONTRACTS)) {

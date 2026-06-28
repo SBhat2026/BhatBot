@@ -33,7 +33,9 @@
     "test:wm": "node scripts/test-window-manager.js",
     "test:history": "node scripts/test-history.js",
     "test:selfdrive": "node scripts/test-selfdrive.js",
-    "verify": "node scripts/verify-syntax.js && node scripts/test-upgrade.js && node scripts/test-tools-extract.js && node scripts/test-configsec.js && node scripts/test-reflect-security.js && node scripts/test-selfheal.js && node scripts/test-patrol.js && node scripts/test-introspect.js && node scripts/test-admission.js && node scripts/test-narrate.js && node scripts/test-runtime-state.js && node scripts/test-toolselect.js && node scripts/test-window-manager.js && node scripts/test-history.js && node scripts/test-selfdrive.js",
+    "test:health": "node scripts/test-health.js",
+    "test:opsstatus": "node scripts/test-opsstatus.js",
+    "verify": "node scripts/verify-syntax.js && node scripts/test-upgrade.js && node scripts/test-tools-extract.js && node scripts/test-configsec.js && node scripts/test-reflect-security.js && node scripts/test-selfheal.js && node scripts/test-patrol.js && node scripts/test-introspect.js && node scripts/test-admission.js && node scripts/test-narrate.js && node scripts/test-runtime-state.js && node scripts/test-toolselect.js && node scripts/test-window-manager.js && node scripts/test-history.js && node scripts/test-selfdrive.js && node scripts/test-health.js && node scripts/test-opsstatus.js",
     "verify:full": "npm run verify && npm run test:browser && npm run smoke && npm run eval"
   },
   "dependencies": {

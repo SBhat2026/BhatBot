@@ -56,6 +56,9 @@ const scheduler = require('./lib/scheduler');         // proactive scheduler (re
 const simulate = require('./lib/simulate');           // physics/chem/math simulation sandbox (scipy/sympy/rdkit/openmm/pyscf…)
 const selfheal = require('./lib/selfheal');           // autonomous self-healing (DISABLED by default; verify-gated self_fix loop)
 const selfdrive = require('./lib/selfdrive');         // Phase 6 — ON-DEMAND self-improvement governor (reflect→pipeline→implement→verify; never pushes)
+const garmin = require('./lib/garmin');               // Health — native Garmin link (python venv worker; same lib the eddmann MCP wraps)
+const health = require('./lib/health');               // Health — biometric trend/flag analysis + non-medical insights
+const opsstatus = require('./lib/opsstatus');         // Manage — live "what is BhatBot managing" aggregator
 let _lastRetryAfterMs = 0;                            // last 429 Retry-After (ms) — self-drive budget governor reads it
 let _pendingSelfDrive = null;                         // Phase 6: a reflection-sanctioned session to start once the turn goes idle
 const vanguard = require('./lib/vanguard');           // Phase 1 — unified VANGUARD fleet codename roster (OVERMIND/FORGE/ORACLE/…)
@@ -3383,6 +3386,33 @@ async function executeTool(name, input) {
         result = { success: false, error: 'unknown self_drive action: ' + a };
         break;
       }
+      case 'health': {
+        const a = (input && input.action) || 'show';
+        if (a === 'login') { result = { success: true, ...(await garmin.login(loadConfig, keychainRead, input && input.mfa)) }; break; }
+        if (a === 'status') { result = { success: true, ...(await garmin.status(loadConfig, keychainRead)), monitoring: healthMonitoring() }; break; }
+        if (a === 'monitor') { const on = input && input.enable !== false; const cur = loadConfig().health || {}; saveConfig({ health: { ...cur, enabled: on } }); if (on) startHealthMonitor(); else stopHealthMonitor(); result = { success: true, result: `Health monitor ${on ? 'on' : 'off'}.`, monitoring: healthMonitoring() }; break; }
+        if (!garmin.available()) { result = { success: false, error: 'Garmin not connected yet. One-time setup: store your password in Keychain (security add-generic-password -s bhatbot-garmin -a <email> -w), set config.garmin.email, then run scripts/garmin-setup.sh (handles MFA).', needsSetup: true }; break; }
+        if (a === 'sync') { const s = await healthSync(); pushBiometrics(); const p = biometricPortrait(); result = { success: !!(s && s.ok), result: health.brief(p), ...s, flags: p.flags }; break; }
+        if (a === 'insights') {
+          if (input && input.sync !== false) { await healthSync(); }
+          const p = biometricPortrait(); pushBiometrics();
+          const ins = await health.insights(p, { anthropicRequest, apiKey: getApiKey() });
+          result = { success: true, result: ins.text, disclaimer: p.disclaimer, flags: p.flags, trends: p.trends };
+          break;
+        }
+        // 'show' | 'today' | 'trends' → open the Health tab + return the portrait
+        if (input && input.sync) { await healthSync(); }
+        const p = biometricPortrait(); pushBiometrics();
+        try { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('show-panel', 'health'); } catch {}
+        result = { success: true, result: health.brief(p), opened: 'health', portrait: { latest_date: p.latest_date, flags: p.flags, trends: p.trends, days_tracked: p.days_tracked, disclaimer: p.disclaimer } };
+        break;
+      }
+      case 'ops_status': {
+        const snap = opsSnapshot();
+        if (input && input.show !== false) { try { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('show-panel', 'manage'); } catch {} }
+        result = { success: true, result: snap.summary, ...snap };
+        break;
+      }
       case 'self_reflect': {
         // PROACTIVE self-reflection: introspect → (scope filter) → reflect (Opus) → narrate. Surfaces
         // OPINIONS only; never triggers self_fix/self_improve. Pipeline degrades gracefully on sparse telemetry.
@@ -4440,6 +4470,8 @@ async function initMcpServer() {
       synthesize: synthesizeSpeech, synthUlaw: synthesizeUlaw, summarize: summarizeForSpeech, media: mediaBytesToBlocks,
       voiceTurn, voiceBegin, voicePoll, endVoiceCall, getActivity, nexusUrl: NEXUS_URL, ownerPhone: c.myPhone,
       twilioAuthToken: c.twilioToken, jobs: jobsBus, control: phoneControl, screenshot: captureScreenJpeg,
+      biometrics: () => { try { return biometricPortrait(); } catch { return { error: 'unavailable' }; } },   // Health screen on the phone
+      opsStatus: () => { try { return opsSnapshot(); } catch { return { error: 'unavailable' }; } },           // Manage view on the phone
       // Phone-call speech-recognition tuning (see gatherTwiml). All optional in config.json.
       voice: { hints: c.voiceHints, speechModel: c.voiceSpeechModel, speechTimeout: c.voiceSpeechTimeout,
         timeout: c.voiceTimeout, enhanced: c.voiceEnhanced, language: c.voiceLanguage,
@@ -5092,6 +5124,68 @@ function noteCapabilityGap(description, files) {
     if (selfdrive.isRunning() || agentState !== 'idle') return { skipped: 'busy' };
     return startSelfDriveSession({ reason: 'capability_gap', focus: String(description || '').slice(0, 300) });
   } catch (e) { return { error: e.message }; }
+}
+
+// ── HEALTH — Garmin biometrics + PROACTIVE monitor ──────────────────────────────────────────────
+// Pulls biometrics on a timer (default on), caches them, and PROACTIVELY surfaces notable trends
+// (resting-HR creep, low HRV/sleep/body-battery, etc.) via Telegram + the Health panel — no prompting.
+// Not a clinician; framed as decision-support over the user's own wearable data.
+let _healthTimer = null;
+let _healthNotified = {};       // metric → last-notified day, so a standing flag isn't re-pinged daily
+function healthCfg() { const c = loadConfig().health || {}; return { enabled: c.enabled !== false, syncEveryMin: c.syncEveryMin || 90, proactive: c.proactive !== false, quietHours: c.quietHours !== false, ...c }; }
+function biometricPortrait() { try { return health.portrait(garmin.readHistory(180)); } catch { return health.portrait([]); } }
+async function healthSync() {
+  if (!garmin.available()) return { ok: false, needsSetup: true, reason: 'run scripts/garmin-setup.sh (one-time)' };
+  return garmin.sync(loadConfig, keychainRead, { activities: 3 });
+}
+function pushBiometrics() { try { const p = biometricPortrait(); if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('biometrics-update', p); return p; } catch { return null; } }
+async function healthTick() {
+  const cfg = healthCfg();
+  if (!cfg.enabled || !garmin.available()) return;
+  if (cfg.quietHours) { const h = new Date().getHours(); if (h < 7 || h >= 23) return; }   // no biometric pings overnight
+  try {
+    await healthSync();
+    const p = pushBiometrics();
+    if (!cfg.proactive || !p) return;
+    // Proactively relay any NEW concern/watch flag (deduped per metric per day).
+    const day = new Date().toISOString().slice(0, 10);
+    const notable = (p.flags || []).filter((f) => (f.level === 'concern' || f.level === 'watch') && _healthNotified[f.metric] !== day);
+    if (notable.length) {
+      for (const f of notable) _healthNotified[f.metric] = day;
+      const lead = notable.find((f) => f.level === 'concern') || notable[0];
+      const msg = `❤️ Health: ${lead.message}` + (notable.length > 1 ? ` (+${notable.length - 1} more on the Health tab)` : '');
+      try { telegramNotify(msg); } catch {}
+      try { sendToActivity('tool-update', { type: 'thinking', text: msg }); } catch {}
+    }
+  } catch (e) { console.warn('[health] tick failed:', e.message); }
+}
+function startHealthMonitor() {
+  const cfg = healthCfg();
+  if (!cfg.enabled) { console.log('[health] monitor disabled (config.health.enabled=false)'); return; }
+  if (!garmin.available()) { console.log('[health] Garmin not set up — run scripts/garmin-setup.sh to enable the biometrics monitor'); return; }
+  if (_healthTimer) return;
+  _healthTimer = setInterval(healthTick, Math.max(15, cfg.syncEveryMin) * 60 * 1000);
+  console.log(`[health] proactive monitor on — syncing every ${cfg.syncEveryMin}m, alerting on notable trends`);
+  setTimeout(healthTick, 60 * 1000);
+}
+function stopHealthMonitor() { if (_healthTimer) { clearInterval(_healthTimer); _healthTimer = null; } }
+function healthMonitoring() { return !!_healthTimer; }
+
+// ── MANAGE — live snapshot of everything BhatBot is running ──────────────────────────────────────
+function opsSnapshot() {
+  return opsstatus.gather({
+    selfheal: () => selfheal.status(loadConfig),
+    selfdrive: () => ({ ...selfdrive.status(loadConfig), running: selfdrive.isRunning() }),
+    patrolOn: () => !!(loadConfig().patrol && loadConfig().patrol.enabled !== false),
+    ambient: () => { try { return ambient.status ? ambient.status(loadConfig) : { enabled: false }; } catch { return { enabled: false }; } },
+    schedules: () => scheduler.list().map((s) => ({ id: s.id, title: s.title, kind: s.kind, nextRun: s.nextRun ? new Date(s.nextRun).toISOString() : null, enabled: s.enabled })),
+    health: () => { const st = (garmin.latest() || {}); return { configured: garmin.available(), monitoring: healthMonitoring(), last_sync: st.synced_at || null }; },
+    cloudConnected: () => !!(_cloudBridge && _cloudBridge.connected && _cloudBridge.connected()),
+    fleet: () => { try { const a = jobsBus.active() || []; return { active: a.length, agents: a.map((j) => ({ id: j.id, role: j.agent || j.kind, task: j.name })) }; } catch { return { active: 0, agents: [] }; } },
+    budgets: () => [MODEL_SONNET, MODEL_HAIKU, 'claude-opus-4-8'].map((m) => { try { const b = rateBudget(m); return { model: m.replace(/^claude-/, ''), outFree: b.outFree, outSafe: b.outSafe }; } catch { return { model: m, outFree: null }; } }),
+    costToday: () => { try { return costToday(); } catch { return null; } },
+    recentEvents: () => { try { return rstate.recentEvents(20); } catch { return []; } },
+  });
 }
 // Feat-2 — ambient proactive defaults + patrol. Self-heal auto-FIXES (verify-gated, auto-revert,
 // never pushes); patrol MONITORS health and RELAYS to Telegram (calls if urgent). Both enabled by
@@ -6282,6 +6376,9 @@ ipcMain.handle('set-briefing-hour', (_e, { hour }) => {
 });
 
 // Live health stats for the activity-window status strip.
+// Biometrics (Garmin) + ops snapshot for the Health / Manage panels (distinct from get-health = system metrics).
+ipcMain.handle('get-biometrics', async (_e, opts) => { try { if (opts && opts.sync) await healthSync(); return biometricPortrait(); } catch (e) { return { error: e.message }; } });
+ipcMain.handle('get-ops-status', async () => { try { return opsSnapshot(); } catch (e) { return { error: e.message }; } });
 ipcMain.handle('get-health', async () => {
   const dir = path.join(os.homedir(), '.bhatbot');
   const memPath = path.join(dir, 'memory.md');
@@ -6526,6 +6623,7 @@ app.whenReady().then(() => {
     if (selfdrive.cfgFrom(loadConfig).autostart === true) { setTimeout(() => startSelfDriveSession({ reason: 'autostart' }), 120 * 1000); console.log('[self-drive] autostart enabled — one session 2m after boot'); }
     else console.log('[self-drive] ready (on-demand: "improve yourself" / reflection / capability-gap)');
     startPatrol();      // Feat-2: ambient health watch → relay via Telegram, call if urgent
+    startHealthMonitor(); // Health: proactive Garmin biometrics monitor (default on; no-op until garmin-setup.sh is run)
     // Pre-warm local Kokoro TTS so the first spoken reply isn't cold (~0.8s load), then give a
     // short spoken "ready" confirmation once warm (ambient mode has no visual chat affordance,
     // so the greeting tells you BhatBot is live and listening). Fires once.

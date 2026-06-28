@@ -134,6 +134,16 @@
      Control view permanently on top of Chat. Visibility is governed by .view.on. */
   #view-control { overflow-y:auto; -webkit-overflow-scrolling:touch; padding:12px; }
   #view-control.on { display:block; }   /* block (not flex) so sections stack + scroll cleanly */
+  /* Health screen */
+  #view-health { overflow-y:auto; -webkit-overflow-scrolling:touch; padding:12px; }
+  #view-health.on { display:block; }
+  #hbody .hgrid { display:grid; grid-template-columns:repeat(2,1fr); gap:8px; }
+  .hcard { background:rgba(255,255,255,.04); border:1px solid var(--line); border-radius:10px; padding:9px; }
+  .hk { font-size:11px; color:var(--dim); } .hv { font-size:20px; font-weight:600; margin:3px 0; } .ht { font-size:11px; }
+  .hsec { font-size:11px; text-transform:uppercase; letter-spacing:.5px; color:var(--cyan); margin:14px 2px 7px; }
+  .hflag { font-size:12.5px; line-height:1.45; padding:8px 10px; border-radius:9px; margin-bottom:7px; border-left:3px solid #46566b; background:rgba(255,255,255,.03); }
+  .hflag.concern { border-left-color:#ff7a7a; } .hflag.watch { border-left-color:#e6b450; } .hflag.good { border-left-color:#4fd38a; }
+  #hdisc { padding:8px 12px; font-size:10px; color:#6a7686; border-top:1px solid var(--line); }
   .csec { color:var(--dim); font-size:11px; letter-spacing:.12em; margin:14px 2px 7px; }
   #screenwrap { border:1px solid var(--line); border-radius:10px; overflow:hidden; background:#000; position:relative; min-height:90px; }
   #screenimg { display:block; width:100%; transition:opacity .2s; }
@@ -246,10 +256,12 @@
   <pre id="shellout"></pre>
 </section>
 <section id="view-nexus" class="view"></section>
+<section id="view-health" class="view"><div id="hbody"><div class="empty">Loading biometrics…</div></div><div id="hdisc">Decision-support over your own Garmin data — not medical advice.</div></section>
 </div>
 <nav id="tabs">
   <div class="tab on" data-tab="chat"><span class="ic"><svg class="gi"><use href="#i-chat"></use></svg></span>Chat</div>
   <div class="tab" data-tab="activity"><span class="ic"><svg class="gi"><use href="#i-activity"></use></svg></span>Activity<span class="badge" id="actbadge" style="display:none">0</span></div>
+  <div class="tab" data-tab="health"><span class="ic">❤</span>Health</div>
   <div class="tab" data-tab="control"><span class="ic"><svg class="gi"><use href="#i-control"></use></svg></span>Control</div>
   <div class="tab" data-tab="nexus"><span class="ic"><svg class="gi"><use href="#i-nexus"></use></svg></span>Nexus</div>
 </nav>
@@ -636,17 +648,33 @@ function encodeWAV(samples, rate) {
 // ---- Tabs: Chat / Activity / Control / Nexus ----
 let curTab = 'chat', nexusLoaded = false;
 const tabs = [...document.querySelectorAll('#tabs .tab')];
-const views = { chat: document.getElementById('view-chat'), activity: document.getElementById('view-activity'), control: document.getElementById('view-control'), nexus: document.getElementById('view-nexus') };
+const views = { chat: document.getElementById('view-chat'), activity: document.getElementById('view-activity'), health: document.getElementById('view-health'), control: document.getElementById('view-control'), nexus: document.getElementById('view-nexus') };
 function showTab(name) {
   curTab = name;
   tabs.forEach(t => t.classList.toggle('on', t.dataset.tab === name));
   for (const k in views) views[k].classList.toggle('on', k === name);
   if (name === 'activity') { actSeen = actLastId; updateActBadge(); }
   if (name === 'nexus' && !nexusLoaded) loadNexus();
+  if (name === 'health') refreshHealth();
   if (name === 'control') { refreshScreen(); refreshJobs(); if (!ctlTimer) ctlTimer = setInterval(refreshJobs, 4000); }
   else if (ctlTimer) { clearInterval(ctlTimer); ctlTimer = null; }
 }
 tabs.forEach(t => t.addEventListener('click', () => { ensureCtx(); showTab(t.dataset.tab); }));
+
+// ---- Health screen: biometrics from the Mac's Garmin link (opened on request / via the Health tab) ----
+const HICON = { resting_hr:'❤️', hrv_avg:'〰️', sleep_hours:'😴', sleep_score:'🌙', body_battery:'🔋', stress_avg:'😰', training_readiness:'⚡', steps:'👟', vo2max:'🫁', spo2_avg:'🩸', weight_kg:'⚖️' };
+function renderHealthM(p) {
+  const b = document.getElementById('hbody'); if (!b) return;
+  if (!p || p.error || !p.days_tracked) { b.innerHTML = '<div class="empty">' + ((p && p.error) || 'No biometric data yet — run the one-time Garmin setup on the Mac.') + '</div>'; return; }
+  const t = p.trends || {};
+  const order = ['resting_hr','hrv_avg','sleep_hours','body_battery','stress_avg','training_readiness','steps','vo2max'];
+  const cards = order.filter(k => t[k] && t[k].latest != null).map(k => { const m = t[k]; const arr = m.improving===true?'▲':(m.improving===false?'▼':'·'); const col = m.improving===true?'#4fd38a':(m.improving===false?'#ff7a7a':'#7a8aa0'); return `<div class="hcard"><div class="hk">${HICON[k]||''} ${m.label}</div><div class="hv">${Math.round(m.latest*10)/10}${m.unit?' '+m.unit:''}</div><div class="ht" style="color:${col}">${arr} ${m.delta!=null?(m.delta>0?'+':'')+m.delta:''}</div></div>`; }).join('');
+  const flags = (p.flags||[]).map(f => `<div class="hflag ${f.level}">${f.level==='concern'?'⚠️':(f.level==='good'?'✅':'👀')} ${f.message}</div>`).join('');
+  b.innerHTML = `<div class="hgrid">${cards}</div>` + (flags ? `<div class="hsec">Trends &amp; suggestions</div>${flags}` : '');
+}
+async function refreshHealth() { try { const r = await fetch(API + '/biometrics', { cache:'no-store' }).then(x=>x.json()); renderHealthM(r); } catch (e) { renderHealthM({ error: String(e) }); } }
+// open the Health screen when asked (deep link #health, or the desktop pushes an open-screen activity event)
+if (location.hash === '#health') setTimeout(() => showTab('health'), 300);
 
 // ---- Control tab: live desktop screen + background jobs + quick actions + shell ----
 let ctlTimer = null;

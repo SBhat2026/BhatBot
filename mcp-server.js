@@ -7,7 +7,7 @@
 
 let httpServer = null;
 
-async function startMcpServer({ port, token, runAgent, transcribe, synthesize, synthUlaw, summarize, media, voiceTurn, voiceBegin, voicePoll, endVoiceCall, getActivity, nexusUrl, ownerPhone, twilioAuthToken, jobs, control, screenshot, voice }) {
+async function startMcpServer({ port, token, runAgent, transcribe, synthesize, synthUlaw, summarize, media, voiceTurn, voiceBegin, voicePoll, endVoiceCall, getActivity, nexusUrl, ownerPhone, twilioAuthToken, jobs, control, screenshot, voice, biometrics, opsStatus }) {
   if (httpServer) return httpServer;
   const express = require('express');
   const fs = require('fs');
@@ -258,6 +258,11 @@ self.addEventListener('fetch', (e) => {
     if (!getActivity) return res.json({ seq: 0, events: [] });
     noStore(res); res.json(getActivity(req.query.since));
   });
+
+  // Health (Garmin biometrics) + ops snapshot for the phone's Health / Manage screens. No-op if the
+  // host didn't inject the providers (older builds). Data lives on the Mac; this serves it read-only.
+  app.get('/api/:token/biometrics', guard, (_req, res) => { noStore(res); res.json(biometrics ? biometrics() : { error: 'not available' }); });
+  app.get('/api/:token/ops', guard, (_req, res) => { noStore(res); res.json(opsStatus ? opsStatus() : { error: 'not available' }); });
 
   // Where the phone's Nexus tab should point.
   app.get('/api/:token/config', guard, (_req, res) => { noStore(res); res.json({ nexusUrl: nexusUrl || '' }); });
