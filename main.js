@@ -5705,10 +5705,6 @@ function setWakeMute(on) {
 }
 function stopDesktopTTS() {
   ttsPlaySeq++;
-  // Invalidate any in-flight streaming drain: its captured seq no longer matches ttsStreamSeq, so
-  // the drain loop breaks cleanly on its next check instead of spinning through the rest of the
-  // queue firing synth+playFile calls that silently no-op (the "voice cut off mid-reply" bug).
-  ttsStreamSeq = ttsPlaySeq; ttsStreamQ = []; ttsStreamBuf = '';
   if (ttsPlayProc) { try { ttsPlayProc.kill(); } catch {} ttsPlayProc = null; }
   setTtsActive(false);
   setWakeMute(false);   // clear any name-clip wake suppression on interrupt
@@ -5740,15 +5736,6 @@ async function speakDesktop(text, opts = {}) {
   if (c.ttsEnabled === false) return { success: false, skipped: 'tts disabled' };
   let t = String(text || '').trim();
   if (!t) return { success: false };
-  // Stream-coexistence: if a streamed reply is currently being spoken, DON'T clobber it.
-  // stopDesktopTTS would bump ttsPlaySeq and the in-flight drain's remaining sentences would
-  // silently drop in playFile → the reply gets cut off mid-sentence. Instead, queue this line
-  // into the live stream so it speaks right after, in the same voice. New turns / barge-in still
-  // preempt (they go through ttsStreamStart / stopDesktopTTS with opts.interrupt).
-  if (!opts.interrupt && ttsStreamSeq === ttsPlaySeq && (ttsStreamDraining || ttsStreamQ.length || ttsStreamBuf.length)) {
-    if (!opts.full && t.length > 500) { try { const s = await summarizeForSpeech(t); if (s && s.success && s.text) t = s.text; } catch {} }
-    if (ttsStreamSeq === ttsPlaySeq) { ttsStreamEnqueue(ttsStreamSeq, t); return { success: true, via: 'tts-stream-queued' }; }
-  }
   stopDesktopTTS();
   const seq = ++ttsPlaySeq;
   // Single consistent voice: always synthesize through the configured provider (no more
