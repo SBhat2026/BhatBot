@@ -33,8 +33,9 @@ console.log(`✓ ${files.length} JS files parse cleanly`);
 const CONTRACTS = {
   './lib/prompts': ['classifyMode', 'selectModePrompt'],
   './lib/static-prompt': ['STATIC_PROMPT'],
-  './lib/introspect': ['buildSelfPortrait'],
-  './lib/reflect': ['reflect', 'resolveDesire'],
+  './lib/introspect': ['buildSelfPortrait', 'telemetryDelta'],
+  './lib/reflect': ['reflect', 'resolveDesire', 'classifyActionability'],
+  './lib/risk': ['riskOf', 'classifyDesire', 'checkFrozen', 'severeConcern', 'FROZEN_ZONE'],
   './lib/narrate': ['render', 'drill'],
   './lib/runtime-state': ['pushActivity', 'getActivity', 'snapshot', 'bind'],
   './lib/configsec': ['sanitizeWrite', 'migrate', 'findPlaintext'],
@@ -44,7 +45,7 @@ const CONTRACTS = {
   './tools/browser': ['__factory'],  // factory: module.exports is a function
   './window-manager': ['__factory'], // factory: module.exports is a function (SPLIT_PLAN step 8)
   './lib/history': ['validateHistory', 'evictOldImages', 'isRetryableTool', 'TRANSIENT_RE'],  // SPLIT_PLAN step 9
-  './lib/selfdrive': ['cycle', 'tick', 'gate', 'pickDesire', 'frozenViolations', 'status', 'enabled'],  // Phase 6 proactive self-improvement
+  './lib/selfdrive': ['startSession', 'runCycle', 'pickDesire', 'status', 'enabled', 'checkFrozenIntegrity', 'budgetPlan', 'requestStop', 'isRunning'],  // Phase 6 on-demand self-improvement
 };
 let missing = 0;
 for (const [mod, exps] of Object.entries(CONTRACTS)) {
