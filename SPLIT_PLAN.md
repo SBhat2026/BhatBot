@@ -23,8 +23,35 @@ The strongest classifier signal — one file holding the agent loop AND raw shel
 destructive-command list AND system/media/browser automation — is now decomposed: shell, system,
 media, and browser capability each live in their own reviewable module, separated from the agent loop.
 
-**main.js size: 524KB → 421KB.** The literal <150KB target is NOT met and is deliberately deferred
-(see below) — it is a navigability goal, secondary to the classifier mitigation, which is done.
+**main.js size: 524KB → 410KB.** Step 8 (window-manager) + step 9's safe slice (lib/history.js) are
+now done (2026-06-28). The literal <150KB target is still NOT met — the only clusters big enough to
+close that gap are the executeTool dispatch + the agentLoop control flow, which are boot-gated (see
+below). <150KB is a navigability goal, secondary to the classifier mitigation, which is done.
+
+### Step 8 (window-manager) — DONE 2026-06-28
+`window-manager.js` (repo root, so __dirname matches main for asset/preload paths) is a DI factory
+that OWNS each secondary window's handle + pending payload: Nexus/Studio/Chess/ChessApplet/World Cup/
+Molecule/Maps/3D-viewer openers + toggleWindow + studioWebContents. main keeps thin const wrappers
+(`const openNexusWindow = wm.openNexusWindow`) so every call site (creation.js ctx, executeTool
+dispatch, IPC handlers, hotkey) is byte-for-byte unchanged; the pending* IPC handlers delegate
+(`wm.sendPendingMol(e)`). `createWindow` + `mainWindow` (the 42-site hub) + `openTerminalWindow`
+(node-pty lifecycle) + `openAgentWindow` (fleet) stay in main by design. The nexus/terminal/worldcup
+STANDALONE openers were already dead code (real triggers send `show-panel` to in-window panels), so
+they were zero-caller and safe to lift. Verified with `scripts/test-window-manager.js` (36 checks):
+mocks BrowserWindow/screen/webContents and INVOKES every opener → catches the runtime-only missing-ctx
+ReferenceError class (the classifyMode failure mode) without a GUI boot.
+
+### Step 9 (agent loop) — SAFE SLICE done; dispatch extraction boot-gated
+Done: `lib/history.js` — the PURE, closure-free agent-loop helpers (`validateHistory`,
+`evictOldImages`, `isRetryableTool`, `TRANSIENT_RE`), with `scripts/test-history.js` (20 checks).
+NOT done (deliberately): `executeTool` (~620-line dispatch bound to every tool handler + confirm
+gates + audit) and the `agentLoop` turn control flow. Their ctx surface is the entire tool + runtime
+state; a single missed binding silently breaks a tool AT RUNTIME (the classifyMode class) and can't be
+fully covered by mocks. That extraction needs a live boot to verify and must not ship blind on the
+branch the live app runs from. **Runbook to finish:** on one `npm start` (or the packaged app), after
+extracting executeTool→`agent-loop.js` as a ctx factory, exercise one tool per cluster (run_shell echo,
+a browser navigate, media_control, a window opener, self_reflect) and confirm zero app.log errors
+before committing.
 
 ### Step 6 (browser) — done, the holder trick
 `browserAction` reassigns `page`/`browser`/`browserContext` on its error/crash paths and shares
