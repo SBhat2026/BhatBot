@@ -44,6 +44,7 @@ const CONTRACTS = {
   './tools/browser': ['__factory'],  // factory: module.exports is a function
   './window-manager': ['__factory'], // factory: module.exports is a function (SPLIT_PLAN step 8)
   './lib/history': ['validateHistory', 'evictOldImages', 'isRetryableTool', 'TRANSIENT_RE'],  // SPLIT_PLAN step 9
+  './lib/selfdrive': ['cycle', 'tick', 'gate', 'pickDesire', 'frozenViolations', 'status', 'enabled'],  // Phase 6 proactive self-improvement
 };
 let missing = 0;
 for (const [mod, exps] of Object.entries(CONTRACTS)) {

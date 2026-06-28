@@ -42,6 +42,7 @@ const { classifyDepth } = require('../lib/depth');      // A3 — response-depth
     ['risk: system_control → confirm', () => assert.equal(risk.riskOf('system_control', {}, 'desktop'), 'confirm')],
     ['risk: run_shell → auto (inner gate owns it)', () => assert.equal(risk.riskOf('run_shell', {}, 'desktop'), 'auto')],
     ['risk: self_fix → stepup', () => assert.equal(risk.riskOf('self_fix', {}, 'desktop'), 'stepup')],
+    ['risk: self_drive → stepup (model-invoked self-mod gated; autonomy is the timer)', () => assert.equal(risk.riskOf('self_drive', {}, 'desktop'), 'stepup')],
     ['risk: keychain local → auto', () => assert.equal(risk.riskOf('keychain_lookup', {}, 'desktop'), 'auto')],
     ['risk: keychain remote → stepup', () => assert.equal(risk.riskOf('keychain_lookup', {}, 'remote'), 'stepup')],
     ['risk: claude_code local → confirm (autonomous under autonomousMode)', () => assert.equal(risk.riskOf('claude_code', {}, 'desktop'), 'confirm')],

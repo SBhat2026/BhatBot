@@ -54,6 +54,7 @@ const jobsBus = require('./lib/jobs');                // P5  — background job 
 const scheduler = require('./lib/scheduler');         // proactive scheduler (recurring/one-off autonomous tasks)
 const simulate = require('./lib/simulate');           // physics/chem/math simulation sandbox (scipy/sympy/rdkit/openmm/pyscf…)
 const selfheal = require('./lib/selfheal');           // autonomous self-healing (DISABLED by default; verify-gated self_fix loop)
+const selfdrive = require('./lib/selfdrive');         // Phase 6 — PROACTIVE self-improvement governor (reflect→pipeline→implement→verify→push)
 const vanguard = require('./lib/vanguard');           // Phase 1 — unified VANGUARD fleet codename roster (OVERMIND/FORGE/ORACLE/…)
 const { createAdmission } = require('./lib/admission'); // Phase 1 — budget-aware fleet admission controller (convoy fix)
 
@@ -1734,7 +1735,10 @@ async function selfFix(input) {
   for (let i = 1; i <= maxRounds; i++) {
     sendToActivity('tool-update', { type: 'thinking', text: `🩺 self-fix round ${i}/${maxRounds}: ${problem.slice(0, 60)}` });
     const prompt = `Fix this in the current repo: ${problem}${fileHint}\nThe fix is verified when this command exits 0:\n  ${verify}\n${lastVerify ? `\nThe previous attempt still failed verification with:\n${lastVerify.slice(0, 1500)}\n` : ''}Make the minimal necessary edits to the source files. Do not run the verify command yourself.`;
-    const cc = await runShell('claude -p ' + JSON.stringify(prompt) + ' --permission-mode acceptEdits', proj, 300000);
+    // skipPerms (self-drive, unattended) → --dangerously-skip-permissions so the headless coder can run
+    // build/move/test commands without a prompt; else acceptEdits (auto-applies edits, still gated on bash).
+    const ccFlag = input.skipPerms ? '--dangerously-skip-permissions' : '--permission-mode acceptEdits';
+    const cc = await runShell('claude -p ' + JSON.stringify(prompt) + ' ' + ccFlag, proj, 300000);
     const v = await runShell(verify, proj, 300000);
     lastVerify = ((v.stdout || '') + '\n' + (v.stderr || '')).trim();
     const passed = v.success && (v.exitCode === 0 || v.exitCode == null);
@@ -3357,6 +3361,23 @@ async function executeTool(name, input) {
         result = { success: false, error: 'unknown self_heal action: ' + a };
         break;
       }
+      case 'self_drive': {
+        const a = (input && input.action) || 'status';
+        if (a === 'status') { result = { success: true, ...selfdrive.status(loadConfig) }; break; }
+        if (a === 'enable' || a === 'disable') {
+          const cur = loadConfig().selfDrive || {};
+          saveConfig({ selfDrive: { ...cur, enabled: a === 'enable' } });
+          if (a === 'enable') startSelfDrive(); else stopSelfDrive();
+          result = { success: true, result: `Proactive self-improvement ${a}d.`, ...selfdrive.status(loadConfig) };
+          break;
+        }
+        if (a === 'run' || a === 'cycle') {   // force one cycle now (bypasses the timer, still gated)
+          result = { success: true, ...(await selfdrive.tick(loadConfig, selfDriveDeps())) };
+          break;
+        }
+        result = { success: false, error: 'unknown self_drive action: ' + a };
+        break;
+      }
       case 'self_reflect': {
         // PROACTIVE self-reflection: introspect → (scope filter) → reflect (Opus) → narrate. Surfaces
         // OPINIONS only; never triggers self_fix/self_improve. Pipeline degrades gracefully on sparse telemetry.
@@ -4939,6 +4960,98 @@ function startSelfHeal() {
   setTimeout(selfHealTick, 60 * 1000);
 }
 function stopSelfHeal() { if (_selfHealTimer) { clearInterval(_selfHealTimer); _selfHealTimer = null; } console.log('[self-heal] stopped'); }
+
+// ── SELF-DRIVE (Phase 6) — PROACTIVE self-improvement governor ──────────────────────────────────
+// reflect (introspect → Opus desires) → multi-agent pipeline (SCOUT research + ORACLE/ECHO plan via
+// orchestrator) → FORGE/ATLAS implement+verify (selfFix) → keep+commit+push on green. Aggressive
+// defaults (enabled, pushes, isolated self-drive branch). HARD rails: verify-or-revert, frozen
+// guardrail/secret zone, idle-only, daily cap, cooldown, budget-paced. See lib/selfdrive.js.
+let _selfDriveTimer = null;
+// reflect() — build the self-portrait and run the bounded Opus desire engine (same path as self_reflect).
+async function selfDriveReflect() {
+  const toolNames = TOOLS.map((t) => t.name);
+  let roleNames = []; try { roleNames = Object.keys(require('./lib/agents/roles').ROLES); } catch {}
+  const portrait = introspect.buildSelfPortrait({ toolNames, roleNames, repoDir: SELF_HEAL_PROJ });
+  return reflect.reflect(portrait, { anthropicRequest, apiKey: getApiKey() });
+}
+// pipeline(desire) — the 5-role research+plan team. SCOUT researches (read-only fleet suit), then
+// ORACLE (planner) + ECHO (skeptic/optimizer) debate as an ensemble → one synthesized implementation
+// brief + a concrete verify command. FORGE/ATLAS (the coder/shell) come after, inside selfFix.
+async function selfDrivePipeline(desire) {
+  const deps = subagentDeps();
+  const aspiration = String(desire.aspiration || desire.id);
+  const impl = (desire.implementation && desire.implementation.summary) || '';
+  const mods = (desire.implementation && [].concat(desire.implementation.modules_affected || [], desire.implementation.new_modules || []).join(', ')) || '';
+  // SCOUT — read-only investigation of the relevant code.
+  let research = '';
+  try {
+    const sc = await agentTeam.fleet([{ id: 'SCOUT', role: 'researcher',
+      tools: ['read_file', 'list_directory', 'run_shell', 'web_search', 'fetch_url'],
+      persona: 'You are SCOUT, the RESEARCHER. Read-only. Investigate the BhatBot codebase to ground an upcoming change. Report: root cause / current state, the exact files+functions involved, concrete options, and risks. Do NOT edit anything.',
+      task: `Research this planned self-improvement so a coder can implement it cleanly:\n\nDesire: ${aspiration}\nIntended approach: ${impl}\nLikely files: ${mods}\n\nRead the relevant source and report findings + the precise change surface.` }],
+      deps, { maxParallel: 3, maxSteps: 10, onUpdate: (u) => fleetBroadcast(u) });
+    research = ((sc.agents || [])[0] || {}).result || '';
+  } catch {}
+  // ORACLE + ECHO — plan + red-team the plan in parallel, synthesized into one brief.
+  let brief = research;
+  try {
+    const planTask = `Produce a precise, minimal IMPLEMENTATION PLAN for this BhatBot self-improvement.\n\nDesire: ${aspiration}\nIntended approach: ${impl}\nLikely files: ${mods}\n\nResearch findings:\n${String(research).slice(0, 5000)}\n\nOutput: numbered concrete steps a coder can follow, the exact files/functions to touch, and a single shell VERIFY command (prefer "npm run verify") that exits 0 only when the change is correct. End with a line "VERIFY: <command>".`;
+    const ens = await agentTeam.ensemble(planTask, deps, {
+      roles: [
+        { name: 'planner', codename: 'ORACLE', persona: 'You are ORACLE, the PLANNER. Turn the goal + research into the smallest correct, concrete implementation plan. Be specific about files, functions, and the verify command.' },
+        { name: 'optimizer', codename: 'ECHO', persona: 'You are ECHO, the OPTIMIZER/SKEPTIC. Red-team the plan: what breaks tests, what is over-engineered, what is the simpler/cheaper path, what guardrail might it trip. Tighten it.' },
+      ], maxSteps: 6, onUpdate: (u) => fleetBroadcast(u) });
+    brief = (ens && ens.result) || research;
+  } catch {}
+  const vm = String(brief).match(/VERIFY:\s*(.+)/);
+  return { brief, verify: (vm && vm[1].trim()) || null };
+}
+function selfDriveDeps() {
+  return {
+    reflect: selfDriveReflect,
+    listResolvedIds: () => { try { const rows = reflect.listDesires(); return new Set(rows.filter((r) => r.type === 'resolution').map((r) => r.id)); } catch { return new Set(); } },
+    resolveDesire: (id, outcome, opts) => { try { return reflect.resolveDesire(id, outcome, opts); } catch {} },
+    pipeline: selfDrivePipeline,
+    runFix: selfFix,
+    runShell,
+    notify: (t) => { try { telegramNotify(t); } catch {} try { sendToActivity('tool-update', { type: 'thinking', text: t }); } catch {} },
+    proj: SELF_HEAL_PROJ,
+    probe: async () => {
+      let treeClean = false;
+      try { const r = await runShell('git status --porcelain', SELF_HEAL_PROJ, 15000); treeClean = !((r.stdout || '').trim()); } catch {}
+      return { idle: agentState === 'idle', treeClean };
+    },
+    // Budget governor: a cycle burns Opus (reflect) + Sonnet (pipeline) + the coder. Skip while any of
+    // those is throttled; the timer retries next cadence, so it "runs until the limit, then resumes".
+    budgetOk: () => {
+      try {
+        for (const m of [MODEL_SONNET, 'claude-opus-4-8']) {
+          const b = rateBudget(m);
+          if (b && b.outFree != null && b.outFree <= 0) return { ok: false, reason: m.replace(/^claude-/, '') + ' OTPM spent' };
+        }
+        return { ok: true };
+      } catch { return { ok: true }; }
+    },
+  };
+}
+async function selfDriveTick() {
+  if (!selfdrive.enabled(loadConfig)) return;
+  if (agentState !== 'idle') return;
+  try {
+    const r = await selfdrive.tick(loadConfig, selfDriveDeps());
+    if (r && r.fixed) console.log('[self-drive]', r.desire, r.changed, r.pushed ? '(pushed)' : '(local)');
+    else if (r && r.gated) console.log('[self-drive] gated:', r.gated);
+  } catch (e) { console.error('[self-drive] tick failed:', e.message); }
+}
+function startSelfDrive() {
+  if (!selfdrive.enabled(loadConfig)) { console.log('[self-drive] disabled (config.selfDrive.enabled !== true)'); return; }
+  if (_selfDriveTimer) return;
+  const everyMs = Math.max(5, (selfdrive.cfgFrom(loadConfig).cycleMin || 30)) * 60 * 1000;
+  _selfDriveTimer = setInterval(selfDriveTick, everyMs);
+  console.log('[self-drive] enabled — proactive self-improvement (reflect→implement→verify→push, 1 desire/cycle, isolated branch)');
+  setTimeout(selfDriveTick, 90 * 1000);
+}
+function stopSelfDrive() { if (_selfDriveTimer) { clearInterval(_selfDriveTimer); _selfDriveTimer = null; } console.log('[self-drive] stopped'); }
 // Feat-2 — ambient proactive defaults + patrol. Self-heal auto-FIXES (verify-gated, auto-revert,
 // never pushes); patrol MONITORS health and RELAYS to Telegram (calls if urgent). Both enabled by
 // default per Siddhant's request; toggle via config.selfHeal.enabled / config.patrol.enabled.
@@ -6366,6 +6479,7 @@ app.whenReady().then(() => {
     rstate.startSnapshotLoop(5000);
     enableProactiveDefaults();   // Feat-2: turn on self-heal + ambient patrol by default (Siddhant asked for it)
     startSelfHeal();    // autonomous self-healing (verify-gated, auto-revert, never pushes)
+    startSelfDrive();   // Phase 6: PROACTIVE self-improvement (reflect→implement→verify→push; aggressive, isolated branch)
     startPatrol();      // Feat-2: ambient health watch → relay via Telegram, call if urgent
     // Pre-warm local Kokoro TTS so the first spoken reply isn't cold (~0.8s load), then give a
     // short spoken "ready" confirmation once warm (ambient mode has no visual chat affordance,
