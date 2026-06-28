@@ -44,6 +44,9 @@ const { classifyDepth } = require('../lib/depth');      // A3 — response-depth
     ['risk: self_fix → stepup', () => assert.equal(risk.riskOf('self_fix', {}, 'desktop'), 'stepup')],
     ['risk: keychain local → auto', () => assert.equal(risk.riskOf('keychain_lookup', {}, 'desktop'), 'auto')],
     ['risk: keychain remote → stepup', () => assert.equal(risk.riskOf('keychain_lookup', {}, 'remote'), 'stepup')],
+    ['risk: claude_code local → confirm (autonomous under autonomousMode)', () => assert.equal(risk.riskOf('claude_code', {}, 'desktop'), 'confirm')],
+    ['risk: claude_code remote → stepup (headless code-exec needs a human)', () => assert.equal(risk.riskOf('claude_code', {}, 'remote'), 'stepup')],
+    ['risk: self_heal stays stepup (self-modifying)', () => assert.equal(risk.riskOf('self_heal', {}, 'desktop'), 'stepup')],
 
     // ---- W4 knowledge graph (uses a temp store) ----
     ['graph: ingest + 2-hop traversal', () => {
