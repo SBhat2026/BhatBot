@@ -5156,7 +5156,10 @@ function noteCapabilityGap(description, files) {
 let _healthTimer = null;
 let _healthNotified = {};       // metric → last-notified day, so a standing flag isn't re-pinged daily
 function healthCfg() { const c = loadConfig().health || {}; return { enabled: c.enabled !== false, syncEveryMin: c.syncEveryMin || 90, proactive: c.proactive !== false, quietHours: c.quietHours !== false, ...c }; }
-function biometricPortrait() { try { return health.portrait(garmin.readHistory(180)); } catch { return health.portrait([]); } }
+function biometricPortrait() {
+  try { const off = loadConfig().health || {}; health.setSleepOffset(off.sleepOffsetHours != null ? off.sleepOffsetHours : 1); } catch {}
+  try { return health.portrait(garmin.readHistory(180)); } catch { return health.portrait([]); }
+}
 async function healthSync() {
   if (!garmin.available()) return { ok: false, needsSetup: true, reason: 'run scripts/garmin-setup.sh (one-time)' };
   return garmin.sync(loadConfig, keychainRead, { activities: 3 });

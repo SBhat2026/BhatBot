@@ -20,6 +20,12 @@ hist.push(today);
 for (const r of hist.slice(-7)) r.stress_avg = 55;
 
 (async () => {
+  // ---- sleep correction offset (Garmin under-counts) ----
+  h.setSleepOffset(1);
+  ok(h.normalize([{ date: 'x', sleep_seconds: 6 * 3600 }])[0].sleep_hours === 7, 'sleep offset: +1h applied (6h raw → 7h)');
+  h.setSleepOffset(0);   // neutralize for the core-math assertions below
+  ok(h.normalize([{ date: 'x', sleep_seconds: 6 * 3600 }])[0].sleep_hours === 6, 'sleep offset: 0 → raw passthrough');
+
   // ---- normalize ----
   const n = h.normalize(hist);
   ok(n.length === 31, 'normalize: 31 distinct days');
