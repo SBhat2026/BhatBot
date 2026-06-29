@@ -380,6 +380,28 @@ function getApiKey() {
   return process.env.ANTHROPIC_API_KEY || loadConfig().apiKey || '';
 }
 
+// Self-heal: if config.json lost a vaulted secret's CRED_REF pointer (config.json was rewritten/reset
+// while the encrypted vault persisted — this silently broke the agent with "No ANTHROPIC_API_KEY"
+// even though the key was safe in the vault), restore the newest ref per known secret field. Only
+// fills fields that are MISSING (never clobbers a present value), so it's safe + idempotent.
+const VAULT_FIELDS = ['apiKey', 'openaiKey', 'geminiKey', 'darkbloomKey', 'googleKey', 'elevenLabsKey', 'replicateKey', 'telegramToken', 'spotifyClientSecret', 'spotifyRefreshToken', 'gmailAppPassword', 'twilioToken', 'cloudToken'];
+function reconcileVaultRefs() {
+  try {
+    const raw = loadConfigRaw();
+    let entries; try { entries = credentials.list(); } catch { return; }
+    const byLabel = {};
+    for (const e of entries) { if (!e.label) continue; (byLabel[e.label] = byLabel[e.label] || []).push(e.ref); }
+    const newest = (label) => {
+      const refs = byLabel[label] || []; if (!refs.length) return null;
+      const pre = 'CRED_REF_' + String(label).toUpperCase().replace(/\W+/g, '_') + '_';
+      return refs.slice().sort((a, b) => (a.slice(pre.length) < b.slice(pre.length) ? -1 : 1)).pop();
+    };
+    const add = {};
+    for (const f of VAULT_FIELDS) { if (!raw[f]) { const r = newest(f); if (r) add[f] = r; } }
+    if (Object.keys(add).length) { saveConfigRaw({ ...raw, ...add }); console.log('[config] restored ' + Object.keys(add).length + ' vault ref(s) lost from config.json: ' + Object.keys(add).join(', ')); }
+  } catch (e) { console.warn('[config] reconcileVaultRefs failed:', e.message); }
+}
+
 const today = () => new Date().toISOString().slice(0, 10);
 
 const INITIAL_MEMORY = `# Bhatbot Memory
@@ -6607,6 +6629,7 @@ function primeAppAutomation(force = false) {
 app.whenReady().then(() => {
   try {
     migrateSecretsToVault();   // Phase 4 #1 — vault any plaintext secrets BEFORE anything (cloud bridge, MCP) reads them
+    reconcileVaultRefs();      // self-heal: re-point config.json at vaulted secrets if it lost them
     createWindow();
     mainWindow.show();
     if (!globalShortcut.register(HOTKEY, toggleWindow)) console.warn('Hotkey failed — may be claimed by another app.');
