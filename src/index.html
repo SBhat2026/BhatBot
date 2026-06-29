@@ -1667,7 +1667,15 @@ function startWebSpeech() {
     tbar.textContent = '🎙 ' + ((finalText + interim).trim() || 'listening…');
     clearTimeout(silenceTimer); silenceTimer = setTimeout(endWebSpeech, SILENCE_MS);
   };
-  recog.onerror = (e) => { tbar.textContent = '🎙 ' + e.error; if (['not-allowed', 'service-not-allowed', 'audio-capture'].includes(e.error)) { manualStop = true; recording = false; } };
+  recog.onerror = (e) => {
+    // Electron has no Web-Speech recognition service → 'network'. NEVER surface raw error codes in
+    // the status bar (the user should only ever see ambient/listening/transcribing), and don't loop:
+    // bail cleanly. The MediaRecorder→Whisper path (cloud or local) is the real STT.
+    manualStop = true; recording = false; clearTimeout(silenceTimer); clearTimeout(restartTimer);
+    setMicRecording(false); setOrbState('idle');
+    tbar.textContent = ambient ? '🌙 ambient — say "Jarvis"' : '';
+    if (e.error === 'not-allowed' || e.error === 'audio-capture') addErr('Mic unavailable: ' + e.error);
+  };
   recog.onend = () => {
     if (recording && !manualStop) { clearTimeout(restartTimer); restartTimer = setTimeout(() => { if (recording && !manualStop && !starting) { starting = true; try { recog.start(); } catch { starting = false; } } }, 250); }
     else { setMicRecording(false); const t = finalText.trim(); finalText = ''; if (t) submitVoice(t); }
