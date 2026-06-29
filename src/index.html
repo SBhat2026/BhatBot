@@ -1205,7 +1205,7 @@ window.bhatbot.onStudioReload && window.bhatbot.onStudioReload(() => reloadStudi
 
 // ===================== HEALTH panel (Garmin biometrics) =====================
 const HL_ICON = { resting_hr: '❤️', hrv_avg: '〰️', sleep_hours: '😴', sleep_score: '🌙', body_battery: '🔋', stress_avg: '😰', training_readiness: '⚡', steps: '👟', intensity_minutes: '🏃', vo2max: '🫁', spo2_avg: '🩸', respiration_avg: '🌬️', weight_kg: '⚖️' };
-function hlFmt(v, unit) { if (v == null) return '—'; return (Math.round(v * 10) / 10) + (unit ? ' ' + unit : ''); }
+function hlFmt(v, unit) { if (v == null) return '—'; const r = Math.abs(v) >= 100 ? Math.round(v) : Math.round(v * 10) / 10; return r + (unit ? ' ' + unit : ''); }
 function renderHealth(p) {
   const body = $('#health-body'); if (!body) return;
   if (!p || p.error || !p.days_tracked) { body.innerHTML = '<div class="hl-empty">' + (p && p.error ? p.error : 'No biometric data yet. One-time setup: store your Garmin password in Keychain, set config.garmin.email, then run <code>scripts/garmin-setup.sh</code>.') + '</div>'; return; }
@@ -1214,7 +1214,7 @@ function renderHealth(p) {
   const cards = order.filter((k) => t[k] && t[k].latest != null).map((k) => {
     const m = t[k]; const arrow = m.direction === 'up' ? '▲' : (m.direction === 'down' ? '▼' : '·');
     const cls = m.improving === true ? 'up' : (m.improving === false ? 'down' : 'flat');
-    return `<div class="hl-card"><div class="hl-k">${HL_ICON[k] || ''} ${m.label}</div><div class="hl-v">${hlFmt(m.latest, m.unit)}</div><div class="hl-t ${cls}">${arrow} ${m.delta != null ? (m.delta > 0 ? '+' : '') + m.delta : ''} <span class="hl-dim">vs avg ${hlFmt(m.avg30 != null ? m.avg30 : m.avg7, '')}</span></div></div>`;
+    return `<div class="hl-card"><div class="hl-k">${HL_ICON[k] || ''} ${m.label}</div><div class="hl-v">${hlFmt(m.latest, m.unit)}</div><div class="hl-t ${cls}">${arrow} ${m.delta != null ? (m.delta > 0 ? '+' : '') + hlFmt(m.delta, '') : ''} <span class="hl-dim">vs avg ${hlFmt(m.avg30 != null ? m.avg30 : m.avg7, '')}</span></div></div>`;
   }).join('');
   const flags = (p.flags || []).map((f) => `<div class="hl-flag ${f.level}"><b>${f.level === 'concern' ? '⚠️' : (f.level === 'good' ? '✅' : '👀')} ${f.metric.replace(/_/g, ' ')}</b> — ${f.message}</div>`).join('');
   const acts = (p.activities || []).slice(0, 3).map((a) => `<div class="hl-act">${a.type || 'activity'} · ${a.name || ''} · ${a.duration_s ? Math.round(a.duration_s / 60) + 'm' : ''} ${a.distance_m ? (Math.round(a.distance_m / 100) / 10) + 'km' : ''} ${a.avg_hr ? '· ' + a.avg_hr + ' bpm' : ''}</div>`).join('');

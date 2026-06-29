@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # One-time BhatBot ↔ Garmin setup. Mirrors the sim-venv / mesh-venv pattern: an isolated Python venv
-# with garminconnect (which uses garth for auth — the same stack the eddmann garmin-connect-mcp wraps),
+# with garminconnect (0.3.x — the same stack the eddmann garmin-connect-mcp wraps; 0.3 dropped the
+# garth dependency and persists tokens via client.dump/load),
 # then an INTERACTIVE login that handles MFA once and caches OAuth tokens to ~/.bhatbot/garmin/tokens.
 # After this, BhatBot pulls biometrics with no password (tokens last ~a year; it re-logs in if they
 # expire, reading creds from the Keychain).
@@ -37,16 +38,25 @@ import sys, os
 from garminconnect import Garmin
 email, pw = sys.argv[1], sys.argv[2]
 TOK = os.path.expanduser("~/.bhatbot/garmin/tokens")
+os.makedirs(TOK, exist_ok=True)
 try:
     g = Garmin(email=email, password=pw, return_on_mfa=True)
     res = g.login()
+    # garminconnect >=0.3 returns ("needs_mfa", client_state) when MFA is required
     if isinstance(res, tuple) and res and res[0] == "needs_mfa":
         code = input("Garmin MFA code (from your email/authenticator): ").strip()
         g.resume_login(res[1], code)
-except TypeError:
-    g = Garmin(email, pw); g.login()
-g.garth.dump(TOK)
-print("[garmin-setup] ✅ logged in as", g.get_full_name(), "— tokens cached to", TOK)
+    # 0.3.x dropped garth; in return_on_mfa mode login() doesn't auto-persist, so dump explicitly.
+    g.client.dump(TOK)
+    print("[garmin-setup] OK logged in as", (g.get_full_name() or email), "- tokens cached to", TOK)
+except Exception as e:
+    msg = str(e)
+    if "429" in msg or "rate" in msg.lower():
+        print("[garmin-setup] Garmin is rate-limiting this IP (HTTP 429). This is on Garmin's side,")
+        print("[garmin-setup] not a setup bug. Wait ~15-60 min (or switch networks / off VPN) and re-run.")
+        sys.exit(2)
+    print("[garmin-setup] login failed:", type(e).__name__ + ":", msg[:300])
+    sys.exit(1)
 PYEOF
 
 echo "[garmin-setup] done. BhatBot can now pull your biometrics. Try: \"show my health\" / health sync."

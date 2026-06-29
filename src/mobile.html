@@ -668,7 +668,7 @@ function renderHealthM(p) {
   if (!p || p.error || !p.days_tracked) { b.innerHTML = '<div class="empty">' + ((p && p.error) || 'No biometric data yet — run the one-time Garmin setup on the Mac.') + '</div>'; return; }
   const t = p.trends || {};
   const order = ['resting_hr','hrv_avg','sleep_hours','body_battery','stress_avg','training_readiness','steps','vo2max'];
-  const cards = order.filter(k => t[k] && t[k].latest != null).map(k => { const m = t[k]; const arr = m.improving===true?'▲':(m.improving===false?'▼':'·'); const col = m.improving===true?'#4fd38a':(m.improving===false?'#ff7a7a':'#7a8aa0'); return `<div class="hcard"><div class="hk">${HICON[k]||''} ${m.label}</div><div class="hv">${Math.round(m.latest*10)/10}${m.unit?' '+m.unit:''}</div><div class="ht" style="color:${col}">${arr} ${m.delta!=null?(m.delta>0?'+':'')+m.delta:''}</div></div>`; }).join('');
+  const cards = order.filter(k => t[k] && t[k].latest != null).map(k => { const m = t[k]; const arr = m.improving===true?'▲':(m.improving===false?'▼':'·'); const col = m.improving===true?'#4fd38a':(m.improving===false?'#ff7a7a':'#7a8aa0'); return `<div class="hcard"><div class="hk">${HICON[k]||''} ${m.label}</div><div class="hv">${Math.abs(m.latest)>=100?Math.round(m.latest):Math.round(m.latest*10)/10}${m.unit?' '+m.unit:''}</div><div class="ht" style="color:${col}">${arr} ${m.delta!=null?(m.delta>0?'+':'')+m.delta:''}</div></div>`; }).join('');
   const flags = (p.flags||[]).map(f => `<div class="hflag ${f.level}">${f.level==='concern'?'⚠️':(f.level==='good'?'✅':'👀')} ${f.message}</div>`).join('');
   b.innerHTML = `<div class="hgrid">${cards}</div>` + (flags ? `<div class="hsec">Trends &amp; suggestions</div>${flags}` : '');
 }

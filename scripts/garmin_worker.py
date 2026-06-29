@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""BhatBot Garmin worker — runs in ~/.bhatbot/garmin-venv (garminconnect/garth, the same library the
-eddmann garmin-connect-mcp wraps). Stateless: node (lib/garmin.js) spawns it with a JSON request on
+"""BhatBot Garmin worker — runs in ~/.bhatbot/garmin-venv (garminconnect 0.3.x, the same library the
+eddmann garmin-connect-mcp wraps; 0.3 dropped the garth dep — tokens persist via client.dump/load).
+Stateless: node (lib/garmin.js) spawns it with a JSON request on
 argv[1] or stdin and reads one JSON object back on stdout. Credentials NEVER come from the model — node
 reads them from the macOS Keychain and passes them only for the one-time `login`. After that the worker
 just loads cached OAuth tokens from ~/.bhatbot/garmin/tokens, so no password is needed per pull.
@@ -42,20 +43,17 @@ def _client(req):
     email, password = req.get("email"), req.get("password")
     if not email or not password:
         raise RuntimeError("not_authenticated")
-    try:
-        g = Garmin(email=email, password=password, return_on_mfa=True)
-        res = g.login()
-        # newer garminconnect returns ("needs_mfa", client_state) when MFA is required
-        if isinstance(res, tuple) and res and res[0] == "needs_mfa":
-            mfa = req.get("mfa")
-            if not mfa:
-                raise RuntimeError("mfa_required")
-            g.resume_login(res[1], str(mfa))
-    except TypeError:
-        # older garminconnect signature
-        g = Garmin(email, password)
-        g.login()
-    g.garth.dump(TOKENS)
+    g = Garmin(email=email, password=password, return_on_mfa=True)
+    res = g.login()
+    # garminconnect >=0.3 returns ("needs_mfa", client_state) when MFA is required
+    if isinstance(res, tuple) and res and res[0] == "needs_mfa":
+        mfa = req.get("mfa")
+        if not mfa:
+            raise RuntimeError("mfa_required")
+        g.resume_login(res[1], str(mfa))
+    # Persist OAuth tokens. garminconnect 0.3.x replaced the garth backend; in return_on_mfa
+    # mode login() short-circuits before its own auto-dump, so we always dump explicitly here.
+    g.client.dump(TOKENS)
     return g
 
 
