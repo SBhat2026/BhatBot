@@ -1346,7 +1346,7 @@ const mic = $('#mic');
 const tbar = $('#transcript');
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 let SILENCE_MS = 2000;   // auto-send 2s after you stop talking (overridable via config.silenceMs)
-let voiceCfg = { hasOpenAI: false, picovoiceKey: null, wakeWord: 'jarvis', silenceMs: 2000, ttsEnabled: true, hasTTS: false, ttsProvider: null };
+let voiceCfg = { hasOpenAI: false, hasLocalStt: false, hasSTT: false, picovoiceKey: null, wakeWord: 'jarvis', silenceMs: 2000, ttsEnabled: true, hasTTS: false, ttsProvider: null };
 let recording = false;
 
 // ===================== TTS: streaming sentence-chunked playback =====================
@@ -1581,7 +1581,7 @@ const MIN_UTTER_MS = 600;     // don't end before this (avoids cutting on the wa
 async function startVoice() {
   if (recording) return;
   stopSpeaking();                                     // don't talk over the user
-  if (!voiceCfg.hasOpenAI) return startWebSpeech();   // fallback if no OpenAI key
+  if (!voiceCfg.hasSTT) return startWebSpeech();      // last resort only if NO STT at all (cloud or local)
   // echo/noise suppression so TTS bleed + room noise don't keep the silence detector "hot"
   try { micStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } }); }
   catch (e) { addErr('Mic permission denied: ' + e.message); return; }

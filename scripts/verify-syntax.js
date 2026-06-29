@@ -49,6 +49,7 @@ const CONTRACTS = {
   './lib/health': ['trends', 'flags', 'portrait', 'brief', 'insights', 'normalize'],   // Health — biometric analysis
   './lib/garmin': ['available', 'sync', 'status', 'login', 'readHistory'],             // Health — Garmin link
   './lib/opsstatus': ['gather'],                                                        // Manage — ops aggregator
+  './lib/localstt': ['available', 'transcribe', 'venvReady'],                           // Voice — offline mlx-whisper fallback
 };
 let missing = 0;
 for (const [mod, exps] of Object.entries(CONTRACTS)) {

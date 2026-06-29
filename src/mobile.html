@@ -541,8 +541,8 @@ document.getElementById('vtest').addEventListener('click', async () => {
 // again — and keeps waiting until YOU actually speak (never times out on silence
 // before you've said anything). Tap again to end the conversation.
 let convoActive = false, wakeMode = false, listening = false, micStream = null, proc = null, srcNode = null, muteNode = null;
-let recChunks = [], heardSpeech = false, silenceAt = 0, capRate = 16000;
-const SILENCE_MS = 1600, SPEECH_RMS = 0.03;
+let recChunks = [], heardSpeech = false, silenceAt = 0, capRate = 16000, recStartAt = 0, noiseFloor = 0.012, floorN = 0;
+const SILENCE_MS = 1600, SPEECH_RMS = 0.03, MAX_UTTER_MS = 15000;
 
 function setMicUI() {
   mic.classList.toggle('rec', listening);
@@ -578,7 +578,7 @@ async function startListening() {
   const ctx = ensureCtx(); if (!ctx) { add('err', 'No audio support'); convoActive = false; setMicUI(); return; }
   try { micStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } }); }
   catch (e) { add('err', 'Mic blocked: ' + e.message); convoActive = false; setMicUI(); return; }
-  listening = true; heardSpeech = false; recChunks = []; capRate = ctx.sampleRate; silenceAt = Date.now();
+  listening = true; heardSpeech = false; recChunks = []; capRate = ctx.sampleRate; silenceAt = Date.now(); recStartAt = Date.now(); noiseFloor = 0.012; floorN = 0;
   setMicUI(); bar.textContent = 'LISTENING…';
   srcNode = ctx.createMediaStreamSource(micStream);
   proc = ctx.createScriptProcessor(4096, 1, 1);
@@ -590,8 +590,11 @@ async function startListening() {
     recChunks.push(new Float32Array(ch));
     let s = 0; for (let i = 0; i < ch.length; i++) s += ch[i] * ch[i];
     const rms = Math.sqrt(s / ch.length); const now = Date.now();
-    if (rms > SPEECH_RMS) { heardSpeech = true; silenceAt = now; bar.textContent = 'LISTENING…'; }
+    if (floorN < 5) { noiseFloor = (noiseFloor * floorN + rms) / (floorN + 1); floorN++; }   // first ~400ms = room floor
+    const gate = Math.max(SPEECH_RMS, noiseFloor * 2.2);
+    if (rms > gate) { heardSpeech = true; silenceAt = now; bar.textContent = 'LISTENING…'; }
     else if (heardSpeech && now - silenceAt > SILENCE_MS) { stopListening(); }   // only stops AFTER you've spoken
+    if (now - recStartAt > MAX_UTTER_MS) { stopListening(); }                    // hard cap → always finalize
   };
 }
 function stopListening() {

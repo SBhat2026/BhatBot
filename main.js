@@ -59,6 +59,7 @@ const selfdrive = require('./lib/selfdrive');         // Phase 6 — ON-DEMAND s
 const garmin = require('./lib/garmin');               // Health — native Garmin link (python venv worker; same lib the eddmann MCP wraps)
 const health = require('./lib/health');               // Health — biometric trend/flag analysis + non-medical insights
 const opsstatus = require('./lib/opsstatus');         // Manage — live "what is BhatBot managing" aggregator
+const localstt = require('./lib/localstt');           // Voice — offline mlx-whisper STT fallback (no cloud key)
 let _lastRetryAfterMs = 0;                            // last 429 Retry-After (ms) — self-drive budget governor reads it
 let _pendingSelfDrive = null;                         // Phase 6: a reflection-sanctioned session to start once the turn goes idle
 const vanguard = require('./lib/vanguard');           // Phase 1 — unified VANGUARD fleet codename roster (OVERMIND/FORGE/ORACLE/…)
@@ -5468,8 +5469,12 @@ ipcMain.handle('get-voice-config', () => {
     : ttsProvider === 'elevenlabs' ? !!c.elevenLabsKey
     : ttsProvider === 'openai' ? !!c.openaiKey
     : ttsProvider === 'piper' ? !!c.piperBin : false;
+  const hasCloudStt = !!(c.openaiKey || (c.sttProvider === 'groq' && c.groqKey));
+  let hasLocalStt = false; try { hasLocalStt = localstt.available(); } catch {}
   return {
-    hasOpenAI: !!(c.openaiKey || (c.sttProvider === 'groq' && c.groqKey)),
+    hasOpenAI: hasCloudStt,
+    hasLocalStt,
+    hasSTT: hasCloudStt || hasLocalStt,   // renderer arms MediaRecorder→Whisper whenever ANY STT exists
     picovoiceKey: c.picovoiceKey || null, wakeWord: c.wakeWord || 'jarvis', silenceMs: c.silenceMs || 2000,
     ttsEnabled: c.ttsEnabled !== false, ttsProvider, hasTTS,
     ttsSpeed: c.ttsSpeed != null ? c.ttsSpeed : 1.05,
@@ -6272,7 +6277,6 @@ async function transcribeAudio(audioBuffer, mimeType) {
   const useGroq = c.sttProvider === 'groq' && c.groqKey;             // fastest path (opt-in)
   const endpoint = useGroq ? 'https://api.groq.com/openai/v1/audio/transcriptions' : 'https://api.openai.com/v1/audio/transcriptions';
   const key = useGroq ? c.groqKey : c.openaiKey;
-  if (!key) return { error: 'No STT key (set openaiKey, or groqKey + sttProvider="groq").' };
   const primary = c.sttModel || (useGroq ? 'whisper-large-v3-turbo' : 'gpt-4o-mini-transcribe');
   const mt = (mimeType || 'audio/webm').split(';')[0].trim();
   const ext = mt === 'audio/mp4' || mt === 'audio/m4a' || mt === 'audio/aac' ? 'm4a'
@@ -6280,6 +6284,19 @@ async function transcribeAudio(audioBuffer, mimeType) {
     : mt === 'audio/ogg' ? 'ogg' : 'webm';
   const buf = Buffer.from(audioBuffer);
   const hint = sttVocabHint();
+  // Offline fallback (mlx-whisper): used when there's no cloud key, or when the cloud call fails.
+  // Keeps voice working with zero cloud dependency once scripts/whisper-setup.sh has run.
+  const tryLocal = async (tag) => {
+    if (!localstt.available()) return null;
+    const r = await localstt.transcribe(buf, ext, { model: c.localSttModel, prompt: hint, execPath: EXEC_PATH });
+    if (r && typeof r.text === 'string') return { success: true, text: r.text.trim(), model: 'local-whisper' + (tag ? '(' + tag + ')' : '') };
+    return { error: 'local STT: ' + ((r && r.error) || 'failed') };
+  };
+  if (!key) {
+    const local = await tryLocal('');
+    if (local) return local;
+    return { error: 'No STT key (set openaiKey, or groqKey + sttProvider="groq"), and offline Whisper is not set up — run scripts/whisper-setup.sh.' };
+  }
   const attempt = async (model) => {
     const form = new FormData();
     form.append('model', model);
@@ -6292,9 +6309,15 @@ async function transcribeAudio(audioBuffer, mimeType) {
   try {
     let res = await attempt(primary);
     if (!res.ok && !useGroq && primary !== 'whisper-1') res = await attempt('whisper-1'); // fallback if model unavailable on account
-    if (!res.ok) return { error: res.err || `STT ${res.status}` };
+    if (!res.ok) {
+      const local = await tryLocal('fallback');     // cloud errored → try offline before giving up
+      if (local && local.success) return local;
+      return { error: res.err || `STT ${res.status}` };
+    }
     return { success: true, text: res.text, model: primary };
   } catch (e) {
+    const local = await tryLocal('fallback');        // network down → offline
+    if (local && local.success) return local;
     return { error: e.message };
   }
 }
