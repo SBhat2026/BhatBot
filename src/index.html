@@ -549,7 +549,6 @@
       <span class="tag" id="health-insights" title="Ask BhatBot for a read" style="cursor:pointer;margin-left:6px">✦ Insights</span>
       <span class="panel-back" data-back style="margin-left:6px">← Chat</span></div>
     <div id="health-body"><div class="hl-empty">Loading biometrics…</div></div>
-    <div id="health-disclaimer">Decision-support over your own Garmin data — not medical advice.</div>
   </div>
 
   <!-- Manage — live snapshot of every background service + active work so you always know it's working -->
@@ -1575,14 +1574,18 @@ function setMicRecording(on) {
 
 // ---- Primary STT: MediaRecorder → OpenAI Whisper (reliable, server-side) ----
 let mediaRecorder = null, audioChunks = [], micStream = null, audioCtx = null, silenceAt = 0;
+let recStartAt = 0, silenceTick = null;
+const MAX_UTTER_MS = 15000;   // hard cap: always stop + transcribe even if it never goes "silent"
+const MIN_UTTER_MS = 600;     // don't end before this (avoids cutting on the wake-word tail)
 
 async function startVoice() {
   if (recording) return;
   stopSpeaking();                                     // don't talk over the user
   if (!voiceCfg.hasOpenAI) return startWebSpeech();   // fallback if no OpenAI key
-  try { micStream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
+  // echo/noise suppression so TTS bleed + room noise don't keep the silence detector "hot"
+  try { micStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } }); }
   catch (e) { addErr('Mic permission denied: ' + e.message); return; }
-  recording = true; setMicRecording(true); setOrbState('listening');
+  recording = true; recStartAt = Date.now(); setMicRecording(true); setOrbState('listening');
   tbar.textContent = '🎙 listening… (click mic to send)';
   audioChunks = [];
   mediaRecorder = new MediaRecorder(micStream, { mimeType: 'audio/webm' });
@@ -1592,28 +1595,36 @@ async function startVoice() {
   watchSilence(micStream);
 }
 
-// auto-stop 5s after you stop talking (RMS on a WebAudio analyser)
+// Auto-stop after you stop talking. Uses setInterval (NOT requestAnimationFrame — rAF is throttled
+// to ~0 Hz when the window is hidden/minimized, which in ambient mode left the mic "listening" forever
+// and never transcribing). Adapts to the room-noise floor, requires that you actually spoke before a
+// silence-end, and enforces a hard MAX_UTTER_MS cap so a transcribe ALWAYS fires.
 function watchSilence(stream) {
   audioCtx = new (window.AudioContext || window.webkitAudioContext)();
   const src = audioCtx.createMediaStreamSource(stream);
   const an = audioCtx.createAnalyser(); an.fftSize = 512; src.connect(an);
   const data = new Uint8Array(an.frequencyBinCount);
   silenceAt = Date.now();
-  const tick = () => {
-    if (!recording) return;
+  let floor = 0.012, calibN = 0, spoke = false;
+  clearInterval(silenceTick);
+  silenceTick = setInterval(() => {
+    if (!recording) { clearInterval(silenceTick); silenceTick = null; return; }
     an.getByteTimeDomainData(data);
     let sum = 0; for (const v of data) { const x = (v - 128) / 128; sum += x * x; }
     const rms = Math.sqrt(sum / data.length);
-    if (rms > 0.025) silenceAt = Date.now();
-    else if (Date.now() - silenceAt > SILENCE_MS) { endVoice(); return; }
-    requestAnimationFrame(tick);
-  };
-  requestAnimationFrame(tick);
+    const elapsed = Date.now() - recStartAt;
+    if (calibN < 25) { floor = (floor * calibN + rms) / (calibN + 1); calibN++; }   // first ~400ms = room floor
+    const gate = Math.max(0.02, floor * 2.2);
+    if (rms > gate) { silenceAt = Date.now(); spoke = true; }
+    else if (spoke && elapsed > MIN_UTTER_MS && Date.now() - silenceAt > SILENCE_MS) { endVoice(); return; }
+    if (elapsed > MAX_UTTER_MS) { endVoice(); return; }   // hard stop → guarantees a transcribe
+  }, 100);
 }
 
-function endVoice() {                 // manual mic click OR 5s silence
+function endVoice() {                 // manual mic click OR end-of-speech / hard cap
   if (!recording) return;
-  recording = false; if (orb && orb.dataset.state === 'listening') setOrbState('idle');
+  recording = false; clearInterval(silenceTick); silenceTick = null;
+  if (orb && orb.dataset.state === 'listening') setOrbState('idle');
   try { if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop(); } catch {}
 }
 
