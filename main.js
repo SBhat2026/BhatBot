@@ -6546,6 +6546,21 @@ ipcMain.handle('chat', async (event, { history }) => {
   // Pipeline toggle by voice/text — flips config.pipeline.enabled without the settings UI.
   const toggle = maybeTogglePipeline(ut);
   if (toggle) return { text: toggle, history: [...history, { role: 'assistant', content: toggle }] };
+  // Deterministic self-improvement trigger — "begin/start/run self-improvement" (or "improve
+  // yourself") reliably invokes the self_drive tool instead of depending on the model to decide.
+  // Routes THROUGH executeTool's step-up gate (the confirm card), so the human approval is still
+  // required — this never bypasses the guardrail. Short + non-question guard avoids false hits on
+  // conversation *about* self-improvement.
+  if (ut.length < 64 && !/\?/.test(ut) &&
+      (/\b(begin|start|run|kick ?off)\b[\s\S]*\bself[\s-]?(improve(ment)?|driv)/i.test(ut) || /^\s*improve yourself\b/i.test(ut))) {
+    try {
+      const r = await executeTool('self_drive', { action: 'start', reason: 'manual' });
+      const msg = (r && r.success)
+        ? '🚀 Starting a self-improvement session on an isolated local branch (never pushed, verify-gated). Approve the card to proceed — say "stop improving yourself" to halt.'
+        : ('Could not start self-drive: ' + ((r && (r.error || r.note)) || 'unknown') + (isRemote() ? ' (self-drive must be started from the desktop app — it requires an in-person approval).' : ''));
+      return { text: msg, history: [...history, { role: 'assistant', content: msg }] };
+    } catch (e) { const m = 'Self-drive start failed: ' + (e && e.message || e); return { text: m, history: [...history, { role: 'assistant', content: m }] }; }
+  }
   // Voice-within-5s guarantee: own the TTS stream from the first millisecond. The ack
   // speaks immediately for action requests; the watchdog covers everything else if no
   // audio has reached the speaker by 2.5s (slow router / cold model / long trim).
