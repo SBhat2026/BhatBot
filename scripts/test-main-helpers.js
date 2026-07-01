@@ -30,7 +30,7 @@ function extract(src, name) {
 
 const main = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
 // eslint-disable-next-line no-new-func
-const load = (name) => new Function('path', 'os', extract(main, name) + '\nreturn ' + name + ';')(path, os);
+const load = (name) => new Function('path', 'os', 'fs', extract(main, name) + '\nreturn ' + name + ';')(path, os, fs);
 
 const sanitizeSteering = load('sanitizeSteering');
 const expandPath = load('expandPath');
@@ -54,6 +54,24 @@ ok(expandPath('${HOME}/notes.md') === path.join(os.homedir(), 'notes.md'), 'path
 ok(expandPath('/abs/path') === '/abs/path', 'path: absolute path unchanged');
 ok(expandPath('relative/path') === 'relative/path', 'path: relative path unchanged');
 ok(expandPath('~notuser/x') === '~notuser/x', 'path: ~user form left alone (no false expand)');
+
+// ---- expandPath: foreign-home remap (wrong /Users/<name>/ segment → real home) ----
+const home = os.homedir();
+const root = path.dirname(home);       // /Users
+const self = path.basename(home);      // e.g. siddhantbhat
+const testDir = fs.mkdtempSync(path.join(home, '.bhatbot-exptest-'));
+try {
+  const realFile = path.join(testDir, 'package.json');
+  fs.writeFileSync(realFile, '{}');
+  const rel = realFile.slice(root.length + 1 + self.length + 1); // .bhatbot-exptest-XXX/package.json
+  const foreign = path.join(root, 'wronguser', rel);             // /Users/wronguser/.bhatbot-.../package.json
+  ok(expandPath(foreign) === realFile, 'path: foreign /Users/<name> remapped to real home when target exists');
+  const foreignMissing = path.join(root, 'wronguser', 'no-such-dir-xyz', 'nope.txt');
+  ok(expandPath(foreignMissing) === foreignMissing, 'path: foreign home left alone when remap target absent');
+  ok(expandPath(realFile) === realFile, 'path: correct home path unchanged');
+} finally {
+  try { fs.rmSync(testDir, { recursive: true, force: true }); } catch {}
+}
 
 // ---- isSecretPath ----
 const bb = path.join(os.homedir(), '.bhatbot');

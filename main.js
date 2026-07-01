@@ -2847,6 +2847,28 @@ function expandPath(p) {
   let out = p.trim();
   if (out === '~' || out.startsWith('~/')) out = path.join(os.homedir(), out.slice(1));
   out = out.replace(/^\$\{?HOME\}?(?=\/|$)/, os.homedir());
+  // Foreign-home remap. The model sometimes emits an absolute path under the WRONG
+  // username (e.g. /Users/siddhant/bhatbot/package.json instead of the real
+  // /Users/siddhantbhat/...), which ENOENTs and forced a run_shell fallback (the
+  // read_file failures seen in the transcript). If a path sits directly under the
+  // home root (/Users on macOS, /home on Linux) but names a different user than the
+  // real home, and that path is missing while the same path under the real home
+  // exists, rewrite the user segment so the file tools "just work". Guarded by the
+  // existence check so legit siblings (e.g. /Users/Shared/...) are never touched.
+  try {
+    const home = os.homedir();
+    const root = path.dirname(home);   // /Users
+    const self = path.basename(home);  // siddhantbhat
+    if (root && root !== '/' && out.startsWith(root + '/')) {
+      const rest = out.slice(root.length + 1);
+      const slash = rest.indexOf('/');
+      const user = slash === -1 ? rest : rest.slice(0, slash);
+      if (user && user !== self) {
+        const remapped = slash === -1 ? home : path.join(home, rest.slice(slash + 1));
+        if (!fs.existsSync(out) && fs.existsSync(remapped)) out = remapped;
+      }
+    }
+  } catch {}
   return out;
 }
 
