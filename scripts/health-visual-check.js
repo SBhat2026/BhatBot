@@ -87,9 +87,9 @@ function buildHistory() {
   </body></html>`;
 
   function renderHealthSrc() {
-    // lift the exact renderHealth function text out of src/index.html
-    const m = idx.match(/function renderHealth\(p\) \{[\s\S]*?\n\}/);
-    return m ? m[0] : (() => { throw new Error('renderHealth not found in index.html'); })();
+    // lift renderHealth + the canvas helpers (drawSpark/drawChart/_cvCtx/_range/_col) as one block
+    const m = idx.match(/let _hlChartKey = 'resting_hr';[\s\S]*?function drawChart\(cv, pts, meta\) \{[\s\S]*?\n\}/);
+    return m ? m[0] : (() => { throw new Error('renderHealth block not found in index.html'); })();
   }
   function hlFmtSrc() {
     // lift the exact hlFmt helper out of src/index.html so formatting is faithful

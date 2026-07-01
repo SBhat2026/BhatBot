@@ -17,6 +17,10 @@ contextBridge.exposeInMainWorld('bhatbot', {
   getVoiceSettings: () => ipcRenderer.invoke('get-voice-settings'),                 // D — current JARVIS voice params
   setVoiceSetting: (key, value) => ipcRenderer.invoke('set-voice-setting', { key, value }),
   importVoiceSamples: () => ipcRenderer.invoke('import-voice-samples'),             // D — clone/improve voice from audio files
+  listVoices: () => ipcRenderer.invoke('list-voices'),                              // Voice panel — ElevenLabs voice picker
+  setVoice: (voiceId) => ipcRenderer.invoke('set-voice', { voiceId }),
+  setVoiceModel: (model) => ipcRenderer.invoke('set-voice-model', { model }),
+  applyVoicePreset: (preset) => ipcRenderer.invoke('apply-voice-preset', { preset }),
   onFleetUpdate: (cb) => ipcRenderer.on('fleet-update', (_e, d) => cb(d)),           // C-Fleet — live suit relay
   sendFleetFeedback: (id, text) => ipcRenderer.invoke('fleet-feedback', { id, text }),
   sendFleetControl: (id, action) => ipcRenderer.invoke('fleet-control', { id, action }),

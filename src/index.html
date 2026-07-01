@@ -118,20 +118,41 @@
   .stage-panel { display: none; flex: 1; min-height: 0; flex-direction: column; }
   .stage-panel.active { display: flex; }
   /* Health + Manage panels */
-  #health-body, #ops-body { flex: 1; min-height: 0; overflow-y: auto; padding: 10px 12px; }
+  #health-body, #ops-body, #voice-body { flex: 1; min-height: 0; overflow-y: auto; padding: 10px 12px; font-family: var(--font-system); }
   .hl-empty { color: #7a8aa0; padding: 24px 8px; text-align: center; font-size: 13px; }
   .hl-dim { color: #7a8aa0; font-size: 11px; }
-  .hl-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(108px, 1fr)); gap: 8px; }
-  .hl-card { background: rgba(255,255,255,.03); border: 1px solid rgba(120,160,200,.14); border-radius: 9px; padding: 8px 9px; }
-  .hl-k { font-size: 10.5px; color: #9fb2c8; letter-spacing: .3px; }
-  .hl-v { font-size: 19px; font-weight: 600; margin: 2px 0 1px; }
+  .hl-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+  /* HUD-styled metric card: glassy, cyan edge-glow, faint scanline, sparkline footer */
+  .hl-card { position: relative; background: linear-gradient(160deg, rgba(20,32,48,.55), rgba(10,16,26,.65)); border: 1px solid rgba(90,180,230,.22); border-radius: 10px; padding: 9px 10px 6px; overflow: hidden; box-shadow: inset 0 0 18px rgba(40,120,180,.08), 0 0 0 1px rgba(0,0,0,.2); }
+  .hl-card::before { content: ''; position: absolute; inset: 0; background: linear-gradient(90deg, transparent, rgba(80,200,255,.05), transparent); pointer-events: none; }
+  .hl-card.up { border-color: rgba(79,211,138,.32); } .hl-card.down { border-color: rgba(255,122,122,.30); }
+  .hl-k { font-size: 10.5px; color: #8fb6d6; letter-spacing: .4px; text-transform: uppercase; }
+  .hl-v { font-size: 22px; font-weight: 600; margin: 3px 0 1px; color: #e8f4ff; text-shadow: 0 0 12px rgba(80,180,255,.25); font-variant-numeric: tabular-nums; }
   .hl-t { font-size: 10.5px; } .hl-t.up { color: #4fd38a; } .hl-t.down { color: #ff7a7a; } .hl-t.flat { color: #7a8aa0; }
-  .hl-sec, .op-sec { font-size: 10.5px; text-transform: uppercase; letter-spacing: .6px; color: #6fd0ff; margin: 14px 2px 6px; }
+  .hl-spark { display: block; width: 100%; height: 26px; margin-top: 5px; opacity: .9; }
+  .hl-chart-wrap { margin: 4px 2px 2px; }
+  .hl-chart { display: block; width: 100%; height: 150px; border: 1px solid rgba(90,180,230,.16); border-radius: 10px; background: linear-gradient(180deg, rgba(16,26,40,.5), rgba(8,12,20,.5)); }
+  .hl-chart-tabs { display: flex; flex-wrap: wrap; gap: 5px; margin: 8px 0 6px; }
+  .hl-ctab { font-size: 10.5px; padding: 3px 9px; border: 1px solid rgba(90,180,230,.2); border-radius: 20px; color: #9fb2c8; cursor: pointer; }
+  .hl-ctab.on { background: rgba(80,180,255,.14); border-color: rgba(80,180,255,.5); color: #d8f2ff; }
+  .hl-sec, .op-sec, .vc-sec { font-size: 10.5px; text-transform: uppercase; letter-spacing: .6px; color: #6fd0ff; margin: 16px 2px 8px; text-shadow: 0 0 10px rgba(80,180,255,.2); }
   .hl-flag { font-size: 12px; line-height: 1.4; padding: 7px 9px; border-radius: 8px; margin-bottom: 6px; border-left: 3px solid #46566b; background: rgba(255,255,255,.025); }
   .hl-flag.concern { border-left-color: #ff7a7a; } .hl-flag.watch { border-left-color: #e6b450; } .hl-flag.good { border-left-color: #4fd38a; }
   .hl-act, .op-row { font-size: 11.5px; padding: 3px 2px; }
   #health-disclaimer { padding: 6px 12px; font-size: 10px; color: #6a7686; border-top: 1px solid rgba(120,160,200,.1); }
   .hl-insight-text { font-size: 12.5px; line-height: 1.5; }
+  /* Voice panel */
+  .vc-row { margin: 0 2px 12px; }
+  .vc-lab { display: flex; align-items: baseline; justify-content: space-between; font-size: 12px; color: #cfe0f0; margin-bottom: 5px; }
+  .vc-val { font-size: 12px; color: #6fd0ff; font-variant-numeric: tabular-nums; }
+  .vc-slider { -webkit-appearance: none; width: 100%; height: 4px; border-radius: 3px; background: linear-gradient(90deg, rgba(80,180,255,.55), rgba(80,180,255,.15)); outline: none; }
+  .vc-slider::-webkit-slider-thumb { -webkit-appearance: none; width: 15px; height: 15px; border-radius: 50%; background: #d8f2ff; border: 2px solid #39d7ff; box-shadow: 0 0 8px rgba(80,200,255,.7); cursor: pointer; }
+  .vc-hint { font-size: 10px; color: #7a8aa0; margin-top: 4px; }
+  .vc-presets { display: flex; flex-wrap: wrap; gap: 6px; margin: 2px 2px 4px; }
+  .vc-preset { cursor: pointer; }
+  .vc-select { width: 100%; background: rgba(16,26,40,.7); color: #dceaf6; border: 1px solid rgba(90,180,230,.25); border-radius: 8px; padding: 7px 9px; font-size: 12.5px; font-family: var(--font-system); }
+  .vc-toggle label { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #cfe0f0; cursor: pointer; }
+  .vc-note { font-size: 11px; line-height: 1.5; color: #8ea6bd; margin: 14px 2px 4px; padding: 10px; border: 1px solid rgba(90,180,230,.14); border-radius: 9px; background: rgba(80,180,255,.04); }
   .op-svcs { display: flex; flex-direction: column; gap: 2px; }
   .op-svc { display: flex; align-items: center; gap: 8px; padding: 5px 4px; font-size: 12.5px; border-bottom: 1px solid rgba(120,160,200,.06); }
   .op-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; box-shadow: 0 0 6px currentColor; }
@@ -499,6 +520,7 @@
     <span class="tag tab" data-panel="vanguard" title="Agent Vanguard — live parallel suits">🦾 Vanguard</span>
     <span class="tag tab" data-panel="health" title="Biometrics from Garmin — trends + suggestions">❤ Health</span>
     <span class="tag tab" data-panel="manage" title="What BhatBot is managing right now">🛰 Manage</span>
+    <span class="tag tab" data-panel="voice" title="Tune BhatBot's JARVIS voice">🎚 Voice</span>
     <span class="tag" id="open-browser" title="Agent browser (own desktop window)">🌐 Browser</span>
     <span class="tag ctx" id="ctxtag">⬡ …</span>
   </div>
@@ -555,6 +577,14 @@
   <div id="manage-panel" class="stage-panel">
     <div class="panel-head"><b>🛰 MANAGE</b><span style="flex:1"></span><span id="ops-summary" class="hl-dim"></span><span class="panel-back" data-back style="margin-left:8px">← Chat</span></div>
     <div id="ops-body"><div class="hl-empty">Loading status…</div></div>
+  </div>
+
+  <!-- Voice — tune the JARVIS voice live (character sliders, voice picker, presets, preview) -->
+  <div id="voice-panel" class="stage-panel">
+    <div class="panel-head"><b>🎚 VOICE</b><span style="flex:1"></span>
+      <span class="tag" id="voice-preview" title="Hear a sample line" style="cursor:pointer">▶ Preview</span>
+      <span class="panel-back" data-back style="margin-left:6px">← Chat</span></div>
+    <div id="voice-body"><div class="hl-empty">Loading voice…</div></div>
   </div>
 
   <!-- Voice-first project log -->
@@ -1186,7 +1216,8 @@ function showPanel(id) {
   else if (id === 'notes') loadNotes();
   else if (id === 'health') initHealth();
   else if (id === 'manage') initManage();
-  else stopManagePoll();
+  else if (id === 'voice') initVoice();
+  if (id !== 'manage') stopManagePoll();
 }
 // Tab clicks. Code uses the existing docked terminal overlay; Browser is its own desktop window.
 document.querySelectorAll('#ctxbar .tab').forEach((t) =>
@@ -1205,22 +1236,70 @@ window.bhatbot.onStudioReload && window.bhatbot.onStudioReload(() => reloadStudi
 // ===================== HEALTH panel (Garmin biometrics) =====================
 const HL_ICON = { resting_hr: '❤️', hrv_avg: '〰️', sleep_hours: '😴', sleep_score: '🌙', body_battery: '🔋', stress_avg: '😰', training_readiness: '⚡', steps: '👟', intensity_minutes: '🏃', vo2max: '🫁', spo2_avg: '🩸', respiration_avg: '🌬️', weight_kg: '⚖️' };
 function hlFmt(v, unit) { if (v == null) return '—'; const r = Math.abs(v) >= 100 ? Math.round(v) : Math.round(v * 10) / 10; return r + (unit ? ' ' + unit : ''); }
+let _hlChartKey = 'resting_hr';
 function renderHealth(p) {
   const body = $('#health-body'); if (!body) return;
   if (!p || p.error || !p.days_tracked) { body.innerHTML = '<div class="hl-empty">' + (p && p.error ? p.error : 'No biometric data yet. One-time setup: store your Garmin password in Keychain, set config.garmin.email, then run <code>scripts/garmin-setup.sh</code>.') + '</div>'; return; }
-  const t = p.trends || {};
+  const t = p.trends || {}; const series = p.series || {};
   const order = ['resting_hr', 'hrv_avg', 'sleep_hours', 'sleep_score', 'body_battery', 'stress_avg', 'training_readiness', 'steps', 'intensity_minutes', 'vo2max', 'spo2_avg', 'weight_kg'];
-  const cards = order.filter((k) => t[k] && t[k].latest != null).map((k) => {
+  const present = order.filter((k) => t[k] && t[k].latest != null);
+  const cards = present.map((k) => {
     const m = t[k]; const arrow = m.direction === 'up' ? '▲' : (m.direction === 'down' ? '▼' : '·');
     const cls = m.improving === true ? 'up' : (m.improving === false ? 'down' : 'flat');
-    return `<div class="hl-card"><div class="hl-k">${HL_ICON[k] || ''} ${m.label}</div><div class="hl-v">${hlFmt(m.latest, m.unit)}</div><div class="hl-t ${cls}">${arrow} ${m.delta != null ? (m.delta > 0 ? '+' : '') + hlFmt(m.delta, '') : ''} <span class="hl-dim">vs avg ${hlFmt(m.avg30 != null ? m.avg30 : m.avg7, '')}</span></div></div>`;
+    return `<div class="hl-card ${cls}"><div class="hl-k">${HL_ICON[k] || ''} ${m.label}</div><div class="hl-v">${hlFmt(m.latest, m.unit)}</div><div class="hl-t ${cls}">${arrow} ${m.delta != null ? (m.delta > 0 ? '+' : '') + hlFmt(m.delta, '') : ''} <span class="hl-dim">vs avg ${hlFmt(m.avg30 != null ? m.avg30 : m.avg7, '')}</span></div><canvas class="hl-spark" data-k="${k}"></canvas></div>`;
   }).join('');
+  const chartable = present.filter((k) => series[k] && series[k].length > 1);
+  if (!chartable.includes(_hlChartKey)) _hlChartKey = chartable[0] || null;
+  const tabs = chartable.map((k) => `<span class="hl-ctab ${k === _hlChartKey ? 'on' : ''}" data-k="${k}">${t[k].label}</span>`).join('');
   const flags = (p.flags || []).map((f) => `<div class="hl-flag ${f.level}"><b>${f.level === 'concern' ? '⚠️' : (f.level === 'good' ? '✅' : '👀')} ${f.metric.replace(/_/g, ' ')}</b> — ${f.message}</div>`).join('');
   const acts = (p.activities || []).slice(0, 3).map((a) => `<div class="hl-act">${a.type || 'activity'} · ${a.name || ''} · ${a.duration_s ? Math.round(a.duration_s / 60) + 'm' : ''} ${a.distance_m ? (Math.round(a.distance_m / 100) / 10) + 'km' : ''} ${a.avg_hr ? '· ' + a.avg_hr + ' bpm' : ''}</div>`).join('');
   body.innerHTML = `<div class="hl-grid">${cards}</div>`
+    + (chartable.length ? `<div class="hl-sec">History · 30 days</div><div class="hl-chart-tabs">${tabs}</div><div class="hl-chart-wrap"><canvas class="hl-chart" id="hl-chart"></canvas></div>` : '')
     + (flags ? `<div class="hl-sec">Trends &amp; where to improve</div><div class="hl-flags">${flags}</div>` : '')
     + (acts ? `<div class="hl-sec">Recent activities</div>${acts}` : '')
     + `<div id="hl-insight"></div>`;
+  // draw after layout so canvas clientWidth is real
+  requestAnimationFrame(() => {
+    body.querySelectorAll('.hl-spark').forEach((cv) => drawSpark(cv, series[cv.dataset.k], t[cv.dataset.k]));
+    if (_hlChartKey) drawChart($('#hl-chart'), series[_hlChartKey], t[_hlChartKey]);
+  });
+  body.querySelectorAll('.hl-ctab').forEach((tb) => tb.addEventListener('click', () => {
+    _hlChartKey = tb.dataset.k; body.querySelectorAll('.hl-ctab').forEach((x) => x.classList.toggle('on', x === tb));
+    drawChart($('#hl-chart'), series[_hlChartKey], t[_hlChartKey]);
+  }));
+}
+// ---- canvas charting (DPR-aware; skips if the panel isn't laid out yet) ----
+function _cvCtx(cv, cssH) {
+  const dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth || 0, h = cssH || cv.clientHeight || 0;
+  if (w < 2 || h < 2) return null;
+  cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr);
+  const ctx = cv.getContext('2d'); ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return { ctx, w, h };
+}
+function _range(pts) { const vs = pts.map((p) => p.v); let min = Math.min(...vs), max = Math.max(...vs); if (min === max) { min -= 1; max += 1; } return { min, max }; }
+function _col(meta) { return meta && meta.improving === true ? '#4fd38a' : (meta && meta.improving === false ? '#ff7a7a' : '#6fd0ff'); }
+function drawSpark(cv, pts, meta) {
+  if (!pts || pts.length < 2) return; const g = _cvCtx(cv, 26); if (!g) return; const { ctx, w, h } = g;
+  const { min, max } = _range(pts); const col = _col(meta); const pad = 2;
+  const X = (i) => pad + (w - 2 * pad) * (i / (pts.length - 1)), Y = (v) => h - pad - (h - 2 * pad) * ((v - min) / (max - min));
+  ctx.beginPath(); ctx.moveTo(X(0), Y(pts[0].v)); pts.forEach((p, i) => ctx.lineTo(X(i), Y(p.v)));
+  ctx.lineTo(X(pts.length - 1), h); ctx.lineTo(X(0), h); ctx.closePath();
+  const fill = ctx.createLinearGradient(0, 0, 0, h); fill.addColorStop(0, col + '40'); fill.addColorStop(1, col + '00'); ctx.fillStyle = fill; ctx.fill();
+  ctx.beginPath(); pts.forEach((p, i) => i ? ctx.lineTo(X(i), Y(p.v)) : ctx.moveTo(X(i), Y(p.v))); ctx.strokeStyle = col; ctx.lineWidth = 1.4; ctx.stroke();
+  ctx.beginPath(); ctx.arc(X(pts.length - 1), Y(pts[pts.length - 1].v), 2, 0, 7); ctx.fillStyle = col; ctx.fill();
+}
+function drawChart(cv, pts, meta) {
+  if (!cv) return; const g = _cvCtx(cv, 150); if (!g) return; const { ctx, w, h } = g; ctx.clearRect(0, 0, w, h);
+  if (!pts || pts.length < 2) { ctx.fillStyle = '#7a8aa0'; ctx.font = '12px -apple-system,sans-serif'; ctx.fillText('Not enough data yet', 10, 22); return; }
+  const { min, max } = _range(pts); const padL = 6, padR = 10, padT = 12, padB = 16; const col = _col(meta);
+  const X = (i) => padL + (w - padL - padR) * (i / (pts.length - 1)), Y = (v) => (h - padB) - (h - padT - padB) * ((v - min) / (max - min));
+  ctx.strokeStyle = 'rgba(120,160,200,.12)'; ctx.fillStyle = '#5f7186'; ctx.font = '9px -apple-system,sans-serif'; ctx.lineWidth = 1;
+  for (let i = 0; i <= 2; i++) { const yy = padT + (h - padT - padB) * i / 2; ctx.beginPath(); ctx.moveTo(padL, yy); ctx.lineTo(w - padR, yy); ctx.stroke(); ctx.fillText(String(Math.round((max - (max - min) * i / 2) * 10) / 10), padL + 2, yy - 2); }
+  ctx.beginPath(); ctx.moveTo(X(0), Y(pts[0].v)); pts.forEach((p, i) => ctx.lineTo(X(i), Y(p.v))); ctx.lineTo(X(pts.length - 1), h - padB); ctx.lineTo(X(0), h - padB); ctx.closePath();
+  const fill = ctx.createLinearGradient(0, padT, 0, h - padB); fill.addColorStop(0, col + '30'); fill.addColorStop(1, col + '00'); ctx.fillStyle = fill; ctx.fill();
+  ctx.shadowColor = col; ctx.shadowBlur = 6; ctx.beginPath(); pts.forEach((p, i) => i ? ctx.lineTo(X(i), Y(p.v)) : ctx.moveTo(X(i), Y(p.v))); ctx.strokeStyle = col; ctx.lineWidth = 2; ctx.stroke(); ctx.shadowBlur = 0;
+  ctx.beginPath(); ctx.arc(X(pts.length - 1), Y(pts[pts.length - 1].v), 3, 0, 7); ctx.fillStyle = col; ctx.fill();
 }
 async function initHealth() { try { renderHealth(await window.bhatbot.getBiometrics()); } catch (e) { renderHealth({ error: String(e) }); } }
 window.bhatbot.onBiometricsUpdate && window.bhatbot.onBiometricsUpdate((p) => { if (curPanel === 'health') renderHealth(p); });
@@ -1249,6 +1328,85 @@ function renderOps(s) {
 async function refreshOps() { try { renderOps(await window.bhatbot.getOpsStatus()); } catch (e) { renderOps({ error: String(e) }); } }
 function initManage() { refreshOps(); stopManagePoll(); _opsTimer = setInterval(() => { if (curPanel === 'manage') refreshOps(); else stopManagePoll(); }, 4000); }
 function stopManagePoll() { if (_opsTimer) { clearInterval(_opsTimer); _opsTimer = null; } }
+
+// ===================== VOICE panel (tune the JARVIS voice live) =====================
+// Synth reads config per-utterance, so every change takes effect on the very next spoken line.
+// JARVIS (Paul Bettany): clipped British RP, calm/measured/unflappable, dry wit in DEADPAN — so the
+// JARVIS preset runs high stability + strong similarity + LOW style (theatrics kill the wit).
+let _voiceState = null;
+const VOICE_SLIDERS = [
+  { key: 'ttsStability',  field: 'stability',       label: 'Stability',  min: 0, max: 1, step: 0.01, hint: 'Higher = calm, even, unflappable (JARVIS). Too high → flat.' },
+  { key: 'ttsSimilarity', field: 'similarity_boost', label: 'Similarity', min: 0, max: 1, step: 0.01, hint: 'Holds the cloned voice timbre.' },
+  { key: 'ttsStyle',      field: 'style',           label: 'Style',      min: 0, max: 1, step: 0.01, hint: 'Low = dry deadpan wit (JARVIS). High = theatrical.' },
+  { key: 'ttsSpeed',      field: 'speed',           label: 'Pace',       min: 0.7, max: 1.2, step: 0.01, hint: 'Unhurried butler pace ≈ 0.97.' },
+];
+const VOICE_SAMPLE = 'Good evening, sir. All systems are operational — shall I run the morning brief?';
+
+async function initVoice() {
+  const body = $('#voice-body'); if (!body) return;
+  body.innerHTML = '<div class="hl-empty">Loading voice…</div>';
+  let s, vl;
+  try { s = await window.bhatbot.getVoiceSettings(); } catch (e) { s = { error: String(e) }; }
+  try { vl = await window.bhatbot.listVoices(); } catch { vl = { voices: [] }; }
+  _voiceState = s;
+  renderVoice(s, vl);
+}
+function renderVoice(s, vl) {
+  const body = $('#voice-body'); if (!body) return;
+  if (!s || s.hasElevenLabs === false) {
+    body.innerHTML = '<div class="hl-empty">ElevenLabs isn\'t configured. Set <code>elevenLabsKey</code> in config, then reopen this tab to tune the voice.</div>';
+    return;
+  }
+  const sliders = VOICE_SLIDERS.map((sl) => {
+    const v = s[sl.field] != null ? s[sl.field] : (sl.min + sl.max) / 2;
+    return `<div class="vc-row">
+      <div class="vc-lab">${sl.label}<span class="vc-val" id="vv-${sl.key}">${Number(v).toFixed(2)}</span></div>
+      <input type="range" class="vc-slider" id="vs-${sl.key}" min="${sl.min}" max="${sl.max}" step="${sl.step}" value="${v}">
+      <div class="vc-hint">${sl.hint}</div></div>`;
+  }).join('');
+  const voices = (vl && vl.voices) || [];
+  const active = (vl && vl.active) || s.voiceId;
+  const opts = voices.length
+    ? voices.map((v) => { const lab = [v.labels && v.labels.gender, v.labels && v.labels.age, v.labels && v.labels.accent].filter(Boolean).join(' · '); return `<option value="${v.voice_id}" ${v.voice_id === active ? 'selected' : ''}>${v.name}${lab ? ' — ' + lab : ''}</option>`; }).join('')
+    : `<option value="${active}" selected>current voice</option>`;
+  const model = (vl && vl.model) || 'eleven_flash_v2_5';
+  const MODELS = [['eleven_flash_v2_5', 'Flash v2.5 (fastest)'], ['eleven_turbo_v2_5', 'Turbo v2.5'], ['eleven_multilingual_v2', 'Multilingual v2 (richest)'], ['eleven_v3', 'v3 (most expressive)']];
+  body.innerHTML = `
+    <div class="vc-sec">Character presets</div>
+    <div class="vc-presets">
+      <span class="tag vc-preset" data-preset="jarvis">JARVIS</span>
+      <span class="tag vc-preset" data-preset="jarvis_younger">JARVIS · younger</span>
+      <span class="tag vc-preset" data-preset="natural">Natural</span>
+    </div>
+    <div class="vc-sec">Fine tuning</div>
+    ${sliders}
+    <div class="vc-row vc-toggle"><label><input type="checkbox" id="vc-boost" ${s.use_speaker_boost ? 'checked' : ''}> Speaker boost (clarity)</label></div>
+    <div class="vc-sec">Voice &amp; model</div>
+    <div class="vc-row"><div class="vc-lab">Voice <span class="vc-hint" style="margin:0">younger timbre = a younger voice (no pitch slider in v2)</span></div>
+      <select id="vc-voice" class="vc-select">${opts}</select>
+      <span class="tag" id="vc-clone" style="cursor:pointer;margin-top:6px;display:inline-block">🎙 Import samples → clone</span></div>
+    <div class="vc-row"><div class="vc-lab">Model</div>
+      <select id="vc-model" class="vc-select">${MODELS.map(([m, n]) => `<option value="${m}" ${m === model ? 'selected' : ''}>${n}</option>`).join('')}</select></div>
+    <div class="vc-note">JARVIS (Paul Bettany): clipped British RP, calm &amp; measured, dry wit in <i>deadpan</i> — the humor is the formal delivery against absurd content, never theatrics. Hence high stability + low style. Tap <b>▶ Preview</b> to hear changes.</div>`;
+  // wire sliders (live; synth reads config per-utterance)
+  VOICE_SLIDERS.forEach((sl) => {
+    const el = $('#vs-' + sl.key); const out = $('#vv-' + sl.key); if (!el) return;
+    el.addEventListener('input', () => { out.textContent = Number(el.value).toFixed(2); });
+    el.addEventListener('change', async () => { try { await window.bhatbot.setVoiceSetting(sl.key, Number(el.value)); if (_voiceState) _voiceState[sl.field] = Number(el.value); } catch {} });
+  });
+  const boost = $('#vc-boost'); if (boost) boost.addEventListener('change', () => window.bhatbot.setVoiceSetting('ttsSpeakerBoost', boost.checked));
+  const vsel = $('#vc-voice'); if (vsel) vsel.addEventListener('change', async () => { await window.bhatbot.setVoice(vsel.value); previewVoice(); });
+  const msel = $('#vc-model'); if (msel) msel.addEventListener('change', () => window.bhatbot.setVoiceModel(msel.value));
+  const clone = $('#vc-clone'); if (clone) clone.addEventListener('click', async () => { clone.textContent = '⏳ importing…'; try { const r = await window.bhatbot.importVoiceSamples(); clone.textContent = r && r.success ? '✓ cloned — active' : (r && r.canceled ? '🎙 Import samples → clone' : '⚠ ' + ((r && r.error) || 'failed')); if (r && r.success) initVoice(); } catch { clone.textContent = '⚠ failed'; } });
+  document.querySelectorAll('.vc-preset').forEach((b) => b.addEventListener('click', async () => {
+    document.querySelectorAll('.vc-preset').forEach((x) => x.classList.remove('rec')); b.classList.add('rec');
+    try { await window.bhatbot.applyVoicePreset(b.dataset.preset); } catch {}
+    await initVoice(); previewVoice();
+  }));
+}
+async function previewVoice() { try { ttsIdle = false; await speak(VOICE_SAMPLE); } catch {} }
+$('#voice-preview') && $('#voice-preview').addEventListener('click', previewVoice);
+
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && curPanel !== 'chat') showPanel('chat'); });
 
 // ===================== session notes (voice-first project log) =====================

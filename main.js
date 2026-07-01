@@ -5574,6 +5574,50 @@ ipcMain.handle('import-voice-samples', async () => {
   }
   return out;
 });
+// List the ElevenLabs voices on the account (for the Voice panel picker). Younger British male
+// voices give JARVIS a younger timbre with the same delivery (v2 models have no pitch control —
+// age = voice choice). Returns a slim list; degrades gracefully without a key.
+ipcMain.handle('list-voices', async () => {
+  const c = loadConfig();
+  if (!c.elevenLabsKey) return { error: 'no elevenLabsKey', voices: [] };
+  try {
+    const r = await fetch('https://api.elevenlabs.io/v1/voices', { headers: { 'xi-api-key': c.elevenLabsKey } });
+    if (!r.ok) return { error: `elevenlabs ${r.status}`, voices: [] };
+    const j = await r.json();
+    const voices = (j.voices || []).map((v) => ({
+      voice_id: v.voice_id, name: v.name, category: v.category,
+      labels: v.labels || {}, preview: v.preview_url || null,
+    }));
+    return { voices, active: c.ttsVoice || c.elevenLabsVoiceId || 'pNInz6obpgDQGcFmaJgB', model: c.ttsModel || 'eleven_flash_v2_5' };
+  } catch (e) { return { error: e.message, voices: [] }; }
+});
+ipcMain.handle('set-voice', (_e, { voiceId }) => {
+  if (!voiceId || typeof voiceId !== 'string') return { error: 'no voiceId' };
+  saveConfig({ ttsProvider: 'elevenlabs', ttsVoice: voiceId, elevenLabsVoiceId: voiceId });
+  return { ok: true, voiceId };
+});
+ipcMain.handle('set-voice-model', (_e, { model }) => {
+  const ok = ['eleven_flash_v2_5', 'eleven_turbo_v2_5', 'eleven_multilingual_v2', 'eleven_v3'].includes(model);
+  if (!ok) return { error: 'unknown model' };
+  saveConfig({ ttsModel: model });
+  return { ok: true, model };
+});
+// JARVIS character presets — researched from Paul Bettany's delivery (clipped British RP, calm/measured/
+// unflappable, dry wit in DEADPAN). High stability (even, never theatrical), strong similarity (hold the
+// timbre), LOW style (deadpan — theatrics kill the wit), unhurried butler pace. "younger" only nudges
+// pace/brightness slightly; true age is the chosen voice.
+const VOICE_PRESETS = {
+  jarvis:        { ttsStability: 0.55, ttsSimilarity: 0.90, ttsStyle: 0.18, ttsSpeed: 0.97, ttsSpeakerBoost: true },
+  jarvis_younger:{ ttsStability: 0.48, ttsSimilarity: 0.88, ttsStyle: 0.22, ttsSpeed: 1.02, ttsSpeakerBoost: true },
+  natural:       { ttsStability: 0.40, ttsSimilarity: 0.85, ttsStyle: 0.30, ttsSpeed: 1.0,  ttsSpeakerBoost: true },
+};
+ipcMain.handle('apply-voice-preset', (_e, { preset }) => {
+  const p = VOICE_PRESETS[preset];
+  if (!p) return { error: 'unknown preset' };
+  saveConfig(p);
+  return { ok: true, preset, settings: p };
+});
+
 // ---------------------------------------------------------------------------
 // Kokoro — local neural TTS (free, offline, high quality). A python worker is
 // kept WARM (model loaded once, ~1.2s) so each reply only pays synth time
