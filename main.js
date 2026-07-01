@@ -1529,18 +1529,40 @@ async function askAI(input) {
 // text note so vision works without re-sending megabytes every iteration.
 // evictOldImages moved to lib/history.js (SPLIT_PLAN step 9).
 
-async function trimHistory(history, apiKey) {
-  if (history.length <= 20) return history;
-  const toSummarize = history.slice(0, -4);
-  const recent = history.slice(-4);
-  const summary = await callClaude([
-    ...toSummarize,
-    { role: 'user', content: 'Summarize this conversation in under 200 words. Preserve: decisions made, file paths referenced, unresolved tasks, any code written.' }
-  ], apiKey, MODEL_HAIKU);
-  const text = (summary.content.find((b) => b.type === 'text') || {}).text || '';
+// The effective wire cap is capTokens() (~32K messages by default) — the model never sees more
+// than that regardless of the 200K window. So we summarize JUST UNDER that cap: past this budget
+// capTokens would otherwise HARD-DROP the oldest turns (losing fidelity). Summarizing first means
+// a dense summary survives capTokens instead of raw truncation. Keep the most recent
+// CONTEXT_KEEP_TAIL tokens verbatim; both fit under the wire cap with headroom. Env-overridable.
+const CONTEXT_TRIM_BUDGET = Number(process.env.BB_CONTEXT_BUDGET) || 28000;
+const CONTEXT_KEEP_TAIL = Number(process.env.BB_CONTEXT_TAIL) || 16000;
+
+// Token-budgeted (not message-count) summarizing trim. A single huge tool result now triggers
+// it, and it's safe to call MID-LOOP (a long fan-out can blow the window before the next user
+// turn — the one place the old count+turn-start trim never fired). Pairing is healed by the
+// validateHistory that runs after every call site.
+async function trimHistory(history, apiKey, budget = CONTEXT_TRIM_BUDGET) {
+  if (!Array.isArray(history) || history.length <= 4) return history;
+  if (estimateTokens(history) <= budget) return history;
+  // Walk back from the newest message, keeping recent turns until the tail budget fills.
+  let cut = history.length, tailTok = 0;
+  while (cut > 1 && tailTok < CONTEXT_KEEP_TAIL) { cut--; tailTok += estimateTokens(history[cut]); }
+  if (cut < 1) cut = 1;                     // always keep ≥1 recent message, summarize ≥1 old
+  const toSummarize = history.slice(0, cut);
+  const recent = history.slice(cut);
+  if (!toSummarize.length) return history;
+  let text = '';
+  try {
+    const summary = await callClaude([
+      ...toSummarize,
+      { role: 'user', content: 'Summarize this conversation so an in-progress task can continue without loss. Preserve concretely: decisions made, exact file paths + line numbers, code/diffs written, tool outputs still needed downstream, and unresolved TODOs. Be dense; skip pleasantries.' }
+    ], apiKey, MODEL_HAIKU);
+    text = (summary.content.find((b) => b.type === 'text') || {}).text || '';
+  } catch { return history; }               // summary failed → keep full history; capTokens still guards the wire
+  if (!text) return history;
   return [
-    { role: 'user', content: `[Conversation summary]: ${text}` },
-    { role: 'assistant', content: 'Understood.' },
+    { role: 'user', content: `[Earlier conversation summarized — ${toSummarize.length} messages condensed]: ${text}` },
+    { role: 'assistant', content: 'Understood — continuing.' },
     ...recent
   ];
 }
@@ -2792,8 +2814,20 @@ function editFileDiff(oldStr, newStr) {
   const plus = String(newStr).split('\n').map((l) => '+ ' + l);
   return [...minus, ...plus].join('\n').slice(0, 2000);
 }
+// Expand a leading ~ and $HOME/${HOME} in tool-supplied file paths. The model routinely
+// passes "~/.bhatbot/config.json"; Node's fs takes it literally → ENOENT → the model falls
+// back to run_shell (the read_file failure seen in the transcript). Normalizing here makes
+// the file tools "just work" on home-relative paths.
+function expandPath(p) {
+  if (typeof p !== 'string' || !p) return p;
+  let out = p.trim();
+  if (out === '~' || out.startsWith('~/')) out = path.join(os.homedir(), out.slice(1));
+  out = out.replace(/^\$\{?HOME\}?(?=\/|$)/, os.homedir());
+  return out;
+}
+
 function applyEdit(input) {
-  const fp = input && input.path;
+  const fp = expandPath(input && input.path);
   const oldStr = input && input.old_string;
   const newStr = input && input.new_string;
   if (!fp) return { success: false, error: 'path required' };
@@ -2844,18 +2878,21 @@ async function executeTool(name, input) {
   try {
     switch (name) {
       case 'read_file': {
-        const stat = fs.statSync(input.path);
+        const rp = expandPath(input.path);
+        const stat = fs.statSync(rp);
         if (stat.size > 100 * 1024) { result = { success: false, error: 'File exceeds 100KB' }; break; }
-        result = { success: true, content: fs.readFileSync(input.path, 'utf8') }; break;
+        result = { success: true, content: fs.readFileSync(rp, 'utf8') }; break;
       }
-      case 'write_file':
-        fs.mkdirSync(path.dirname(input.path), { recursive: true });
-        fs.writeFileSync(input.path, input.content);
-        result = { success: true, path: input.path }; break;
+      case 'write_file': {
+        const wp = expandPath(input.path);
+        fs.mkdirSync(path.dirname(wp), { recursive: true });
+        fs.writeFileSync(wp, input.content);
+        result = { success: true, path: wp }; break;
+      }
       case 'edit_file':
         result = applyEdit(input); break;
       case 'list_directory':
-        result = { success: true, entries: fs.readdirSync(input.path, { withFileTypes: true })
+        result = { success: true, entries: fs.readdirSync(expandPath(input.path), { withFileTypes: true })
           .map((e) => ({ name: e.name, type: e.isDirectory() ? 'dir' : 'file' })) }; break;
       case 'run_shell': {
         if (HARD_BLOCKED.some((re) => re.test(input.command))) { result = { success: false, error: 'Blocked: destructive command' }; break; }
@@ -3843,6 +3880,14 @@ async function agentLoop(history, apiKey, event, opts = {}) {
     }
 
     history = [...history, { role: 'user', content: toolResults }];
+    // Mid-loop context guard: a single turn that fans out into dozens of tool calls can approach
+    // the window before the next user message. Summarize the old head in place so long autonomous /
+    // self-drive runs keep fidelity instead of getting hard-dropped by capTokens at the wire.
+    if (estimateTokens(history) > CONTEXT_TRIM_BUDGET) {
+      const before = history.length;
+      history = await trimHistory(history, apiKey);
+      if (history.length < before) sendToActivity('tool-update', { type: 'thinking', text: '🗜 context summarized to stay within the window' });
+    }
     iterations++;
   }
   // Budget exhausted — don't dead-end. One final tool-less turn so the user gets a concrete
@@ -6341,6 +6386,23 @@ function sttVocabHint() {
   } catch { return ''; }
 }
 
+// STT hallucination guard. Whisper-family models emit repeated-token / low-entropy bursts on
+// near-silent or non-speech audio (the "Talaser Talaser…" loop). Reject those before they enter
+// the chat or get injected as live steering. Returns a trimmed string, or null to drop it.
+function sanitizeSteering(raw) {
+  const text = String(raw || '').trim();
+  if (!text) return null;
+  const capped = text.length > 2000 ? text.slice(0, 2000) : text;   // cap runaway transcripts
+  const words = capped.toLowerCase().match(/[\p{L}\p{N}']+/gu) || [];
+  if (!words.length) return null;
+  const distinct = new Set(words);
+  if (distinct.size === 1 && words.length >= 2) return null;                          // one token repeated
+  if (words.length >= 6 && distinct.size / words.length < 0.34) return null;          // low lexical diversity
+  let run = 1;                                                                        // 4+ consecutive repeats
+  for (let i = 1; i < words.length; i++) { run = words[i] === words[i - 1] ? run + 1 : 1; if (run >= 4) return null; }
+  return capped;
+}
+
 async function transcribeAudio(audioBuffer, mimeType) {
   const c = loadConfig();
   const useGroq = c.sttProvider === 'groq' && c.groqKey;             // fastest path (opt-in)
@@ -6358,7 +6420,10 @@ async function transcribeAudio(audioBuffer, mimeType) {
   const tryLocal = async (tag) => {
     if (!localstt.available()) return null;
     const r = await localstt.transcribe(buf, ext, { model: c.localSttModel, prompt: hint, execPath: EXEC_PATH });
-    if (r && typeof r.text === 'string') return { success: true, text: r.text.trim(), model: 'local-whisper' + (tag ? '(' + tag + ')' : '') };
+    if (r && typeof r.text === 'string') {
+      const clean = sanitizeSteering(r.text);
+      return { success: true, text: clean || '', model: 'local-whisper' + (tag ? '(' + tag + ')' : ''), ...(clean ? {} : { _dropped: 'hallucination' }) };
+    }
     return { error: 'local STT: ' + ((r && r.error) || 'failed') };
   };
   if (!key) {
@@ -6383,6 +6448,7 @@ async function transcribeAudio(audioBuffer, mimeType) {
       if (local && local.success) return local;
       return { error: res.err || `STT ${res.status}` };
     }
+    if (res.text && !sanitizeSteering(res.text)) return { success: true, text: '', model: primary, _dropped: 'hallucination' };
     return { success: true, text: res.text, model: primary };
   } catch (e) {
     const local = await tryLocal('fallback');        // network down → offline
@@ -6568,7 +6634,12 @@ function rememberImagePath(p) { if (/\.(png|jpe?g|gif|webp|heic|heif)$/i.test(p 
 ipcMain.on('agent-pause', () => { if (agentState === 'running') agentState = 'paused'; });
 ipcMain.on('agent-resume', () => { if (agentState === 'paused') agentState = 'running'; });
 ipcMain.on('agent-stop', () => { agentState = 'stopped'; });
-ipcMain.on('agent-guidance', (_e, { text }) => { if (text && text.trim()) pendingGuidance.push(text.trim()); });
+ipcMain.on('agent-guidance', (_e, { text }) => {
+  const clean = sanitizeSteering(text);
+  if (!clean) { if (text && text.trim()) sendToActivity('tool-update', { type: 'thinking', text: '🚫 ignored a low-confidence voice fragment' }); return; }
+  if (pendingGuidance[pendingGuidance.length - 1] === clean) return;   // dedup consecutive repeats
+  pendingGuidance.push(clean);
+});
 ipcMain.handle('save-guidance-pref', (_e, text) => saveMemoryEntry('Preferences & Patterns', text));
 ipcMain.on('confirm-response', (_e, { id, approved }) => {
   const r = pendingConfirms.get(id);
