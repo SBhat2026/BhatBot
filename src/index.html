@@ -1315,7 +1315,14 @@ function renderOps(s) {
   $('#ops-summary') && ($('#ops-summary').textContent = s.summary || '');
   const svc = (s.services || []).map((x) => `<div class="op-svc"><span class="op-dot" style="background:${OPS_DOT[x.state] || '#46566b'}"></span><span class="op-ic">${x.icon || ''}</span><span class="op-name">${x.name}</span><span class="op-state">${x.state}</span><span class="op-detail hl-dim">${x.detail || ''}</span></div>`).join('');
   const sd = s.selfdrive || {};
-  const fleet = (s.fleet && s.fleet.active) ? `<div class="op-sec">Active agents (${s.fleet.active})</div>` + (s.fleet.agents || []).map((a) => `<div class="op-row hl-dim">🦾 ${a.role || ''} — ${(a.task || '').slice(0, 60)}</div>`).join('') : '';
+  const f = s.fleet || {};
+  const fw = f.width, fcap = f.cap;
+  // Show live OTPM-available width alongside the static cap so it's clear when they diverge.
+  const fleetHdr = (fw != null)
+    ? `<div class="op-sec">Fleet — ${f.active || 0} active · ${fw} available now${fcap != null && fw !== fcap ? ` (cap ${fcap})` : ''}</div>`
+      + (f.widthByModel ? `<div class="op-row hl-dim">by model — sonnet ${f.widthByModel.sonnet} · haiku ${f.widthByModel.haiku} · opus ${f.widthByModel.opus}</div>` : '')
+    : (f.active ? `<div class="op-sec">Active agents (${f.active})</div>` : '');
+  const fleet = fleetHdr + (f.agents || []).map((a) => `<div class="op-row hl-dim">🦾 ${a.role || ''} — ${(a.task || '').slice(0, 60)}</div>`).join('');
   const sched = (s.schedules || []).filter((x) => x.enabled).slice(0, 6).map((x) => `<div class="op-row hl-dim">⏰ ${x.title} ${x.nextRun ? '· next ' + new Date(x.nextRun).toLocaleString() : ''}</div>`).join('');
   const bud = (s.budgets || []).map((b) => `${b.model}: ${b.outFree == null ? '∞' : Math.round((b.outFree || 0) / 1000) + 'k'} free`).join(' · ');
   const ev = (s.recent_events || []).slice(-8).reverse().map((e) => `<div class="op-row hl-dim">• ${e.kind || ''} ${(e.message || e.tool || e.note || '').toString().slice(0, 70)}</div>`).join('');

@@ -162,6 +162,8 @@ let mainWindow = null;
 let activityWindow = null;
 let agentState = 'idle'; // 'running' | 'paused' | 'stopped'
 let _lastUserText = '';  // most recent user turn (for the runtime-state snapshot)
+let _lastActivityTs = Date.now();   // Task 5 — last real turn, gates the opt-in cache keep-alive
+function markActivity() { _lastActivityTs = Date.now(); }
 let browser = null;
 let page = null;
 let browserContext = null;   // kept so we can persist cookies/localStorage (storageState) across launches
@@ -296,6 +298,7 @@ const WORKFLOW_DIR = path.join(os.homedir(), '.bhatbot', 'workflows');
 const NOTES_DIR = path.join(os.homedir(), '.bhatbot', 'notes');
 const pendingConfirms = new Map();
 let pendingGuidance = [];   // live feedback queued mid-task (steering)
+const MAX_GUIDANCE_CHARS = 500;   // cap total queued steering text so a garbage burst can't balloon a turn
 let terminalWindow = null;   // other secondary-window state (nexus/studio/chess/worldcup/viewer/mol/maps) lives in window-manager.js
 let ptyProc = null, wakeProc = null;   // studioWatcher moved to window-manager.js
 
@@ -991,8 +994,9 @@ const admission = createAdmission({
 });
 // Live fleet width = how many ~4k-output suits the current OTPM budget can carry (clamped [3,12]).
 // Replaces the old hardcoded parallel caps; the per-request admission reservation does the fine pacing.
+const FLEET_CAP = 24;   // Phase 5: static upper bound (always-plugged desktop); admission paces against live OTPM below this
 function fleetWidth(model = MODEL_SONNET, perAgentOut = 4096) {
-  try { return admission.width(model, perAgentOut, { min: 3, max: 24 }); } catch { return 3; }   // Phase 5: cap raised 12→24 (always-plugged desktop); admission still paces against live OTPM
+  try { return admission.width(model, perAgentOut, { min: 3, max: FLEET_CAP }); } catch { return 3; }
 }
 // qwen3-family models burn seconds on <think> tokens before answering — for an assistant
 // reply that's pure mute latency. Ollama honors `think:false` for them (unknown fields are
@@ -1536,12 +1540,20 @@ async function askAI(input) {
 // CONTEXT_KEEP_TAIL tokens verbatim; both fit under the wire cap with headroom. Env-overridable.
 const CONTEXT_TRIM_BUDGET = Number(process.env.BB_CONTEXT_BUDGET) || 28000;
 const CONTEXT_KEEP_TAIL = Number(process.env.BB_CONTEXT_TAIL) || 16000;
+// Live threshold: config.midLoopTrimThreshold overrides the default at runtime (no restart).
+// NOTE: the sensible ceiling is the ~32K capTokens wire cap, NOT the 200K window — past ~32K
+// capTokens already hard-drops oldest turns on every call, so trimming later than that can't
+// recover the lost fidelity. Values above the wire cap are accepted but won't help.
+function contextTrimBudget() {
+  try { const v = Number(loadConfig().midLoopTrimThreshold); if (v > 0) return v; } catch {}
+  return CONTEXT_TRIM_BUDGET;
+}
 
 // Token-budgeted (not message-count) summarizing trim. A single huge tool result now triggers
 // it, and it's safe to call MID-LOOP (a long fan-out can blow the window before the next user
 // turn — the one place the old count+turn-start trim never fired). Pairing is healed by the
 // validateHistory that runs after every call site.
-async function trimHistory(history, apiKey, budget = CONTEXT_TRIM_BUDGET) {
+async function trimHistory(history, apiKey, budget = contextTrimBudget()) {
   if (!Array.isArray(history) || history.length <= 4) return history;
   if (estimateTokens(history) <= budget) return history;
   // Walk back from the newest message, keeping recent turns until the tail budget fills.
@@ -2791,9 +2803,21 @@ async function pacedSubagentRequest(body, apiKey, opts) {
 // call, the full tool registry (sub-agents filter it to their allowlist), executeTool, the key,
 // and the model ids. onStep surfaces the VANGUARD codename for the suit.
 function subagentDeps() {
+  // Roles safe to run on Haiku when Sonnet is saturated — verification/critique work, NOT primary
+  // generation (coding/research). Tunable via config.fleetDowngradeRoles.
+  let downgradeRoles = ['tester', 'skeptic'];
+  try { const c = loadConfig().fleetDowngradeRoles; if (Array.isArray(c)) downgradeRoles = c; } catch {}
   return {
     anthropicRequest: pacedSubagentRequest, executeTool, toolDefs: TOOLS, apiKey: getApiKey(),
     models: { sonnet: MODEL_SONNET, haiku: MODEL_HAIKU },
+    // Task 4 — cross-model overflow: let runRole spill downgrade-safe roles onto Haiku's idle OTPM
+    // headroom instead of queuing on a pinned Sonnet admission slot.
+    fleetWidth, fleetFloor: 3,
+    canDowngrade: (role) => !!role && downgradeRoles.includes(role.name || role.role),
+    logDowngrade: (roleName, sw, hw) => {
+      try { sendToActivity('tool-update', { type: 'thinking', text: `⤵ ${vanguard.codename(roleName)} → Haiku spill (Sonnet width ${sw}, Haiku ${hw})` }); } catch {}
+      try { logRouterDecision({ taskType: 'fleet-downgrade:' + roleName, model: MODEL_HAIKU, ms: 0, usd: 0 }); } catch {}
+    },
     onStep: (name, tool) => sendToActivity('tool-update', { type: 'thinking', text: `🤝 ${vanguard.codename(name)} → ${tool}` }),
   };
 }
@@ -2824,6 +2848,22 @@ function expandPath(p) {
   if (out === '~' || out.startsWith('~/')) out = path.join(os.homedir(), out.slice(1));
   out = out.replace(/^\$\{?HOME\}?(?=\/|$)/, os.homedir());
   return out;
+}
+
+// True for files that hold real secrets (the encrypted credential vault; the browser session
+// profile with auth cookies/tokens). read_file returns a CLEAN structured refusal for these
+// instead of a raw fs error, so the model explains why instead of improvising a run_shell find.
+// NOTE: config.json is deliberately NOT guarded — it holds only CRED_REF_* handles (secrets were
+// migrated to the vault), so it's safe + useful to read.
+function isSecretPath(fp) {
+  try {
+    const p = path.resolve(fp);
+    const bb = path.join(os.homedir(), '.bhatbot');
+    if (p === path.join(bb, 'credentials.json')) return true;
+    if (p === path.join(bb, 'browser-profile.json')) return true;
+    if (p === path.join(bb, 'browser-profile-dir') || p.startsWith(path.join(bb, 'browser-profile-dir') + path.sep)) return true;
+    return false;
+  } catch { return false; }
 }
 
 function applyEdit(input) {
@@ -2879,6 +2919,7 @@ async function executeTool(name, input) {
     switch (name) {
       case 'read_file': {
         const rp = expandPath(input.path);
+        if (isSecretPath(rp)) { result = { success: false, guarded: true, error: 'refused: this path holds encrypted credentials/session secrets and cannot be read directly. The values are stored via the vault (CRED_REF handles); ask Siddhant if you need one.' }; break; }
         const stat = fs.statSync(rp);
         if (stat.size > 100 * 1024) { result = { success: false, error: 'File exceeds 100KB' }; break; }
         result = { success: true, content: fs.readFileSync(rp, 'utf8') }; break;
@@ -3679,7 +3720,7 @@ function needsPlan(text) {
   const multi = /\b(and then|after that|then|next|also)\b/i.test(t) || /[;,].*\b\w+\b.*[;,]/.test(t) || verbs >= 2;
   return verbs >= 1 && (multi || t.length > 120);
 }
-function parseJsonLoose(s) { const m = String(s || '').match(/\{[\s\S]*\}/); if (!m) return null; try { return JSON.parse(m[0]); } catch { return null; } }
+// parseJsonLoose lives once, near the pipeline stages (defined below); the earlier duplicate was removed.
 async function quickPlan(taskText, apiKey) {
   const system = `You are BhatBot's fast planner. Draft a SHORT execution plan for Siddhant's request.
 Return ONLY JSON: {"steps":["<imperative action>", ...3-6 items],"spoken":"<=2 sentences, plain spoken English summarizing your approach — no markdown, no numbered list>"}
@@ -3709,6 +3750,7 @@ async function agentLoop(history, apiKey, event, opts = {}) {
   agentState = 'running';
   _userSpokeSinceOpen = true;     // Feat-1: the user engaged → don't pop the idle briefing offer
   try { _lastUserText = lastUserText(history) || _lastUserText; } catch {}
+  markActivity();   // Task 5 — mark the burst so the cache keep-alive stays warm between turns
   try { rstate.event('turn', { text: String(_lastUserText).slice(0, 160) }); } catch {}
   const _turnT0 = Date.now(); const _usd0 = costToday().usd;   // router telemetry (#13)
   pendingGuidance = [];          // fresh per task
@@ -3875,18 +3917,19 @@ async function agentLoop(history, apiKey, event, opts = {}) {
     if (pendingGuidance.length) {
       const g = pendingGuidance.splice(0);
       usedGuidance.push(...g);
-      toolResults.unshift({ type: 'text', text: '[Live guidance from Siddhant — adjust accordingly]: ' + g.join(' | ') });
-      sendToAll(event, 'tool-update', { type: 'guidance_applied', text: g.join(' | ') });
+      const gJoined = g.join(' | ').slice(0, MAX_GUIDANCE_CHARS);   // defensive cap: never balloon one turn
+      toolResults.unshift({ type: 'text', text: '[Live guidance from Siddhant — adjust accordingly]: ' + gJoined });
+      sendToAll(event, 'tool-update', { type: 'guidance_applied', text: gJoined });
     }
 
     history = [...history, { role: 'user', content: toolResults }];
     // Mid-loop context guard: a single turn that fans out into dozens of tool calls can approach
     // the window before the next user message. Summarize the old head in place so long autonomous /
     // self-drive runs keep fidelity instead of getting hard-dropped by capTokens at the wire.
-    if (estimateTokens(history) > CONTEXT_TRIM_BUDGET) {
+    if (estimateTokens(history) > contextTrimBudget()) {
       const before = history.length;
       history = await trimHistory(history, apiKey);
-      if (history.length < before) sendToActivity('tool-update', { type: 'thinking', text: '🗜 context summarized to stay within the window' });
+      if (history.length < before) sendToActivity('tool-update', { type: 'thinking', text: `🗜 context summarized mid-loop (${before}→${history.length} msgs) to stay within the window` });
     }
     iterations++;
   }
@@ -4067,20 +4110,6 @@ function parseJsonLoose(s) {
   return null;
 }
 
-// macOS free-RAM check — gate loading the 12B planner so we don't thrash/swap.
-function checkRamPressure() {
-  return new Promise((resolve) => {
-    try {
-      exec('vm_stat', { timeout: 2000 }, (err, stdout) => {
-        if (err) return resolve(true);
-        let freePages = 0; const pg = (stdout.match(/page size of (\d+)/) || [])[1] || 4096;
-        for (const l of stdout.split('\n')) { const m = l.match(/Pages (free|speculative|inactive):\s+(\d+)/); if (m) freePages += parseInt(m[2]); }
-        resolve((freePages * pg) / 1048576 > 1500);   // need ≥1.5GB reclaimable to load 12B
-      });
-    } catch { resolve(true); }
-  });
-}
-
 // Stage 1 — Router (small, resident). simple | complex | cloud.
 async function routerClassify(message) {
   const cfg = pipelineCfg();
@@ -4108,71 +4137,12 @@ REQUEST: ${message}`, {
   } catch (e) { return { path: 'cloud', reason: 'router error: ' + e.message, needsTools: true, suggestedMode: modePrompts.classifyMode(message) }; }
 }
 
-async function plannerPass(message, classification) {
-  const cfg = pipelineCfg();
-  const model = await resolveModel(cfg.plannerModel, ['gemma3:12b', 'qwen3:latest']);
-  const ctx = classification.needsFullContext ? CTX_TIERS.fullRepo : CTX_TIERS.planner;
-  let projectCtx = '';
-  try { const md = path.join(process.env.BHATBOT_PROJECT || os.homedir(), 'CLAUDE.md'); if (fs.existsSync(md)) projectCtx = fs.readFileSync(md, 'utf8').slice(0, 8000); } catch {}
-  const system = `You are the PLANNER stage of BhatBot. Decompose the task into ordered steps.
-Output ONLY valid JSON, no markdown.${projectCtx ? `\n## Project context\n${projectCtx}` : ''}
-{"steps":[{"action":"<desc>","tool":"<tool_name>|null","input":"<what to pass>","validation":"<success condition>"}],"contextNeeded":<tokens>}`;
-  try {
-    // 45s cap: a cold 12B load must not hold the turn hostage — null → caller escalates to
-    // the (streaming, already-acked) cloud path instead of grinding on a slower local plan.
-    const out = await ollamaGenerate(model, message, { num_ctx: ctx, keep_alive: 300, format: 'json', system, timeoutMs: 45000 });
-    const p = parseJsonLoose(out);
-    if (p && Array.isArray(p.steps) && p.steps.length) return p;
-  } catch (e) { console.warn('[pipeline] planner failed:', e.message); return null; }
-  return { steps: [{ action: message, tool: null, input: message, validation: 'any output' }] };
-}
-
-async function compressStepOutput(output) {
-  const s = String(output || '');
-  if (s.length < 2000) return s;
-  const cfg = pipelineCfg();
-  const model = await resolveModel(cfg.criticModel, ['qwen3:latest', 'gemma3:12b']);
-  try { return await ollamaGenerate(model, s.slice(0, 20000), { num_ctx: CTX_TIERS.executor, system: 'Compress to the essential facts in under 300 words.' }); }
-  catch { return s.slice(0, 2000); }
-}
-
-async function executorStep(step, previousResults) {
-  // Real tool steps run on BhatBot's actual tool layer (same as Claude uses).
-  if (step.tool && TOOLS.some((t) => t.name === step.tool)) {
-    try {
-      let input = step.input;
-      if (typeof input === 'string') { const j = parseJsonLoose(input); if (j) input = j; }
-      const r = await executeTool(step.tool, input);
-      const failed = r && r.success === false;
-      return { output: typeof r === 'string' ? r : JSON.stringify(r), failed, error: failed ? (r.error || 'tool failed') : null };
-    } catch (e) { return { output: '', failed: true, error: e.message }; }
-  }
-  // Reasoning/codegen steps run on the local executor model.
-  const cfg = pipelineCfg();
-  const model = await resolveModel(cfg.executorModel, ['gemma3:12b', 'qwen3:latest']);
-  const ctxParts = [];
-  for (const r of previousResults) ctxParts.push('Prior: ' + (await compressStepOutput(r.output)).slice(0, 1200));
-  try {
-    const out = await ollamaGenerate(model, String(step.input || step.action), {
-      num_ctx: CTX_TIERS.executor, keep_alive: 300,
-      system: `${ctxParts.join('\n')}\n\nExecute this step. Return ONLY the output, no commentary.`
-    });
-    return { output: out, failed: false };
-  } catch (e) { return { output: '', failed: true, error: e.message }; }
-}
-
-async function criticValidate(plan, results) {
-  const cfg = pipelineCfg();
-  const model = await resolveModel(cfg.criticModel, ['qwen3:latest', 'gemma3:12b']);
-  const summary = results.map((r, i) => `${plan.steps[i] ? plan.steps[i].action : 'step'}: ${String(r.output || '').slice(0, 200)}`).join('\n');
-  try {
-    const out = await ollamaGenerate(model, summary, {
-      num_ctx: CTX_TIERS.critic, format: 'json',
-      system: `Validate these outputs against the plan. JSON only.\nPlan: ${plan.steps.map((s) => s.action).join(' → ')}\n{"allPassed":true|false,"failedSteps":[],"summary":"<one sentence>"}`
-    });
-    return parseJsonLoose(out) || { allPassed: true, summary: 'Completed' };
-  } catch { return { allPassed: true, summary: 'Completed' }; }
-}
+// NOTE (Task 6): the local complex pipeline (planner → executor → critic) was intentionally
+// retired — local models mangled tool-call JSON, so tool/complex work is scoped to Claude in
+// runPipeline (the looksLikeToolTask + needsTools + complex→Claude escalations below). The old
+// plannerPass/executorStep/criticValidate/compressStepOutput/checkRamPressure helpers were dead
+// (only the unreachable branch called them) and have been removed. routerClassify + the local
+// "simple" streaming path remain — that's the pipeline's real, working scope: fast local Q&A.
 
 // Stage orchestrator. Returns { text, history, _provider } matching agentLoop's shape so the
 // chat handler is interchangeable. event/opts forwarded to agentLoop on cloud escalation.
@@ -4222,34 +4192,10 @@ async function runPipeline(history, apiKey, event, opts = {}) {
     return escalate('local simple failed');
   }
 
-  // Complex work always goes to Claude now (the local plan→execute path was unreliable and the
-  // user wants the pipeline only for simple Q&A / fact checks). Claude also does the cost-aware
-  // chunking for big tasks (see the COMPLEX-TASK BUDGETING note in the system prompt).
+  // Complex / tool / code work always goes to Claude (full desktop tools + safety + cost-aware
+  // chunking; see the COMPLEX-TASK BUDGETING note in the system prompt). The local pipeline is
+  // deliberately scoped to the fast "simple" Q&A path handled above.
   return escalate('complex → Claude');
-
-  // (Dead code below — kept for reference; the local complex pipeline is intentionally disabled.)
-  // eslint-disable-next-line no-unreachable
-  if (!(await checkRamPressure())) return escalate('RAM pressure');
-  sendToActivity('tool-update', { type: 'thinking', text: '🧠 planning locally…' });   // visible feedback while the 12B loads
-  const plan = await plannerPass(userMessage, cls);
-  if (!plan) return escalate('planner timeout/error');
-  if (plan.steps.length > cfg.maxSteps) return escalate('plan too large');
-  sendToActivity('tool-update', { type: 'thinking', text: `📋 plan: ${plan.steps.length} steps` });
-  const results = [];
-  for (const step of plan.steps) {
-    let r = await executorStep(step, results);
-    if (r.failed) { const retry = await executorStep(step, results); if (retry.failed) return escalate('step failed: ' + step.action); r = retry; }
-    results.push(r);
-  }
-  const validation = await criticValidate(plan, results);
-  if (!validation.allPassed) return escalate('critic rejected');
-  const full = extractSpeakText(results.map((r, i) => `### ${plan.steps[i].action}\n${r.output}`).join('\n\n')).display;
-  if (opts.stream) {                                           // speak the critic's summary aloud
-    const line = validation.summary || full;
-    if (opts.ttsSeq != null) { ttsStreamFeed(opts.ttsSeq, line); ttsStreamFlush(opts.ttsSeq); }
-    else speakDesktop(line);
-  }
-  return { text: full, history: [...history, { role: 'assistant', content: full }], _provider: 'pipeline-local', _summary: validation.summary };
 }
 
 // ===========================================================================
@@ -5252,7 +5198,11 @@ function opsSnapshot() {
     schedules: () => scheduler.list().map((s) => ({ id: s.id, title: s.title, kind: s.kind, nextRun: s.nextRun ? new Date(s.nextRun).toISOString() : null, enabled: s.enabled })),
     health: () => { const st = (garmin.latest() || {}); return { configured: garmin.available(), monitoring: healthMonitoring(), last_sync: st.synced_at || null }; },
     cloudConnected: () => !!(_cloudBridge && _cloudBridge.connected && _cloudBridge.connected()),
-    fleet: () => { try { const a = jobsBus.active() || []; return { active: a.length, agents: a.map((j) => ({ id: j.id, role: j.agent || j.kind, task: j.name })) }; } catch { return { active: 0, agents: [] }; } },
+    fleet: () => { try { const a = jobsBus.active() || []; return { active: a.length, agents: a.map((j) => ({ id: j.id, role: j.agent || j.kind, task: j.name })),
+      // Live OTPM-derived width so the panel shows what's ACTUALLY available now vs the static cap.
+      width: fleetWidth(MODEL_SONNET), cap: FLEET_CAP,
+      widthByModel: { sonnet: fleetWidth(MODEL_SONNET), haiku: fleetWidth(MODEL_HAIKU), opus: fleetWidth('claude-opus-4-8') } }; }
+      catch { return { active: 0, agents: [], width: 0, cap: FLEET_CAP }; } },
     budgets: () => [MODEL_SONNET, MODEL_HAIKU, 'claude-opus-4-8'].map((m) => { try { const b = rateBudget(m); return { model: m.replace(/^claude-/, ''), outFree: b.outFree, outSafe: b.outSafe }; } catch { return { model: m, outFree: null }; } }),
     costToday: () => { try { return costToday(); } catch { return null; } },
     recentEvents: () => { try { return rstate.recentEvents(20); } catch { return []; } },
@@ -6421,8 +6371,9 @@ async function transcribeAudio(audioBuffer, mimeType) {
     if (!localstt.available()) return null;
     const r = await localstt.transcribe(buf, ext, { model: c.localSttModel, prompt: hint, execPath: EXEC_PATH });
     if (r && typeof r.text === 'string') {
+      if (r.dropped === 'low_confidence') console.warn(`[stt-guard] worker dropped low-confidence audio (no_speech=${r.no_speech_prob}, avg_logprob=${r.avg_logprob})`);
       const clean = sanitizeSteering(r.text);
-      return { success: true, text: clean || '', model: 'local-whisper' + (tag ? '(' + tag + ')' : ''), ...(clean ? {} : { _dropped: 'hallucination' }) };
+      return { success: true, text: clean || '', model: 'local-whisper' + (tag ? '(' + tag + ')' : ''), ...(clean ? {} : { _dropped: r.dropped || 'hallucination' }) };
     }
     return { error: 'local STT: ' + ((r && r.error) || 'failed') };
   };
@@ -6639,6 +6590,9 @@ ipcMain.on('agent-guidance', (_e, { text }) => {
   if (!clean) { if (text && text.trim()) sendToActivity('tool-update', { type: 'thinking', text: '🚫 ignored a low-confidence voice fragment' }); return; }
   if (pendingGuidance[pendingGuidance.length - 1] === clean) return;   // dedup consecutive repeats
   pendingGuidance.push(clean);
+  // Total-queue cap: a burst of steering can't balloon a single tool-result turn — drop oldest
+  // until the queued text fits MAX_GUIDANCE_CHARS.
+  while (pendingGuidance.length > 1 && pendingGuidance.join(' | ').length > MAX_GUIDANCE_CHARS) pendingGuidance.shift();
 });
 ipcMain.handle('save-guidance-pref', (_e, text) => saveMemoryEntry('Preferences & Patterns', text));
 ipcMain.on('confirm-response', (_e, { id, approved }) => {
@@ -6744,6 +6698,29 @@ function primeAppAutomation(force = false) {
 // ---------------------------------------------------------------------------
 // Lifecycle
 // ---------------------------------------------------------------------------
+// Task 5 — cache keep-alive (opt-in, config.cacheKeepAlive, default off). The ephemeral prompt
+// cache TTL is ~5min; for a bursty ambient assistant an idle gap >5min re-bills the full static
+// prompt + tool schemas on the next turn. When on, refresh the Sonnet cache with a 1-token no-op
+// every ~4min — but ONLY within KEEPALIVE_ACTIVE_MS of a real turn, so a genuinely idle machine is
+// never billed for keep-alives it won't benefit from. The system block matches real turns' cached
+// prefix (static block + breakpoint; the mode block rides after it and doesn't affect the prefix).
+// Best-effort: any error is swallowed. Refreshes the FULL-catalog prefix (helps no-embedding-key /
+// out-of-loop turns most; toolselect-subset turns vary their own prefix and benefit less).
+const KEEPALIVE_ACTIVE_MS = 30 * 60 * 1000;
+function startCacheKeepAlive() {
+  const t = setInterval(async () => {
+    try {
+      if (!loadConfig().cacheKeepAlive) return;
+      if (Date.now() - _lastActivityTs > KEEPALIVE_ACTIVE_MS) return;   // idle → let the cache lapse
+      const key = getApiKey(); if (!key) return;
+      await anthropicRequest({ model: MODEL_SONNET, max_tokens: 1,
+        system: [{ type: 'text', text: buildStaticPrompt(), cache_control: { type: 'ephemeral' } }],
+        tools: TOOLS, messages: [{ role: 'user', content: 'ping' }] }, key, { retries: 0 });
+    } catch { /* keep-alive is best-effort */ }
+  }, 4 * 60 * 1000);
+  if (t.unref) t.unref();
+}
+
 app.whenReady().then(() => {
   try {
     migrateSecretsToVault();   // Phase 4 #1 — vault any plaintext secrets BEFORE anything (cloud bridge, MCP) reads them
@@ -6767,6 +6744,7 @@ app.whenReady().then(() => {
     // remains available; re-enable by calling it if you ever want the timed brief back.)
     startScheduler();   // proactive recurring/one-off tasks
     startAmbient();     // #18 opt-in ambient awareness (no-op unless config.ambient.enabled)
+    startCacheKeepAlive();   // Task 5 — opt-in prompt-cache warm-keeper (no-op unless config.cacheKeepAlive)
     // Live state feed (state.json + events.jsonl) — bind main's live values, then persist on a loop.
     rstate.bind({
       agent: () => ({ state: agentState, lastUser: String(_lastUserText || '').slice(0, 200) }),

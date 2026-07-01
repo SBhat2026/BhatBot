@@ -34,6 +34,7 @@ const load = (name) => new Function('path', 'os', extract(main, name) + '\nretur
 
 const sanitizeSteering = load('sanitizeSteering');
 const expandPath = load('expandPath');
+const isSecretPath = load('isSecretPath');
 
 // ---- sanitizeSteering ----
 ok(sanitizeSteering('Talaser Talaser') === null, 'STT: single token repeated → dropped');
@@ -53,6 +54,15 @@ ok(expandPath('${HOME}/notes.md') === path.join(os.homedir(), 'notes.md'), 'path
 ok(expandPath('/abs/path') === '/abs/path', 'path: absolute path unchanged');
 ok(expandPath('relative/path') === 'relative/path', 'path: relative path unchanged');
 ok(expandPath('~notuser/x') === '~notuser/x', 'path: ~user form left alone (no false expand)');
+
+// ---- isSecretPath ----
+const bb = path.join(os.homedir(), '.bhatbot');
+ok(isSecretPath(path.join(bb, 'credentials.json')) === true, 'secret: credentials vault guarded');
+ok(isSecretPath(path.join(bb, 'browser-profile.json')) === true, 'secret: browser session profile guarded');
+ok(isSecretPath(path.join(bb, 'browser-profile-dir', 'Cookies')) === true, 'secret: browser profile dir guarded');
+ok(isSecretPath(path.join(bb, 'config.json')) === false, 'secret: config.json NOT guarded (only CRED_REF handles)');
+ok(isSecretPath(path.join(bb, 'memory.md')) === false, 'secret: normal .bhatbot file readable');
+ok(isSecretPath('/etc/hosts') === false, 'secret: unrelated path readable');
 
 console.log(`\n${fail === 0 ? '✅' : '❌'} ${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);
