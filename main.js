@@ -6551,12 +6551,19 @@ ipcMain.handle('chat', async (event, { history }) => {
   // Routes THROUGH executeTool's step-up gate (the confirm card), so the human approval is still
   // required — this never bypasses the guardrail. Short + non-question guard avoids false hits on
   // conversation *about* self-improvement.
-  if (ut.length < 64 && !/\?/.test(ut) &&
-      (/\b(begin|start|run|kick ?off)\b[\s\S]*\bself[\s-]?(improve(ment)?|driv)/i.test(ut) || /^\s*improve yourself\b/i.test(ut))) {
+  // Anchored to the start of the message so mid-sentence mentions don't fire. Captures an optional
+  // focus after "on"/"about"/"focused on"/":" — a focus is what makes reflection productive (with
+  // none, the desire engine often finds nothing concrete on a freshly-booted, telemetry-thin app,
+  // and the session halts with "no_actionable_desires").
+  const sdMatch = !/\?/.test(ut) && (
+    ut.match(/^\s*(?:begin|start|run|kick ?off)\b.*?\bself[\s-]?(?:improve(?:ment)?|driv\w*)\b\s*(?:(?:focus(?:ed)?\s+on|focusing on|on|about|:)\s+(.{3,200}))?$/i)
+    || ut.match(/^\s*improve yourself\b\s*(?:(?:focus(?:ed)?\s+on|focusing on|on|about|:)\s+(.{3,200}))?$/i));
+  if (sdMatch) {
+    const focus = (sdMatch[1] || '').trim();
     try {
-      const r = await executeTool('self_drive', { action: 'start', reason: 'manual' });
+      const r = await executeTool('self_drive', { action: 'start', reason: 'manual', focus });
       const msg = (r && r.success)
-        ? '🚀 Starting a self-improvement session on an isolated local branch (never pushed, verify-gated). Approve the card to proceed — say "stop improving yourself" to halt.'
+        ? `🚀 Starting a self-improvement session${focus ? ` focused on: ${focus}` : ''} on an isolated local branch (never pushed, verify-gated). Approve the card to proceed — say "stop improving yourself" to halt.${focus ? '' : ' (Tip: add a focus — "begin self-improvement on <area>" — so it has something concrete to work on.)'}`
         : ('Could not start self-drive: ' + ((r && (r.error || r.note)) || 'unknown') + (isRemote() ? ' (self-drive must be started from the desktop app — it requires an in-person approval).' : ''));
       return { text: msg, history: [...history, { role: 'assistant', content: msg }] };
     } catch (e) { const m = 'Self-drive start failed: ' + (e && e.message || e); return { text: m, history: [...history, { role: 'assistant', content: m }] }; }
