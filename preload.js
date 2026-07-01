@@ -59,6 +59,10 @@ contextBridge.exposeInMainWorld('bhatbot', {
   open3DViewer: (p) => ipcRenderer.invoke('open-3d-viewer', p),
   onToolUpdate: (cb) => ipcRenderer.on('tool-update', (_e, u) => cb(u)),
   onJobUpdate: (cb) => ipcRenderer.on('job-update', (_e, j) => cb(j)),
+  // Step-up / confirm gate (was orphaned in preload-activity.js when Activity moved in-window).
+  // Restores the human-approval card for stepup/confirm-tier tools (self_drive, etc.).
+  onConfirmRequired: (cb) => ipcRenderer.on('confirm-required', (_e, c) => cb(c)),
+  confirmRespond: (id, approved) => ipcRenderer.send('confirm-response', { id, approved }),
   removeToolUpdateListener: () => ipcRenderer.removeAllListeners('tool-update')
 });
 

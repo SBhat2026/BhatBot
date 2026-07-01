@@ -1233,6 +1233,34 @@ $('#open-browser').addEventListener('click', async () => {
 window.bhatbot.onShowPanel && window.bhatbot.onShowPanel((id) => showPanel(id));
 window.bhatbot.onStudioReload && window.bhatbot.onStudioReload(() => reloadStudio());
 
+// Step-up / confirm gate — renders the human-approval card for high-risk tools (self_drive,
+// self_fix, remote-destructive, etc.). Was orphaned when the Activity window was retired, so
+// requestConfirm() never resolved and the tool turn hung forever. Self-contained (builds its
+// own DOM); clicking a button sends confirm-response back to main, resolving the gate.
+window.bhatbot.onConfirmRequired && window.bhatbot.onConfirmRequired((c) => {
+  try {
+    const prev = document.getElementById('confirm-overlay'); if (prev) prev.remove();
+    const ov = document.createElement('div'); ov.id = 'confirm-overlay';
+    ov.style.cssText = 'position:fixed;inset:0;z-index:99999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.55);backdrop-filter:blur(3px)';
+    const card = document.createElement('div');
+    card.style.cssText = 'max-width:520px;width:80%;background:#0d1420;border:1px solid #2a3a52;border-radius:14px;padding:22px;box-shadow:0 20px 60px rgba(0,0,0,.6);color:#dce6f2';
+    const title = document.createElement('div'); title.textContent = '⚠ Approval required';
+    title.style.cssText = 'font-size:15px;font-weight:600;color:#e6b450;margin-bottom:8px';
+    const reason = document.createElement('div'); reason.textContent = c.reason || 'A high-risk action needs your approval.';
+    reason.style.cssText = 'font-size:13px;line-height:1.5;margin-bottom:10px';
+    const cmd = document.createElement('div'); cmd.textContent = c.command || '';
+    cmd.style.cssText = 'font-size:12px;color:#8aa0bd;background:#0a0f18;border:1px solid #1e2b40;border-radius:8px;padding:8px 10px;margin-bottom:16px;word-break:break-word;font-family:ui-monospace,monospace';
+    const row = document.createElement('div'); row.style.cssText = 'display:flex;gap:10px;justify-content:flex-end';
+    const mk = (label, bg, approved) => { const b = document.createElement('button'); b.textContent = label;
+      b.style.cssText = 'padding:8px 18px;border-radius:9px;border:none;font-size:13px;font-weight:600;cursor:pointer;color:#fff;background:' + bg;
+      b.onclick = () => { try { window.bhatbot.confirmRespond(c.id, approved); } catch (e) {} ov.remove(); }; return b; };
+    row.appendChild(mk('Deny', '#3a4358', false));
+    row.appendChild(mk('Approve', '#1f8f4e', true));
+    card.appendChild(title); card.appendChild(reason); if (c.command) card.appendChild(cmd); card.appendChild(row);
+    ov.appendChild(card); document.body.appendChild(ov);
+  } catch (e) { /* never let a card error wedge the UI */ }
+});
+
 // ===================== HEALTH panel (Garmin biometrics) =====================
 const HL_ICON = { resting_hr: '❤️', hrv_avg: '〰️', sleep_hours: '😴', sleep_score: '🌙', body_battery: '🔋', stress_avg: '😰', training_readiness: '⚡', steps: '👟', intensity_minutes: '🏃', vo2max: '🫁', spo2_avg: '🩸', respiration_avg: '🌬️', weight_kg: '⚖️' };
 function hlFmt(v, unit) { if (v == null) return '—'; const r = Math.abs(v) >= 100 ? Math.round(v) : Math.round(v * 10) / 10; return r + (unit ? ' ' + unit : ''); }
