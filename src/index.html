@@ -33,7 +33,14 @@
     --font-ui: -apple-system, 'SF Pro Text', 'Segoe UI', Inter, Roboto, system-ui, sans-serif;
     --font-system: 'JetBrains Mono', ui-monospace, 'SF Mono', monospace;
     --font-data: 'JetBrains Mono', ui-monospace, 'SF Mono', monospace;
+    /* JARVIS/Marvel display + HUD faces (vendored in src/vendor/fonts — offline-safe) */
+    --font-display: 'Orbitron', 'JetBrains Mono', ui-monospace, monospace;   /* wide geometric — titles, boot */
+    --font-hud: 'Rajdhani', 'SF Pro Text', system-ui, sans-serif;           /* tall techy sans — HUD readouts */
   }
+  @font-face { font-family: 'Orbitron'; font-weight: 800; font-display: swap; src: url('vendor/fonts/Orbitron-800.woff2') format('woff2'); }
+  @font-face { font-family: 'Rajdhani'; font-weight: 400; font-display: swap; src: url('vendor/fonts/Rajdhani-400.woff2') format('woff2'); }
+  @font-face { font-family: 'Rajdhani'; font-weight: 500; font-display: swap; src: url('vendor/fonts/Rajdhani-500.woff2') format('woff2'); }
+  @font-face { font-family: 'Rajdhani'; font-weight: 600; font-display: swap; src: url('vendor/fonts/Rajdhani-600.woff2') format('woff2'); }
   * { margin: 0; padding: 0; box-sizing: border-box; }
   html, body { height: 100%; }
   /* Apply the type system by category (see :root). Content defaults to --font-ui (set on body);
@@ -435,12 +442,34 @@
     transition: opacity .5s ease;
   }
   #hero { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 0; display: block; }
-  #bootinner { position: relative; z-index: 1; pointer-events: none; }
-  #bootlog { font-size: 15px; line-height: 1.9; color: var(--accent); white-space: pre; min-height: 220px; text-shadow: 0 0 12px rgba(0,200,255,.45); }
+  #bootinner { position: relative; z-index: 1; pointer-events: none; max-width: 640px; }
+  /* JARVIS/Marvel boot: wide Orbitron wordmark + tall Rajdhani HUD readout. */
+  #boottitle { font-family: var(--font-display); font-weight: 800; font-size: 54px; letter-spacing: 16px; color: #eaf6ff;
+    text-shadow: 0 0 22px rgba(0,200,255,.65), 0 0 64px rgba(0,140,255,.30); line-height: 1; padding-left: 4px;
+    opacity: 0; transform: translateY(6px); animation: bootTitleIn .9s cubic-bezier(.2,.7,.2,1) forwards; }
+  #bootsub { font-family: var(--font-hud); font-weight: 600; font-size: 12.5px; letter-spacing: 7px; text-transform: uppercase;
+    color: var(--accent); opacity: 0; margin: 10px 0 26px 6px; animation: bootFadeIn .6s ease .5s forwards; }
+  @keyframes bootTitleIn { to { opacity: 1; transform: none; } }
+  @keyframes bootFadeIn { to { opacity: .8; } }
+  #bootlog { font-family: var(--font-hud); font-weight: 500; font-size: 16.5px; letter-spacing: 2px; text-transform: uppercase;
+    line-height: 2.05; color: var(--accent); white-space: pre; min-height: 210px; text-shadow: 0 0 12px rgba(0,200,255,.4); }
   #bootlog .dim { color: var(--text-dim); }
-  #bootbar { margin-top: 14px; height: 3px; background: rgba(21,33,47,.6); border-radius: 2px; overflow: hidden; box-shadow: 0 0 10px rgba(0,200,255,.25); }
-  #bootbar i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, #0a4a63, #00c8ff); transition: width .25s linear; box-shadow: 0 0 12px #00c8ff; }
+  #bootbar { margin-top: 8px; height: 2px; background: rgba(21,33,47,.6); border-radius: 2px; overflow: hidden; box-shadow: 0 0 10px rgba(0,200,255,.25); }
+  #bootbar i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, #0a4a63, #00c8ff); transition: width .25s linear; box-shadow: 0 0 14px #00c8ff; }
   #boot.gone { opacity: 0; pointer-events: none; }
+  /* Settings panel */
+  #settings-body { flex: 1; min-height: 0; overflow-y: auto; padding: 16px 18px; font-family: var(--font-ui); max-width: 620px; }
+  .set-sec { font-family: var(--font-system); font-size: 12px; letter-spacing: .5px; text-transform: uppercase; color: var(--accent); margin: 6px 2px 8px; }
+  .set-hint { font-size: 12.5px; line-height: 1.55; color: var(--text-dim); margin-bottom: 12px; }
+  .set-status { font-size: 12.5px; margin-bottom: 10px; color: var(--text-dim); }
+  .set-status.ok { color: #4fd38a; } .set-status.bad { color: #ff7a7a; }
+  .set-row { display: flex; gap: 8px; align-items: center; }
+  .set-input { flex: 1; background: rgba(16,26,40,.7); color: #dceaf6; border: 1px solid rgba(90,180,230,.28); border-radius: 8px; padding: 9px 11px; font-size: 13px; font-family: var(--font-data); }
+  .set-input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px rgba(0,200,255,.15); }
+  .set-btn { background: #1f8f4e; color: #fff; border: none; border-radius: 8px; padding: 9px 18px; font-size: 13px; font-weight: 600; cursor: pointer; }
+  .set-btn:hover { background: #24a259; } .set-btn:disabled { opacity: .5; cursor: default; }
+  .set-msg { font-size: 12.5px; margin-top: 10px; min-height: 16px; }
+  .set-msg.ok { color: #4fd38a; } .set-msg.bad { color: #ff7a7a; }
   /* D — JARVIS voice tuning popover */
   #voicepanel { position: fixed; right: 14px; bottom: 96px; width: 248px; z-index: 50;
     background: rgba(11,17,25,.97); border: 1px solid var(--accent); border-radius: 10px;
@@ -490,6 +519,8 @@
 <div id="boot">
   <canvas id="hero"></canvas>
   <div id="bootinner">
+    <div id="boottitle">BHATBOT</div>
+    <div id="bootsub">J.A.R.V.I.S. · Personal Agent</div>
     <div id="bootlog"></div>
     <div id="bootbar"><i></i></div>
   </div>
@@ -521,6 +552,7 @@
     <span class="tag tab" data-panel="health" title="Biometrics from Garmin — trends + suggestions">❤ Health</span>
     <span class="tag tab" data-panel="manage" title="What BhatBot is managing right now">🛰 Manage</span>
     <span class="tag tab" data-panel="voice" title="Tune BhatBot's JARVIS voice">🎚 Voice</span>
+    <span class="tag tab" data-panel="settings" title="API key & configuration">⚙ Settings</span>
     <span class="tag" id="open-browser" title="Agent browser (own desktop window)">🌐 Browser</span>
     <span class="tag ctx" id="ctxtag">⬡ …</span>
   </div>
@@ -585,6 +617,21 @@
       <span class="tag" id="voice-preview" title="Hear a sample line" style="cursor:pointer">▶ Preview</span>
       <span class="panel-back" data-back style="margin-left:6px">← Chat</span></div>
     <div id="voice-body"><div class="hl-empty">Loading voice…</div></div>
+  </div>
+
+  <!-- Settings — API key (vaulted) + config. First place the key is enterable in-app. -->
+  <div id="settings-panel" class="stage-panel">
+    <div class="panel-head"><b>⚙ SETTINGS</b><span style="flex:1"></span><span class="panel-back" data-back>← Chat</span></div>
+    <div id="settings-body">
+      <div class="set-sec">Anthropic API key</div>
+      <div class="set-hint">Powers all reasoning. Stored encrypted in your local vault (never written as plaintext, never leaves this machine). Enter it here to fix “invalid x-api-key”.</div>
+      <div id="set-key-status" class="set-status">checking…</div>
+      <div class="set-row">
+        <input id="set-key-input" class="set-input" type="password" placeholder="sk-ant-… (paste key, then Save)" autocomplete="off" spellcheck="false" />
+        <button id="set-key-save" class="set-btn">Save</button>
+      </div>
+      <div id="set-key-msg" class="set-msg"></div>
+    </div>
   </div>
 
   <!-- Voice-first project log -->
@@ -744,15 +791,15 @@ let heroStop = null;
 (function boot() {
   const today = new Date().toISOString().slice(0, 10);
   const lines = [
-    '> BHATBOT AGENT v1.0',
-    '> BUILD: ' + today,
-    '> CONTEXT: reading CLAUDE.md…',
-    '> MEMORY: loading ~/.bhatbot/memory.md…',
-    '> TOOLS: fs · shell · browser · claude-code · memory',
-    '> MODEL ROUTING: haiku (simple) · sonnet (reasoning)',
-    '> PROMPT CACHING: enabled (90% input savings)',
-    '> ─────────────────────────────────────────',
-    '> SYSTEMS ONLINE.'
+    'Initializing neural core',
+    'Build · ' + today,
+    'Context · CLAUDE.md',
+    'Memory · ~/.bhatbot',
+    'Toolkit · fs · shell · browser · claude-code',
+    'Routing · Haiku / Sonnet / Opus',
+    'Prompt cache · online',
+    '──────────────────────',
+    'All systems online'
   ];
   const log = $('#bootlog');
   const bar = $('#bootbar i');
@@ -1217,7 +1264,43 @@ function showPanel(id) {
   else if (id === 'health') initHealth();
   else if (id === 'manage') initManage();
   else if (id === 'voice') initVoice();
+  else if (id === 'settings') initSettings();
   if (id !== 'manage') stopManagePoll();
+}
+
+// Settings — API key entry (vaulted via save-api-key). The one in-app place to fix an invalid key.
+async function initSettings() {
+  const status = document.getElementById('set-key-status');
+  const msg = document.getElementById('set-key-msg');
+  const input = document.getElementById('set-key-input');
+  const btn = document.getElementById('set-key-save');
+  if (msg) msg.textContent = ''; if (input) input.value = '';
+  // Report current key health without ever showing the secret.
+  try {
+    const k = await window.bhatbot.getApiKey();
+    const valid = typeof k === 'string' && k.startsWith('sk-ant-');
+    const brokenRef = typeof k === 'string' && /^CRED_REF/i.test(k);
+    status.className = 'set-status ' + (valid ? 'ok' : 'bad');
+    status.textContent = valid ? '✓ A key is set and vaulted.'
+      : brokenRef ? '✗ Key can’t be decrypted by this app build (identity mismatch) — paste it again below to re-vault.'
+      : (k ? '⚠ A key is set but doesn’t look like an Anthropic key — paste a valid one below.' : '✗ No API key set — paste one below.');
+  } catch { status.className = 'set-status bad'; status.textContent = '✗ Could not read key status.'; }
+  if (btn && !btn._wired) {
+    btn._wired = true;
+    btn.addEventListener('click', async () => {
+      const key = (input.value || '').trim();
+      if (!key) { msg.className = 'set-msg bad'; msg.textContent = 'Paste a key first.'; return; }
+      if (!key.startsWith('sk-ant-')) { msg.className = 'set-msg bad'; msg.textContent = 'That doesn’t look like an Anthropic key (should start with sk-ant-).'; return; }
+      btn.disabled = true; msg.className = 'set-msg'; msg.textContent = 'Saving + vaulting…';
+      try {
+        await window.bhatbot.saveApiKey(key);
+        input.value = '';
+        msg.className = 'set-msg ok'; msg.textContent = '✓ Saved and encrypted in the vault. Reasoning is live — try “improve yourself”.';
+        setTimeout(initSettings, 400);
+      } catch (e) { msg.className = 'set-msg bad'; msg.textContent = 'Save failed: ' + (e && e.message || e); }
+      finally { btn.disabled = false; }
+    });
+  }
 }
 // Tab clicks. Code uses the existing docked terminal overlay; Browser is its own desktop window.
 document.querySelectorAll('#ctxbar .tab').forEach((t) =>
