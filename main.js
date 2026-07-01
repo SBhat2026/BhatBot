@@ -5034,11 +5034,24 @@ function stopSelfHeal() { if (_selfHealTimer) { clearInterval(_selfHealTimer); _
 // revert; never pushes; commits to a local per-session branch. See lib/selfdrive.js + lib/risk.js.
 
 // reflect(focus) — build the self-portrait and run the bounded Opus desire engine.
+// Relay a self-drive progress line to every surface (Activity/Vanguard panel, chat, Telegram) so
+// the run is visible in real time instead of a black box between "started" and "done".
+function sdRelay(text) {
+  try { sendToActivity('tool-update', { type: 'thinking', text }); } catch {}
+  try { fleetBroadcast({ id: 'self-drive', role: 'OVERMIND', status: 'working', note: text, panel: 'selfdrive' }); } catch {}
+}
 async function selfDriveReflect(focus) {
   const toolNames = TOOLS.map((t) => t.name);
   let roleNames = []; try { roleNames = Object.keys(require('./lib/agents/roles').ROLES); } catch {}
   const portrait = introspect.buildSelfPortrait({ toolNames, roleNames, repoDir: SELF_HEAL_PROJ });
-  return reflect.reflect(portrait, { anthropicRequest, apiKey: getApiKey(), focus: focus || '' });
+  try { if (portrait.code_scan && portrait.code_scan.summary) sdRelay('🔍 Scanned my source — ' + portrait.code_scan.summary); } catch {}
+  const r = await reflect.reflect(portrait, { anthropicRequest, apiKey: getApiKey(), focus: focus || '' });
+  try {
+    const ds = (r.desires || []).slice(0, 3).map((d, i) => `${i + 1}. ${d.aspiration}`).join('  ·  ');
+    if (ds) sdRelay('🧠 Improvement ideas — ' + ds);
+    else if (r.error) sdRelay('⚠ Reflection produced no actionable ideas (' + r.error + ')');
+  } catch {}
+  return r;
 }
 function selfDriveSnapshot() {
   const toolNames = TOOLS.map((t) => t.name);
@@ -5062,7 +5075,9 @@ async function selfDriveResearch(desire, files) {
       persona: 'You are SCOUT, the RESEARCHER (read-only). Investigate the BhatBot repo to ground a planned change. Report: current state / root cause, the exact files+functions involved, 2-3 implementation options with tradeoffs, a recommended option, and the precise list of files that must change. Do NOT edit anything.',
       task: `Research this planned self-improvement:\n\nDesire: ${aspiration}\nIntended approach: ${(desire.implementation && desire.implementation.summary) || ''}\nImplicated files: ${(files || []).join(', ')}\n\nRead the relevant source and report findings + the precise change surface.` }],
       subagentDeps(), { maxParallel: 1, maxSteps: 10, onUpdate: (u) => fleetBroadcast(u) });
-    return ((sc.agents || [])[0] || {}).result || '';
+    const result = ((sc.agents || [])[0] || {}).result || '';
+    try { if (result) sdRelay('🔬 SCOUT findings — ' + String(result).replace(/\s+/g, ' ').slice(0, 240)); } catch {}
+    return result;
   } catch { return ''; }
 }
 // ORACLE + ECHO — plan + adversarial review (ensemble). Parse the synthesized plan for a VERIFY
@@ -5079,6 +5094,7 @@ async function selfDrivePlan(desire, report) {
       ], maxSteps: 6, onUpdate: (u) => fleetBroadcast(u) });
     text = (ens && ens.result) || '';
   } catch {}
+  try { if (text) sdRelay('📋 Plan — ' + String(text).replace(/\s+/g, ' ').slice(0, 240)); } catch {}
   const grab = (re) => { const m = String(text).match(re); return m ? m[1].trim() : ''; };
   return { brief: text, files: grab(/FILES:\s*(.+)/) ? grab(/FILES:\s*(.+)/).split(/\s+/) : [], verify: grab(/VERIFY:\s*(.+)/) || null, severity: grab(/SEVERITY:\s*(\w+)/).toLowerCase() || 'medium', concern: text.slice(-400) };
 }
@@ -5093,7 +5109,12 @@ async function selfDriveForge({ desire, report, plan, verify, proj }) {
     `\nThe change is correct when this exits 0:\n  ${verify}`,
     `Do NOT run the verify command yourself. Do NOT edit any of: lib/selfdrive.js, lib/risk.js, lib/selfheal.js, lib/security.js, lib/credentials.js, lib/admission.js, scripts/verify-syntax.js, scripts/test-upgrade.js, config files, or secrets.`,
   ].filter(Boolean).join('\n');
-  try { const r = await runShell('claude -p ' + JSON.stringify(prompt) + ' --dangerously-skip-permissions', proj, 300000); return { success: r && r.success !== false, out: (r && (r.stdout || r.error) || '').slice(-400) }; }
+  try {
+    sdRelay('🔧 FORGE: editing files via Claude Code (full write access on the isolated branch)…');
+    const r = await runShell('claude -p ' + JSON.stringify(prompt) + ' --dangerously-skip-permissions', proj, 300000);
+    try { sdRelay('🔧 Claude Code done — ' + String((r && (r.stdout || r.error)) || '').replace(/\s+/g, ' ').slice(-240)); } catch {}
+    return { success: r && r.success !== false, out: (r && (r.stdout || r.error) || '').slice(-400) };
+  }
   catch (e) { return { success: false, error: e.message }; }
 }
 function selfDriveDeps() {
