@@ -5144,9 +5144,16 @@ function selfDriveDeps() {
 function startSelfDriveSession(opts = {}) {
   if (!selfdrive.enabled(loadConfig)) return { skipped: 'disabled' };
   if (selfdrive.isRunning()) return { skipped: 'already running' };
+  // Capture the branch we start from so we can return to it afterward. selfdrive checks out its own
+  // self-drive-* branch and never switches back — which left the repo (and any later commits, mine or
+  // the user's) stranded on the session branch. Restore the original branch when the session ends.
+  let origBranch = 'main';
+  try { origBranch = require('child_process').execSync('git rev-parse --abbrev-ref HEAD', { cwd: SELF_HEAL_PROJ }).toString().trim() || 'main'; } catch {}
+  if (/^self-drive-/.test(origBranch)) origBranch = 'main';   // never return onto a prior session branch
   selfdrive.startSession(loadConfig, selfDriveDeps(), opts)
     .then((r) => { if (r && r.skipped) console.log('[self-drive] not started:', r.skipped); })
-    .catch((e) => console.error('[self-drive] session error:', e.message));
+    .catch((e) => console.error('[self-drive] session error:', e.message))
+    .finally(() => { runShell('git checkout ' + JSON.stringify(origBranch), SELF_HEAL_PROJ).then((r) => { if (r && r.success !== false) console.log('[self-drive] returned to branch ' + origBranch); }).catch(() => {}); });
   return { started: true, reason: opts.reason || 'manual' };
 }
 // Capability-gap trigger: BhatBot decided it can't do something with its current tools. Enqueue a
