@@ -68,6 +68,8 @@ const { createAdmission } = require('./lib/admission'); // Phase 1 — budget-aw
 const blackboard = require('./lib/blackboard');        // FORGE — shared cross-agent state (T5)
 const { runFleet } = require('./lib/fleet');           // FORGE — drone fleet supervisor (D1)
 const scholar = require('./lib/integrations/scholar');  // FORGE — scholarly adapters (arXiv/Semantic Scholar)
+const scicompute = require('./lib/scicompute');         // quant/numerics/stats/MPS-torch compute pack (sci_compute)
+const dockerPack = require('./lib/integrations/docker'); // container isolation lane (container_run)
 
 const DB_MODELS = { db_speech: 'gpt-oss-20b', db_directive: 'gemma-4-26b' };
 
@@ -3098,6 +3100,31 @@ async function executeTool(name, input) {
         result = await simulate.mathReason({ task: input.task || input.problem, model: m, maxSteps: input.maxSteps, apiKey: getApiKey(), timeoutMs: input.timeoutMs });
         break;
       }
+      case 'sci_compute': {
+        // Quantitative/numerics/stats/MPS-torch compute pack (lib/scicompute.js, own venv).
+        if ((input.action || 'run') === 'capabilities') result = scicompute.capabilities();
+        else result = await scicompute.run({ code: input.code, timeoutMs: input.timeoutMs });
+        break;
+      }
+      case 'container_run': {
+        // Docker container lane — the STRONGER isolation floor over the untrusted-code wall. Never
+        // inherits BhatBot's env/secrets; network defaults to 'none' for generated/cloned code.
+        if ((input.action || 'run') === 'status') {
+          const avail = await dockerPack.available();
+          result = { success: true, available: avail, hint: avail ? undefined : dockerPack.INSTALL_HINT,
+            note: avail ? 'Docker daemon reachable — container lane active.' : 'Docker absent — untrusted code falls back to the scrubbed-subprocess sandbox floor (lib/sandboxexec.js).' };
+          break;
+        }
+        if (!(await dockerPack.available())) { result = { success: false, error: dockerPack.INSTALL_HINT }; break; }
+        const image = input.image || dockerPack.baseImageFor(input.stack || 'debian');
+        const net = input.network || (input.trusted ? 'bridge' : 'none'); // untrusted → no network by default
+        const r = await dockerPack.run({ image, cmd: input.cmd, mount: input.mount, workdir: input.workdir,
+          memory: input.memory, cpus: input.cpus, network: net, platform: input.platform,
+          env: input.env && typeof input.env === 'object' ? input.env : undefined, timeoutMs: input.timeoutMs });
+        result = { success: r.code === 0 && !r.timedOut, image: r.image, exitCode: r.code, timedOut: r.timedOut,
+          network: net, stdout: (r.stdout || '').slice(-6000), stderr: (r.stderr || '').slice(-3000) };
+        break;
+      }
       case 'molecule': {
         if ((input.action || 'view') === 'render') {
           const out = path.join(MOL_DIR, `render-${Date.now()}.png`);
@@ -4057,7 +4084,7 @@ async function agentLoop(history, apiKey, event, opts = {}) {
       catch (e) { result = { success: false, error: 'tool threw: ' + (e && e.message || String(e)) }; }
       // Jarvis HUD: surface visuals inline in chat — generated images / design renders /
       // explicit screenshots as holo-cards, and 3D outputs as an in-chat spinning model.
-      const showImage = result._image && (['generate_image', 'make_figure', 'simulate', 'studio_write', 'ui_inspect', 'screen_parse', 'vision_click', 'molecule', 'maps'].includes(block.name)
+      const showImage = result._image && (['generate_image', 'make_figure', 'simulate', 'sci_compute', 'studio_write', 'ui_inspect', 'screen_parse', 'vision_click', 'molecule', 'maps'].includes(block.name)
         || (block.name === 'browser' && block.input && block.input.action === 'screenshot'));
       const model3d = (block.name === 'generate_3d' || block.name === 'make_printable') && result.success && result.path ? result.path : undefined;
       sendToAll(event, 'tool-update', {
