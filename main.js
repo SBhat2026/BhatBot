@@ -5904,6 +5904,7 @@ ipcMain.handle('get-voice-config', () => {
     hasLocalStt,
     hasSTT: hasCloudStt || hasLocalStt,   // renderer arms MediaRecorder→Whisper whenever ANY STT exists
     picovoiceKey: c.picovoiceKey || null, wakeWord: c.wakeWord || 'jarvis', silenceMs: c.silenceMs || 2000,
+    vadFloorMargin: (c.vad && c.vad.floorMargin) || 1.8, verifyUser: !!(c.voice && c.voice.verifyUser),
     ttsEnabled: c.ttsEnabled !== false, ttsProvider, hasTTS,
     ttsSpeed: c.ttsSpeed != null ? c.ttsSpeed : 1.05,
     hasReplicateKey: !!c.replicateKey, hasImageGen: !!c.openaiKey

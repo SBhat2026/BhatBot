@@ -1998,10 +1998,58 @@ const MAX_UTTER_MS = 45000;                    // never hold the mic open longer
 async function refreshEndpointThreshold() {
   try { const r = await window.bhatbot.endpointThreshold(); if (r && r.thresholdMs) SILENCE_MS = r.thresholdMs; } catch {}
 }
+
+// ---- near-field speech-energy VAD: decide endpoints from REAL acoustic silence, not Web-Speech's
+// erratic result cadence. RMS over the mic; auto-calibrate the noise floor from the first ~1.8s each
+// session; `userSpeaking` = RMS above floor×margin. This is what makes "wait until I actually stop"
+// robust (a quiet thinking-pause reads as silence; the mic doesn't cut me off early). Best-effort —
+// STT still works if getUserMedia/AudioContext are unavailable. (Speaker-ID separation = voiceid
+// post-filter + future work; energy alone can't tell voices apart.)
+let vadCtx = null, vadAnalyser = null, vadBuf = null, vadStream = null, vadRAF = 0;
+let userSpeaking = false, lastUserSpeechTs = 0, noiseFloor = 0.008, vadCalib = [], vadCalibrating = false;
+async function startVad() {
+  if (vadCtx) return;
+  try {
+    vadStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: false } });
+    vadCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const src = vadCtx.createMediaStreamSource(vadStream);
+    vadAnalyser = vadCtx.createAnalyser(); vadAnalyser.fftSize = 1024; vadBuf = new Float32Array(vadAnalyser.fftSize);
+    src.connect(vadAnalyser);
+    vadCalibrating = true; vadCalib = [];
+    setTimeout(() => { if (vadCalib.length) { vadCalib.sort((a, b) => a - b); noiseFloor = Math.max(0.004, vadCalib[Math.floor(vadCalib.length / 2)]); } vadCalibrating = false; }, 1800);
+    lastUserSpeechTs = Date.now();
+    const margin = (voiceCfg.vadFloorMargin || 1.8);
+    const loop = () => {
+      if (!vadAnalyser) return;
+      vadAnalyser.getFloatTimeDomainData(vadBuf);
+      let s = 0; for (let i = 0; i < vadBuf.length; i++) s += vadBuf[i] * vadBuf[i];
+      const rms = Math.sqrt(s / vadBuf.length);
+      if (vadCalibrating) vadCalib.push(rms);
+      userSpeaking = rms > noiseFloor * margin + 0.002;
+      if (userSpeaking) lastUserSpeechTs = Date.now();
+      vadRAF = requestAnimationFrame(loop);
+    };
+    loop();
+  } catch { /* VAD is best-effort; endpointing falls back to the Web-Speech timer */ }
+}
+function stopVad() {
+  if (vadRAF) cancelAnimationFrame(vadRAF); vadRAF = 0;
+  if (vadStream) { try { vadStream.getTracks().forEach((t) => t.stop()); } catch {} vadStream = null; }
+  if (vadCtx) { try { vadCtx.close(); } catch {} vadCtx = null; }
+  vadAnalyser = null; userSpeaking = false;
+}
+// End only when BOTH signals agree we're done: Web-Speech has been quiet for SILENCE_MS AND (when VAD
+// is live) the mic has been acoustically quiet for SILENCE_MS. If the user is still making sound, wait.
+function tryEndWebSpeech() {
+  const quietFor = Date.now() - (lastUserSpeechTs || 0);
+  if (!vadCtx || quietFor >= SILENCE_MS) { endWebSpeech(); return; }
+  clearTimeout(silenceTimer); silenceTimer = setTimeout(tryEndWebSpeech, Math.max(80, SILENCE_MS - quietFor));
+}
 function startWebSpeech() {
   if (!SR) { addErr('No STT available — set openaiKey for Whisper.'); return; }
   finalText = ''; manualStop = false; recording = true; lastResultTs = 0; setOrbState('listening');
   refreshEndpointThreshold();                  // pull the latest learned threshold (async; timers re-read SILENCE_MS)
+  startVad();                                  // near-field energy gate so background/pauses don't cut me off
   clearTimeout(maxUtterTimer); maxUtterTimer = setTimeout(endWebSpeech, MAX_UTTER_MS);
   recog = new SR(); recog.lang = 'en-US'; recog.interimResults = true; recog.continuous = true;
   recog.onstart = () => { starting = false; };
@@ -2015,7 +2063,7 @@ function startWebSpeech() {
     const now = Date.now();
     if (lastResultTs) { const gap = now - lastResultTs; if (gap >= 300 && gap < SILENCE_MS) { try { window.bhatbot.endpointObserve(gap, true); } catch {} } }
     lastResultTs = now;
-    clearTimeout(silenceTimer); silenceTimer = setTimeout(endWebSpeech, SILENCE_MS);
+    clearTimeout(silenceTimer); silenceTimer = setTimeout(tryEndWebSpeech, SILENCE_MS);
   };
   recog.onerror = (e) => {
     // Electron has no Web-Speech recognition service → 'network'. NEVER surface raw error codes in
@@ -2032,9 +2080,9 @@ function startWebSpeech() {
   };
   setMicRecording(true); tbar.textContent = '🎙 listening… (click mic to send)';
   starting = true; try { recog.start(); } catch { starting = false; }
-  clearTimeout(silenceTimer); silenceTimer = setTimeout(endWebSpeech, SILENCE_MS);
+  clearTimeout(silenceTimer); silenceTimer = setTimeout(tryEndWebSpeech, SILENCE_MS);
 }
-function endWebSpeech() { manualStop = true; recording = false; clearTimeout(silenceTimer); clearTimeout(restartTimer); clearTimeout(maxUtterTimer); try { recog && recog.stop(); } catch {} }
+function endWebSpeech() { manualStop = true; recording = false; clearTimeout(silenceTimer); clearTimeout(restartTimer); clearTimeout(maxUtterTimer); stopVad(); try { recog && recog.stop(); } catch {} }
 
 mic.addEventListener('click', () => recording ? endVoice() : startVoice());
 
