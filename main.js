@@ -43,6 +43,7 @@ const agentTeam = require('./lib/orchestrator');        // C — parallel same-t
 const planner = require('./lib/planner');               // B1 — decompose a goal into a task DAG for the team
 const ambient = require('./lib/ambient');              // #18 — opt-in proactive Calendar/Mail awareness (OFF by default)
 const { textHintFromSelector, splitForSpeech, estimateToolCost, stripReasoning } = require('./lib/pure');  // SPLIT_PLAN step 1
+const speech = require('./lib/speech');                 // human-speech shaping: emoji→spoken-cue/drop + context-aware punctuation
 const { validateHistory, evictOldImages, isRetryableTool, TRANSIENT_RE } = require('./lib/history');  // SPLIT_PLAN step 9 (pure agent-loop helpers)
 const projects = require('./lib/projects');            // #24 — project memory + living auto-summary
 const visualInspect = require('./lib/inspect');
@@ -2943,8 +2944,28 @@ async function executeTool(name, input) {
         const rp = expandPath(input.path);
         if (isSecretPath(rp)) { result = { success: false, guarded: true, error: 'refused: this path holds encrypted credentials/session secrets and cannot be read directly. The values are stored via the vault (CRED_REF handles); ask Siddhant if you need one.' }; break; }
         const stat = fs.statSync(rp);
-        if (stat.size > 100 * 1024) { result = { success: false, error: 'File exceeds 100KB' }; break; }
-        result = { success: true, content: fs.readFileSync(rp, 'utf8') }; break;
+        const raw = fs.readFileSync(rp, 'utf8');
+        // Line paging so large files (e.g. BhatBot's own 400KB+ main.js — needed for self-inspection)
+        // can be read in windows instead of hard-failing. offset = 1-based start line; limit = count.
+        const hasWindow = input.offset != null || input.limit != null;
+        const CHAR_CAP = 90 * 1024;   // keep any single result comfortably under the tool-result token cap
+        if (hasWindow) {
+          const lines = raw.split('\n');
+          const start = Math.max(1, Number(input.offset) || 1);
+          const count = Math.max(1, Number(input.limit) || 400);
+          const slice = lines.slice(start - 1, start - 1 + count).join('\n').slice(0, CHAR_CAP);
+          result = { success: true, content: slice, offset: start, lines_returned: Math.min(count, lines.length - start + 1), total_lines: lines.length, truncated: start - 1 + count < lines.length };
+          break;
+        }
+        if (stat.size > CHAR_CAP) {
+          const lines = raw.split('\n');
+          const head = raw.slice(0, CHAR_CAP);
+          const headLines = head.split('\n').length;
+          result = { success: true, content: head, offset: 1, lines_returned: headLines, total_lines: lines.length, truncated: true,
+            note: `File is ${Math.round(stat.size / 1024)}KB / ${lines.length} lines — returned the first ~${headLines}. Re-read with {"path":"…","offset":${headLines + 1},"limit":400} to page further.` };
+          break;
+        }
+        result = { success: true, content: raw }; break;
       }
       case 'write_file': {
         const wp = expandPath(input.path);
@@ -5914,6 +5935,7 @@ async function openaiSynth(t, c) {
 // Applied ONLY on the audio path (synthesizeSpeech) — the on-screen text keeps its symbols.
 function normalizeForSpeech(input) {
   let s = stripReasoning(String(input || ''));                 // never voice leaked <thinking>/meta
+  s = speech.forSpeech(s);                                     // emoji → spoken cue / clean drop; calm shouty punctuation (lib/speech)
   // 1. Things that should never be read aloud.
   s = s.replace(/```[\s\S]*?```/g, ' ');                       // fenced code blocks
   s = s.replace(/`([^`]+)`/g, '$1');                           // inline code → its text
