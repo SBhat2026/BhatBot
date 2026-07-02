@@ -177,3 +177,37 @@ _The larger arc lives in `AMBITIOUS_ROADMAP.md` (A–H). Near-term:_
 
 _For deeper history: `ARCHITECTURE.md`, `BHATBOT_DOSSIER.md`, `SPLIT_PLAN.md`, `PERF-EVAL.md`,
 `WORLDCUP_ITERATION_LOG.md`, and the dated commit log._
+
+---
+
+## 10. Autonomy model update (2026-07-01, branch `jarvis-sprint`)
+
+Siddhant's revised self-improvement permission model — **"approve when it starts, then run free on
+what it actually affects, except ban self-degradation and report it to me."** Implemented in the pure
+governor (`lib/selfdrive.js`) + firewall (`lib/risk.js`), verify-tested (`scripts/test-selfdrive.js`,
+39 assertions).
+
+- **Approve at start (universal).** Every session — manual, reflection-sanctioned, or capability-gap
+  — now needs an explicit go-ahead. Manual `self_drive start` carries approval (it's a step-up tool;
+  the confirm card *is* the approval). Auto-triggers no longer auto-start: they stage a proposal and
+  ask; a plain **"go ahead"** launches it (`_pendingSelfDrive` in `main.js`). Reflection-implies-
+  consent auto-start was removed.
+- **Run free once approved.** `selfDrive.freeRun` (default **true**) swaps the tight caps
+  (`maxCyclesPerSession 5`, combined `dailyCap 3`) for `freeRunMaxCycles 25` / `freeRunDailyCap 25`
+  via `effectiveCaps()`, and shortens the inter-cycle cooldown, so an approved session works through
+  the whole actionable backlog instead of a token number of cycles.
+- **Self-degradation banned (the one hard block that survives approval).** Unified in
+  `risk.isSelfDegrading(files, text)` = frozen-zone edit **or** guardrail-weakening intent. The
+  behavioral half is the existing verify-or-revert: a change that breaks the suite is degradation and
+  gets reverted. Frozen zone unchanged (its own governor, risk.js, selfheal, security, credentials,
+  admission, verify scripts). Never automated, any channel.
+- **Reported.** Every block/revert is tagged (`self_degradation` | `verify_fail` | `frozen_breach`),
+  collected into `session.degradation_attempts`, surfaced in the end-of-session notify and in
+  `selfdrive.status().lastSession`.
+
+**New config keys:** `selfDrive.requireStartApproval` (default true), `selfDrive.freeRun` (default
+true), `selfDrive.freeRunMaxCycles` (25), `selfDrive.freeRunDailyCap` (25). Still **never pushes**;
+still commits to a local `self-drive-*` branch for human merge.
+
+_NOT done from the sprint prompt (deferred): T1–T4 voice ws transport/planner/ack library, T5–T7
+blackboard/DAG/fan-out, T8–T9 goal queue + Manage cards, T10 zen UI._

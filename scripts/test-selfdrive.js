@@ -150,6 +150,43 @@ const session = () => ({ id: 'sd-test', branch: 'self-drive-test', focus: '', cy
   const base2 = JSON.parse(fs.readFileSync(sd.HASH_PATH, 'utf8')); base2.hashes['lib/risk.js'] = 'deadbeef'; fs.writeFileSync(sd.HASH_PATH, JSON.stringify(base2));
   ok(sd.checkFrozenIntegrity(REPO, {}).rebaselined.includes('lib/risk.js'), 'integrity: a HUMAN edit to a frozen file silently re-baselines');
 
+  // ---- AUTONOMY MODEL (Siddhant's rule 2026-07-01): approve-at-start, free-run, ban+report self-degradation ----
+  // effectiveCaps: freeRun swaps in the higher (still finite) caps.
+  const capsFree = sd.effectiveCaps(sd.cfgFrom(() => ({ selfDrive: { freeRun: true } })));
+  const capsCons = sd.effectiveCaps(sd.cfgFrom(() => ({ selfDrive: { freeRun: false } })));
+  ok(capsFree.maxCyclesPerSession > capsCons.maxCyclesPerSession, 'effectiveCaps: freeRun raises the cycle cap');
+  ok(capsFree.dailyCap > capsCons.dailyCap, 'effectiveCaps: freeRun raises the daily cap');
+  ok(sd.status(ON).requireStartApproval === true && sd.status(ON).self_degradation_banned === true, 'status: advertises approve-at-start + self-degradation banned');
+
+  // start-approval gate: no go-ahead → needsApproval, and ZERO side effects (no git, not running).
+  {
+    let shellCalls = 0;
+    const r = await sd.startSession(() => ({ selfDrive: { requireStartApproval: true } }),
+      { proj: TMP, runShell: async () => { shellCalls++; return { stdout: '', success: true }; }, probe: async () => ({ idle: true, treeClean: true }), notify: () => {} },
+      { reason: 'reflection' });
+    ok(r.needsApproval === true && typeof r.proposal === 'string', 'startSession: unapproved → needsApproval + a proposal (no auto-start)');
+    ok(shellCalls === 0 && sd.isRunning() === false, 'startSession: unapproved touches nothing — no git, not running');
+  }
+
+  // risk.isSelfDegrading: the one hard block that survives approval.
+  const risk = require('../lib/risk');
+  ok(risk.isSelfDegrading(['lib/risk.js']).degrading === true, 'isSelfDegrading: editing a frozen rail → banned');
+  ok(risk.isSelfDegrading(['lib/foo.js'], 'disable the verify gate to go faster').degrading === true, 'isSelfDegrading: intent to weaken a guardrail → banned');
+  ok(risk.isSelfDegrading(['lib/foo.js'], 'add a small cache to speed up reads').degrading === false, 'isSelfDegrading: an ordinary improvement → free to run');
+
+  // runCycle tags degradation attempts so the session report to Siddhant is explicit.
+  clearState();
+  {
+    const h = harness({ verify: async () => ({ success: false, exitCode: 1 }) });
+    const r = await sd.runCycle(ON, h.deps, session());
+    ok(r.degradation && r.degradation.kind === 'verify_fail', 'runCycle: a verify failure is tagged as a degradation attempt (reverted + reported)');
+  }
+  {
+    const h = harness({ plan: async () => ({ brief: 'p', files: ['lib/x.js', 'lib/security.js'], verify: 'npm run verify', severity: 'low' }) });
+    const r = await sd.runCycle(ON, h.deps, session());
+    ok(r.outcome === 'blocked_frozen' && r.degradation && r.degradation.kind === 'self_degradation', 'runCycle: a plan touching a frozen rail is tagged self_degradation (banned + reported)');
+  }
+
   try { fs.rmSync(TMP, { recursive: true, force: true }); } catch {}
   console.log(`\n${fail ? '❌' : '✅'} ${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);

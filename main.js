@@ -3523,8 +3523,10 @@ async function executeTool(name, input) {
         }
         if (a === 'stop') { result = { success: true, ...selfdrive.requestStop(input && input.now ? 'now' : 'graceful'), note: 'Self-drive will halt after the current cycle (or immediately if now=true).' }; break; }
         if (a === 'run' || a === 'start') {   // begin an on-demand session (runs in background; progress → panel)
-          const r = startSelfDriveSession({ reason: input && input.reason ? String(input.reason).slice(0, 40) : 'manual', focus: (input && input.focus) || '', maxCycles: input && input.maxCycles });
-          result = { success: !r.skipped, ...r, note: r.skipped ? r.skipped : 'Self-drive session started — I\'ll improve myself on an isolated local branch (never pushed) and report what I land. Say "stop improving yourself" to halt.' };
+          // The self_drive tool is a step-up tool: reaching this handler means the confirm card was
+          // approved, so this manual path carries approval (approved:true). Run free from here.
+          const r = startSelfDriveSession({ reason: input && input.reason ? String(input.reason).slice(0, 40) : 'manual', focus: (input && input.focus) || '', maxCycles: input && input.maxCycles, approved: true });
+          result = { success: !r.skipped, ...r, note: r.skipped ? r.skipped : 'Self-drive session started — I\'ll run free through my actionable backlog on an isolated local branch (never pushed, verify-gated), refuse + report anything that would degrade me. Say "stop improving yourself" to halt.' };
           break;
         }
         result = { success: false, error: 'unknown self_drive action: ' + a };
@@ -3576,16 +3578,17 @@ async function executeTool(name, input) {
         let text;
         if (drillish) { let schematic = ''; try { schematic = fs.readFileSync(path.join(__dirname, 'BHATBOT_SCHEMATIC.md'), 'utf8'); } catch {} text = await narrate.drill(rf.desires, { focus, anthropicRequest, apiKey: getApiKey(), schematic }); }
         else text = narrate.render(rf.desires, { mode: depth === 'brief' ? 'top' : 'full' });
-        // Reflection-implies-consent (Siddhant 2026-06-28): asking what I'd improve SANCTIONS me to act
-        // on it without further permission — UNLESS he explicitly says otherwise. If there's at least one
-        // automatable, non-frozen LOCAL/STRUCTURAL desire, queue a self-drive session for turn-end.
+        // Reflection → PROPOSAL (Siddhant's rule 2026-07-01): asking what I'd improve surfaces an offer,
+        // but a session only STARTS with an explicit go-ahead (no more auto-start on reflection). If
+        // there's ≥1 automatable, non-frozen LOCAL/STRUCTURAL desire, stage a pending proposal the user
+        // approves by saying "go ahead"; once approved it runs FREE through the backlog.
         try {
           const sdCfg = selfdrive.cfgFrom(loadConfig);
           const forbid = /\b(do ?n'?t|do not|just tell|only tell|no change|hold off|not now|without (chang|edit|implement)|don'?t (implement|change|touch|act))\b/i.test(String(focus));
           const actionable = (rf.desires || []).some((d) => { const c = selfDriveClassify(d); return c.automatable && (c.level === 'LOCAL' || c.level === 'STRUCTURAL') && !c.frozen; });
-          if (sdCfg.enabled && sdCfg.actOnReflection && !forbid && actionable && !selfdrive.isRunning()) {
-            _pendingSelfDrive = { reason: 'reflection', focus: String(focus || '').slice(0, 200) };
-            text += '\n\n— Since you asked, I\'ll act on it: starting a self-improvement session on the top automatable desire (isolated local branch, verify-gated, never pushed). Say "stop improving yourself" — or "just tell me, don\'t change anything" next time — to hold off.';
+          if (sdCfg.enabled && !forbid && actionable && !selfdrive.isRunning()) {
+            _pendingSelfDrive = { reason: 'reflection', focus: String(focus || '').slice(0, 200), at: Date.now() };
+            text += '\n\n— Want me to act on this? Say "go ahead" and I\'ll run a self-improvement session through these on an isolated local branch (verify-gated, auto-reverting anything that would degrade me, never pushed). I won\'t start without your go-ahead.';
           }
         } catch {}
         result = { success: true, result: text, desires: rf.desires, scope };
@@ -3864,8 +3867,8 @@ async function agentLoop(history, apiKey, event, opts = {}) {
   // All exits go through here so live guidance can be offered for learning (2a).
   const finish = (text) => {
     agentState = 'idle';
-    // Phase 6: a reflection-sanctioned self-drive session is deferred to here (turn must be idle first).
-    if (_pendingSelfDrive) { const p = _pendingSelfDrive; _pendingSelfDrive = null; setTimeout(() => { try { startSelfDriveSession(p); } catch {} }, 1500); }
+    // Phase 6: a reflection/capability-gap proposal is NOT auto-started (Siddhant's rule: approve at
+    // start). _pendingSelfDrive stays parked until he says "go ahead" (handled in the chat entrypoint).
     _activeTools = null;   // W1 — drop the per-turn tool subset so out-of-loop calls see the full catalog
     if (speakParser) speakParser.finish(); else if (ttsSeq != null) ttsStreamFlush(ttsSeq);
     if (usedGuidance.length) sendToActivity('learn_prompt', { text: usedGuidance.join(' | ') });
@@ -5187,13 +5190,25 @@ function selfDriveDeps() {
 function startSelfDriveSession(opts = {}) {
   if (!selfdrive.enabled(loadConfig)) return { skipped: 'disabled' };
   if (selfdrive.isRunning()) return { skipped: 'already running' };
+  // APPROVAL GATE (Siddhant's rule 2026-07-01): every session — manual, reflection, capability-gap —
+  // needs an explicit go-ahead. A manual invocation already carries approval (self_drive is a step-up
+  // tool: the confirm card WAS the approval, so its handler passes approved:true). Auto-triggers pass
+  // no approval → we stash a pending proposal and ask; the user says "go ahead" to launch.
+  const sdCfg = selfdrive.cfgFrom(loadConfig);
+  if (sdCfg.requireStartApproval && !opts.approved) {
+    _pendingSelfDrive = { reason: opts.reason || 'manual', focus: opts.focus || '', maxCycles: opts.maxCycles, at: Date.now() };
+    const proposal = `Approve a self-improvement session${opts.focus ? ` focused on: ${String(opts.focus).slice(0, 120)}` : ''}? Once approved I run free through my actionable backlog on an isolated local branch, verify-gate every change, auto-revert anything that would degrade me, never touch my own safety rails, and never push. Say "go ahead" to begin.`;
+    try { sendToActivity('tool-update', { type: 'thinking', text: '🕹 awaiting your approval to start a self-improvement session' }); } catch {}
+    try { if (opts.reason && opts.reason !== 'manual') telegramNotify('🕹 ' + proposal); } catch {}
+    return { needsApproval: true, proposal };
+  }
   // Capture the branch we start from so we can return to it afterward. selfdrive checks out its own
   // self-drive-* branch and never switches back — which left the repo (and any later commits, mine or
   // the user's) stranded on the session branch. Restore the original branch when the session ends.
   let origBranch = 'main';
   try { origBranch = require('child_process').execSync('git rev-parse --abbrev-ref HEAD', { cwd: SELF_HEAL_PROJ }).toString().trim() || 'main'; } catch {}
   if (/^self-drive-/.test(origBranch)) origBranch = 'main';   // never return onto a prior session branch
-  selfdrive.startSession(loadConfig, selfDriveDeps(), opts)
+  selfdrive.startSession(loadConfig, selfDriveDeps(), { ...opts, approved: true })
     .then((r) => { if (r && r.skipped) console.log('[self-drive] not started:', r.skipped); })
     .catch((e) => console.error('[self-drive] session error:', e.message))
     .finally(() => { runShell('git checkout ' + JSON.stringify(origBranch), SELF_HEAL_PROJ).then((r) => { if (r && r.success !== false) console.log('[self-drive] returned to branch ' + origBranch); }).catch(() => {}); });
@@ -6618,6 +6633,20 @@ ipcMain.handle('chat', async (event, { history }) => {
   // Pipeline toggle by voice/text — flips config.pipeline.enabled without the settings UI.
   const toggle = maybeTogglePipeline(ut);
   if (toggle) return { text: toggle, history: [...history, { role: 'assistant', content: toggle }] };
+  // Approve a PARKED self-improvement proposal (from reflection or a capability gap). This is the
+  // "approve at start" half of Siddhant's rule — a plain "go ahead" launches the staged session with
+  // approval, and from there it runs free. Guarded to only fire when a proposal is actually pending.
+  if (_pendingSelfDrive && !/\?/.test(ut) && /^\s*(go ahead|go for it|approved?|permission granted|you have my (approval|permission)|yes,?\s*(do it|go|please|start)?|do it|proceed|start( it)?|make it so)\b/i.test(ut)) {
+    const p = _pendingSelfDrive; _pendingSelfDrive = null;
+    let msg;
+    try {
+      const r = startSelfDriveSession({ ...p, approved: true });
+      msg = (r && (r.started || r.ran)) && !r.skipped
+        ? `🚀 Approved — running a self-improvement session${p.focus ? ` (focus: ${p.focus})` : ''} on an isolated local branch. I'll work through what's actionable, verify-gate each change, and report anything I refuse as self-degrading. Say "stop improving yourself" to halt.`
+        : ('Couldn\'t start: ' + ((r && (r.skipped || r.error)) || 'unknown') + '.');
+    } catch (e) { msg = 'Self-drive start failed: ' + (e && e.message || e); }
+    return { text: msg, history: [...history, { role: 'assistant', content: msg }] };
+  }
   // Deterministic self-improvement trigger — "begin/start/run self-improvement" (or "improve
   // yourself") reliably invokes the self_drive tool instead of depending on the model to decide.
   // Routes THROUGH executeTool's step-up gate (the confirm card), so the human approval is still
