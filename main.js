@@ -65,6 +65,8 @@ let _lastRetryAfterMs = 0;                            // last 429 Retry-After (m
 let _pendingSelfDrive = null;                         // Phase 6: a reflection-sanctioned session to start once the turn goes idle
 const vanguard = require('./lib/vanguard');           // Phase 1 — unified VANGUARD fleet codename roster (OVERMIND/FORGE/ORACLE/…)
 const { createAdmission } = require('./lib/admission'); // Phase 1 — budget-aware fleet admission controller (convoy fix)
+const blackboard = require('./lib/blackboard');        // FORGE — shared cross-agent state (T5)
+const { runFleet } = require('./lib/fleet');           // FORGE — drone fleet supervisor (D1)
 
 const DB_MODELS = { db_speech: 'gpt-oss-20b', db_directive: 'gemma-4-26b' };
 
@@ -2823,6 +2825,67 @@ function subagentDeps() {
   };
 }
 
+// ── DRONES (FORGE / D2) ────────────────────────────────────────────────────────────────────────
+// Generic scoped one-shot agent loop for a single drone. Mirrors subagents.run's tool loop but takes
+// its scope (tools/system/model/budget) from the drone ctx that lib/drone.js assembles. Charges spend
+// + heartbeats via ctx.onStep each turn (drives the fleet's budget envelope + stall watchdog). The
+// tool allow-list is enforced HERE too (belt): a tool_use outside the grant is refused, not run.
+async function droneAgentRun(ctx, task) {
+  const toolDefs = TOOLS.filter((t) => (ctx.tools || []).includes(t.name));
+  const model = ctx.model === 'haiku' ? MODEL_HAIKU : MODEL_SONNET;
+  const goal = (task && (task.goal || task)) || 'work the mission';
+  let hist = [{ role: 'user', content: String(goal) }];
+  const maxTurns = Math.max(1, Math.min((ctx.budget && ctx.budget.maxTurns) || 8, 12));
+  let finalText = '';
+  for (let i = 0; i < maxTurns; i++) {
+    let resp;
+    try { resp = await pacedSubagentRequest({ model, max_tokens: 3072, system: ctx.system, tools: toolDefs, messages: hist.slice(-24) }, getApiKey()); }
+    catch (e) { return { status: finalText ? 'partial' : 'failed', summary: finalText || ('drone model error: ' + e.message) }; }
+    const content = resp.content || [];
+    hist.push({ role: 'assistant', content });
+    const text = content.filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim();
+    if (text) finalText = text;
+    const u = resp.usage || {};
+    const usd = ((u.input_tokens || 2000) / 1e6) * 3 + ((u.output_tokens || 400) / 1e6) * 15;   // Sonnet ~ $3 in / $15 out
+    const step = ctx.onStep ? ctx.onStep({ usd, note: (text || 'tool step').slice(0, 60) }) : { budgetLeft: true };
+    const tus = content.filter((b) => b.type === 'tool_use');
+    if (!tus.length || resp.stop_reason === 'end_turn' || (step && step.budgetLeft === false) || (step && step.terminated)) break;
+    const results = [];
+    for (const tu of tus) {
+      const r = (ctx.tools || []).includes(tu.name) ? await executeTool(tu.name, tu.input) : { success: false, error: `tool "${tu.name}" is not permitted for this drone` };
+      results.push({ type: 'tool_result', tool_use_id: tu.id, content: JSON.stringify(r).slice(0, 16 * 1024), is_error: r && r.success === false });
+    }
+    hist.push({ role: 'user', content: results });
+  }
+  return { status: 'ok', summary: finalText || '(completed, no text output)' };
+}
+
+// When the caller gives a mission but no explicit drones, an orchestrator call designs the fleet:
+// N personas + roles from the mission. Bounded to `cap`; falls back to a sensible default trio.
+async function designDroneFleet(mission, cap = 6) {
+  const sys = `You design a small fleet of specialist agent "drones" for a mission. Output ONLY JSON: {"drones":[{"name":"UPPER_CASE","role":"research|coding|browser|creative|memory","brief":"one line","goal":"what THIS drone does"}]}. ${cap} max. Prefer distinct, complementary roles.`;
+  try {
+    const r = await anthropicRequest({ model: MODEL_SONNET, max_tokens: 900, system: sys, messages: [{ role: 'user', content: 'Mission: ' + String(mission).slice(0, 500) }] }, getApiKey());
+    const txt = (r.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('');
+    const m = txt.match(/\{[\s\S]*\}/);
+    const arr = m ? (JSON.parse(m[0]).drones || []) : [];
+    if (arr.length) return arr.slice(0, cap).map((d, i) => ({
+      id: 'drone-' + (i + 1), role: d.role, persona: { name: d.name || ('DRONE-' + (i + 1)), brief: d.brief || d.goal || mission, style: 'concise' },
+      _task: { goal: d.goal || mission },
+    }));
+  } catch {}
+  return ['implementer', 'skeptic', 'reviewer'].map((role, i) => ({ id: 'drone-' + (i + 1), role: role === 'implementer' ? 'coding' : 'research', persona: { name: role.toUpperCase(), brief: role + ' on the mission', style: 'concise' }, _task: { goal: mission } }));
+}
+
+// Merge the drones' result envelopes into one recommendation (the synthesize:true step).
+async function synthesizeDroneResults(mission, results) {
+  const body = results.map((r) => `## ${r.persona} [${r.status}]\n${r.summary}`).join('\n\n').slice(0, 8000);
+  try {
+    const r = await anthropicRequest({ model: MODEL_SONNET, max_tokens: 1200, system: 'Synthesize these drone reports into one clear recommendation for Siddhant. Resolve disagreements explicitly. Be concise.', messages: [{ role: 'user', content: `Mission: ${mission}\n\n${body}` }] }, getApiKey());
+    return (r.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim();
+  } catch (e) { return null; }
+}
+
 // Lean summary model call for project memory (#24) — minimal system so it's cheap.
 const projectSummarize = async (prompt) => {
   const j = await anthropicRequest({ model: MODEL_HAIKU, max_tokens: 400, system: 'You write tight, factual project summaries.', messages: [{ role: 'user', content: prompt }] }, getApiKey());
@@ -3288,6 +3351,57 @@ async function executeTool(name, input) {
           shouldStop: (id) => fleetShouldStop(id),
         });
         try { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('fleet-update', { phase: 'done' }); } catch {}
+        break;
+      }
+      case 'deploy_drones': {
+        // FORGE D2 — deploy N scoped BhatBot instances (drones) on a mission via the fleet supervisor
+        // (lib/fleet.js): budget-derived width (admission), envelope wallet, stall reaping, blackboard
+        // relay. Explicit `drones` or an orchestrator-designed fleet from `mission`.
+        const mission = String(input.mission || (Array.isArray(input.drones) && input.drones.map((d) => d.goal).filter(Boolean).join('; ')) || '').trim();
+        if (!mission && !(Array.isArray(input.drones) && input.drones.length)) { result = { success: false, error: 'mission or drones[] required' }; break; }
+        const hardCap = Math.max(1, Math.min(input.hardCap || 6, FLEET_CAP));
+        const wsDir = path.join(os.homedir(), '.bhatbot', 'drones', 'run-' + Date.now());
+        try { fs.mkdirSync(wsDir, { recursive: true }); } catch {}
+        const board = blackboard.createBlackboard({ dir: wsDir });
+        let specs;
+        if (Array.isArray(input.drones) && input.drones.length) {
+          specs = input.drones.slice(0, hardCap).map((d, i) => ({
+            id: 'drone-' + (i + 1), role: d.role, tools: Array.isArray(d.tools) ? d.tools : undefined,
+            persona: d.persona || { name: (d.role || ('DRONE-' + (i + 1))).toUpperCase(), brief: d.brief || d.goal || mission, style: 'concise' },
+            hermetic: !!d.hermetic, _task: { goal: d.goal || mission },
+          }));
+        } else {
+          specs = await designDroneFleet(mission, hardCap);
+        }
+        const perDrone = (input.budgetUsd || 2) / Math.max(1, specs.length);
+        specs.forEach((s, i) => { s.wsDir = path.join(wsDir, s.id || ('d' + i)); s.budget = { usd: perDrone, maxTurns: input.maxTurns || 8 }; });
+        const taskMap = Object.fromEntries(specs.map((s) => [s.id, s._task || { goal: mission }]));
+        // Live surfacing: Vanguard panel cards + Activity + spoken launch line.
+        try { fleetSeed(specs.map((s) => ({ id: s.id, role: (s.persona && s.persona.name) || s.id, task: (taskMap[s.id] || {}).goal || mission }))); } catch {}
+        sendToActivity('tool-update', { type: 'thinking', text: `🛩 deploying ${specs.length} drones: ${specs.map((s) => s.persona.name).join(', ')}` });
+        try { speakDesktop(`<speak>Deploying ${specs.length} ${specs.length === 1 ? 'drone' : 'drones'} on it, sir.</speak>`); } catch {}
+        const onEvent = (ev) => {
+          if (ev.type === 'drone-done') { try { fleetBroadcast({ id: ev.drone, status: ev.status, step: 'done' }); } catch {} }
+          if (ev.type === 'drone-reaped' || ev.type === 'drone-nudge') sendToActivity('tool-update', { type: 'thinking', text: `🛩 ${ev.type.replace('drone-', 'drone ')}: ${ev.drone}` });
+        };
+        let out;
+        try {
+          out = await runFleet(specs, { board, agentRun: droneAgentRun, admission, onEvent, log: (t) => sendToActivity('tool-update', { type: 'thinking', text: t }) },
+            { wsDir, mission, hardCap, envelopeUsd: input.budgetUsd || 2, staleMs: input.staleMs || 90000, nudgeGraceMs: 15000, taskFor: (d) => taskMap[d.id] || { goal: mission } });
+        } catch (e) { try { fleetDone(); } catch {}; result = { success: false, error: 'fleet error: ' + e.message }; break; }
+        try { fleetDone(); } catch {}
+        let synthesis = null;
+        if (input.synthesize !== false && out.results.some((r) => r.status === 'ok' || r.status === 'partial')) {
+          synthesis = await synthesizeDroneResults(mission, out.results);
+        }
+        sendToActivity('tool-update', { type: 'thinking', text: `🛩 fleet back: ${out.launched} launched, ${out.reaped} reaped, $${out.totalSpend.toFixed(3)}` });
+        try { speakDesktop(`<speak>The fleet's back — summary on screen.</speak>`); } catch {}
+        result = {
+          success: true, mission, board_file: board.file,
+          drones: out.results.map((r) => ({ persona: r.persona, status: r.status, summary: r.summary, spend: r.spend, reaped: !!r.reaped })),
+          totalSpend: out.totalSpend, launched: out.launched, reaped: out.reaped, envelopeExceeded: out.envelopeExceeded,
+          synthesis,
+        };
         break;
       }
       case 'plan_and_run': {
