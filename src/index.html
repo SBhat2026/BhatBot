@@ -1926,15 +1926,29 @@ function submitVoice(text) {
 
 // ---- Fallback STT: Web Speech (only if no OpenAI key) ----
 let recog = null, finalText = '', manualStop = false, silenceTimer = null, restartTimer = null, starting = false;
+let lastResultTs = 0, maxUtterTimer = null;   // endpointing: learn mid-utterance pauses + hard safety cap
+const MAX_UTTER_MS = 45000;                    // never hold the mic open longer than this (background-noise guard)
+// Refresh the adaptive silence-wait from the learned per-user model (grows if you tend to pause to think).
+async function refreshEndpointThreshold() {
+  try { const r = await window.bhatbot.endpointThreshold(); if (r && r.thresholdMs) SILENCE_MS = r.thresholdMs; } catch {}
+}
 function startWebSpeech() {
   if (!SR) { addErr('No STT available — set openaiKey for Whisper.'); return; }
-  finalText = ''; manualStop = false; recording = true; setOrbState('listening');
+  finalText = ''; manualStop = false; recording = true; lastResultTs = 0; setOrbState('listening');
+  refreshEndpointThreshold();                  // pull the latest learned threshold (async; timers re-read SILENCE_MS)
+  clearTimeout(maxUtterTimer); maxUtterTimer = setTimeout(endWebSpeech, MAX_UTTER_MS);
   recog = new SR(); recog.lang = 'en-US'; recog.interimResults = true; recog.continuous = true;
   recog.onstart = () => { starting = false; };
   recog.onresult = (e) => {
     let interim = '';
     for (let i = e.resultIndex; i < e.results.length; i++) { const t = e.results[i][0].transcript; if (e.results[i].isFinal) finalText += t + ' '; else interim += t; }
     tbar.textContent = '🎙 ' + ((finalText + interim).trim() || 'listening…');
+    // LEARN the user's speech pattern: a gap between results where they kept talking (<SILENCE_MS, so
+    // the endpoint didn't fire) is a mid-utterance thinking-pause. Feed it back so the model waits past
+    // this user's typical pause next time instead of cutting them off.
+    const now = Date.now();
+    if (lastResultTs) { const gap = now - lastResultTs; if (gap >= 300 && gap < SILENCE_MS) { try { window.bhatbot.endpointObserve(gap, true); } catch {} } }
+    lastResultTs = now;
     clearTimeout(silenceTimer); silenceTimer = setTimeout(endWebSpeech, SILENCE_MS);
   };
   recog.onerror = (e) => {
@@ -1954,7 +1968,7 @@ function startWebSpeech() {
   starting = true; try { recog.start(); } catch { starting = false; }
   clearTimeout(silenceTimer); silenceTimer = setTimeout(endWebSpeech, SILENCE_MS);
 }
-function endWebSpeech() { manualStop = true; recording = false; clearTimeout(silenceTimer); clearTimeout(restartTimer); try { recog && recog.stop(); } catch {} }
+function endWebSpeech() { manualStop = true; recording = false; clearTimeout(silenceTimer); clearTimeout(restartTimer); clearTimeout(maxUtterTimer); try { recog && recog.stop(); } catch {} }
 
 mic.addEventListener('click', () => recording ? endVoice() : startVoice());
 
@@ -1983,6 +1997,7 @@ function initWake() {
   try {
     voiceCfg = (await window.bhatbot.getVoiceConfig()) || voiceCfg;
     SILENCE_MS = voiceCfg.silenceMs || SILENCE_MS;
+    refreshEndpointThreshold();   // prefer the learned per-user silence-wait when available
     ttsOn = !!(voiceCfg.hasTTS && voiceCfg.ttsEnabled);   // auto-on if a TTS provider is configured
     setSpkUI();
     if (!voiceCfg.hasTTS) spk.style.opacity = '0.4';

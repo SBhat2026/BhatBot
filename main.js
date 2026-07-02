@@ -63,6 +63,9 @@ const opsstatus = require('./lib/opsstatus');         // Manage — live "what i
 const localstt = require('./lib/localstt');           // Voice — offline mlx-whisper STT fallback (no cloud key)
 let _lastRetryAfterMs = 0;                            // last 429 Retry-After (ms) — self-drive budget governor reads it
 let _pendingSelfDrive = null;                         // Phase 6: a reflection-sanctioned session to start once the turn goes idle
+let _opusApproved = false;                            // session flag: user OK'd Opus for heavy tasks (asked once per session)
+let _pendingOpusTask = null;                          // a heavy turn parked awaiting Opus approval ({history, at})
+let _opusSuppressAsk = false;                         // one-shot: re-run the parked task WITHOUT re-asking (user declined Opus)
 const vanguard = require('./lib/vanguard');           // Phase 1 — unified VANGUARD fleet codename roster (OVERMIND/FORGE/ORACLE/…)
 const { createAdmission } = require('./lib/admission'); // Phase 1 — budget-aware fleet admission controller (convoy fix)
 const blackboard = require('./lib/blackboard');        // FORGE — shared cross-agent state (T5)
@@ -70,6 +73,7 @@ const { runFleet } = require('./lib/fleet');           // FORGE — drone fleet 
 const scholar = require('./lib/integrations/scholar');  // FORGE — scholarly adapters (arXiv/Semantic Scholar)
 const scicompute = require('./lib/scicompute');         // quant/numerics/stats/MPS-torch compute pack (sci_compute)
 const dockerPack = require('./lib/integrations/docker'); // container isolation lane (container_run)
+const { createEndpointer } = require('./lib/endpoint');  // adaptive, speaker-gated utterance endpointing
 
 const DB_MODELS = { db_speech: 'gpt-oss-20b', db_directive: 'gemma-4-26b' };
 
@@ -1445,7 +1449,10 @@ async function callModel(messages, apiKey, allowDarkbloom, onText) {
   // still run on Sonnet; Opus does the planning, synthesis, and interpretation). Overrides the Sonnet
   // upgrade above. Config: allowOpusHeavy (default true) to disable, heavyToolModel to override. The
   // $-governor still forces Haiku when over the daily budget.
-  if (!overBudget() && toolish && (cfg.allowOpusHeavy !== false) && looksHeavyTool(lastUserText(messages))) {
+  // Opus is gated by an explicit OK (cfg.opusRequiresApproval, default true): the dispatch layer asks
+  // before switching and sets _opusApproved for the session. If we reach here un-approved (or the knob
+  // is off), we simply stay on Sonnet — never silently spend Opus rates.
+  if (!overBudget() && toolish && (cfg.allowOpusHeavy !== false) && (cfg.opusRequiresApproval === false || _opusApproved) && looksHeavyTool(lastUserText(messages))) {
     claudeModel = cfg.heavyToolModel || MODEL_OPUS; _lastModel = claudeModel; _lastRouterTask = 'heavy-opus-upgrade';
   }
 
@@ -5852,6 +5859,35 @@ ipcMain.handle('get-voice-config', () => {
     hasReplicateKey: !!c.replicateKey, hasImageGen: !!c.openaiKey
   };
 });
+// ── Adaptive utterance endpointing (lib/endpoint.js) ──────────────────────────────────────────────
+// One learned model of the user's speech-pause habits, persisted so it improves across sessions. The
+// renderer asks for the current silence threshold when it opens the mic, and reports each mid-utterance
+// pause it observes so the model learns when THIS user actually stops talking (vs a thinking-pause).
+const ENDPOINT_FILE = path.join(os.homedir(), '.bhatbot', 'endpoint.json');
+let _endpointer = null, _endpointSaveTimer = null;
+function endpointer() {
+  if (_endpointer) return _endpointer;
+  let saved = {};
+  try { saved = JSON.parse(fs.readFileSync(ENDPOINT_FILE, 'utf8')); } catch {}
+  const c = loadConfig();
+  _endpointer = createEndpointer({ pauses: saved.pauses,
+    floorMs: c.endpointFloorMs, ceilMs: c.endpointCeilMs, defaultMs: c.silenceMs || c.endpointDefaultMs });
+  return _endpointer;
+}
+function saveEndpointSoon() {
+  clearTimeout(_endpointSaveTimer);
+  _endpointSaveTimer = setTimeout(() => {
+    try { fs.mkdirSync(path.dirname(ENDPOINT_FILE), { recursive: true }); fs.writeFileSync(ENDPOINT_FILE, JSON.stringify(endpointer().toJSON())); } catch {}
+  }, 1500);
+}
+// Renderer opens the mic → asks how long to wait for silence (learned, per-user). Returns { thresholdMs, stats }.
+ipcMain.handle('endpoint-threshold', () => { try { const e = endpointer(); return { thresholdMs: e.threshold(), stats: e.stats() }; } catch { return { thresholdMs: 1800 }; } });
+// Renderer saw the user pause mid-utterance and resume (resumed:true) or end (resumed:false) → learn it.
+ipcMain.handle('endpoint-observe', (_e, { ms, resumed } = {}) => {
+  try { const e = endpointer(); e.observePause(ms, resumed); saveEndpointSoon(); return { thresholdMs: e.threshold() }; }
+  catch { return { thresholdMs: 1800 }; }
+});
+
 // Live speaking-speed from the settings slider. Clamped to ElevenLabs' 0.7–1.2 range; read per
 // utterance in elevenLabsSynth, so no restart needed. Returns the saved value.
 ipcMain.handle('set-tts-speed', (_e, v) => {
@@ -6933,6 +6969,27 @@ ipcMain.handle('chat', async (event, { history }) => {
         : ('Could not start self-drive: ' + ((r && (r.error || r.note)) || 'unknown') + (isRemote() ? ' (self-drive must be started from the desktop app — it requires an in-person approval).' : ''));
       return { text: msg, history: [...history, { role: 'assistant', content: msg }] };
     } catch (e) { const m = 'Self-drive start failed: ' + (e && e.message || e); return { text: m, history: [...history, { role: 'assistant', content: m }] }; }
+  }
+  // OPUS PERMISSION GATE: heavy tasks (scientific sims / deep builds) can run on Opus, but per
+  // Siddhant's rule BhatBot ASKS before switching. Flow: detect heavy → park the turn + ask → on "use
+  // opus"/"yes" run it on Opus (and remember the OK for the session); on "stay on sonnet"/"no" run it
+  // on Sonnet. Opus stays ENABLED — this only governs the switch. (He'll refine the UX later.)
+  {
+    const cfgOpus = loadConfig();
+    if (_pendingOpusTask) {
+      const yes = /^\s*(use opus|opus\b|yes|yeah|yep|sure|ok(ay)?|go ahead|go for it|do it|proceed|approved?|permission granted)\b/i.test(ut) && !/\?/.test(ut);
+      const no = /^\s*(no|nope|stay on sonnet|sonnet|keep sonnet|don'?t|cheaper|not now)\b/i.test(ut);
+      if (yes) { const p = _pendingOpusTask; _pendingOpusTask = null; _opusApproved = true; history = p.history; }        // re-run on Opus
+      else if (no) { const p = _pendingOpusTask; _pendingOpusTask = null; _opusSuppressAsk = true; history = p.history; } // re-run on Sonnet
+      else { _pendingOpusTask = null; }   // unrelated message → drop the ask, handle it normally
+    }
+    if (!_opusApproved && !_opusSuppressAsk && cfgOpus.opusRequiresApproval !== false && cfgOpus.allowOpusHeavy !== false
+        && !overBudget() && looksLikeToolTask(ut) && looksHeavyTool(ut)) {
+      _pendingOpusTask = { history, at: Date.now() };
+      const q = 'This one\'s heavy — a scientific simulation / deep build. I can run it on **Opus** (my deepest model) and fan it out across a research → design → code → test fleet, which is more capable but costs more, or keep it on Sonnet. Want me on Opus? Say "use opus" or "stay on sonnet".';
+      return { text: q, history: [...history, { role: 'assistant', content: q }] };
+    }
+    _opusSuppressAsk = false;   // one-shot: only suppresses the immediate re-run
   }
   // Voice-within-5s guarantee: own the TTS stream from the first millisecond. The ack
   // speaks immediately for action requests; the watchdog covers everything else if no

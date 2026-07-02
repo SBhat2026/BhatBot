@@ -13,6 +13,8 @@ contextBridge.exposeInMainWorld('bhatbot', {
   getContextPath: () => ipcRenderer.invoke('get-context-path'),
   getMemoryPath: () => ipcRenderer.invoke('get-memory-path'),
   getVoiceConfig: () => ipcRenderer.invoke('get-voice-config'),
+  endpointThreshold: () => ipcRenderer.invoke('endpoint-threshold'),                 // adaptive silence-wait (learned per user)
+  endpointObserve: (ms, resumed) => ipcRenderer.invoke('endpoint-observe', { ms, resumed }), // report a mid-utterance pause to learn
   setTtsSpeed: (v) => ipcRenderer.invoke('set-tts-speed', v),
   getVoiceSettings: () => ipcRenderer.invoke('get-voice-settings'),                 // D — current JARVIS voice params
   setVoiceSetting: (key, value) => ipcRenderer.invoke('set-voice-setting', { key, value }),
