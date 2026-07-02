@@ -101,6 +101,7 @@ try {
 const HOTKEY = 'CommandOrControl+Shift+B';
 const MODEL_SONNET = 'claude-sonnet-4-6';      // corrected from stale spec id
 const MODEL_HAIKU = 'claude-haiku-4-5';        // corrected from stale spec id
+const MODEL_OPUS = 'claude-opus-4-8';          // deepest reasoning — reserved for HEAVY tasks (sims, heavy coding+interpretation)
 const MAX_AGENT_ITERATIONS = 20;   // step ceiling; complex tasks need headroom to retry/replan
 // TIER-2 THROUGHPUT: tools that are READ-ONLY / side-effect-free / order-independent, so when the
 // model fires several in one turn they can run CONCURRENTLY (the higher per-minute cap serves the
@@ -705,6 +706,10 @@ function systemBlocks(query) {
   if (mem) blocks.push({ type: 'text', text: mem });
   const jb = jobsStatusBlock();
   if (jb) blocks.push({ type: 'text', text: jb });
+  // HEAVY task → reinforce fleet decomposition for THIS turn (trailing/uncached so it never
+  // invalidates the cached static prompt). Stateless: keyed off the actual user ask, so it persists
+  // across the multi-step turn and stays off for everything else. Pairs with the Opus routing tier.
+  if (query && looksHeavyTool(query)) blocks.push({ type: 'text', text: HEAVY_FLEET_DIRECTIVE });
   return blocks;
 }
 function buildSystemPrompt(query) {
@@ -1433,7 +1438,15 @@ async function callModel(messages, apiKey, allowDarkbloom, onText) {
   // task both needs tools AND looks generative/multi-step, run it on Sonnet. Gated by the daily $
   // governor so cost stays bounded; trivial one-shot actions (open/play/screenshot/volume) stay Haiku.
   if (claudeModel === MODEL_HAIKU && !overBudget() && toolish && looksComplexTool(lastUserText(messages))) {
-    claudeModel = MODEL_SONNET; _lastModel = MODEL_SONNET; _lastRouterTask = 'complex-tool-upgrade';
+    claudeModel = cfg.complexToolModel || MODEL_SONNET; _lastModel = claudeModel; _lastRouterTask = 'complex-tool-upgrade';
+  }
+  // HEAVY-TASK OPUS TIER: the hardest tasks — a scientific simulation, an engine/model needing deep
+  // coding AND interpretation — get Opus as the orchestrating brain (the parallel drones it spawns
+  // still run on Sonnet; Opus does the planning, synthesis, and interpretation). Overrides the Sonnet
+  // upgrade above. Config: allowOpusHeavy (default true) to disable, heavyToolModel to override. The
+  // $-governor still forces Haiku when over the daily budget.
+  if (!overBudget() && toolish && (cfg.allowOpusHeavy !== false) && looksHeavyTool(lastUserText(messages))) {
+    claudeModel = cfg.heavyToolModel || MODEL_OPUS; _lastModel = claudeModel; _lastRouterTask = 'heavy-opus-upgrade';
   }
 
   // Preflight rate-limit check: if this request would blow the per-minute INPUT or OUTPUT budget,
@@ -4260,6 +4273,36 @@ function looksComplexTool(text) {
     // "make/compute a <thing>" where the thing is substantive (a sim/model/report/etc.), not "make a call".
     || /\b(make|compute|calculate|run)\b.*\b(simulation|model|analysis|report|forecast|prediction|backtest|figure|chart|graph|dataset|benchmark|proof|derivation)\b/.test(t);
 }
+
+// HEAVY-task gate: the hardest class — a scientific simulation, an engine/solver, a model that needs
+// heavy coding AND interpretation (DNA replication, protein folding, fluid dynamics, N-body, MD…).
+// These get the Opus tier as the orchestrating brain AND are decomposed across a parallel fleet.
+// Deliberately stricter than looksComplexTool so everyday "complex" work (a dashboard, a refactor)
+// stays on Sonnet and only genuinely deep scientific/engineering builds pull Opus + the fleet.
+function looksHeavyTool(text) {
+  const t = String(text || '').toLowerCase();
+  const sim = /\b(simulat\w*|\bengine\b|\bsolver\b|from scratch|end.?to.?end|n-?body|monte.?carlo|\bode\b|\bpde\b|\bcfd\b|\bfem\b|finite element|molecular dynamics)\b/.test(t);
+  const sciDomain = /\b(dna|rna|genom\w*|protein|molecul\w*|enzyme|cell(?:ular)?|biolog\w*|replication|transcription|translation|(?:protein )?folding|physics|quantum|orbital|fluid|aerodynam\w*|thermodynam\w*|climate|epidemi\w*|reaction.?diffusion|lattice|kinetics)\b/.test(t);
+  const heavyBuild = /\b(build|create|implement|develop|write|design|model)\b/.test(t) && /\b(simulat\w*|model|engine|system|pipeline|solver|framework|dashboard|app|analysis)\b/.test(t);
+  const explicitHeavy = /\b(complex|detailed|rigorous|comprehensive|realistic|high.?fidelity|publication.?(?:grade|quality)|research.?grade)\b/.test(t) && heavyBuild;
+  return (sim && (sciDomain || heavyBuild)) || (sciDomain && heavyBuild) || explicitHeavy;
+}
+
+// Injected (uncached, trailing) into the system when a HEAVY task is detected — turns the single
+// linear agent loop into a parallel fleet. This is the whole point of the subagent fleet: research,
+// design, code, and testing proceed concurrently, then get synthesized with real interpretation.
+const HEAVY_FLEET_DIRECTIVE = [
+  'HEAVY TASK — multi-faceted build detected (deep coding + interpretation, e.g. a scientific simulation).',
+  'Do NOT grind through it in one linear pass. DECOMPOSE and run specialists IN PARALLEL via',
+  'plan_and_run (task DAG) or deploy_drones (fleet + shared blackboard), typically four lanes:',
+  '• RESEARCH — find_papers/web_search to ground the model in the real mechanism & parameters.',
+  '• DESIGN — studio_write/make_figure for the visualization (what the sim should render).',
+  '• CODE — sci_compute/simulate to implement AND run the model.',
+  '• TEST — sanity-check the outputs (conservation laws, units, numerical stability, plausibility).',
+  'Independent lanes run concurrently; dependent ones wait for upstream results. Then SYNTHESIZE the',
+  'lanes into one coherent deliverable with your OWN interpretation (what the result means, caveats).',
+  'Use your full reasoning depth — you are on the Opus tier for exactly this.'
+].join(' ');
 
 // Natural-language toggle for the pipeline, usable from any entry point (desktop,
 // phone, Telegram). Returns a reply string if it handled a toggle, else null.

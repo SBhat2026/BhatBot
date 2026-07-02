@@ -97,5 +97,19 @@ ok(looksComplexTool('take a screenshot') === false, 'route: screenshot → stays
 ok(looksComplexTool('make a call to mom') === false, 'route: "make a call" not upgraded (not substantive)');
 ok(looksComplexTool('turn up the volume') === false, 'route: volume → stays Haiku');
 
+// ---- looksHeavyTool (heaviest tier: scientific sims / heavy coding+interp → Opus + parallel fleet) ----
+const looksHeavyTool = load('looksHeavyTool');
+ok(looksHeavyTool('can you make a simulation of DNA replication?') === true, 'heavy: DNA replication simulation → Opus + fleet');
+ok(looksHeavyTool('implement a protein folding model') === true, 'heavy: protein folding model → heavy');
+ok(looksHeavyTool('build a realistic fluid dynamics simulation') === true, 'heavy: realistic fluid dynamics sim → heavy');
+ok(looksHeavyTool('simulate molecular dynamics of a water box') === true, 'heavy: molecular dynamics sim → heavy');
+ok(looksHeavyTool('design a comprehensive climate model') === true, 'heavy: comprehensive climate model → heavy');
+ok(looksHeavyTool('build a dashboard for my health metrics') === false, 'heavy: dashboard → NOT heavy (stays Sonnet)');
+ok(looksHeavyTool('refactor the auth module') === false, 'heavy: refactor → NOT heavy');
+ok(looksHeavyTool('write a python script to sort a list') === false, 'heavy: trivial script → NOT heavy');
+ok(looksHeavyTool('open spotify') === false, 'heavy: open spotify → NOT heavy');
+// heavy tasks should also register as complex, so the Sonnet-then-Opus routing chain is coherent
+ok(looksComplexTool('make a simulation of DNA replication') && looksHeavyTool('make a simulation of DNA replication'), 'heavy ⊂ complex: DNA sim is both (Sonnet gate then Opus override)');
+
 console.log(`\n${fail === 0 ? '✅' : '❌'} ${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);
