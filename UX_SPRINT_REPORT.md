@@ -37,7 +37,34 @@ remain.**
 - **Open:** true speaker separation (end despite another voice) still needs the voiceid post-filter
   (`config.voice.verifyUser`, flag wired, filter TODO) or real-time diarization.
 
-## ⬜ Remaining (T4–T6 — the learned spoken-length loop)
+### T5 — learned spoken-length model ✅ (`lib/spokenmodel.js`)
+Ridge (clones depthmodel), pure. Density→spoken-WORD target from the finished answer
+(screen_tokens, numbers, entities, code/list/urls, TTR, struct_type, qtype, has_headline). Barge-in
+RIGHT-censoring (train on min(target,N); ceiling ≤ interrupt p75), under → boosted target, clean →
+as-is. Dashboard metric **L = interrupt_rate + λ·underinform_rate**. Wired into `summarizeForSpeech`
+("aim for ~N words"). 16 tests.
+
+### T6 — feedback instrumentation ✅
+`recordSpoken` counts spoken words; `bargeInInterrupt` records the word position (interrupted@N); a
+one-slot pending row is resolved on the NEXT user turn (`spokenmodel.labelOutcome`) and appended to
+`~/.bhatbot/spoken.jsonl`, then `maybeRetrain`. `L` logged every 10 turns. 11 tests.
+
+### voiceid post-filter ✅ (T3 open item)
+`config.voice.verifyUser` — `transcribe-audio` verifies the clip is the enrolled speaker; a background
+voice is discarded so BhatBot never acts on someone else. Fail-open, off by default.
+
+### Phone clean-geometry redesign ✅
+Additive CSS override on all 3 `mobile.html` copies — re-themes via the CSS variables, kills the HUD
+noise (scanlines/vignette/corner-brackets/glows/counter-rotating rings) into flat simple geometry.
+Every JS selector preserved. Deployed to Fly (phone auto-reloads the live UI).
+
+## L value
+Not yet meaningful — `spoken.jsonl` is empty until real turns accrue (needs ≥ MIN_ROWS=200 to train;
+`computeL` reports over the last 100). It'll drop from its initial value as clean turns accumulate.
+
+## ⬜ Remaining
+**T4 — streaming digest mode** (de-prioritized by Siddhant this sprint): `classifySpeechMode(runningText)`
+in lib/speech.js + a `digest` mode in `makeSpeakStream` (headline-first, no summarize round-trip).
 
 - **T4 — streaming digest mode.** Give `makeSpeakStream` a `digest` mode decided from the stream
   (structural detectors: code/list/table/headers/length) via a pure `classifySpeechMode(runningText)` in

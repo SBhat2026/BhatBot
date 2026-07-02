@@ -247,3 +247,22 @@ Foundational layer for the FORGE sprint (drones, repo autopilot, swarms). Featur
 in `verify`). **No new external deps required** for the foundation (Docker/Blender/idb come
 with the deferred feature phases). **Still never pushes; branch `forge-sprint` off
 `jarvis-sprint`.**
+
+## 12. UX Sprint (2026-07-02, merged to `main`, pushed, cloud deployed)
+Voice turn-taking, rate stability, learned spoken length, file transfer, phone redesign.
+- **Rate:** live `anthropic-ratelimit-*` headers drive `rateBudget` (`lib/rate.js`); drones forced to
+  Sonnet (never Opus OTPM); `sealDanglingToolUse` un-orphans interrupted tool_use at the source.
+- **Voice:** adaptive+learned endpointing (`lib/endpoint.js`) + Web-Audio user-speech VAD gate + phone
+  parity (`lib/voicestream`); voiceid cocktail-party post-filter (`config.voice.verifyUser`).
+- **Learned spoken length:** `lib/spokenmodel.js` (density→word-count, barge-in censored) + the
+  `spoken.jsonl` feedback loop; metric `L = interrupt_rate + λ·underinform_rate`.
+- **Files:** drag ANY file anywhere → persists in view (thumbnails by the orb), voice+text, PDF/CSV
+  ingested (`lib/attach.js`).
+- **Phone:** clean-geometry CSS redesign across all 3 `mobile.html` copies.
+- **New config keys:** `rateLimitLiveFrac` (0.95), `vad.floorMargin` (1.8), `voice.verifyUser` (false),
+  `spokenLambda` (1.0). **New artifacts (gitignored):** `spoken.jsonl`, `spoken-model.json`,
+  `endpoint.json`.
+- **New tests in `verify`:** `test:ratelive`, `test:abort-pairing`, `test:attach`, `test:endpoint`,
+  `test:endpointint`, `test:spoken`, `test:spokenfb` (38 suites total).
+- **Deferred:** T4 streaming-digest mode. **Pending user:** phone token/key sync (`BHATBOT_TOKEN` /
+  `ANTHROPIC_API_KEY` Fly secrets — raw values are vaulted).
