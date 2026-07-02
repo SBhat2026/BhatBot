@@ -5266,6 +5266,7 @@ async function selfDriveForge({ desire, report, plan, verify, proj }) {
     `Implement this BhatBot self-improvement. Make the MINIMAL necessary edits to the source files.`,
     `Desire: ${desire.aspiration || desire.id}`,
     plan && plan.brief ? `\nApproved plan (follow it):\n${String(plan.brief).slice(0, 6000)}` : (report ? `\nResearch:\n${String(report).slice(0, 4000)}` : ''),
+    plan && plan.reviewerNotes ? `\nA reviewer flagged the previous attempt — ADDRESS these before anything else:\n${String(plan.reviewerNotes).slice(0, 2000)}` : '',
     `\nThe change is correct when this exits 0:\n  ${verify}`,
     `Do NOT run the verify command yourself. Do NOT edit any of: lib/selfdrive.js, lib/risk.js, lib/selfheal.js, lib/security.js, lib/credentials.js, lib/admission.js, scripts/verify-syntax.js, scripts/test-upgrade.js, config files, or secrets.`,
   ].filter(Boolean).join('\n');
@@ -5277,9 +5278,36 @@ async function selfDriveForge({ desire, report, plan, verify, proj }) {
   }
   catch (e) { return { success: false, error: e.message }; }
 }
+// REVIEWER (demo 7 / C2) — a skeptic pass over the FORGE diff against docs/CODE_STYLE.md + the hard
+// frozen-zone rules, BEFORE the verify judge. severe → the governor runs a bounded revise loop, then
+// blocks. Reviewer unavailable / parse-fail → 'none' (never block on the reviewer's own failure; verify
+// is still the gate). Cached style doc keeps it cheap.
+let _codeStyleDoc = null;
+function codeStyleDoc() {
+  if (_codeStyleDoc != null) return _codeStyleDoc;
+  try { _codeStyleDoc = fs.readFileSync(path.join(SELF_HEAL_PROJ, 'docs', 'CODE_STYLE.md'), 'utf8').slice(0, 6000); } catch { _codeStyleDoc = ''; }
+  return _codeStyleDoc;
+}
+async function selfDriveReview({ diff, desire } = {}) {
+  if (!diff || !String(diff).trim()) return { severity: 'none', notes: '' };
+  const frozen = risk.FROZEN_ZONE.join(', ');
+  const sys = `You are the REVIEWER: a skeptic reviewing a code diff produced by a SELF-MODIFYING agent, BEFORE it is verified. Output ONLY JSON: {"severity":"none|minor|severe","notes":"specific, actionable findings"}.
+severe = a HARD-RULE violation (touches or weakens a frozen rail [${frozen}]; weakens a guardrail/gate/limit or the verify suite; ships a secret; swallows a load-bearing error) OR a real correctness/quality defect.
+minor = style nits only. none = clean.
+STYLE GUIDE:\n${codeStyleDoc()}`;
+  try {
+    const r = await anthropicRequest({ model: MODEL_SONNET, max_tokens: 700, system: sys, messages: [{ role: 'user', content: `Desire: ${desire && (desire.aspiration || desire.id)}\n\nDIFF:\n${String(diff).slice(0, 16000)}` }] }, getApiKey());
+    const txt = (r.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('');
+    const m = txt.match(/\{[\s\S]*\}/);
+    if (m) { const j = JSON.parse(m[0]); const sev = String(j.severity || 'none').toLowerCase(); try { sdRelay(`🔎 REVIEWER — ${sev}${j.notes ? ': ' + String(j.notes).replace(/\s+/g, ' ').slice(0, 180) : ''}`); } catch {} return { severity: sev, notes: j.notes || '' }; }
+  } catch {}
+  return { severity: 'none', notes: '' };
+}
 function selfDriveDeps() {
   return {
     reflect: selfDriveReflect,
+    // REVIEWER stage — on by default; disable with config.codeReview.enabled=false.
+    review: (loadConfig().codeReview && loadConfig().codeReview.enabled === false) ? undefined : selfDriveReview,
     listResolvedIds: () => { try { const rows = reflect.listDesires(); return new Set(rows.filter((r) => r.type === 'resolution').map((r) => r.id)); } catch { return new Set(); } },
     resolveDesire: (id, outcome, opts) => { try { return reflect.resolveDesire(id, outcome, opts); } catch {} },
     classify: selfDriveClassify,

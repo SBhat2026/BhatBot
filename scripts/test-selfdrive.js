@@ -33,6 +33,7 @@ function harness(over = {}) {
     research: over.research || (async () => 'research report'),
     plan: over.plan || (async () => ({ brief: 'plan', files: ['lib/x.js'], verify: 'npm run verify', severity: 'low' })),
     forge: over.forge || (async () => { state.forgeCalled = true; return { success: true }; }),
+    review: over.review,   // optional REVIEWER stage (absent → skipped)
     verify: over.verify || (async () => ({ success: true, exitCode: 0 })),
     snapshot: () => ({ performance: { avg_latency_ms: 100 } }),
     telemetryDelta: () => ({ net: 1, improved: ['avg_latency_ms -10'], regressed: [] }),
@@ -180,6 +181,41 @@ const session = () => ({ id: 'sd-test', branch: 'self-drive-test', focus: '', cy
     const h = harness({ verify: async () => ({ success: false, exitCode: 1 }) });
     const r = await sd.runCycle(ON, h.deps, session());
     ok(r.degradation && r.degradation.kind === 'verify_fail', 'runCycle: a verify failure is tagged as a degradation attempt (reverted + reported)');
+  }
+
+  // ---- REVIEWER stage (demo 7 / C2): severe → bounded revise loop → block; clean → proceeds ----
+  clearState();
+  {
+    // reviewer returns severe twice then would-be-clean, maxReviewRevisions default 2 → after 2
+    // revises still severe on the check that matters → blocked_attempt with reviewer_severe.
+    let calls = 0;
+    const h = harness({ review: async () => { calls++; return { severity: 'severe', notes: 'weakens a guardrail' }; } });
+    const r = await sd.runCycle(ON, h.deps, session());
+    ok(r.outcome === 'blocked_attempt' && r.reason === 'reviewer_severe', 'runCycle(reviewer): persistent severe → blocked_attempt (reviewer_severe)');
+    ok(r.degradation && r.degradation.kind === 'reviewer_severe', 'runCycle(reviewer): severe review tagged as a degradation attempt');
+    ok(calls >= 2, 'runCycle(reviewer): re-reviews after revise (bounded loop ran)');
+  }
+  clearState();
+  {
+    // reviewer clean → proceeds to verify (which passes) → resolved
+    const h = harness({ review: async () => ({ severity: 'none', notes: '' }) });
+    const r = await sd.runCycle(ON, h.deps, session());
+    ok(r.outcome === 'resolved', 'runCycle(reviewer): clean review → proceeds to verify → resolved');
+  }
+  clearState();
+  {
+    // reviewer minor → does NOT block (proceeds); FORGE only called once (no revise)
+    let forgeCalls = 0;
+    const h = harness({ review: async () => ({ severity: 'minor', notes: 'nit' }), forge: async () => { forgeCalls++; return { success: true }; } });
+    const r = await sd.runCycle(ON, h.deps, session());
+    ok(r.outcome === 'resolved' && forgeCalls === 1, 'runCycle(reviewer): minor findings do not block or trigger a revise');
+  }
+  clearState();
+  {
+    // no review dep → stage skipped entirely (backward compatible)
+    const h = harness();
+    const r = await sd.runCycle(ON, h.deps, session());
+    ok(r.outcome === 'resolved', 'runCycle(reviewer): absent review dep → stage skipped, unchanged behavior');
   }
   {
     const h = harness({ plan: async () => ({ brief: 'p', files: ['lib/x.js', 'lib/security.js'], verify: 'npm run verify', severity: 'low' }) });
