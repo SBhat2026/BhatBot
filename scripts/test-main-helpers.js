@@ -82,5 +82,20 @@ ok(isSecretPath(path.join(bb, 'config.json')) === false, 'secret: config.json NO
 ok(isSecretPath(path.join(bb, 'memory.md')) === false, 'secret: normal .bhatbot file readable');
 ok(isSecretPath('/etc/hosts') === false, 'secret: unrelated path readable');
 
+// ---- looksComplexTool (model-routing complexity gate: complex tool tasks → Sonnet, not Haiku) ----
+const looksComplexTool = load('looksComplexTool');
+ok(looksComplexTool('can you make a simulation of DNA replication?') === true, 'route: "make a simulation of…" → complex (Sonnet)');
+ok(looksComplexTool('build a dashboard for my health metrics') === true, 'route: build a dashboard → complex');
+ok(looksComplexTool('write a python script to backtest this strategy') === true, 'route: write a script → complex');
+ok(looksComplexTool('analyze the returns and plot a chart') === true, 'route: analyze + plot → complex');
+ok(looksComplexTool('research GNN papers on protein folding') === true, 'route: research → complex');
+ok(looksComplexTool('refactor the auth module') === true, 'route: refactor → complex');
+ok(looksComplexTool('compute a Monte Carlo forecast') === true, 'route: compute a forecast → complex');
+ok(looksComplexTool('open spotify') === false, 'route: trivial "open spotify" → stays Haiku');
+ok(looksComplexTool('play the next song') === false, 'route: "play next song" → stays Haiku');
+ok(looksComplexTool('take a screenshot') === false, 'route: screenshot → stays Haiku');
+ok(looksComplexTool('make a call to mom') === false, 'route: "make a call" not upgraded (not substantive)');
+ok(looksComplexTool('turn up the volume') === false, 'route: volume → stays Haiku');
+
 console.log(`\n${fail === 0 ? '✅' : '❌'} ${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);

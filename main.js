@@ -775,7 +775,13 @@ function capTokens(messages, maxTok = 32000) {   // tier-2 headroom → keep mor
     msgs.shift();
     while (msgs.length && leadsWithToolResult(msgs[0])) msgs.shift();
   }
-  return msgs;
+  // FOLD the pairing repair into the SINGLE trim chokepoint: trimming can strand a tool_use whose
+  // tool_result got shifted off the head (or leave a mid-history dangling tool_use from an interrupted
+  // turn). validateHistory is idempotent, so wrapping it here makes EVERY wire path — the fast-reply
+  // stream, the tool-less stream, the pipeline's anthropicTools escalation, pacing re-entry,
+  // cloud-bridge — pairing-safe by construction. Root fix for the recurring "tool_use ids were found
+  // without tool_result blocks" API 400, no matter which entry point built the messages.
+  return validateHistory(msgs);
 }
 
 // Centralized Anthropic call with exponential backoff on 429 / 529 / 5xx, honoring the
@@ -1419,6 +1425,16 @@ async function callModel(messages, apiKey, allowDarkbloom, onText) {
   // The model is chosen BEFORE the preflight so the rate check uses that model's OWN per-minute
   // caps (Sonnet's are ~4× Haiku's) instead of a single global number.
   let claudeModel = (route === 'sonnet' || route === 'db_directive') ? MODEL_SONNET : MODEL_HAIKU;
+
+  // COMPLEX-TOOL ESCALATION: the regex classifier only routes obvious "reasoning" phrasings to Sonnet,
+  // so a genuinely hard TOOL task worded plainly ("make a simulation of DNA replication", "build X",
+  // "write a script that…") falls through to Haiku — which then fumbles the multi-step tool plan,
+  // emits empty/partial tool calls (the `simulate {}` loop), and never actually does the work. When a
+  // task both needs tools AND looks generative/multi-step, run it on Sonnet. Gated by the daily $
+  // governor so cost stays bounded; trivial one-shot actions (open/play/screenshot/volume) stay Haiku.
+  if (claudeModel === MODEL_HAIKU && !overBudget() && toolish && looksComplexTool(lastUserText(messages))) {
+    claudeModel = MODEL_SONNET; _lastModel = MODEL_SONNET; _lastRouterTask = 'complex-tool-upgrade';
+  }
 
   // Preflight rate-limit check: if this request would blow the per-minute INPUT or OUTPUT budget,
   // either run it on a local Ollama model (free, no quota) or — if local is unavailable
@@ -4079,6 +4095,13 @@ async function agentLoop(history, apiKey, event, opts = {}) {
     // NO matching tool_result → the next API call 400s. Always resolve to a result so pairing holds.
     const runOneTool = async (block) => {
       sendToAll(event, 'tool-update', { type: 'tool_start', name: block.name, input: block.input });
+      // Guard empty code-tool calls (weak model or an interrupted stream that parsed tool input as {}):
+      // short-circuit to a crisp corrective result — no wasted spawn, pairing intact, precise retry cue.
+      if ((block.name === 'simulate' || block.name === 'sci_compute') && (block.input.action || 'run') === 'run' && !String(block.input.code || '').trim()) {
+        const r = { success: false, error: `${block.name} was called with no \`code\`. Write the Python to run (call action:"capabilities" first if unsure what's installed), then call ${block.name} again with a non-empty \`code\`.` };
+        sendToAll(event, 'tool-update', { type: 'tool_done', name: block.name, result: r });
+        return { type: 'tool_result', tool_use_id: block.id, content: JSON.stringify(r), is_error: true };
+      }
       let result;
       try { result = await executeTool(block.name, block.input); }
       catch (e) { result = { success: false, error: 'tool threw: ' + (e && e.message || String(e)) }; }
@@ -4225,6 +4248,17 @@ function looksLikeToolTask(text) {
   // NOT be shunted to the tool-less local/Darkbloom fast path, which answers from stale training.
   if (/\bworld cup\b|\bstandings?\b|\bbracket\b|\bodds\b|who'?s winning|\bscores?\b|\bfixtures?\b|\bmatchup\b|right now|\btoday\b|currently|\blatest\b|live (?:score|match|game|update)|what.*\bwatch\b|worth watching|the (?:game|match)\b|\binsights?\b|fill me in|\bweather\b|\bstock|\bprice\b|\bnews\b|\bheadlines?\b/.test(t)) return true;
   return /\b(open|launch|quit|close|play|pause|skip|resume|search|google|browse|navigate|go to|website|url|click|type|screenshot|screen|capture|delete|remove|create|make|build|write|edit|save|move|rename|copy|file|folder|directory|\bls\b|\bcd\b|run|exec|shell|command|terminal|deploy|install|update|git|commit|push|email|gmail|inbox|send|calendar|event|schedule|remind|reminder|note|notes|message|imessage|text|spotify|playlist|song|music|track|volume|login|log in|sign in|download|upload|generate|image|picture|logo|render|3d|stl|print|figure|plot|graph|chart|simulate|notion|app\b|browser|playwright|spreadsheet|document)\b/.test(t);
+}
+
+// Complexity gate for model routing: does this tool task need real authoring / multi-step reasoning
+// (→ Sonnet) rather than a trivial one-shot action (open/play/screenshot → Haiku is fine)? Catches the
+// generative + analytical + multi-step verbs Haiku reliably fumbles. Kept deliberately tight so
+// everyday quick actions aren't needlessly upgraded.
+function looksComplexTool(text) {
+  const t = String(text || '').toLowerCase();
+  return /\b(simulat|model\b|modeling|build|create|generate|design|render|3d|plot|graph|chart|figure|dashboard|write (?:code|a script|python|the|an?)|\bscript\b|refactor|debug|analy[sz]e|analysis|research|investigate|compare|optimi[sz]e|pipeline|automate|workflow|scaffold|deploy|backtest|derive|prove|forecast|predict|multi.?step|step.?by.?step|then .*then)\b/.test(t)
+    // "make/compute a <thing>" where the thing is substantive (a sim/model/report/etc.), not "make a call".
+    || /\b(make|compute|calculate|run)\b.*\b(simulation|model|analysis|report|forecast|prediction|backtest|figure|chart|graph|dataset|benchmark|proof|derivation)\b/.test(t);
 }
 
 // Natural-language toggle for the pipeline, usable from any entry point (desktop,
