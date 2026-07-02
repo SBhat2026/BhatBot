@@ -94,6 +94,27 @@ harness (`gnn_eval`). Mirrors the existing `~/.bhatbot/sim-venv` pattern.
   standard dataset (e.g. a PPI benchmark)?
 - AlphaFold DB by UniProt fetch — any auth, or the public EBI endpoint?
 
+## ✅ DECISIONS (Siddhant, 2026-07-02)
+
+- **First wave, in parallel:** native iOS (simctl) + Docker probe + Scholar adapters — "a mix."
+- **Second wave:** the comp-bio venv **expanded into a broader scientific-compute pack** — not just
+  bio, but **high-complexity math**: real analysis / rigorous numerics, **quant** (stock modeling,
+  time-series, options/risk), and **physics analysis**. Same venv, `lib/compute.js` umbrella +
+  `lib/compbio.js`. Build with **MPS/GPU torch** (Apple Silicon).
+- **Last:** Blender + design-taste loop.
+- **Installed:** Blender ✓, Xcode + CLT ✓. **Docker: unconfirmed** → probe first, ask to install if
+  absent. iOS: **native REQUIRED** (not just emulation) → `simctl` + OmniParser vision-taps;
+  emulation stays as the zero-setup fallback for the PWA.
+
+### Revised scope notes
+- **iOS §3** → build the native `simctl` lane now (Xcode present). OmniParser tap-loop first; add
+  `idb` only if taps prove flaky (ask before `brew install idb-companion`).
+- **Comp-bio §5** → widen to a scientific-compute pack: add SciPy/NumPy/SymPy (real analysis,
+  symbolic), statsmodels + a quant lane (pandas/yfinance-or-provided-data, backtest primitives,
+  Black-Scholes/Greeks, Monte-Carlo), and a physics lane (ODE/PDE solvers, `sympy.physics`). MPS
+  torch for the GNN harness. Provenance (§P4) applies to ALL of it (seed/versions/params logged).
+  📸 handoff: I'll share the first quant backtest plot + a physics sim result for you to sanity-check.
+
 ## Suggested build order (once questions are answered)
 
 1. **iOS emulation lane (stage 1)** + Docker probe — lowest setup, unblocks swarm + repoauto lanes.
