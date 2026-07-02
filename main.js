@@ -1648,8 +1648,7 @@ async function trimHistory(history, apiKey, budget = contextTrimBudget()) {
 // ---------------------------------------------------------------------------
 const VISION_MAX_DIM = 1568;
 const imgBlock = (data, mt) => ({ type: 'image', source: { type: 'base64', media_type: mt, data } });
-const IMG_EXT = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.heic', '.heif', '.bmp', '.tif', '.tiff'];
-const VID_EXT = ['.mov', '.mp4', '.m4v', '.avi', '.mkv', '.webm'];
+const { IMG_EXT, VID_EXT, TEXT_EXT, classifyExt } = require('./lib/attach');  // pure file-type routing (drag-drop / attach)
 
 function sipsToJpeg(src) {
   const out = path.join(os.tmpdir(), `bb-img-${Date.now()}-${Math.random().toString(36).slice(2)}.jpg`);
@@ -1670,20 +1669,42 @@ function videoFrames(src, max = 6) {
 }
 async function mediaFileToBlocks(p) {
   const ext = path.extname(p).toLowerCase();
+  const kind = classifyExt(ext);
   const blocks = [];
-  if (IMG_EXT.includes(ext)) {
+  if (kind === 'image') {
     const jpg = sipsToJpeg(p);
     if (jpg) { blocks.push(imgBlock(fs.readFileSync(jpg).toString('base64'), 'image/jpeg')); fs.unlink(jpg, () => {}); }
     else {
       const mt = ext === '.png' ? 'image/png' : ext === '.gif' ? 'image/gif' : ext === '.webp' ? 'image/webp' : 'image/jpeg';
       blocks.push(imgBlock(fs.readFileSync(p).toString('base64'), mt));
     }
-  } else if (VID_EXT.includes(ext)) {
+  } else if (kind === 'video') {
     const frames = videoFrames(p);
     if (frames.length) { blocks.push({ type: 'text', text: `[screen recording — ${frames.length} sampled frames follow]` }); frames.forEach(f => blocks.push(imgBlock(f, 'image/jpeg'))); }
     else blocks.push({ type: 'text', text: `[video at ${p}: frame extraction failed; inspect it with run_shell/ffmpeg]` });
+  } else if (kind === 'pdf') {
+    // Claude reads PDFs natively via a base64 document block (text + figures). Cap to keep the request
+    // sane; oversized → a pointer so the model uses a tool (pdftotext / run_shell) instead.
+    try {
+      const sz = fs.statSync(p).size;
+      if (sz <= 28 * 1024 * 1024) {
+        blocks.push({ type: 'document', title: path.basename(p),
+          source: { type: 'base64', media_type: 'application/pdf', data: fs.readFileSync(p).toString('base64') } });
+      } else {
+        blocks.push({ type: 'text', text: `[PDF ${path.basename(p)} is ${(sz / 1e6).toFixed(1)}MB — too large to inline; read it at ${p} with pdftotext / run_shell]` });
+      }
+    } catch (e) { blocks.push({ type: 'text', text: `[PDF at ${p}: ${e.message}]` }); }
+  } else if (kind === 'text') {
+    // Inline the actual content so BhatBot works on the data (CSV rows, code, config), not just a path.
+    try {
+      const raw = fs.readFileSync(p, 'utf8');
+      const CAP = 200 * 1024;
+      const body = raw.length > CAP ? raw.slice(0, CAP) + `\n… [truncated — ${raw.length} chars total; full file at ${p}]` : raw;
+      const lang = ext.slice(1);
+      blocks.push({ type: 'text', text: `[attached file: ${path.basename(p)} — ${raw.length} chars]\n\`\`\`${lang}\n${body}\n\`\`\`` });
+    } catch (e) { blocks.push({ type: 'text', text: `[file ${p}: ${e.message}; try opening it with a tool]` }); }
   } else {
-    blocks.push({ type: 'text', text: `[attached file: ${p} — use your tools to inspect it]` });
+    blocks.push({ type: 'text', text: `[attached file: ${p} — use your tools (read_file / run_shell / textutil) to inspect it]` });
   }
   return blocks;
 }

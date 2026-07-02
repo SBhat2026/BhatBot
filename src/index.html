@@ -391,6 +391,28 @@
   .attchip b { color: var(--text); font-weight: 500; }
   .attchip .x { cursor: pointer; color: var(--text-dim); }
   .attchip .x:hover { color: var(--err); }
+  .attchip .thumb { width: 22px; height: 22px; border-radius: 4px; object-fit: cover; border: 1px solid var(--accent-dim); }
+  .attchip .ficon { font-size: 13px; }
+  #attclear { font-size: 10.5px; color: var(--text-dim); cursor: pointer; align-self: center; padding: 2px 6px; border-radius: 10px; }
+  #attclear:hover { color: var(--err); background: rgba(255,255,255,.05); }
+  /* pinned attachments float near the orb so they stay IN VIEW while BhatBot works on them */
+  #attpin { position: absolute; top: 14px; right: 14px; z-index: 40; display: flex; gap: 6px; flex-wrap: wrap;
+    max-width: 220px; justify-content: flex-end; pointer-events: none; }
+  #attpin:empty { display: none; }
+  #attpin .pin { position: relative; }
+  #attpin img { width: 54px; height: 54px; object-fit: cover; border-radius: 8px;
+    border: 1px solid var(--accent-dim); box-shadow: 0 2px 10px rgba(0,0,0,.5), 0 0 0 1px rgba(0,200,255,.15); }
+  #attpin .doc { width: 54px; height: 54px; border-radius: 8px; border: 1px solid var(--accent-dim);
+    background: rgba(0,200,255,.07); display: flex; align-items: center; justify-content: center; font-size: 20px; }
+  #attpin .lbl { position: absolute; bottom: 2px; left: 2px; right: 2px; font-size: 8px; color: #cfefff;
+    background: rgba(0,0,0,.55); border-radius: 3px; padding: 0 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: center; }
+  /* full-window drop veil — drag ANY file anywhere onto BhatBot */
+  #dropveil { position: fixed; inset: 0; z-index: 9999; display: none; align-items: center; justify-content: center;
+    background: rgba(4,10,16,.72); backdrop-filter: blur(3px); border: 2.5px dashed var(--accent, #39d7ff); }
+  #dropveil.show { display: flex; }
+  #dropveil .dz { text-align: center; color: var(--accent); font-size: 16px; letter-spacing: .04em; }
+  #dropveil .dz .big { font-size: 40px; display: block; margin-bottom: 10px; }
+  #dropveil .dz small { color: var(--text-dim); display: block; margin-top: 8px; font-size: 12px; }
   .readfull { display: inline-block; margin-top: 6px; font-size: 12px; color: var(--accent);
     border: 1px solid var(--accent-dim); border-radius: 5px; padding: 2px 8px; cursor: pointer; user-select: none; }
   .readfull:hover { background: var(--accent-dim); }
@@ -556,9 +578,13 @@
 
   <div id="chat"></div>
 
+  <!-- full-window drag-drop veil: drop ANY file (image / PDF / CSV / text / …) anywhere -->
+  <div id="dropveil"><div class="dz"><span class="big">📎</span>Drop to attach<small>images, PDFs, CSVs, code, any file — it stays in view while I work</small></div></div>
+
   <!-- ===== voice-first stage: BhatBot orb + inline visuals + shortened caption.
        Shown instead of the transcript when 🎧 is on; transcript is one click away. ===== -->
   <div id="vstage">
+    <div id="attpin"></div>
     <div id="orb" data-state="idle">
       <span class="ticks"></span>
       <i class="ring r1"></i><i class="ring r2"></i><i class="ring r3"></i><i class="ring r4"></i>
@@ -1089,41 +1115,78 @@ function addThought(text) {
   chat.appendChild(d); scroll();
 }
 
-// ---- attachments (screenshots / photos / screen recordings → vision) ----
-let pendingAtt = [];   // { name, blocks:[...] }
+// ---- attachments: drag ANY file (image / PDF / CSV / text / …) → stays IN VIEW while BhatBot works ----
+// Attachments PERSIST across turns (re-sent each message) so you can ask follow-up questions about the
+// same file; remove one with ✕ or "clear all". Images show a thumbnail near the orb (#attpin) so the
+// file is visibly "in hand" during processing.
+let pendingAtt = [];   // { name, blocks:[...], thumb:dataURL|null, kind:'image'|'pdf'|'file' }
+function attItem(name, blocks) {
+  const img = blocks.find((b) => b.type === 'image' && b.source && b.source.data);
+  const isPdf = blocks.some((b) => b.type === 'document');
+  return { name, blocks, thumb: img ? `data:${img.source.media_type};base64,${img.source.data}` : null,
+    kind: img ? 'image' : isPdf ? 'pdf' : 'file' };
+}
+function attIcon(kind) { return kind === 'pdf' ? '📄' : kind === 'image' ? '🖼' : '📎'; }
 function renderAtt() {
-  const bar = $('#attachbar'); bar.innerHTML = '';
+  const bar = $('#attachbar'); if (!bar) return; bar.innerHTML = '';
+  const pin = $('#attpin'); if (pin) pin.innerHTML = '';
   pendingAtt.forEach((a, i) => {
     const c = document.createElement('span'); c.className = 'attchip';
-    const imgs = a.blocks.filter((b) => b.type === 'image').length;
-    c.innerHTML = '📎 <b></b> <span class="x">✕</span>';
-    c.querySelector('b').textContent = a.name + (imgs > 1 ? ` (${imgs} frames)` : '');
-    c.querySelector('.x').addEventListener('click', () => { pendingAtt.splice(i, 1); renderAtt(); });
-    bar.appendChild(c);
+    if (a.thumb) { const im = document.createElement('img'); im.className = 'thumb'; im.src = a.thumb; c.appendChild(im); }
+    else { const s = document.createElement('span'); s.className = 'ficon'; s.textContent = attIcon(a.kind); c.appendChild(s); }
+    const b = document.createElement('b'); b.textContent = a.name; c.appendChild(b);
+    const x = document.createElement('span'); x.className = 'x'; x.textContent = '✕';
+    x.addEventListener('click', () => { pendingAtt.splice(i, 1); renderAtt(); });
+    c.appendChild(x); bar.appendChild(c);
+    if (pin) {   // near-orb persistent preview
+      const p = document.createElement('div'); p.className = 'pin';
+      if (a.thumb) { const im = document.createElement('img'); im.src = a.thumb; p.appendChild(im); }
+      else { const d = document.createElement('div'); d.className = 'doc'; d.textContent = attIcon(a.kind); p.appendChild(d); }
+      const l = document.createElement('div'); l.className = 'lbl'; l.textContent = a.name; p.appendChild(l);
+      pin.appendChild(p);
+    }
   });
+  if (pendingAtt.length > 1) {
+    const clr = document.createElement('span'); clr.id = 'attclear'; clr.textContent = 'clear all';
+    clr.addEventListener('click', () => { pendingAtt = []; renderAtt(); }); bar.appendChild(clr);
+  }
+}
+// Attach one or more file paths (each becomes its own thumbnailed item).
+async function attachFiles(paths) {
+  let added = 0;
+  for (const p of paths) {
+    try { const r = await window.bhatbot.attachPaths([p]);
+      if (r && r.blocks && r.blocks.length) { pendingAtt.push(attItem((r.names || ['file'])[0], r.blocks)); added++; }
+    } catch (e) { addErr('Attach failed: ' + (e.message || e)); }
+  }
+  renderAtt();
+  if (added) tbar.textContent = `📎 ${pendingAtt.length} attached — ask me anything about ${pendingAtt.length > 1 ? 'them' : 'it'} (voice or text)`;
 }
 $('#attach').addEventListener('click', async () => {
   $('#attach').classList.add('busy');
-  try {
-    const r = await window.bhatbot.pickMedia();
-    (r.names || []).forEach((name, i) => {
-      // pickMedia returns flat blocks for all files; group is approximate — keep one chip per file name
-    });
-    if (r.blocks && r.blocks.length) { pendingAtt.push({ name: (r.names || ['attachment']).join(', '), blocks: r.blocks }); renderAtt(); }
+  try { const r = await window.bhatbot.pickMedia();
+    if (r.blocks && r.blocks.length) { pendingAtt.push(attItem((r.names || ['attachment']).join(', '), r.blocks)); renderAtt(); }
   } catch (e) { addErr('Attach failed: ' + (e.message || e)); }
   $('#attach').classList.remove('busy');
 });
 
-// Drag-and-drop files anywhere on the chat → attach as vision/text blocks for the next msg.
-const chatEl = $('#chat');
-['dragover', 'dragenter'].forEach((ev) => chatEl.addEventListener(ev, (e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; chatEl.style.outline = '1.5px dashed var(--accent, #39d7ff)'; }));
-['dragleave', 'dragend'].forEach((ev) => chatEl.addEventListener(ev, () => { chatEl.style.outline = ''; }));
-chatEl.addEventListener('drop', async (e) => {
-  e.preventDefault(); chatEl.style.outline = '';
+// Drag-and-drop ANY file ANYWHERE on the window → full-screen veil, then attach. Robust show/hide via a
+// short auto-hide timer (dragleave/enter counting is flaky across child elements).
+const veil = $('#dropveil');
+let veilTimer = null;
+const dragHasFiles = (e) => e.dataTransfer && Array.from(e.dataTransfer.types || []).includes('Files');
+function showVeil(on) { if (veil) veil.classList.toggle('show', on); }
+window.addEventListener('dragover', (e) => {
+  if (!dragHasFiles(e)) return;
+  e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; showVeil(true);
+  clearTimeout(veilTimer); veilTimer = setTimeout(() => showVeil(false), 160);
+});
+window.addEventListener('dragend', () => { clearTimeout(veilTimer); showVeil(false); });
+window.addEventListener('drop', async (e) => {
+  if (!dragHasFiles(e)) return;
+  e.preventDefault(); clearTimeout(veilTimer); showVeil(false);
   const paths = Array.from(e.dataTransfer.files).map((f) => f.path).filter(Boolean);
-  if (!paths.length) return;
-  const r = await window.bhatbot.attachPaths(paths);
-  if (r && r.blocks && r.blocks.length) { pendingAtt.push({ name: (r.names || ['files']).join(', '), blocks: r.blocks }); renderAtt(); }
+  if (paths.length) await attachFiles(paths);
 });
 
 async function send(text) {
@@ -1140,9 +1203,12 @@ async function send(text) {
   $('#ta').value = ''; autoresize();
   $('#chips').classList.add('hidden');
   const nImg = atts.filter((b) => b.type === 'image').length;
-  addUser(text + (nImg ? `  📎 ${nImg} image${nImg > 1 ? 's' : ''}` : ''));
-  history.push({ role: 'user', content: atts.length ? [{ type: 'text', text: text || 'See the attached media.' }, ...atts] : text });
-  pendingAtt = []; renderAtt();
+  const nDoc = atts.length - nImg;
+  const attLabel = atts.length ? `  📎 ${[nImg && `${nImg} image${nImg > 1 ? 's' : ''}`, nDoc && `${nDoc} file${nDoc > 1 ? 's' : ''}`].filter(Boolean).join(', ')}` : '';
+  addUser(text + attLabel);
+  history.push({ role: 'user', content: atts.length ? [{ type: 'text', text: text || 'See the attached file(s).' }, ...atts] : text });
+  // Attachments PERSIST (stay pinned + in view) so follow-up questions still include them — the user
+  // removes them with ✕ / "clear all" when done. (Re-sent each turn to survive context trimming.)
   setBusy(true);
   streamedThisTurn = false; liveBubble = null;
   ttsIdle = false;                 // turn in flight; conversation mode re-arms on tts-idle
