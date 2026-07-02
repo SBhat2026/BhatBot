@@ -44,7 +44,7 @@ const planner = require('./lib/planner');               // B1 — decompose a go
 const ambient = require('./lib/ambient');              // #18 — opt-in proactive Calendar/Mail awareness (OFF by default)
 const { textHintFromSelector, splitForSpeech, estimateToolCost, stripReasoning } = require('./lib/pure');  // SPLIT_PLAN step 1
 const speech = require('./lib/speech');                 // human-speech shaping: emoji→spoken-cue/drop + context-aware punctuation
-const { validateHistory, evictOldImages, isRetryableTool, TRANSIENT_RE } = require('./lib/history');  // SPLIT_PLAN step 9 (pure agent-loop helpers)
+const { validateHistory, sealDanglingToolUse, evictOldImages, isRetryableTool, TRANSIENT_RE } = require('./lib/history');  // SPLIT_PLAN step 9 (pure agent-loop helpers)
 const projects = require('./lib/projects');            // #24 — project memory + living auto-summary
 const visualInspect = require('./lib/inspect');
 const security = require('./lib/security');          // P0.4 — injection sanitizer + daily audit
@@ -2889,9 +2889,15 @@ function subagentDeps() {
 // its scope (tools/system/model/budget) from the drone ctx that lib/drone.js assembles. Charges spend
 // + heartbeats via ctx.onStep each turn (drives the fleet's budget envelope + stall watchdog). The
 // tool allow-list is enforced HERE too (belt): a tool_use outside the grant is refused, not run.
+// T2: drones NEVER run on Opus. Opus OTPM (~16k/min) is far too tight for a fanned-out fleet — a batch
+// of drone calls would drain it and stall waitForBudget (the stall that orphaned tool_use → API 400).
+// A drone spec may only request the cheap tier (haiku); anything else — including 'opus'/heavyToolModel
+// — resolves to Sonnet (90k OTPM). Opus is reserved for the single plan+interpret calls in the loop.
+function resolveDroneModel(specModel) { return specModel === 'haiku' ? MODEL_HAIKU : MODEL_SONNET; }
+
 async function droneAgentRun(ctx, task) {
   const toolDefs = TOOLS.filter((t) => (ctx.tools || []).includes(t.name));
-  const model = ctx.model === 'haiku' ? MODEL_HAIKU : MODEL_SONNET;
+  const model = resolveDroneModel(ctx.model);
   const goal = (task && (task.goal || task)) || 'work the mission';
   let hist = [{ role: 'user', content: String(goal) }];
   const maxTurns = Math.max(1, Math.min((ctx.budget && ctx.budget.maxTurns) || 8, 12));
@@ -4083,6 +4089,9 @@ async function agentLoop(history, apiKey, event, opts = {}) {
   // All exits go through here so live guidance can be offered for learning (2a).
   const finish = (text) => {
     agentState = 'idle';
+    // T2 abort-guard: if this exit is an interruption mid-tool-call, seal the dangling tool_use with
+    // synthetic '[interrupted]' results NOW, so the stored history is pairing-safe at the source.
+    history = sealDanglingToolUse(history);
     // Phase 6: a reflection/capability-gap proposal is NOT auto-started (Siddhant's rule: approve at
     // start). _pendingSelfDrive stays parked until he says "go ahead" (handled in the chat entrypoint).
     _activeTools = null;   // W1 — drop the per-turn tool subset so out-of-loop calls see the full catalog
