@@ -800,6 +800,19 @@ function capTokens(messages, maxTok = 32000) {   // tier-2 headroom → keep mor
 // Haiku's). A single global input bucket (the old design) ignored OTPM entirely — the likeliest
 // throttle on long, generation-heavy turns — and wasted Sonnet's headroom. We now track in+out per
 // model in separate rolling 60s windows. ---
+const rateLib = require('./lib/rate');      // T1 — parse live anthropic-ratelimit headers + budget merge
+const _liveRate = {};                       // per-model latest live reading from response headers (ground truth)
+const _liveRateLogged = new Set();          // one-time "now pacing against live headers" log per model
+// Called on EVERY Anthropic response (streaming + non): capture the real remaining budget so pacing
+// stops guessing. Bind res.headers.get so lib/rate can read case-insensitively.
+function noteRateHeaders(model, headers) {
+  try {
+    const parsed = rateLib.parseRateHeaders((n) => headers.get(n));
+    if (!parsed) return;
+    _liveRate[model] = parsed;
+    if (!_liveRateLogged.has(model)) { _liveRateLogged.add(model); console.log(`[rate] now pacing against live headers for ${model}`); }
+  } catch {}
+}
 const _win = { in: {}, out: {} };          // { in: { model: [[ts,n],…] }, out: {…} }
 function _winPush(bucket, model, n) {
   if (!n) return;
@@ -831,19 +844,24 @@ function rateLimitsFor(model) {
 }
 function rateBudget(model = MODEL_HAIKU) {
   const c = loadConfig();
-  const frac = c.rateLimitSafetyFrac || 0.9;           // leave headroom
+  const frac = c.rateLimitSafetyFrac || 0.9;           // leave headroom on the ESTIMATE
   const { itpm, otpm } = rateLimitsFor(model);
-  const inSafe = Math.floor(itpm * frac);
-  const outSafe = otpm ? Math.floor(otpm * frac) : Infinity;
+  const inSafeEst = Math.floor(itpm * frac);
+  const outSafeEst = otpm ? Math.floor(otpm * frac) : Infinity;
   const inUsed = _winSum(_win.in, model);
   const outUsed = _winSum(_win.out, model);
-  const inFree = Math.max(0, inSafe - inUsed);
-  const outFree = outSafe === Infinity ? Infinity : Math.max(0, outSafe - outUsed);
+  const est = {
+    inSafe: inSafeEst, outSafe: outSafeEst,
+    inFree: Math.max(0, inSafeEst - inUsed),
+    outFree: outSafeEst === Infinity ? Infinity : Math.max(0, outSafeEst - outUsed),
+  };
+  // T1: prefer the LIVE header reading (ground truth) when fresh; fall back to the windowed estimate.
+  const eff = rateLib.effectiveBudget(est, _liveRate[model], { liveFrac: c.rateLimitLiveFrac || 0.95, otpmTracked: !!otpm });
   return {
-    model, itpm, otpm,
-    inSafe, inUsed, inFree, outSafe, outUsed, outFree,
+    model, itpm, otpm, rateSource: eff.source,
+    inSafe: eff.inSafe, inUsed, inFree: eff.inFree, outSafe: eff.outSafe, outUsed, outFree: eff.outFree,
     // back-compat aliases (callers that predate OTPM read .safe/.used/.free as the INPUT budget)
-    limit: itpm, safe: inSafe, used: inUsed, free: inFree,
+    limit: itpm, safe: eff.inSafe, used: inUsed, free: eff.inFree,
   };
 }
 // --- Real per-model cost ledger (token→USD), persisted per day in ~/.bhatbot/costs.json ---
@@ -1065,6 +1083,7 @@ async function anthropicRequest(body, apiKey, { retries = 5 } = {}) {
       attempt++; continue;
     }
     if (res.ok) {
+      noteRateHeaders(body.model, res.headers);       // T1 — capture live budget from the response
       const j = await res.json();
       try { const u = j.usage || {}; recordTokens(body.model, (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0), u.output_tokens || 0); recordCost(body.model, u); noteUsage(body.model, u); } catch {}
       return j;
@@ -1272,6 +1291,7 @@ async function anthropicStream(body, apiKey, onText, { retries = 3 } = {}) {
       if (res.status === 529) throw new Error('Anthropic is overloaded right now. Try again shortly.');
       throw new Error(`API ${res.status}: ${t.slice(0, 300)}`);
     }
+    noteRateHeaders(body.model, res.headers);         // T1 — live budget from the streaming response
     const reader = res.body.getReader();
     const dec = new TextDecoder();
     let buf = '';
