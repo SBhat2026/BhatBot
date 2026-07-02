@@ -15,5 +15,8 @@ OmniParser/
 
 # Phase 3 — learned depth model artifact (lives in ~/.bhatbot, never committed)
 depth-model.json
+# T5 — learned spoken-length model + dataset (live in ~/.bhatbot, never committed)
+spoken-model.json
+spoken.jsonl
 .episodic-vec.json
 .phase4-backup/

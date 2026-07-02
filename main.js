@@ -66,6 +66,26 @@ let _pendingSelfDrive = null;                         // Phase 6: a reflection-s
 let _opusApproved = false;                            // session flag: user OK'd Opus for heavy tasks (asked once per session)
 let _pendingOpusTask = null;                          // a heavy turn parked awaiting Opus approval ({history, at})
 let _opusSuppressAsk = false;                         // one-shot: re-run the parked task WITHOUT re-asking (user declined Opus)
+// T5/T6 — learned spoken-length loop. One "just-spoken" turn is held and its OUTCOME (interrupted@N /
+// under / clean) is resolved on the NEXT user turn, then appended to spoken.jsonl (like depth's priorOut).
+let _currentUserPrompt = '';
+let _spk = { replyText: '', userPrompt: '', words: 0, bargedAt: null, at: 0 };
+let _spkFinalizeCount = 0;
+function countWords(s) { return (String(s || '').match(/[\w'-]+/g) || []).length; }
+// Resolve the previous spoken turn against what the user just did, append a labeled row, retrain.
+function finalizeSpokenRow(nextUserText) {
+  try {
+    if (!_spk.replyText) { _spk = { replyText: '', userPrompt: '', words: 0, bargedAt: null, at: 0 }; return; }
+    const f = spokenmodel.extractFeatures(_spk.replyText, _spk.userPrompt);
+    const { outcome, interrupt_at } = spokenmodel.labelOutcome({ bargedAt: _spk.bargedAt, nextUserText });
+    const to_next_ms = outcome === 'clean' ? Date.now() - (_spk.at || Date.now()) : null;
+    const row = { at: _spk.at, outcome, spoken_words: _spk.words, interrupt_at, to_next_ms, qtype: f.qtype, struct: f.struct_type, f };
+    try { fs.mkdirSync(path.dirname(spokenmodel.DATASET), { recursive: true }); fs.appendFileSync(spokenmodel.DATASET, JSON.stringify(row) + '\n'); } catch {}
+    try { spokenmodel.maybeRetrain(); } catch {}
+    if (++_spkFinalizeCount % 10 === 0) { try { const L = spokenmodel.computeL(spokenmodel.readRows(), { lambda: loadConfig().spokenLambda || 1.0 }); if (L.L != null) console.log(`[spoken] L=${L.L} (interrupt ${L.interrupt_rate}, under ${L.underinform_rate}, n=${L.n})`); } catch {} }
+  } catch {}
+  _spk = { replyText: '', userPrompt: '', words: 0, bargedAt: null, at: 0 };
+}
 const vanguard = require('./lib/vanguard');           // Phase 1 — unified VANGUARD fleet codename roster (OVERMIND/FORGE/ORACLE/…)
 const { createAdmission } = require('./lib/admission'); // Phase 1 — budget-aware fleet admission controller (convoy fix)
 const blackboard = require('./lib/blackboard');        // FORGE — shared cross-agent state (T5)
@@ -74,6 +94,8 @@ const scholar = require('./lib/integrations/scholar');  // FORGE — scholarly a
 const scicompute = require('./lib/scicompute');         // quant/numerics/stats/MPS-torch compute pack (sci_compute)
 const dockerPack = require('./lib/integrations/docker'); // container isolation lane (container_run)
 const { createEndpointer } = require('./lib/endpoint');  // adaptive, speaker-gated utterance endpointing
+const voiceid = require('./lib/voiceid');                // T3 — speaker verification (cocktail-party post-filter)
+const spokenmodel = require('./lib/spokenmodel');        // T5 — learned spoken-length model (density→compression)
 
 const DB_MODELS = { db_speech: 'gpt-oss-20b', db_directive: 'gemma-4-26b' };
 
@@ -6470,6 +6492,7 @@ function stopDesktopTTS() {
 // turn returns via finish('⏹ Stopped.') on the next loop check. Gated by config.bargeInAbortsTurn.
 function bargeInInterrupt() {
   stopDesktopTTS();
+  if (_spk.words && _spk.bargedAt == null) _spk.bargedAt = _spk.words;   // T6 — spoken-word position at barge-in (right-censoring signal)
   if (agentState === 'running' && loadConfig().bargeInAbortsTurn !== false) agentState = 'stopped';
 }
 // splitForSpeech moved to lib/pure.js (SPLIT_PLAN step 1).
@@ -6641,7 +6664,7 @@ let sessionGenerating = false;
 const SESSION_SILENCE_MS = 30000;
 function recordSpoken(text) {
   const t = String(text || '').trim();
-  if (t && t.length > 1) { sessionSpoken.push(t); noteActivity(); }
+  if (t && t.length > 1) { sessionSpoken.push(t); _spk.words += countWords(t); noteActivity(); }
 }
 function noteActivity() {
   // Reset the 30s silence → end-session timer on any spoken/user activity.
@@ -6846,7 +6869,32 @@ async function transcribeAudio(audioBuffer, mimeType) {
     return { error: e.message };
   }
 }
-ipcMain.handle('transcribe-audio', (_e, { audioBuffer, mimeType }) => transcribeAudio(audioBuffer, mimeType));
+// COCKTAIL-PARTY post-filter (T3, config.voice.verifyUser): after transcribing, verify the clip is the
+// ENROLLED user's voice; if it clearly isn't (someone else in the room talking), discard so BhatBot
+// never acts on a background speaker. Off by default (voiceid is a slow venv); fail-OPEN on any error
+// or missing enrollment so it can never wedge the mic.
+async function verifyEnrolledSpeaker(buf, ext) {
+  try {
+    if (!voiceid.ready() || !voiceid.isEnrolled()) return { ok: true, skipped: 'not-enrolled' };
+    const tmp = path.join(os.tmpdir(), `bb-spk-${Date.now()}.${ext}`);
+    try { fs.writeFileSync(tmp, buf); } catch { return { ok: true, skipped: 'tmp-write' }; }
+    const r = await voiceid.verify(tmp).catch(() => null);
+    fs.unlink(tmp, () => {});
+    if (!r || r.ok === false || typeof r.match !== 'boolean') return { ok: true, skipped: 'verify-error' };  // fail-open
+    return { ok: r.match, score: r.score, threshold: r.threshold };
+  } catch { return { ok: true, skipped: 'exception' }; }
+}
+ipcMain.handle('transcribe-audio', async (_e, { audioBuffer, mimeType }) => {
+  const res = await transcribeAudio(audioBuffer, mimeType);
+  const c = loadConfig();
+  if (res && res.success && res.text && c.voice && c.voice.verifyUser) {
+    const mt = (mimeType || 'audio/webm').split(';')[0].trim();
+    const ext = mt === 'audio/mp4' || mt === 'audio/m4a' ? 'm4a' : mt === 'audio/wav' ? 'wav' : mt === 'audio/ogg' ? 'ogg' : 'webm';
+    const v = await verifyEnrolledSpeaker(Buffer.from(audioBuffer), ext);
+    if (!v.ok) { console.log(`[voiceid] discarded non-enrolled speaker (score ${v.score}, thr ${v.threshold})`); return { success: true, text: '', _dropped: 'not_enrolled_speaker', score: v.score }; }
+  }
+  return res;
+});
 
 // Spoken-summary: long replies get condensed for voice (the full text still shows on
 // screen / can be read in full on demand). Haiku first (tiny + fast + negligible quota);
@@ -6864,11 +6912,19 @@ async function summarizeForSpeech(text) {
   if (!t) return { error: 'empty text' };
   const cfg = loadConfig();
   const apiKey = getApiKey();
+  // T5 — the LEARNED spoken-length target. The prompt stays qualitative; the NUMBER is learned from
+  // this user's barge-in / ask-for-more feedback (density-conditioned). Below MIN_ROWS predict()
+  // returns null and we keep the 1–3 sentence heuristic.
+  let sys = SPEECH_SYS;
+  try {
+    const pred = spokenmodel.predict(spokenmodel.extractFeatures(t, _currentUserPrompt));
+    if (pred && pred.words) sys += ` Aim for roughly ${pred.words} spoken words — lead with the headline (the key number, name, or verdict), then only what earns its place.`;
+  } catch {}
   // 1) Haiku — only if there's budget this minute (a summary is small, ~few hundred tok).
   if (apiKey && requestTokenEstimate([{ role: 'user', content: t.slice(0, 8000) }]) < rateBudget().free) {
     try {
       const j = await anthropicRequest({
-        model: MODEL_HAIKU, max_tokens: 512, system: SPEECH_SYS,   // 512 (was 280): a 1-3 sentence summary must never be hard-truncated mid-word
+        model: MODEL_HAIKU, max_tokens: 512, system: sys,   // 512 (was 280): a 1-3 sentence summary must never be hard-truncated mid-word
         messages: [{ role: 'user', content: t.slice(0, 8000) }]
       }, apiKey, { retries: 1 });
       let out = (j.content || []).filter(b => b.type === 'text').map(b => b.text).join(' ').trim();
@@ -6881,7 +6937,7 @@ async function summarizeForSpeech(text) {
     try {
       const lm = cfg.localModel || 'qwen3:latest';
       // stripReasoning: local models (qwen3 etc.) leak <think>…</think> — those tags must never be spoken.
-      const out = stripReasoning((await ollamaChat([{ role: 'user', content: t.slice(0, 8000) }], SPEECH_SYS, lm) || '')).trim();
+      const out = stripReasoning((await ollamaChat([{ role: 'user', content: t.slice(0, 8000) }], sys, lm) || '')).trim();
       if (out) return { success: true, text: out, via: 'ollama' };
     } catch (e) { console.warn('[summary] ollama failed:', e.message); }
   }
@@ -6981,6 +7037,8 @@ ipcMain.handle('chat', async (event, { history }) => {
   noteActivity();                                  // user spoke/typed → keep the session alive
   // "wrap up" / "that's all" ends the session (note generated after the reply lands).
   const ut = lastUserText(history);
+  finalizeSpokenRow(ut);            // T5/T6 — resolve the PREVIOUS spoken turn's outcome now that the user acted
+  _currentUserPrompt = ut;
   const wrap = /\b(wrap up|wrap it up|that'?s all|we'?re done|end session|close out|debrief)\b/i.test(ut);
   // Pipeline toggle by voice/text — flips config.pipeline.enabled without the settings UI.
   const toggle = maybeTogglePipeline(ut);
@@ -7052,6 +7110,9 @@ ipcMain.handle('chat', async (event, { history }) => {
     const ev = (event && event.sender ? event : { sender: { send() {} } });
     const res = await dispatchTurn(history, apiKey, ev, { stream: true, ttsSeq });
     if (wrap) setTimeout(() => endSession('wrap-up'), 1200);
+    // T5/T6 — capture this turn's reply for the spoken-length row; word count keeps accruing via
+    // recordSpoken as the (possibly streamed) audio plays, and is finalized on the NEXT user turn.
+    if (res && res.text) { _spk.replyText = res.text; _spk.userPrompt = _currentUserPrompt; _spk.at = Date.now(); }
     latMark('turn-complete');
     // Tell the renderer whether main actually spoke this turn (so a silent turn falls back to
     // renderer-side speech), and GUARANTEE the conversation re-arms: if nothing was queued the
