@@ -183,6 +183,61 @@
   #send .gi, #mic.rec .gi { stroke-width:1.9; }
   .qbtn .qi { display:grid; place-items:center; }
   .qbtn .qi .gi { width:21px; height:21px; color:var(--cyan); }
+  /* ============================================================================
+     CLEAN GEOMETRY REDESIGN (2026-07-02) — a calmer, flatter phone skin. Layered as
+     an override so every functional selector/JS binding is untouched: it re-themes
+     via the CSS variables and quiets the HUD chrome (scanlines, vignette, corner
+     brackets, glows, counter-rotating rings) into simple geometry — flat surfaces,
+     hairline borders, one restrained accent, a clean system typeface.
+     ============================================================================ */
+  :root {
+    --bg:#0b0f14; --bg-deep:#080b0f; --panel:#141a21; --surface:#141a21; --line:#232c36;
+    --cyan:#4bb8d8; --cyan-bright:#5fc9e6; --cyan-soft:#8fd6ea; --cyan-core:#bfe8f4;
+    --cyan-deep:#0a1a20; --cyan-dim:#28414c;
+    --txt:#d3dce6; --txt-strong:#eef4fa; --dim:#7c8a99;
+    --sans:-apple-system,BlinkMacSystemFont,'SF Pro Text','Segoe UI',system-ui,sans-serif;
+    --glow-sm:none; --glow-md:none; --glow-core:0 0 0 1px rgba(75,184,216,.35);
+    --ls-brand:.14em; --ls-label:.06em;
+  }
+  html,body { font-family:var(--sans); font-size:15px; }
+  /* quiet the HUD overlays → clean flat backdrop */
+  body::before { display:none !important; }
+  body::after { box-shadow:none !important; }
+  /* drop corner-bracket ticks → simple rectangles */
+  .cf::before, .cf::after { display:none !important; }
+  /* header: flat, hairline rule (no gradient/glow) */
+  header { background:var(--bg-deep); box-shadow:none; }
+  .wm i { box-shadow:none; border-radius:6px; background:var(--cyan); color:#06222b; }
+  .wm b { letter-spacing:var(--ls-brand); }
+  header small { text-transform:none; letter-spacing:.02em; }
+  /* status indicator: one calm ring + solid dot (no counter-spin noise) */
+  .reactor .r2 { display:none; }
+  .reactor .r1 { border:1.5px solid var(--cyan-dim); border-top-color:var(--cyan); animation:spin 4s linear infinite; }
+  .reactor .core { box-shadow:none; background:var(--cyan); width:10px; height:10px; }
+  .reactor .core.off { background:var(--warn); box-shadow:none; }
+  /* messages: simple rounded rectangles, flat fills, even radius */
+  .msg { border-radius:14px; }
+  .me { background:#1b2c38; border:1px solid #26414f; }
+  .bot { background:var(--panel); border:1px solid var(--line); box-shadow:none; }
+  /* inputs + buttons: geometric, flat, clear focus (accessibility) */
+  textarea { border-radius:14px; }
+  textarea:focus { border-color:var(--cyan); box-shadow:0 0 0 2px rgba(75,184,216,.25); }
+  button { border-radius:12px; box-shadow:none; }
+  #mic, #spk, #wake, #gear, #attach, .row .sec { border-radius:12px; }
+  #send, #mic.rec { box-shadow:none; }
+  #send:active, button:active { box-shadow:none; }
+  #mic.rec { animation:none; }
+  .hbtn { border-radius:10px; }
+  /* tabs: flat, no glow/shadow, calm accent on the active tab */
+  #tabs { background:var(--bg-deep); }
+  #tabs .tab { text-transform:none; letter-spacing:.01em; }
+  #tabs .tab.on .ic .gi, #tabs .tab.on .ic { filter:none; text-shadow:none; }
+  /* uppercase micro-labels → sentence case for a cleaner read */
+  #bar, .csec, .act .k { text-transform:none; letter-spacing:.02em; }
+  .csec::before { content:""; }
+  /* cards everywhere: consistent geometry + hairline borders, flat fills */
+  .hcard, .jcard, .act, .attchip, #screenwrap, .qbtn, .testbtn { border-radius:12px; box-shadow:none; }
+  .testbtn { background:rgba(75,184,216,.10); border-color:var(--cyan-dim); color:var(--cyan-soft); }
 </style>
 </head>
 <body>
