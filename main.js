@@ -67,6 +67,7 @@ const vanguard = require('./lib/vanguard');           // Phase 1 — unified VAN
 const { createAdmission } = require('./lib/admission'); // Phase 1 — budget-aware fleet admission controller (convoy fix)
 const blackboard = require('./lib/blackboard');        // FORGE — shared cross-agent state (T5)
 const { runFleet } = require('./lib/fleet');           // FORGE — drone fleet supervisor (D1)
+const scholar = require('./lib/integrations/scholar');  // FORGE — scholarly adapters (arXiv/Semantic Scholar)
 
 const DB_MODELS = { db_speech: 'gpt-oss-20b', db_directive: 'gemma-4-26b' };
 
@@ -3402,6 +3403,24 @@ async function executeTool(name, input) {
           totalSpend: out.totalSpend, launched: out.launched, reaped: out.reaped, envelopeExceeded: out.envelopeExceeded,
           synthesis,
         };
+        break;
+      }
+      case 'find_papers': {
+        // FORGE Phase 6 — scholarly search across arXiv (keyless) + Semantic Scholar (key optional),
+        // merged + deduped into normalized records. The research-depth pipeline builds on this.
+        const q = String(input.query || '').trim();
+        if (!q) { result = { success: false, error: 'query required' }; break; }
+        const max = Math.max(1, Math.min(input.max || 8, 25));
+        const c = loadConfig();
+        const [ax, ss] = await Promise.all([
+          scholar.arxiv(q, { max }),
+          scholar.semanticScholar(q, { max, key: c.semanticScholarKey }).catch(() => ({ results: [] })),
+        ]);
+        const merged = scholar.mergeDedupe(ax.results, ss.results).slice(0, max);
+        const notes = [ax.error && ('arxiv: ' + ax.error), ss.error && ('semanticscholar: ' + ss.error)].filter(Boolean);
+        result = { success: merged.length > 0 || notes.length === 0, query: q, count: merged.length,
+          papers: merged.map((p) => ({ title: p.title, authors: (p.authors || []).slice(0, 6), year: p.year, source: p.source, citations: p.citations, pdfUrl: p.pdfUrl, url: p.url, abstract: (p.abstract || '').slice(0, 400) })),
+          notes: notes.length ? notes : undefined };
         break;
       }
       case 'plan_and_run': {
