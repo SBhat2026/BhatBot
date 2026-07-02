@@ -211,3 +211,39 @@ still commits to a local `self-drive-*` branch for human merge.
 
 _NOT done from the sprint prompt (deferred): T1–T4 voice ws transport/planner/ack library, T5–T7
 blackboard/DAG/fan-out, T8–T9 goal queue + Manage cards, T10 zen UI._
+
+---
+
+## 11. Drone fleet & FORGE foundations (2026-07-02, branch `forge-sprint`, NOT pushed)
+
+Foundational layer for the FORGE sprint (drones, repo autopilot, swarms). Feature phases
+(repoauto, swarm, visual, sim, research, style, voice/UI) are DEFERRED — see
+`FORGE_SPRINT_REPORT.md`. All verify-gated (49 new assertions).
+
+- **Shared blackboard** (`lib/blackboard.js`, T5) — per-workspace append-only JSONL + tail
+  cache: `post/read/fleetStatusBlock/claim/isClaimed/heartbeat`. `lib/agents/base.js` injects
+  `fleetStatusBlock()` into every agent (optional `adapters.board`) and posts results as
+  findings so live siblings see them. Test: `scripts/test-blackboard.js`.
+- **DAG orchestrator** (`lib/agents/orchestrator.js`, T6) — tasks gain `needs:[]`; ready-set
+  scheduling; a dead dependency blocks dependents with a reason (independent branches keep
+  running; only `needs_input` pauses the run); dependency summaries injected into the
+  dependent's context. Planner prompt (`lib/agents/roles/index.js`) emits ids+needs. New DI
+  seams `planFn`/`runAgentFn` on `orchestrator.run` for headless tests.
+  Test: `scripts/test-orchestrator-dag.js`.
+- **Untrusted-code wall** (`lib/sandboxexec.js`) — THE safety floor: `scrubEnv` allow-lists
+  PATH+locale+throwaway HOME only (secrets excluded by construction, no keychain/dotfiles);
+  `run()` execs under it, layering macOS `sandbox-exec` network-deny when network isn't
+  allowed. Canary test proves a real parent-env secret is invisible inside. Phase 2/3
+  install/test/run lanes MUST route through this. Test: `scripts/test-sandboxexec.js`.
+- **Drone runtime + fleet** (`lib/drone.js`, `lib/fleet.js`, D1) — `createDrone(spec,deps)`:
+  scoped BhatBot instance (persona, strict tool subset via `scopeTools`, own wsDir, budget,
+  board handle, identity prompt). `runFleet(specs,deps,opts)`: admission-gated launch
+  (budget-derived width), envelope wallet (`envelopeUsd`), hard cap (`hardCap`), cooperative
+  stall reaping (silent drone → one board nudge → `partial` reaped envelope). In-process
+  DI-driven; hermetic/generated code routes through the untrusted-code wall.
+  Test: `scripts/test-fleet.js`.
+
+**New npm test scripts:** `test:blackboard`, `test:dag`, `test:sandbox`, `test:fleet` (all
+in `verify`). **No new external deps required** for the foundation (Docker/Blender/idb come
+with the deferred feature phases). **Still never pushes; branch `forge-sprint` off
+`jarvis-sprint`.**
