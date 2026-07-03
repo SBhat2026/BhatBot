@@ -126,8 +126,9 @@ try {
 
 const HOTKEY = 'CommandOrControl+Shift+B';
 const MODEL_SONNET = 'claude-sonnet-4-6';      // corrected from stale spec id
-const MODEL_HAIKU = 'claude-haiku-4-5';        // corrected from stale spec id
+const MODEL_HAIKU = 'claude-haiku-4-5';        // RETIRED from routing — kept only for legacy price/rate maps
 const MODEL_OPUS = 'claude-opus-4-8';          // deepest reasoning — reserved for HEAVY tasks (sims, heavy coding+interpretation)
+const MODEL_FABLE = 'claude-fable-5';          // native subagents + high autonomy — opt-in heavy/autonomous tier (config.useFable)
 const MAX_AGENT_ITERATIONS = 20;   // step ceiling; complex tasks need headroom to retry/replan
 // TIER-2 THROUGHPUT: tools that are READ-ONLY / side-effect-free / order-independent, so when the
 // model fires several in one turn they can run CONCURRENTLY (the higher per-minute cap serves the
@@ -747,7 +748,7 @@ function buildSystemPrompt(query) {
 // ---------------------------------------------------------------------------
 function chooseModel(lastUserMessage) {
   let model, task;
-  if (overBudget()) { model = MODEL_HAIKU; task = 'budget'; }
+  if (overBudget()) { model = MODEL_SONNET; task = 'budget'; }   // Haiku retired — cheap tier is local; Sonnet is the floor cloud model
   else {
     const sonnet = [
       /write.*prompt/i, /claude.?code/i, /architect/i, /refactor/i, /debug/i,
@@ -762,12 +763,7 @@ function chooseModel(lastUserMessage) {
       /world cup|bracket|standings?|who'?s winning|tournament|fixtures?|matchup|\bodds\b|what.*watch|worth watching|\binsights?\b/i
     ];
     const hit = sonnet.some((p) => p.test(lastUserMessage || ''));
-    model = hit ? MODEL_SONNET : MODEL_HAIKU; task = hit ? 'reasoning' : 'simple';
-    // TELEMETRY NUDGE (Phase 1, Deliverable #3): router.jsonl now DRIVES, not just records. If the
-    // cheap 'simple' route has been getting corrected a lot, the regex is under-calling it — escalate.
-    if (model === MODEL_HAIKU && task === 'simple' && routeCorrectionRate('simple') > 0.34) {
-      model = MODEL_SONNET; task = 'simple-nudged';
-    }
+    model = MODEL_SONNET; task = hit ? 'reasoning' : 'simple';   // Haiku retired — Sonnet is the floor cloud model (cheap 'simple' tier runs local)
   }
   _lastModel = model; _lastRouterTask = task;       // remembered for router telemetry (#13)
   return model;
@@ -854,6 +850,7 @@ const RATE_LIMITS = {
   'claude-sonnet-4-6': { itpm: 450000, otpm: 90000 },
   'claude-haiku-4-5':  { itpm: 100000, otpm: 50000 },
   'claude-opus-4-8':   { itpm: 100000, otpm: 16000 },
+  'claude-fable-5':    { itpm: 200000, otpm: 32000 },   // conservative until live headers (T1) correct it
 };
 function rateLimitsFor(model) {
   const c = loadConfig();
@@ -892,6 +889,7 @@ function rateBudget(model = MODEL_HAIKU) {
 // genuine budget-aware decisions ("calculate the cost, then chunk").
 const MODEL_PRICES = {                              // USD / 1M tokens: [input, output, cacheWrite, cacheRead]
   'claude-opus-4-8':   [15, 75, 18.75, 1.50],
+  'claude-fable-5':    [5, 25, 6.25, 0.50],         // estimate; refine when official pricing lands
   'claude-sonnet-4-6': [3, 15, 3.75, 0.30],
   'claude-haiku-4-5':  [1, 5, 1.25, 0.10],
   // Cross-provider TEXT-offload models (Phase 2, Deliverable #4) — no cache tiers, so cacheWrite/
@@ -1045,6 +1043,36 @@ async function waitForBudget(model, needIn, needOut = 0, maxWaitMs = 75000) {
 async function ollamaUp() {
   try { const r = await fetch(`${OLLAMA_URL}/api/tags`, { signal: AbortSignal.timeout(700) }); return r.ok; } catch { return false; }
 }
+// Cached liveness so the CHEAP tier (below) doesn't pay a 700ms probe every turn.
+let _ollamaUpCache = { up: false, at: 0 };
+async function ollamaReady() {
+  if (Date.now() - _ollamaUpCache.at < 20000) return _ollamaUpCache.up;
+  const up = await ollamaUp(); _ollamaUpCache = { up, at: Date.now() };
+  return up;
+}
+// The CHEAP tier — Haiku is retired; simple/utility work runs FREE on a local Ollama model
+// (gemma/qwen), falling back to Sonnet (never Haiku) when Ollama is down or disabled.
+// Default is gemma3:12b: ~1s warm, coherent, and NON-reasoning — qwen3 leaks <think> and runs
+// ~16× slower (17s), which is unusable on the latency-critical voice/fast-reply paths. Override
+// with config.cheapModel (e.g. 'qwen3:latest' if you want reasoning quality over latency).
+function cheapLocalModel() { const c = loadConfig(); return c.cheapModel || c.localModel || 'gemma3:12b'; }
+function cheapEnabled() { return loadConfig().useLocalCheap !== false; }
+// One tool-less completion for internal utilities (summaries, session notes, reflection, briefs).
+// Returns { text, via }. Local-first (free), Sonnet cloud fallback.
+async function cheapText(system, userText, { maxTokens = 512 } = {}) {
+  const t = String(userText || '');
+  if (cheapEnabled() && await ollamaReady()) {
+    try { const out = stripReasoning(await ollamaChat([{ role: 'user', content: t.slice(0, 8000) }], system, cheapLocalModel()) || '').trim();
+      if (out) return { text: out, via: 'ollama:' + cheapLocalModel() }; } catch (e) { console.warn('[cheap] ollama failed → sonnet:', e.message); }
+  }
+  try {
+    const r = await anthropicRequest({ model: MODEL_SONNET, max_tokens: maxTokens, system, messages: [{ role: 'user', content: t.slice(0, 8000) }] }, getApiKey(), { retries: 1 });
+    return { text: (r.content || []).filter((b) => b.type === 'text').map((b) => b.text).join(' ').trim(), via: 'sonnet' };
+  } catch (e) { return { text: '', via: 'none', error: e.message }; }
+}
+// Resolve the HEAVY/orchestrator tier: Opus by default, or Fable-5 (native subagents, more autonomous)
+// when opted in. Used by the heavy-task routing + autonomous paths.
+function heavyModel() { const c = loadConfig(); return c.useFable ? MODEL_FABLE : (c.heavyToolModel || MODEL_OPUS); }
 // VANGUARD admission controller (Phase 1) — shared token-reservation ledger over the SAME rolling
 // rate windows as the main preflight (rateBudget). Sub-agent calls acquire/release through this so
 // concurrent suits self-throttle to live budget instead of convoying into the rate limit together.
@@ -1473,9 +1501,19 @@ async function callModel(messages, apiKey, allowDarkbloom, onText) {
     }
   }
 
-  // The model is chosen BEFORE the preflight so the rate check uses that model's OWN per-minute
-  // caps (Sonnet's are ~4× Haiku's) instead of a single global number.
-  let claudeModel = (route === 'sonnet' || route === 'db_directive') ? MODEL_SONNET : MODEL_HAIKU;
+  // CHEAP TIER → local Ollama (Haiku retired). A non-tool, non-reasoning turn runs FREE on a local
+  // model (qwen/gemma) instead of a paid cheap cloud model. Tool tasks + the 'sonnet' reasoning route
+  // skip this — they need the cloud tool loop / real depth. Falls through to Sonnet when Ollama is down.
+  if (!toolish && cheapEnabled() && route !== 'sonnet' && route !== 'db_directive' && await ollamaReady()) {
+    try {
+      const text = stripReasoning(await ollamaChat(messages, buildSystemPrompt(lastUserText(messages)), cheapLocalModel()) || '').trim();
+      if (text) { if (onText) try { onText(text); } catch {} return { content: [{ type: 'text', text }], stop_reason: 'end_turn', _provider: 'ollama', _model: cheapLocalModel(), _cheapLocal: true }; }
+    } catch (e) { console.warn('[cheap] local failed → cloud:', e.message); }
+  }
+
+  // Cloud Claude base tier is now SONNET (Haiku fully retired from routing). The complex/heavy
+  // upgrades below can push it to Opus/Fable; the local branch above already took the free path.
+  let claudeModel = MODEL_SONNET;
 
   // COMPLEX-TOOL ESCALATION: the regex classifier only routes obvious "reasoning" phrasings to Sonnet,
   // so a genuinely hard TOOL task worded plainly ("make a simulation of DNA replication", "build X",
@@ -1483,7 +1521,7 @@ async function callModel(messages, apiKey, allowDarkbloom, onText) {
   // emits empty/partial tool calls (the `simulate {}` loop), and never actually does the work. When a
   // task both needs tools AND looks generative/multi-step, run it on Sonnet. Gated by the daily $
   // governor so cost stays bounded; trivial one-shot actions (open/play/screenshot/volume) stay Haiku.
-  if (claudeModel === MODEL_HAIKU && !overBudget() && toolish && looksComplexTool(lastUserText(messages))) {
+  if (claudeModel === MODEL_SONNET && !overBudget() && toolish && looksComplexTool(lastUserText(messages))) {
     claudeModel = cfg.complexToolModel || MODEL_SONNET; _lastModel = claudeModel; _lastRouterTask = 'complex-tool-upgrade';
   }
   // HEAVY-TASK OPUS TIER: the hardest tasks — a scientific simulation, an engine/model needing deep
@@ -1495,7 +1533,7 @@ async function callModel(messages, apiKey, allowDarkbloom, onText) {
   // before switching and sets _opusApproved for the session. If we reach here un-approved (or the knob
   // is off), we simply stay on Sonnet — never silently spend Opus rates.
   if (!overBudget() && toolish && (cfg.allowOpusHeavy !== false) && (cfg.opusRequiresApproval === false || _opusApproved) && looksHeavyTool(lastUserText(messages))) {
-    claudeModel = cfg.heavyToolModel || MODEL_OPUS; _lastModel = claudeModel; _lastRouterTask = 'heavy-opus-upgrade';
+    claudeModel = heavyModel(); _lastModel = claudeModel; _lastRouterTask = cfg.useFable ? 'heavy-fable-upgrade' : 'heavy-opus-upgrade';
   }
 
   // Preflight rate-limit check: if this request would blow the per-minute INPUT or OUTPUT budget,
@@ -1505,16 +1543,7 @@ async function callModel(messages, apiKey, allowDarkbloom, onText) {
   // generation turns pace too, not just big-context ones.
   let est = requestTokenEstimate(messages);
   let estOut = predictedOutputTokens(lastUserText(messages));
-  // OTPM-AWARE ROUTING (Phase 1, Deliverable #3): when OUTPUT is the binding constraint, Sonnet's
-  // 90k OTPM beats Haiku's 50k — so a Haiku-routed turn whose predicted output would crowd Haiku's
-  // live output window upgrades to Sonnet when Sonnet has materially more output headroom right now.
-  // (Skipped under the daily $ governor, which forces Haiku.)
-  if (claudeModel === MODEL_HAIKU && !overBudget()) {
-    const hB = rateBudget(MODEL_HAIKU), sB = rateBudget(MODEL_SONNET);
-    if (estOut > hB.outFree && sB.outFree > estOut && sB.outFree > hB.outFree) {
-      claudeModel = MODEL_SONNET; _lastModel = MODEL_SONNET; _lastRouterTask = 'otpm-upgrade';
-    }
-  }
+  // (The old Haiku→Sonnet OTPM upgrade is gone — Haiku is retired; the cloud base is already Sonnet.)
   let budget = rateBudget(claudeModel);
   if (est > budget.inFree || (budget.outFree !== Infinity && estOut > budget.outFree)) {
     const mode = cfg.rateLimitMode || 'local';
@@ -1652,7 +1681,7 @@ async function trimHistory(history, apiKey, budget = contextTrimBudget()) {
     const summary = await callClaude([
       ...toSummarize,
       { role: 'user', content: 'Summarize this conversation so an in-progress task can continue without loss. Preserve concretely: decisions made, exact file paths + line numbers, code/diffs written, tool outputs still needed downstream, and unresolved TODOs. Be dense; skip pleasantries.' }
-    ], apiKey, MODEL_HAIKU);
+    ], apiKey, MODEL_SONNET);
     text = (summary.content.find((b) => b.type === 'text') || {}).text || '';
   } catch { return history; }               // summary failed → keep full history; capTokens still guards the wire
   if (!text) return history;
@@ -2536,7 +2565,7 @@ async function graphIngest(content) {
     const text = String(content || '').trim();
     if (text.length < 8) return;
     const sys = 'Extract knowledge-graph triples from this fact about Siddhant. Return ONLY JSON: {"triples":[{"subject","predicate","object","subjectType","objectType"}]}. Types ∈ person|project|tool|org|place|concept|event|thing. Canonical short names ("Siddhant" not "I"). Skip non-factual text. Max 6 triples; empty array if none.';
-    const r = await anthropicRequest({ model: MODEL_HAIKU, max_tokens: 500, system: sys, messages: [{ role: 'user', content: text.slice(0, 1000) }] }, getApiKey(), { retries: 1 });
+    const r = await anthropicRequest({ model: MODEL_SONNET, max_tokens: 500, system: sys, messages: [{ role: 'user', content: text.slice(0, 1000) }] }, getApiKey(), { retries: 1 });
     const txt = (r.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('');
     const j = parseJsonLoose(txt);
     if (j && Array.isArray(j.triples) && j.triples.length) {
@@ -2908,21 +2937,13 @@ async function pacedSubagentRequest(body, apiKey, opts) {
 // call, the full tool registry (sub-agents filter it to their allowlist), executeTool, the key,
 // and the model ids. onStep surfaces the VANGUARD codename for the suit.
 function subagentDeps() {
-  // Roles safe to run on Haiku when Sonnet is saturated — verification/critique work, NOT primary
-  // generation (coding/research). Tunable via config.fleetDowngradeRoles.
-  let downgradeRoles = ['tester', 'skeptic'];
-  try { const c = loadConfig().fleetDowngradeRoles; if (Array.isArray(c)) downgradeRoles = c; } catch {}
+  // Haiku RETIRED: there's no cheaper cloud tier to spill onto, so cross-model downgrade is disabled.
+  // Sonnet is the floor; the free cheap tier is local (Ollama), which can't run the fleet tool-loop.
   return {
     anthropicRequest: pacedSubagentRequest, executeTool, toolDefs: TOOLS, apiKey: getApiKey(),
-    models: { sonnet: MODEL_SONNET, haiku: MODEL_HAIKU },
-    // Task 4 — cross-model overflow: let runRole spill downgrade-safe roles onto Haiku's idle OTPM
-    // headroom instead of queuing on a pinned Sonnet admission slot.
+    models: { sonnet: MODEL_SONNET },
     fleetWidth, fleetFloor: 3,
-    canDowngrade: (role) => !!role && downgradeRoles.includes(role.name || role.role),
-    logDowngrade: (roleName, sw, hw) => {
-      try { sendToActivity('tool-update', { type: 'thinking', text: `⤵ ${vanguard.codename(roleName)} → Haiku spill (Sonnet width ${sw}, Haiku ${hw})` }); } catch {}
-      try { logRouterDecision({ taskType: 'fleet-downgrade:' + roleName, model: MODEL_HAIKU, ms: 0, usd: 0 }); } catch {}
-    },
+    canDowngrade: () => false,   // no sub-Sonnet cloud tier anymore
     onStep: (name, tool) => sendToActivity('tool-update', { type: 'thinking', text: `🤝 ${vanguard.codename(name)} → ${tool}` }),
   };
 }
@@ -2936,7 +2957,7 @@ function subagentDeps() {
 // of drone calls would drain it and stall waitForBudget (the stall that orphaned tool_use → API 400).
 // A drone spec may only request the cheap tier (haiku); anything else — including 'opus'/heavyToolModel
 // — resolves to Sonnet (90k OTPM). Opus is reserved for the single plan+interpret calls in the loop.
-function resolveDroneModel(specModel) { return specModel === 'haiku' ? MODEL_HAIKU : MODEL_SONNET; }
+function resolveDroneModel(_specModel) { return MODEL_SONNET; }   // drones run tools → always Sonnet (Haiku retired; local can't tool-loop)
 
 async function droneAgentRun(ctx, task) {
   const toolDefs = TOOLS.filter((t) => (ctx.tools || []).includes(t.name));
@@ -2996,7 +3017,7 @@ async function synthesizeDroneResults(mission, results) {
 
 // Lean summary model call for project memory (#24) — minimal system so it's cheap.
 const projectSummarize = async (prompt) => {
-  const j = await anthropicRequest({ model: MODEL_HAIKU, max_tokens: 400, system: 'You write tight, factual project summaries.', messages: [{ role: 'user', content: prompt }] }, getApiKey());
+  const j = { content: [{ type: 'text', text: (await cheapText('You write tight, factual project summaries.', prompt, { maxTokens: 400 })).text }] };
   return (j.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim();
 };
 
@@ -4037,7 +4058,7 @@ async function quickPlan(taskText, apiKey) {
 Return ONLY JSON: {"steps":["<imperative action>", ...3-6 items],"spoken":"<=2 sentences, plain spoken English summarizing your approach — no markdown, no numbered list>"}
 Steps = concrete actions/tools BhatBot will take, each under 12 words. No preamble, JSON only.`;
   try {
-    const r = await anthropicRequest({ model: MODEL_HAIKU, max_tokens: 400,
+    const r = await anthropicRequest({ model: MODEL_SONNET, max_tokens: 400,
       system: [{ type: 'text', text: system }],
       messages: [{ role: 'user', content: String(taskText || '').slice(0, 2000) }] }, apiKey, { retries: 1 });
     const txt = (r.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('');
@@ -4632,20 +4653,31 @@ async function fastReply(history, apiKey, event, opts = {}) {
     const disp = parser ? parser.feed(delta) : delta;
     if (disp) { try { event && event.sender && event.sender.send('tool-update', { type: 'token', text: disp }); } catch {} }
   } : null;
-  sendToAll(event, 'tool-update', { type: 'provider_used', provider: 'anthropic', model: MODEL_HAIKU });
-  // Right-size the fast (no-tools) path too: learned depth ceiling, capped at 2048 since this path
-  // is for quick conversational replies — a trivial "ack" no longer reserves 1024 output tokens.
   const ut = lastUserText(history);
+  // CHEAP TIER (Haiku retired): a fast conversational reply runs FREE on a local model when Ollama is
+  // up. Emitted whole (like the Darkbloom path) so makeSpeakStream still chunks it for TTS.
+  if (cheapEnabled() && await ollamaReady()) {
+    try {
+      const text = stripReasoning(await ollamaChat(history, buildSystemPrompt(ut), cheapLocalModel()) || '').replace(/<\/?speak>/g, '').trim();
+      if (text) {
+        sendToAll(event, 'tool-update', { type: 'provider_used', provider: 'ollama', model: cheapLocalModel() });
+        if (parser) { parser.feed(text); parser.finish(); } else if (stream && ttsSeq != null) { if (onText) onText(text); ttsStreamFlush(ttsSeq); } else if (onText) onText(text);
+        return { text, history: [...history, { role: 'assistant', content: text }], _provider: 'ollama', _model: cheapLocalModel(), _streamed: !!(stream && ttsSeq != null) };
+      }
+    } catch (e) { console.warn('[fast] local failed → sonnet:', e.message); }
+  }
+  sendToAll(event, 'tool-update', { type: 'provider_used', provider: 'anthropic', model: MODEL_SONNET });
+  // Cloud fallback: Sonnet (Haiku retired). Learned depth ceiling, capped at 2048 for quick replies.
   const d = sizeTurn(ut, history);           // Phase 3 — learned ceiling + position taper (fast no-tools path)
   const r = await anthropicStream({
-    model: MODEL_HAIKU, max_tokens: Math.min(d.maxTokens, 2048),
+    model: MODEL_SONNET, max_tokens: Math.min(d.maxTokens, 2048),
     system: [...systemBlocks(ut), { type: 'text', text: d.directive }],   // cache_control'd static block → cheap + low TTFT
     messages: capTokens(history)                    // NO tools → faster first token, no tool-decision detour
   }, apiKey, onText);
   logDepthOutcome({ depth: d.depth, maxTokens: Math.min(d.maxTokens, 2048), feats: d.feats, taperFactor: d.taperFactor, source: d.source }, r, 'fast');
   if (parser) parser.finish(); else if (stream && ttsSeq != null) ttsStreamFlush(ttsSeq);
   const text = stripReasoning(r.content.filter((b) => b.type === 'text').map((b) => b.text).join('\n')).replace(/<\/?speak>/g, '').trim();
-  return { text, history: [...history, { role: 'assistant', content: text }], _provider: 'anthropic', _model: MODEL_HAIKU, _streamed: !!(stream && ttsSeq != null) };
+  return { text, history: [...history, { role: 'assistant', content: text }], _provider: 'anthropic', _model: MODEL_SONNET, _streamed: !!(stream && ttsSeq != null) };
 }
 
 // Serialize ALL turns. agentLoop/pipeline mutate module-level globals (mcpHistory,
@@ -4962,8 +4994,13 @@ function drainSentences(st, { flush = false } = {}) {
 
 // Tool-less fast reply for conversational turns (low latency, no agent/tool loop).
 async function voiceFastReply(history) {
-  const sys = systemBlocks(lastUserText(history)) + '\n\n[PHONE CALL: answer in ONE or two short spoken sentences, plain text, no lists.]';
-  const r = await anthropicStream({ model: MODEL_HAIKU, max_tokens: 320, system: sys, messages: capTokens(history) }, getApiKey(), null);
+  const q = lastUserText(history);
+  const sysStr = buildSystemPrompt(q) + '\n\n[PHONE CALL: answer in ONE or two short spoken sentences, plain text, no lists.]';
+  // Cheap tier: local-first (free), Sonnet fallback (Haiku retired).
+  if (cheapEnabled() && await ollamaReady()) {
+    try { const t = stripReasoning(await ollamaChat(history, sysStr, cheapLocalModel()) || '').trim(); if (t) return clampSpoken(t); } catch {}
+  }
+  const r = await anthropicStream({ model: MODEL_SONNET, max_tokens: 320, system: [{ type: 'text', text: sysStr }], messages: capTokens(history) }, getApiKey(), null);
   return clampSpoken(r.content.filter((b) => b.type === 'text').map((b) => b.text).join(' '));
 }
 
@@ -5631,9 +5668,9 @@ function opsSnapshot() {
     fleet: () => { try { const a = jobsBus.active() || []; return { active: a.length, agents: a.map((j) => ({ id: j.id, role: j.agent || j.kind, task: j.name })),
       // Live OTPM-derived width so the panel shows what's ACTUALLY available now vs the static cap.
       width: fleetWidth(MODEL_SONNET), cap: FLEET_CAP,
-      widthByModel: { sonnet: fleetWidth(MODEL_SONNET), haiku: fleetWidth(MODEL_HAIKU), opus: fleetWidth('claude-opus-4-8') } }; }
+      widthByModel: { sonnet: fleetWidth(MODEL_SONNET), fable: fleetWidth(MODEL_FABLE), opus: fleetWidth('claude-opus-4-8') } }; }
       catch { return { active: 0, agents: [], width: 0, cap: FLEET_CAP }; } },
-    budgets: () => [MODEL_SONNET, MODEL_HAIKU, 'claude-opus-4-8'].map((m) => { try { const b = rateBudget(m); return { model: m.replace(/^claude-/, ''), outFree: b.outFree, outSafe: b.outSafe }; } catch { return { model: m, outFree: null }; } }),
+    budgets: () => [MODEL_SONNET, MODEL_FABLE, 'claude-opus-4-8'].map((m) => { try { const b = rateBudget(m); return { model: m.replace(/^claude-/, ''), outFree: b.outFree, outSafe: b.outSafe }; } catch { return { model: m, outFree: null }; } }),
     costToday: () => { try { return costToday(); } catch { return null; } },
     recentEvents: () => { try { return rstate.recentEvents(20); } catch { return []; } },
   });
@@ -6682,8 +6719,8 @@ async function endSession(trigger) {
   sessionGenerating = true;
   try {
     const sys = 'You convert a spoken assistant transcript into a concise session note (a project debrief, not a chat log). Output GitHub markdown: a single "# " title line (5-8 words, specific), then short sections only if they apply: **Decisions**, **Done**, **Next**. Bullets, terse. Ignore filler acknowledgements. No preamble.';
-    const r = await callClaude([{ role: 'user', content: 'Spoken transcript of this session:\n\n' + transcript.slice(0, 6000) + '\n\nWrite the session note.' }], getApiKey(), MODEL_HAIKU);
-    let md = (r.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim();
+    const r = await cheapText(sys, 'Spoken transcript of this session:\n\n' + transcript.slice(0, 6000) + '\n\nWrite the session note.', { maxTokens: 700 });
+    let md = (r.text || '').trim();
     if (!md) { sessionGenerating = false; return; }
     const titleM = md.match(/^#\s+(.+)$/m);
     const title = titleM ? titleM[1].trim() : 'Session ' + new Date().toLocaleTimeString();
@@ -6731,8 +6768,8 @@ function reflectOnCorrection(history, userText, priorText) {
     }
     (async () => {
       try {
-        const r = await callClaude([{ role: 'user', content: `User correction: "${userText.slice(0, 500)}"\nMy prior reply: "${String(prior).slice(0, 800)}"\n\nExtract ONE durable working-preference to remember for next time, as a single imperative line (e.g. "Keep spoken replies under two sentences"). If there is nothing durable/actionable, output exactly: NONE` }], getApiKey(), MODEL_HAIKU);
-        const pref = (r.content || []).filter((b) => b.type === 'text').map((b) => b.text).join(' ').trim();
+        const r = await cheapText('You extract one durable working-preference from a user correction, or output NONE.', `User correction: "${userText.slice(0, 500)}"\nMy prior reply: "${String(prior).slice(0, 800)}"\n\nExtract ONE durable working-preference to remember for next time, as a single imperative line (e.g. "Keep spoken replies under two sentences"). If there is nothing durable/actionable, output exactly: NONE`, { maxTokens: 120 });
+        const pref = (r.text || '').trim();
         if (!pref || /^none\b/i.test(pref) || pref.length < 6) return;
         saveMemoryEntry('Preferences & Patterns', pref.replace(/^[-*\s]+/, '').slice(0, 200));
         sendToActivity('tool-update', { type: 'thinking', text: '🧠 learned: ' + pref.slice(0, 120) });
@@ -6920,26 +6957,26 @@ async function summarizeForSpeech(text) {
     const pred = spokenmodel.predict(spokenmodel.extractFeatures(t, _currentUserPrompt));
     if (pred && pred.words) sys += ` Aim for roughly ${pred.words} spoken words — lead with the headline (the key number, name, or verdict), then only what earns its place.`;
   } catch {}
-  // 1) Haiku — only if there's budget this minute (a summary is small, ~few hundred tok).
-  if (apiKey && requestTokenEstimate([{ role: 'user', content: t.slice(0, 8000) }]) < rateBudget().free) {
+  // 1) Local model FIRST (free, no quota) — a 1-3 sentence summary is well within a local model's reach.
+  //    Haiku retired: the cheap tier is now local-first, Sonnet cloud fallback.
+  if (cheapEnabled() && await ollamaReady()) {
+    try {
+      // stripReasoning: local models (qwen3 etc.) leak <think>…</think> — those tags must never be spoken.
+      const out = stripReasoning((await ollamaChat([{ role: 'user', content: t.slice(0, 8000) }], sys, cheapLocalModel()) || '')).trim();
+      if (out) return { success: true, text: out, via: 'ollama' };
+    } catch (e) { console.warn('[summary] ollama failed → sonnet:', e.message); }
+  }
+  // 2) Sonnet cloud fallback — only if there's budget this minute (a summary is small, ~few hundred tok).
+  if (apiKey && requestTokenEstimate([{ role: 'user', content: t.slice(0, 8000) }]) < rateBudget(MODEL_SONNET).free) {
     try {
       const j = await anthropicRequest({
-        model: MODEL_HAIKU, max_tokens: 512, system: sys,   // 512 (was 280): a 1-3 sentence summary must never be hard-truncated mid-word
+        model: MODEL_SONNET, max_tokens: 512, system: sys,   // 512: a 1-3 sentence summary must never be hard-truncated mid-word
         messages: [{ role: 'user', content: t.slice(0, 8000) }]
       }, apiKey, { retries: 1 });
       let out = (j.content || []).filter(b => b.type === 'text').map(b => b.text).join(' ').trim();
       if (j && j.stop_reason === 'max_tokens') out = trimToSentence(out);   // belt-and-suspenders: never speak a truncated tail
-      if (out) return { success: true, text: out, via: 'haiku' };
-    } catch (e) { console.warn('[summary] haiku failed → local:', e.message); }
-  }
-  // 2) Local model fallback (no quota) — used when rate-limited or Haiku errored.
-  if (await ollamaUp()) {
-    try {
-      const lm = cfg.localModel || 'qwen3:latest';
-      // stripReasoning: local models (qwen3 etc.) leak <think>…</think> — those tags must never be spoken.
-      const out = stripReasoning((await ollamaChat([{ role: 'user', content: t.slice(0, 8000) }], sys, lm) || '')).trim();
-      if (out) return { success: true, text: out, via: 'ollama' };
-    } catch (e) { console.warn('[summary] ollama failed:', e.message); }
+      if (out) return { success: true, text: out, via: 'sonnet' };
+    } catch (e) { console.warn('[summary] sonnet failed:', e.message); }
   }
   return { error: 'no summary path available' };
 }

@@ -3,7 +3,7 @@
 // T2 — the abort-guard un-orphans tool_use at the SOURCE, and drones never resolve to Opus.
 //   • sealDanglingToolUse (lib/history): a turn interrupted mid-tool-call gets synthetic '[interrupted]'
 //     results so the stored history is pairing-safe, and the result passes validateHistory unchanged.
-//   • resolveDroneModel (main.js, extracted): 'opus'/heavyToolModel/anything → Sonnet; only 'haiku' → Haiku.
+//   • resolveDroneModel (main.js, extracted): ALWAYS Sonnet (Haiku retired — no sub-Sonnet cloud tier).
 // Pure — runs in node, in verify.
 const fs = require('fs');
 const path = require('path');
@@ -50,12 +50,12 @@ function extract(src, name) {
   for (; i < src.length; i++) { if (src[i] === '{') depth++; else if (src[i] === '}') { depth--; if (depth === 0) { i++; break; } } }
   return src.slice(start, i);
 }
-// stub the two model constants the helper closes over
-const resolveDroneModel = new Function('MODEL_HAIKU', 'MODEL_SONNET', extract(main, 'resolveDroneModel') + '\nreturn resolveDroneModel;')('claude-haiku-4-5', 'claude-sonnet-4-6');
+// Haiku retired: resolveDroneModel now ALWAYS returns Sonnet (no sub-Sonnet cloud tier).
+const resolveDroneModel = new Function('MODEL_SONNET', extract(main, 'resolveDroneModel') + '\nreturn resolveDroneModel;')('claude-sonnet-4-6');
 ok(resolveDroneModel('opus') === 'claude-sonnet-4-6', 'drone: spec model "opus" → Sonnet (never drains Opus OTPM)');
 ok(resolveDroneModel('claude-opus-4-8') === 'claude-sonnet-4-6', 'drone: explicit opus id → Sonnet');
 ok(resolveDroneModel(undefined) === 'claude-sonnet-4-6', 'drone: default (no model) → Sonnet');
-ok(resolveDroneModel('haiku') === 'claude-haiku-4-5', 'drone: "haiku" → Haiku (the only downgrade allowed)');
+ok(resolveDroneModel('haiku') === 'claude-sonnet-4-6', 'drone: "haiku" → Sonnet (Haiku retired — no downgrade tier)');
 ok(resolveDroneModel('sonnet') === 'claude-sonnet-4-6', 'drone: "sonnet" → Sonnet');
 
 console.log(`\n${fail ? '❌' : '✅'} ${pass} passed, ${fail} failed`);
