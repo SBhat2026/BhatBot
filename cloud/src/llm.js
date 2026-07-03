@@ -6,7 +6,10 @@ const db = require('./db');
 
 const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY || '';
 const MODEL_SONNET = process.env.ANTHROPIC_MODEL_SONNET || 'claude-sonnet-4-6';
-const MODEL_HAIKU = process.env.ANTHROPIC_MODEL || 'claude-haiku-4-5';
+// Haiku RETIRED. The cloud brain has no local Ollama tier, so Sonnet IS the cheap floor here.
+// (The desktop runs its free cheap tier on local gemma/qwen; the cloud can't.) Env can still
+// override with ANTHROPIC_MODEL, but the default is no longer Haiku.
+const MODEL_CHEAP = process.env.ANTHROPIC_MODEL || MODEL_SONNET;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const MODEL_PRICES = {                              // USD / 1M tokens: [input, output, cacheWrite, cacheRead]
@@ -18,7 +21,7 @@ function priceFor(model) {
   if (MODEL_PRICES[model]) return MODEL_PRICES[model];
   const bare = (model || '').replace(/^claude-/, '');
   const k = Object.keys(MODEL_PRICES).find((m) => m.replace(/^claude-/, '') === bare || (model || '').includes(m.replace(/^claude-/, '')));
-  return MODEL_PRICES[k] || MODEL_PRICES[MODEL_HAIKU];
+  return MODEL_PRICES[k] || MODEL_PRICES[MODEL_SONNET];
 }
 function costOf(model, u) {
   if (!u) return 0;
@@ -29,7 +32,7 @@ function costOf(model, u) {
 
 // One Claude call. `tools` optional. Returns the FULL message (content blocks + stop_reason)
 // so the agent loop can act on tool_use. Records cost.
-async function callClaude({ system, messages, tools, model = MODEL_HAIKU, maxTokens = 2048, retries = 4 }) {
+async function callClaude({ system, messages, tools, model = MODEL_CHEAP, maxTokens = 2048, retries = 4 }) {
   if (!ANTHROPIC_KEY) throw new Error('ANTHROPIC_API_KEY not set');
   const body = { model, max_tokens: maxTokens, system, messages };
   if (tools && tools.length) body.tools = tools;
@@ -56,4 +59,4 @@ async function callClaude({ system, messages, tools, model = MODEL_HAIKU, maxTok
   }
 }
 
-module.exports = { callClaude, MODEL_SONNET, MODEL_HAIKU };
+module.exports = { callClaude, MODEL_SONNET, MODEL_CHEAP };

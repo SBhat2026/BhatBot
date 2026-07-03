@@ -5,7 +5,7 @@
 //   • runs tools (cloud-native here, computer tools relayed to the Mac),
 //   • persists the conversation to SQLite, and streams tool activity to the phone's feed.
 const db = require('./db');
-const { callClaude, MODEL_SONNET, MODEL_HAIKU } = require('./llm');
+const { callClaude, MODEL_SONNET, MODEL_CHEAP } = require('./llm');
 const { toolDefs, dispatchTool, macOnline } = require('./tools');
 const { stripReasoning } = require('./voice');   // strip leaked <thinking>/meta before it reaches the phone
 const graph = require('./graph');                // W4 cloud parity — knowledge-graph memory (multi-hop)
@@ -18,7 +18,9 @@ const HISTORY_LIMIT = Number(process.env.HISTORY_LIMIT || 40);
 const SONNET_HINTS = [/write.*prompt/i, /architect/i, /refactor/i, /debug/i, /explain.*why/i, /design/i, /strategy/i, /research/i, /paper/i, /optimiz/i, /\bplan\b/i, /review/i, /analy[sz]e/i,
   // live-data/sports → route up so the tool is reliably invoked instead of a stale-memory reply
   /world cup|bracket|standings?|who'?s winning|tournament|fixtures?|matchup|\bodds\b|what.*watch|worth watching|\binsights?\b/i];
-function pickModel(text) { return SONNET_HINTS.some((re) => re.test(text || '')) ? MODEL_SONNET : MODEL_HAIKU; }
+// Haiku retired: MODEL_CHEAP is Sonnet in the cloud (no local tier), so this is Sonnet either way —
+// the hint split is kept for when a genuinely cheaper cloud tier returns.
+function pickModel(text) { return SONNET_HINTS.some((re) => re.test(text || '')) ? MODEL_SONNET : MODEL_CHEAP; }
 
 function buildSystem({ macUp, recalled }) {
   let s = `You are BhatBot — Siddhant's personal AI assistant, running as an always-on CLOUD service he reaches from his phone or computer.
@@ -141,7 +143,7 @@ async function graphIngestCloud(content) {
     const text = String(content || '').trim();
     if (text.length < 8) return;
     const sys = 'Extract knowledge-graph triples from this fact about Siddhant. Return ONLY JSON: {"triples":[{"subject","predicate","object","subjectType","objectType"}]}. Types ∈ person|project|tool|org|place|concept|event|thing. Canonical short names ("Siddhant" not "I"). Skip non-factual text. Max 6 triples; empty array if none.';
-    const r = await callClaude({ system: sys, messages: [{ role: 'user', content: text.slice(0, 1000) }], model: MODEL_HAIKU });
+    const r = await callClaude({ system: sys, messages: [{ role: 'user', content: text.slice(0, 1000) }], model: MODEL_CHEAP });
     const txt = (r.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('');
     const m = txt.match(/\{[\s\S]*\}/);
     const j = m ? JSON.parse(m[0]) : null;
