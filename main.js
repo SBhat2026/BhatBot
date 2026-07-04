@@ -2943,9 +2943,12 @@ function subagentDeps() {
   // Sonnet is the floor; the free cheap tier is local (Ollama), which can't run the fleet tool-loop.
   return {
     anthropicRequest: pacedSubagentRequest, executeTool, toolDefs: TOOLS, apiKey: getApiKey(),
-    models: { sonnet: MODEL_SONNET },
+    models: { sonnet: MODEL_SONNET, haiku: MODEL_SONNET },   // Haiku retired → any 'haiku' role resolves to Sonnet (was undefined → broke lifeadmin/haiku roles)
     fleetWidth, fleetFloor: 3,
     canDowngrade: () => false,   // no sub-Sonnet cloud tier anymore
+    // T7 — a fresh SHARED blackboard per fan-out batch: ensemble/fleet pass it to every sibling so
+    // they read each other's live status/findings mid-run instead of coordinating only at the end.
+    makeBoard: () => { try { return blackboard.createBlackboard({ dir: path.join(os.tmpdir(), 'bb-fleet-' + Date.now() + '-' + Math.random().toString(36).slice(2, 7)) }); } catch { return null; } },
     onStep: (name, tool) => sendToActivity('tool-update', { type: 'thinking', text: `🤝 ${vanguard.codename(name)} → ${tool}` }),
   };
 }
