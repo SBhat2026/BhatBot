@@ -266,3 +266,33 @@ Voice turn-taking, rate stability, learned spoken length, file transfer, phone r
   `test:endpointint`, `test:spoken`, `test:spokenfb` (38 suites total).
 - **Deferred:** T4 streaming-digest mode. **Pending user:** phone token/key sync (`BHATBOT_TOKEN` /
   `ANTHROPIC_API_KEY` Fly secrets — raw values are vaulted).
+
+## 13. JARVIS upgrade — voice/latency + zen UI + fleet coordination (2026-07-04, branch `jarvis-upgrade-20260704`)
+Speech quality + latency, JARVIS-minimalist UI, and parallel-agent coordination. Verify-green
+(40 suites). **Restart the desktop app to load.**
+- **T2 speech planner** (`lib/pure.classifySpeech`): `makeSpeakStream` now decides READ-verbatim
+  (short prose) vs SUMMARIZE (long / code / list / table / headers / multi-paragraph / URL-dense).
+  Digest mode calls `summarizeForSpeech(fullText)` and speaks the digest; screen still shows all.
+  Reserves the drain→`tts-idle` contract synchronously (hands-free never wedges); floors to the
+  first sentence if summarize fails. `<speak>` prompt rule strengthened.
+- **T3 cadence**: `humanizeCadence` ellipsis→plain comma (was a dragging pause), dropped the
+  discourse double-beat, `<break>` cap 6→3. `jarvisVoiceSettings` defaults stability 0.45→0.38,
+  speed 1.0→1.04. Stream-safe `createSpeechNormalizer` (never splits a URL/decimal token).
+- **T1 ws streaming TTS** (`lib/ttsws.js`): ONE ElevenLabs `stream-input` websocket per turn →
+  ONE persistent `ffplay`/`sox` PCM player via stdin — no per-sentence REST POST / tmp-file /
+  afplay respawn (the inter-sentence latency). **Config-gated `ttsTransport: 'rest'|'ws'` (default
+  `rest`)**; flip to `ws` to enable (needs `ffmpeg`/ffplay — present on this Mac). Barge-in kills
+  ws+player; `tts-idle` preserved; acks stream through ws.
+- **T10 zen UI** (`src/index.html`): **`config.uiTheme: 'zen'(default) | 'hud'`**. Zen = additive
+  `body.zen` theme (hud stays pixel-identical): no scanlines/corner-brackets/glitch, near-black flat,
+  ONE desaturated accent, hairline borders, system type, calmer orb. Voice stage is home: reactive
+  orb + 12px status word + ephemeral fading captions + quiet `now: <tool>` line. Summonable input
+  (any key / ⌘K reveals #ta, Esc/send hides). ⌘⇧U toggles theme. Screenshot-verified via Playwright.
+  Also fixed a duplicate `const MAX_UTTER_MS` (renamed the Web-Speech one) — a real parse error.
+- **T7 fleet coordination**: dynamic-role parallel fan-out (`agent_team` ensemble) + independent app
+  tester (`agent_team test_app`, SENTINEL) already shipped in `lib/orchestrator.js` — now they share
+  a **blackboard** per batch (`runRole` folds `fleetStatusBlock()` into each turn + posts status/
+  findings), so siblings coordinate DURING the run. Fixed a latent `haiku`-role → `model:undefined`
+  bug in `subagentDeps` (Haiku retired → maps to Sonnet).
+- **New config keys:** `ttsTransport` ('rest'), `uiTheme` ('zen'). Surfaced in `get-voice-config`.
+- **New tests in `verify`:** `test:speechplanner`, `test:ttsws`, `test:orchboard` (40 suites total).
