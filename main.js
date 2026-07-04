@@ -43,6 +43,8 @@ const agentTeam = require('./lib/orchestrator');        // C — parallel same-t
 const planner = require('./lib/planner');               // B1 — decompose a goal into a task DAG for the team
 const ambient = require('./lib/ambient');              // #18 — opt-in proactive Calendar/Mail awareness (OFF by default)
 const { textHintFromSelector, splitForSpeech, estimateToolCost, stripReasoning, classifySpeech, createSpeechNormalizer } = require('./lib/pure');  // SPLIT_PLAN step 1
+const WebSocket = require('ws');
+const { createTtsWs } = require('./lib/ttsws');   // T1 — continuous ws streaming TTS transport (config.ttsTransport==='ws')
 const speech = require('./lib/speech');                 // human-speech shaping: emoji→spoken-cue/drop + context-aware punctuation
 const { validateHistory, sealDanglingToolUse, evictOldImages, isRetryableTool, TRANSIENT_RE } = require('./lib/history');  // SPLIT_PLAN step 9 (pure agent-loop helpers)
 const projects = require('./lib/projects');            // #24 — project memory + living auto-summary
@@ -6523,6 +6525,7 @@ function setWakeMute(on) {
 function stopDesktopTTS() {
   ttsPlaySeq++;
   if (ttsPlayProc) { try { ttsPlayProc.kill(); } catch {} ttsPlayProc = null; }
+  ttsWsClose();         // T1 — tear down any in-flight ws stream + player instantly (barge-in)
   setTtsActive(false);
   setWakeMute(false);   // clear any name-clip wake suppression on interrupt
 }
@@ -6598,9 +6601,47 @@ function ttsStreamStart() {
 function emitTtsIdle(seq) {
   try { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('tts-idle', { seq }); } catch {}
 }
+// --- T1: continuous ws streaming TTS transport --------------------------------------------
+// Probe (cached) for the raw-PCM player + a singleton transport. `available()` gates the whole
+// path so a missing ffplay/sox or key silently keeps us on the legacy REST stream.
+const _binCache = {};
+function _binExists(bin) {
+  if (bin in _binCache) return _binCache[bin];
+  let ok = false;
+  try { ok = spawnSync('/usr/bin/which', [bin], { env: { ...process.env, PATH: EXEC_PATH }, timeout: 3000 }).status === 0; } catch {}
+  return (_binCache[bin] = ok);
+}
+const _ttsWs = createTtsWs({
+  WebSocket, spawn, which: _binExists,
+  getConfig: () => { const c = loadConfig(); return { ...c, jarvisVoiceSettings: jarvisVoiceSettings(c) }; },
+  log: (m) => console.warn(m),
+  latMark: (m) => { try { latMark(m); } catch {} },
+  onWakeMute: (on) => setWakeMute(on),
+});
+let _ttsWsSess = null, _ttsWsSeq = -1, _ttsWsNorm = null;
+function ttsWsActive() { const c = loadConfig(); return c.ttsTransport === 'ws' && _ttsWs.available(); }
+function ttsWsEnsure(seq) {
+  if (_ttsWsSess && _ttsWsSeq === seq) return _ttsWsSess;
+  if (_ttsWsSess) { try { _ttsWsSess.close(); } catch {} }
+  _ttsWsSeq = seq;
+  _ttsWsNorm = createSpeechNormalizer(normalizeForSpeech);   // stream-safe: never splits a URL/decimal token
+  const sess = _ttsWs.create(seq);
+  sess.onFirstAudio(() => { ttsLastAudioSeq = seq; setTtsActive(true); try { latMark('first-audio-playing'); } catch {} });
+  sess.onDrained(() => { if (seq === ttsStreamSeq) { setTtsActive(false); emitTtsIdle(seq); } });
+  _ttsWsSess = sess;
+  ttsStreamProduced = true;   // ws will put audio on the wire → reserve the drain→tts-idle contract
+  return sess;
+}
+function ttsWsClose() { if (_ttsWsSess) { try { _ttsWsSess.close(); } catch {} _ttsWsSess = null; _ttsWsSeq = -1; _ttsWsNorm = null; } }
 function ttsStreamFeed(seq, delta) {
   if (seq !== ttsStreamSeq) return;
   if (loadConfig().ttsEnabled === false) return;
+  if (ttsWsActive()) {                                        // ws path: normalize to token boundaries, stream raw
+    const sess = ttsWsEnsure(seq);
+    const out = _ttsWsNorm.push(delta);
+    if (out) sess.feed(out);
+    return;
+  }
   ttsStreamBuf += delta;
   const re = /[^.!?\n]*[.!?\n]+/g; let m, consumed = 0;
   while ((m = re.exec(ttsStreamBuf))) { const s = m[0].trim(); consumed = re.lastIndex; if (s.length > 2) ttsStreamEnqueue(seq, s); }
@@ -6608,6 +6649,12 @@ function ttsStreamFeed(seq, delta) {
 }
 function ttsStreamFlush(seq) {
   if (seq !== ttsStreamSeq) return;
+  if (_ttsWsSess && _ttsWsSeq === seq && ttsWsActive()) {     // ws path: flush the token-boundary tail + EOS
+    const tail = _ttsWsNorm ? _ttsWsNorm.flush() : '';
+    if (tail) _ttsWsSess.feed(tail);
+    _ttsWsSess.flush();
+    return;
+  }
   const rest = ttsStreamBuf.trim(); ttsStreamBuf = '';
   if (rest && loadConfig().ttsEnabled !== false) ttsStreamEnqueue(seq, rest);
 }
@@ -6692,7 +6739,7 @@ function maybeAck(seq, userText) {
   if (c.instantAck === false || c.ttsEnabled === false) return;
   if (!ACTION_RE.test(userText || '')) return;     // only acknowledge action requests, not idle chat
   latMark('ack-queued');
-  ttsStreamFeed(seq, ACKS[Math.floor(Math.random() * ACKS.length)]);
+  ttsStreamFeed(seq, ACKS[Math.floor(Math.random() * ACKS.length)] + ' ');   // trailing space = clean token boundary for the ws normalizer
 }
 // Watchdog behind maybeAck: guarantees SOME voice within ~5s of ANY message, not just
 // action-shaped ones. If nothing has reached the speaker — and nothing is queued or mid-
@@ -6705,7 +6752,9 @@ function armAckWatchdog(seq, ms = 2500) {
     if (ttsLastAudioSeq === seq || ttsStreamQ.length || ttsStreamDraining) return; // audio flowing or imminent
     if (loadConfig().ttsEnabled === false || loadConfig().instantAck === false) return;
     latMark('ack-queued');
-    ttsStreamEnqueue(seq, HOLDING[Math.floor(Math.random() * HOLDING.length)]);
+    const line = HOLDING[Math.floor(Math.random() * HOLDING.length)];
+    if (ttsWsActive()) ttsStreamFeed(seq, line + ' ');   // ws path: stream it, don't spawn a competing REST clip
+    else ttsStreamEnqueue(seq, line);
   }, ms);
 }
 
