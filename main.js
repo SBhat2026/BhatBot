@@ -5968,6 +5968,8 @@ ipcMain.handle('get-voice-config', () => {
     vadFloorMargin: (c.vad && c.vad.floorMargin) || 1.8, verifyUser: !!(c.voice && c.voice.verifyUser),
     ttsEnabled: c.ttsEnabled !== false, ttsProvider, hasTTS,
     ttsSpeed: c.ttsSpeed != null ? c.ttsSpeed : 1.05,
+    ttsTransport: c.ttsTransport === 'ws' ? 'ws' : 'rest',   // T1 transport (surfaced for the ops panel)
+    uiTheme: c.uiTheme === 'hud' ? 'hud' : 'zen',            // T10 default: minimalist zen (config can force 'hud')
     hasReplicateKey: !!c.replicateKey, hasImageGen: !!c.openaiKey
   };
 });

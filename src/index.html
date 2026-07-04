@@ -533,6 +533,67 @@
   .suit-out { font-size: 11px; color: var(--text); white-space: pre-wrap; max-height: 120px; overflow: auto; }
   .suit-fb-in { width: 100%; background: #0b1119; border: 1px solid var(--line); border-radius: 5px; color: var(--text); padding: 4px 7px; font-size: 11px; }
   .suit-fb-in:focus { border-color: var(--accent); outline: none; }
+
+  /* ============================================================================
+     ZEN THEME (T10) — voice-first, minimalist "quiet instrument" layer. ADDITIVE:
+     everything is scoped to body.zen so body.hud keeps the full cockpit HUD
+     pixel-identical. Near-black flat surfaces, ONE desaturated accent, hairline
+     borders, system type, and a calmer orb — an instrument, not a cockpit.
+     ============================================================================ */
+  body.zen {
+    --bg: #0a0a0c; --surface: #101014; --surface-2: #16161c;
+    --accent: #7fd4e8; --accent-dim: #24333a;
+    --text: #d7dce3; --text-dim: #7b838f; --text-dim2: #565d68;
+    --line: rgba(255,255,255,.07);
+  }
+  body.zen::after { display: none; }                 /* scanlines off */
+  body.zen .corner { display: none; }                /* corner brackets off */
+  body.zen .brand.glitch::before, body.zen .brand.glitch::after { display: none; }
+  body.zen .brand.glitch { animation: none; }
+  /* system type everywhere; Orbitron/Rajdhani only survive in hud */
+  body.zen .brand, body.zen #ctxbar .tag, body.zen .panel-head b,
+  body.zen #statusbar, body.zen #metrics, body.zen #count,
+  body.zen .suit-role, body.zen .suit-status,
+  body.zen #ta, body.zen #ta::placeholder, body.zen #transcript,
+  body.zen #boottitle, body.zen #bootsub, body.zen #bootlog {
+    font-family: var(--font-ui); }
+  body.zen #boottitle { letter-spacing: 6px; font-weight: 600; font-size: 40px; }
+  body.zen #bootsub, body.zen #statusbar, body.zen #metrics { letter-spacing: .04em; }
+  body.zen .brand { letter-spacing: 1.5px; font-weight: 600; }
+  /* flat surfaces, hairline borders, no gradients */
+  body.zen #titlebar { background: var(--surface); }
+  body.zen .hl-card, body.zen .suit-card { background: var(--surface); border-color: var(--line); box-shadow: none; }
+  body.zen .tb-btn, body.zen .tag, body.zen .sbtn, body.zen .ibtn { background: transparent; border-color: var(--line); }
+  body.zen #inputbar, body.zen #ctxbar { background: var(--surface); }
+  /* calmer orb: drop the busiest layers, desaturate to the single accent */
+  body.zen #orb { filter: drop-shadow(0 0 16px rgba(127,212,232,.14)); }
+  body.zen #orb .ticks, body.zen #orb .hex, body.zen #orb .hex.hex2,
+  body.zen #orb .ring.r1, body.zen #orb .ring.r2, body.zen #orb::before { display: none; }
+  body.zen #orb .ring.r3 { border-color: rgba(127,212,232,.26); }
+  body.zen #orb .ring.r4 { border-top-color: rgba(127,212,232,.85); border-right-color: rgba(127,212,232,.4); }
+  body.zen #orb .glow { background: radial-gradient(circle, rgba(127,212,232,.22), transparent 70%); }
+  body.zen #orb .core { background: radial-gradient(circle at 42% 38%, #eefaff, #a9e4f2 40%, #4f9fb2 68%, transparent 80%);
+    box-shadow: 0 0 26px 6px rgba(127,212,232,.4), inset 0 0 12px rgba(255,255,255,.45); }
+  body.zen #orb .eq i { background: #a9e4f2; box-shadow: 0 0 8px rgba(127,212,232,.7); }
+  /* idle = slow breathing (calm), not a busy multi-ring spin */
+  body.zen #orb[data-state="idle"] .ring.r3 { animation-duration: 24s; }
+  body.zen #orb[data-state="idle"] .ring.r4 { animation-duration: 20s; }
+  body.zen .hud-ring { filter: none; }
+  /* voice stage — the ONLY persistent elements: orb, one status word, ephemeral caption, quiet tool line */
+  #vstatus { font-size: 12px; letter-spacing: .2em; text-transform: uppercase; color: var(--text-dim);
+    min-height: 1em; transition: color .3s; font-family: var(--font-ui); }
+  #orb[data-state="listening"] ~ #vstatus { color: var(--accent); }
+  #orb[data-state="speaking"]  ~ #vstatus { color: #a9e4f2; }
+  #orb[data-state="error"]     ~ #vstatus { color: var(--warn); }
+  #vtool { font-size: 11px; color: var(--text-dim2); min-height: 1em; font-family: var(--font-ui);
+    opacity: .85; transition: opacity .3s; }
+  #vtool:empty { opacity: 0; }
+  #vcap { transition: opacity .5s; }
+  body.zen #vcap { color: var(--text); font-size: 16px; }
+  /* summonable input: hidden in zen ambient, fades in on keypress / Cmd+K, Esc dismisses */
+  body.zen.ambient.summon #inputbar { display: flex !important; animation: zenSummon .18s ease; }
+  body.zen.ambient.summon #attachbar { display: flex !important; }
+  @keyframes zenSummon { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 </style>
 </head>
 <body>
@@ -592,9 +653,11 @@
       <span class="glow"></span><span class="core"></span>
       <span class="eq"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span>
     </div>
+    <div id="vstatus"></div>
     <div id="vvis"></div>
     <div id="vcap"></div>
-    <div id="vhint">say "Jarvis" — or just talk · 📄 for transcript</div>
+    <div id="vtool"></div>
+    <div id="vhint">say "Jarvis" — or just talk · ⌘K to type · 📄 for transcript</div>
   </div>
 
   <!-- ===== swappable stage panels (one visible at a time; Chat is default) ===== -->
@@ -1049,7 +1112,7 @@ function liveAppend(delta) {
 function closeLiveBubble() { liveBubble = null; }
 window.bhatbot.onToolUpdate((u) => {
   if (u.type === 'token') { rmThinking(); streamedThisTurn = true; if (!voiceFirst) liveAppend(u.text); else { setSpeaking(true); setOrbState('speaking'); } }
-  else if (u.type === 'tool_start') { rmThinking(); closeLiveBubble(); toolStart(u); addThinking(); actLog(u.name + ' ' + shortArg(u.name, u.input), 'run'); }
+  else if (u.type === 'tool_start') { rmThinking(); closeLiveBubble(); toolStart(u); addThinking(); actLog(u.name + ' ' + shortArg(u.name, u.input), 'run'); showToolLine(String(u.name || '').replace(/_/g, ' ')); }
   else if (u.type === 'tool_done') {
     toolDone(u); const ok = u.result && u.result.success !== false;
     actLog((u.name || 'tool') + (ok ? ' ✓' : ' ✗'), ok ? 'ok' : 'fail');
@@ -1201,6 +1264,7 @@ async function send(text) {
     return;
   }
   $('#ta').value = ''; autoresize();
+  if (typeof summonInput === 'function') summonInput(false);   // zen: re-hide the summoned input after send
   $('#chips').classList.add('hidden');
   const nImg = atts.filter((b) => b.type === 'image').length;
   const nDoc = atts.length - nImg;
@@ -1662,7 +1726,7 @@ function maybeRearm() {
   if (!convoMode || busy || recording || !ttsIdle) return;
   setTimeout(() => { if (convoMode && !busy && !recording && ttsIdle) startVoice(); }, 450);
 }
-window.bhatbot.onTtsIdle(() => { ttsIdle = true; setSpeaking(false); setOrbState('idle'); maybeRearm(); });
+window.bhatbot.onTtsIdle(() => { ttsIdle = true; setSpeaking(false); setOrbState('idle'); showToolLine(''); maybeRearm(); });
 
 // Vosk listener heard "bhatbot …": run the command, or arm voice if none. Either way, a wake
 // word opens conversation mode so BhatBot keeps listening until told it's done.
@@ -1876,7 +1940,11 @@ const orb = $('#orb');
 const hudRing = document.querySelector('.hud-ring');
 // One call drives BOTH the voice-stage orb AND the always-visible titlebar reactor, so the JARVIS
 // status (idle/listening/thinking/speaking) is glanceable even outside voice-first mode.
-function setOrbState(s) { if (orb) orb.dataset.state = s; if (hudRing) hudRing.dataset.state = s; }
+const STATUS_WORD = { idle: '', listening: 'listening', thinking: 'thinking', planning: 'working', speaking: 'speaking', error: 'error' };
+function setOrbState(s) {
+  if (orb) orb.dataset.state = s; if (hudRing) hudRing.dataset.state = s;
+  const vs = $('#vstatus'); if (vs) vs.textContent = STATUS_WORD[s] != null ? STATUS_WORD[s] : '';
+}
 function flashHudError() {
   if (!hudRing) return;
   const prev = hudRing.dataset.state && hudRing.dataset.state !== 'error' ? hudRing.dataset.state : 'idle';
@@ -1891,7 +1959,15 @@ function shorten(text) {
   if (out.length > 180) out = out.slice(0, 177).trim() + '…';
   return out;
 }
-function showCaption(text) { const c = $('#vcap'); if (c) c.textContent = shorten(text); }
+let _capTimer = null;
+function showCaption(text) {
+  const c = $('#vcap'); if (!c) return;
+  c.textContent = shorten(text); c.style.opacity = '1';
+  if (_capTimer) clearTimeout(_capTimer);
+  _capTimer = setTimeout(() => { c.style.opacity = '0'; }, 3800);   // ephemeral: fade the spoken line out
+}
+// Quiet single-line "now: <tool>" under the status word (zen voice stage). Clears when the turn goes idle.
+function showToolLine(text) { const t = $('#vtool'); if (t) t.textContent = text ? '· ' + text : ''; }
 // ---- transcript: hidden behind the orb stage in voice-first/ambient, one tap to reveal ----
 const txbtn = $('#txbtn');
 if (txbtn) txbtn.addEventListener('click', () => {
@@ -1900,6 +1976,44 @@ if (txbtn) txbtn.addEventListener('click', () => {
   const on = document.body.classList.toggle('show-transcript');
   txbtn.classList.toggle('rec', on);
   applyStageVisibility();
+});
+
+// ---- UI theme: zen (minimalist, default) ⇄ hud (full cockpit) ----
+// localStorage is the user's manual choice; config.uiTheme seeds the first-ever launch.
+let uiTheme = 'zen';
+try { uiTheme = localStorage.getItem('uiTheme') || 'zen'; } catch {}
+function applyTheme() {
+  document.body.classList.toggle('zen', uiTheme !== 'hud');
+  document.body.classList.toggle('hud', uiTheme === 'hud');
+}
+function toggleTheme() {
+  uiTheme = (uiTheme === 'hud') ? 'zen' : 'hud';
+  try { localStorage.setItem('uiTheme', uiTheme); } catch {}
+  applyTheme();
+  if (typeof tbar !== 'undefined' && tbar) tbar.textContent = uiTheme === 'zen' ? '◐ zen — minimalist' : '◑ hud — full cockpit';
+}
+applyTheme();
+// Seed from config on first launch (before the user has made a manual choice).
+(async () => {
+  try { if (!localStorage.getItem('uiTheme')) { const vc = await window.bhatbot.getVoiceConfig(); if (vc && vc.uiTheme) { uiTheme = vc.uiTheme; applyTheme(); } } } catch {}
+})();
+
+// ---- summonable input: in zen ambient the input bar is hidden; any printable key or ⌘K reveals it ----
+function summonInput(on) {
+  document.body.classList.toggle('summon', on);
+  const el = document.querySelector('#ta');
+  if (el) { if (on) el.focus(); else { el.blur(); if (!el.value.trim()) el.value = ''; } }
+}
+document.addEventListener('keydown', (e) => {
+  if ((e.metaKey || e.ctrlKey) && (e.key === 'u' || e.key === 'U') && e.shiftKey) { e.preventDefault(); toggleTheme(); return; }
+  if (uiTheme !== 'zen') return;
+  const typing = /^(INPUT|TEXTAREA)$/.test((e.target && e.target.tagName) || '');
+  if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) { e.preventDefault(); summonInput(true); return; }
+  if (e.key === 'Escape' && document.body.classList.contains('summon')) { summonInput(false); return; }
+  // A printable keystroke while idle in ambient → summon + seed the character.
+  if (!typing && document.body.classList.contains('ambient') && e.key.length === 1 && !e.metaKey && !e.ctrlKey && !e.altKey) {
+    summonInput(true); const el = document.querySelector('#ta'); if (el) { el.value += e.key; if (typeof autoresize === 'function') autoresize(); } e.preventDefault();
+  }
 });
 
 function setMicRecording(on) {
@@ -1993,7 +2107,8 @@ function submitVoice(text) {
 // ---- Fallback STT: Web Speech (only if no OpenAI key) ----
 let recog = null, finalText = '', manualStop = false, silenceTimer = null, restartTimer = null, starting = false;
 let lastResultTs = 0, maxUtterTimer = null;   // endpointing: learn mid-utterance pauses + hard safety cap
-const MAX_UTTER_MS = 45000;                    // never hold the mic open longer than this (background-noise guard)
+const WEBSPEECH_MAX_UTTER_MS = 45000;          // never hold the mic open longer than this (background-noise guard)
+                                               // (renamed from MAX_UTTER_MS — collided with the MediaRecorder cap in the same script scope)
 // Refresh the adaptive silence-wait from the learned per-user model (grows if you tend to pause to think).
 async function refreshEndpointThreshold() {
   try { const r = await window.bhatbot.endpointThreshold(); if (r && r.thresholdMs) SILENCE_MS = r.thresholdMs; } catch {}
@@ -2050,7 +2165,7 @@ function startWebSpeech() {
   finalText = ''; manualStop = false; recording = true; lastResultTs = 0; setOrbState('listening');
   refreshEndpointThreshold();                  // pull the latest learned threshold (async; timers re-read SILENCE_MS)
   startVad();                                  // near-field energy gate so background/pauses don't cut me off
-  clearTimeout(maxUtterTimer); maxUtterTimer = setTimeout(endWebSpeech, MAX_UTTER_MS);
+  clearTimeout(maxUtterTimer); maxUtterTimer = setTimeout(endWebSpeech, WEBSPEECH_MAX_UTTER_MS);
   recog = new SR(); recog.lang = 'en-US'; recog.interimResults = true; recog.continuous = true;
   recog.onstart = () => { starting = false; };
   recog.onresult = (e) => {
