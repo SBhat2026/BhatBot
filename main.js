@@ -42,7 +42,7 @@ const subagents = require('./lib/subagents');          // #20 — persistent spe
 const agentTeam = require('./lib/orchestrator');        // C — parallel same-task ensemble + independent app-tester
 const planner = require('./lib/planner');               // B1 — decompose a goal into a task DAG for the team
 const ambient = require('./lib/ambient');              // #18 — opt-in proactive Calendar/Mail awareness (OFF by default)
-const { textHintFromSelector, splitForSpeech, estimateToolCost, stripReasoning } = require('./lib/pure');  // SPLIT_PLAN step 1
+const { textHintFromSelector, splitForSpeech, estimateToolCost, stripReasoning, classifySpeech, createSpeechNormalizer } = require('./lib/pure');  // SPLIT_PLAN step 1
 const speech = require('./lib/speech');                 // human-speech shaping: emoji→spoken-cue/drop + context-aware punctuation
 const { validateHistory, sealDanglingToolUse, evictOldImages, isRetryableTool, TRANSIENT_RE } = require('./lib/history');  // SPLIT_PLAN step 9 (pure agent-loop helpers)
 const projects = require('./lib/projects');            // #24 — project memory + living auto-summary
@@ -6274,11 +6274,11 @@ function elLimit(fn) {
 // measured speed. Every field is config-overridable live (D1 voice-customizability hooks here).
 function jarvisVoiceSettings(c) {
   return {
-    stability: c.ttsStability != null ? c.ttsStability : 0.45,
+    stability: c.ttsStability != null ? c.ttsStability : 0.38,   // T3: a touch livelier prosody, less monotone
     similarity_boost: c.ttsSimilarity != null ? c.ttsSimilarity : 0.85,
     style: c.ttsStyle != null ? c.ttsStyle : 0.22,        // dry deadpan; raise only if it sounds flat
     use_speaker_boost: c.ttsSpeakerBoost != null ? c.ttsSpeakerBoost : true,
-    speed: Math.max(0.7, Math.min(1.2, Number(c.ttsSpeed) || 1.0)),  // deliberate, unhurried butler pace
+    speed: Math.max(0.7, Math.min(1.2, Number(c.ttsSpeed) || 1.04)),  // deliberate butler pace, marginally brisker
   };
 }
 
@@ -6427,21 +6427,23 @@ function humanizeCadence(input, { breaks = false } = {}) {
   let s = String(input || '');
   if (!s) return s;
   const SHORT = breaks ? '<break time="0.2s"/>' : ',';
-  const MED = breaks ? '<break time="0.3s"/>' : ' …';
-  // Opening discourse marker → a brief beat after it ("Right, on it." → "Right,⟨beat⟩ on it.")
-  s = s.replace(DISCOURSE_LEAD, (m) => m.replace(/[,\s]+$/, '') + (breaks ? SHORT + ' ' : ', '));
-  // Ellipses = a trailing-off pause; em/en dashes and " - " = a mid-thought beat.
-  s = s.replace(/\s*\.\.\.+\s*/g, breaks ? ' ' + MED + ' ' : ' … ');
+  // Opening discourse marker → a plain comma beat. (T3: dropped the extra <break> on the ws/flash
+  // path — it double-paused with the comma and read as a stammer.)
+  s = s.replace(DISCOURSE_LEAD, (m) => m.replace(/[,\s]+$/, '') + ', ');
+  // T3: ellipses used to render as a LONG trailing pause (…/<break 0.3s>) that stacked with the
+  // sentence pause and dragged noticeably. A plain comma is the right micro-beat on every engine.
+  s = s.replace(/\s*\.\.\.+\s*/g, ', ');
+  // Em/en dashes and " - " = a brief mid-thought beat.
   s = s.replace(/\s*[—–]\s*/g, breaks ? ' ' + SHORT + ' ' : ', ');
   s = s.replace(/\s+-\s+/g, breaks ? ' ' + SHORT + ' ' : ', ');
   if (breaks) {
-    // NOTE: we deliberately do NOT inject a <break> between sentences — ElevenLabs already pauses
-    // naturally at . ! ? and an extra break stacked on top made sentence-ends drag. Cap the beats
-    // we DID add (ellipses/dashes/discourse) to avoid the documented prosody instability.
-    const MAX = 6; let count = 0;
+    // We deliberately do NOT inject a <break> between sentences — ElevenLabs already pauses at
+    // . ! ? and an extra break made sentence-ends drag. Cap the beats we DID add (dashes) hard,
+    // to avoid the documented prosody instability. T3 lowered the cap 6 → 3.
+    const MAX = 3; let count = 0;
     s = s.replace(/<break[^>]*>/g, (t) => (++count > MAX ? '' : t));
   }
-  return s.replace(/[ \t]{2,}/g, ' ').trim();
+  return s.replace(/[ \t]{2,}/g, ' ').replace(/\s+([.,!?;:])/g, '$1').trim();
 }
 
 // Multi-provider TTS — kokoro (local neural, default), elevenlabs (cloud JARVIS), openai (onyx), piper (offline)
@@ -6629,8 +6631,11 @@ function makeSpeakStream(seq) {
   const strip = (s) => s.replace(/<\/?speak>/g, '');
   function feed(delta) {
     full += delta;
-    // Committed plain mode → fast path: everything visible is spoken.
-    if (mode === 'plain') { const d = strip(pending + delta); pending = ''; if (d) { ttsStreamFeed(seq, d); recordSpoken(d); } return d; }
+    // Committed short-plain → fast path: everything visible is read verbatim as it streams.
+    if (mode === 'short-plain') { const d = strip(pending + delta); pending = ''; if (d) { ttsStreamFeed(seq, d); recordSpoken(d); } return d; }
+    // Committed digest → speak NOTHING more from the stream (finish() summarizes); still flow
+    // the visible text to the screen so the full structured reply is shown.
+    if (mode === 'digest') { const d = strip(pending + delta); pending = ''; return d; }
     pending += delta; let display = '';
     while (pending.length) {
       if (!inside) {
@@ -6643,18 +6648,35 @@ function makeSpeakStream(seq) {
         const segq = pending.slice(0, j); if (segq) { ttsStreamFeed(seq, segq); recordSpoken(segq); display += segq; } pending = pending.slice(j + CLOSE.length); inside = false;
       }
     }
-    // No <speak> has appeared and we have enough signal (a sentence end or ~60 chars) →
-    // commit to plain mode and speak everything streamed so far. Guarantees speech.
+    // No <speak> tag yet — let the speech PLANNER decide once there's signal (T2). It reads the
+    // visible text so far and commits to reading verbatim (short prose) or summarizing (long /
+    // structured). Until it commits, keep buffering; a truly short reply is spoken whole by finish().
     if (mode === 'undecided') {
-      const s = strip(full);
-      if (s.length >= 60 || /[.!?\n]/.test(s)) { mode = 'plain'; if (s) { ttsStreamFeed(seq, s); recordSpoken(s); } pending = ''; }
+      const decision = classifySpeech(strip(full));
+      if (decision === 'short-plain') { mode = 'short-plain'; const s = strip(full); if (s) { ttsStreamFeed(seq, s); recordSpoken(s); } pending = ''; }
+      else if (decision === 'digest') { mode = 'digest'; }   // speak nothing now; finish() feeds the digest
     }
     return display;
   }
   function finish() {
     const display = strip(pending); pending = '';
-    if ((inside || mode === 'plain') && display) { ttsStreamFeed(seq, display); recordSpoken(display); }
-    // Reply too short to ever trip the threshold (e.g. "Done.") → speak it whole.
+    if (mode === 'digest') {
+      // Reserve the drain→tts-idle contract SYNCHRONOUSLY so the post-turn idle guard doesn't fire
+      // early (the digest is async). The drain that runs when the digest enqueues will emit tts-idle;
+      // if the digest is empty we release the mic explicitly. Never silent, never wedges hands-free.
+      ttsStreamProduced = true;
+      (async () => {
+        let spoken = '';
+        try { const r = await summarizeForSpeech(strip(full)); if (r && r.success && r.text) spoken = r.text.trim(); } catch {}
+        if (seq !== ttsStreamSeq) return;                      // a newer turn now owns tts-idle
+        if (!spoken) { const m = strip(full).trim().match(/[^.!?\n]*[.!?]/); spoken = (m ? m[0] : strip(full).trim().slice(0, 200)).trim(); }  // floor: first sentence
+        if (spoken) { ttsStreamEnqueue(seq, spoken); recordSpoken(spoken); }
+        else emitTtsIdle(seq);
+      })();
+      return { sawTag, display, digest: true };
+    }
+    if ((inside || mode === 'short-plain') && display) { ttsStreamFeed(seq, display); recordSpoken(display); }
+    // Reply too short to ever commit a mode (e.g. "Done.") → speak it whole.
     else if (mode === 'undecided') { const f = strip(full).trim(); if (f) { ttsStreamFeed(seq, f); recordSpoken(f); } }
     ttsStreamFlush(seq);
     return { sawTag, display };
