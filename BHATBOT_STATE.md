@@ -296,3 +296,24 @@ Speech quality + latency, JARVIS-minimalist UI, and parallel-agent coordination.
   bug in `subagentDeps` (Haiku retired → maps to Sonnet).
 - **New config keys:** `ttsTransport` ('rest'), `uiTheme` ('zen'). Surfaced in `get-voice-config`.
 - **New tests in `verify`:** `test:speechplanner`, `test:ttsws`, `test:orchboard` (40 suites total).
+
+## 14. Guaranteed action + Vanguard teamwork (2026-07-04 cont., on `main`)
+Siddhant: "have commands guaranteed to create actions rather than say it'll do something and run
+out of juice" + "make Vanguard actually work together." Interviewed → chose: post-turn verify,
+auto-extend budget, shared board + lead integrator. Verify-green (42 suites).
+- **Post-turn action verification** (`main.js` agentLoop + `verifyActionDone`): the loop used to
+  finish the instant a turn returned no `tool_use` — a pure narration ("I'll open it") ended the
+  turn with nothing done. Now, on an ACTION-shaped task that ends promissory (or with zero tools
+  run), a cheap judge checks whether the action actually happened; if only promised, it injects a
+  "do it NOW with tools" directive and re-enters the loop. Bounded (≤2 redos), fail-open, config
+  `actionVerify` (default on). Prefilter `lib/pure.isPromissory`.
+- **Auto-extend budget** (`main.js` agentLoop): raises `maxIters` past the 20-step budget up to
+  `agentMaxStepsHard` (default 60) while still making NOVEL progress (tool-signature novelty);
+  a stuck/repeating agent stops. Config `autoExtend` (default on). Helper `lib/pure.shouldExtendBudget`.
+- **Vanguard teamwork** (`lib/orchestrator.js`): fleet suits get real coordination TOOLS
+  (`board_post`/`board_read`/`board_claim`, handled locally against the batch board), each suit's
+  persona names the TEAM ROSTER + is told to build ONE deliverable, and a new LEAD INTEGRATOR merges
+  the suits' outputs + board into a single coherent result (was bare concatenation). `fleet` now
+  returns `.result`.
+- **New config keys:** `actionVerify` (on), `autoExtend` (on), `agentMaxStepsHard` (60).
+- **New tests:** `test:actionguard` (17); `test:orchboard` extended to 13 (board tools + integrator).
