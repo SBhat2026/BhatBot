@@ -13,15 +13,24 @@ function ok(name, cond) { if (cond) { console.log('✅ ' + name); pass++; } else
 
 // Capture every system prompt the mock model receives, so we can assert the board block was folded in.
 const seenSystems = [];
-function mkDeps(board) {
+const seenToolNames = [];   // union of tool names offered across all calls
+function mkDeps(board, opts = {}) {
   return {
     apiKey: 'k',
     models: { sonnet: 'sonnet', haiku: 'sonnet' },
     toolDefs: [],
     makeBoard: () => board,
-    anthropicRequest: async ({ system }) => {
+    anthropicRequest: async ({ system, tools, messages }) => {
       seenSystems.push(system);
-      // one-shot: emit text, no tool calls → the role finishes immediately
+      (tools || []).forEach((t) => seenToolNames.push(t.name));
+      // The lead INTEGRATOR call: its system says "INTEGRATE" → return a recognizable merged result.
+      if (/INTEGRATE/i.test(system || '')) return { content: [{ type: 'text', text: 'INTEGRATED-DELIVERABLE' }], stop_reason: 'end_turn' };
+      // A suit's FIRST turn, when it has board tools: call board_post once (exercise the handler),
+      // then finish on the next turn.
+      const firstTurn = (messages || []).length <= 1;
+      if (opts.useBoardTool && firstTurn && (tools || []).some((t) => t.name === 'board_post')) {
+        return { content: [{ type: 'tool_use', id: 'tu1', name: 'board_post', input: { kind: 'finding', text: 'found X' } }], stop_reason: 'tool_use' };
+      }
       return { content: [{ type: 'text', text: 'take from an agent' }], stop_reason: 'end_turn' };
     },
   };
@@ -44,13 +53,17 @@ function mkDeps(board) {
   ok('board captured status + finding posts', posts.length >= 4);
   ok('both agents posted findings', posts.filter((p) => p.kind === 'finding' && (p.agent === 'a' || p.agent === 'b')).length === 2);
 
-  // --- fleet also shares a board across suits ---
-  seenSystems.length = 0;
+  // --- fleet: shares a board, offers board tools, suits actively post, lead integrates ---
+  seenSystems.length = 0; seenToolNames.length = 0;
   const board2 = createBlackboard({ dir: path.join(os.tmpdir(), 'bb-test2-' + Date.now()) });
-  const deps2 = mkDeps(board2);
+  const deps2 = mkDeps(board2, { useBoardTool: true });
   const fres = await orch.fleet([{ role: 'x', task: 'job one' }, { role: 'y', task: 'job two' }], deps2, {});
   ok('fleet ran both suits', fres.success && fres.agents.length === 2);
   ok('fleet folded board into suit prompts', seenSystems.some((s) => /FLEET BLACKBOARD/.test(s || '')));
+  ok('suits are offered the board_post/read/claim tools', ['board_post', 'board_read', 'board_claim'].every((n) => seenToolNames.includes(n)));
+  ok('suit persona names the team roster', seenSystems.some((s) => /YOUR TEAM/.test(s || '')));
+  ok('board_post tool call was handled (agent-authored finding on the board)', board2.all().some((p) => p.kind === 'finding' && p.text === 'found X'));
+  ok('lead integrator merged suits into ONE deliverable', fres.result === 'INTEGRATED-DELIVERABLE');
 
   // --- no board factory → no crash, no injection (backward compatible) ---
   seenSystems.length = 0;
