@@ -317,3 +317,21 @@ auto-extend budget, shared board + lead integrator. Verify-green (42 suites).
   returns `.result`.
 - **New config keys:** `actionVerify` (on), `autoExtend` (on), `agentMaxStepsHard` (60).
 - **New tests:** `test:actionguard` (17); `test:orchboard` extended to 13 (board tools + integrator).
+
+## 15. Latency + UX pass (2026-07-05, on `main`)
+Siddhant: "reduce latency + better UX feeling; as long as the task finishes I don't mind rate-
+limiting." Verify-green (42 suites). Three coherent felt-latency wins:
+- **Cache keep-alive default ON** (`config.cacheKeepAlive`, was opt-in): the static-prompt+tools
+  prefix stays hot within 30min of activity, so first token is fast after idle gaps instead of the
+  ~5min-TTL cold re-prefill. (The keep-alive itself was already built — just flipped the default.)
+- **Pre-rendered ack library**: ack/holding lines are rendered once in the configured voice to
+  `~/.bhatbot/voice/acks` at boot (lazy background render via the existing EL synth path); `maybeAck`
+  + the watchdog now play the cached clip DIRECTLY with afplay (zero synth round-trip = instant first
+  audio), falling back to live synth. Barge-in kills the ack (tracked in `ttsPlayProc`).
+  Config `prerenderAcks` (on).
+- **Spoken progress heartbeat**: on a long multi-tool turn with no audio for ~20s, speak a brief
+  tool-aware line (`lib/pure.progressLine`, deterministic + free, no model call) so tier-1-paced turns
+  feel alive. Bounded to one per interval. Config `spokenProgress` / `spokenProgressMs` (20000).
+- **New config keys:** `prerenderAcks` (on), `spokenProgress` (on), `spokenProgressMs` (20000);
+  `cacheKeepAlive` default flipped on. **New artifact:** `~/.bhatbot/voice/acks/*.mp3` + `index.json`.
+- **Tests:** `lib/pure.progressLine` in `test:actionguard` (now 22 assertions).
