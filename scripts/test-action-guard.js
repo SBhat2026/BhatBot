@@ -3,7 +3,7 @@
 // Unit tests for the action-completion guard helpers (isPromissory, shouldExtendBudget, toolSig)
 // in lib/pure.js. Pure — the model judge (verifyActionDone) lives in main.js and is exercised live.
 // Run: node scripts/test-action-guard.js   (wired into npm run verify)
-const { isPromissory, shouldExtendBudget, toolSig } = require('../lib/pure');
+const { isPromissory, shouldExtendBudget, toolSig, progressLine } = require('../lib/pure');
 
 let pass = 0, fail = 0;
 function ok(name, cond) { if (cond) { console.log('✅ ' + name); pass++; } else { console.log('❌ ' + name); fail++; } }
@@ -30,6 +30,13 @@ ok('STOP at the hard ceiling', shouldExtendBudget({ maxIters: 60, hardCeiling: 6
 ok('identical calls share a signature', toolSig('read_file', { path: 'a' }) === toolSig('read_file', { path: 'a' }));
 ok('different args → different signature', toolSig('read_file', { path: 'a' }) !== toolSig('read_file', { path: 'b' }));
 ok('different tool → different signature', toolSig('read_file', { path: 'a' }) !== toolSig('write_file', { path: 'a' }));
+
+// --- progressLine: tool-aware, deterministic, always a non-empty spoken line ---
+ok('known tool → its specific line', progressLine('make_figure') === 'Building the figure.');
+ok('browser tool → its line', progressLine('browser') === 'Still working through the page.');
+ok('unknown tool → a generic line (non-empty)', typeof progressLine('nope', 0.0) === 'string' && progressLine('nope', 0.0).length > 0);
+ok('no tool → a generic line', progressLine(undefined, 0.5).length > 0);
+ok('rnd is deterministic for tests', progressLine(null, 0) === progressLine(null, 0));
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

@@ -42,7 +42,7 @@ const subagents = require('./lib/subagents');          // #20 — persistent spe
 const agentTeam = require('./lib/orchestrator');        // C — parallel same-task ensemble + independent app-tester
 const planner = require('./lib/planner');               // B1 — decompose a goal into a task DAG for the team
 const ambient = require('./lib/ambient');              // #18 — opt-in proactive Calendar/Mail awareness (OFF by default)
-const { textHintFromSelector, splitForSpeech, estimateToolCost, stripReasoning, classifySpeech, createSpeechNormalizer, isPromissory, shouldExtendBudget, toolSig } = require('./lib/pure');  // SPLIT_PLAN step 1
+const { textHintFromSelector, splitForSpeech, estimateToolCost, stripReasoning, classifySpeech, createSpeechNormalizer, isPromissory, shouldExtendBudget, toolSig, progressLine } = require('./lib/pure');  // SPLIT_PLAN step 1
 const WebSocket = require('ws');
 const { createTtsWs } = require('./lib/ttsws');   // T1 — continuous ws streaming TTS transport (config.ttsTransport==='ws')
 const speech = require('./lib/speech');                 // human-speech shaping: emoji→spoken-cue/drop + context-aware punctuation
@@ -4201,6 +4201,7 @@ async function agentLoop(history, apiKey, event, opts = {}) {
   const HARD_CEILING = Math.max(maxIters, Number(loadConfig().agentMaxStepsHard) || 60);
   const userText0 = lastUserText(history);            // the original request, for the action-verify judge
   let toolsRan = 0, unproductive = 0, verifyCount = 0; const toolNamesRan = []; const seenSigs = [];
+  if (stream) ttsLastAudioTs = Date.now();            // measure the progress-heartbeat silence from turn start
   while (iterations < maxIters) {
     if (agentState === 'stopped') return finish('⏹ Stopped.');
     while (agentState === 'paused') await sleep(300);
@@ -4315,6 +4316,16 @@ async function agentLoop(history, apiKey, event, opts = {}) {
     const novel = sigs.some((s) => !seenSigs.includes(s));
     for (const s of sigs) seenSigs.push(s); while (seenSigs.length > 12) seenSigs.shift();
     unproductive = novel ? 0 : unproductive + 1;
+    // Spoken progress heartbeat: a long turn with no audio for a while gets a brief tool-aware "still
+    // working" line so tier-1-paced multi-tool turns never sit in dead air (Siddhant accepts the cost).
+    if (stream && ttsSeq != null && loadConfig().spokenProgress !== false && loadConfig().ttsEnabled !== false) {
+      const thresh = Number(loadConfig().spokenProgressMs) || 20000;
+      if (Date.now() - (ttsLastAudioTs || 0) > thresh) {
+        const lastTool = toolUses[toolUses.length - 1] && toolUses[toolUses.length - 1].name;
+        ttsStreamFeed(ttsSeq, progressLine(lastTool) + ' ');
+        ttsLastAudioTs = Date.now();   // reset so progress lines don't stack
+      }
+    }
     // Mid-loop context guard: a single turn that fans out into dozens of tool calls can approach
     // the window before the next user message. Summarize the old head in place so long autonomous /
     // self-drive runs keep fidelity instead of getting hard-dropped by capTokens at the wire.
@@ -6560,7 +6571,12 @@ ipcMain.handle('synthesize-speech', (_e, { text }) => synthesizeSpeech(text));
 // <Audio> element is unreliable in Electron (autoplay/codec quirks → silent desktop,
 // the long-standing "works on phone not Mac" bug). afplay is rock-solid and the
 // synthesis already lives here. Returns once playback has STARTED (not finished).
-let ttsPlayProc = null, ttsPlaySeq = 0, ttsActive = false, ttsLastAudioSeq = 0;
+let ttsPlayProc = null, ttsPlaySeq = 0, ttsActive = false, ttsLastAudioSeq = 0, ttsLastAudioTs = 0;
+// Pre-rendered ack library (latency pass): the ack is the FIRST thing heard every turn, so make it
+// FREE latency-wise — play a cached mp3 (rendered once in the configured voice) instead of a live
+// synth round-trip. Rendered lazily at boot; falls back to live synth if a clip is missing.
+const ACKS_DIR = path.join(os.homedir(), '.bhatbot', 'voice', 'acks');
+let _ackRendering = false;
 // Tell the wake listener whether audio is playing, so its barge-in VAD only arms during
 // playback (and uses the echo-rejection threshold then). Drives the `ttsActive` flag the
 // barge-in handler checks.
@@ -6597,7 +6613,7 @@ function bargeInInterrupt() {
 function playFile(file, seq, text) {
   return new Promise((res) => {
     if (seq !== ttsPlaySeq) return res();
-    ttsLastAudioSeq = seq;                               // ack watchdog: audio reached the speaker for this turn
+    ttsLastAudioSeq = seq; ttsLastAudioTs = Date.now();  // ack watchdog + progress heartbeat: audio reached the speaker
     latMark('first-audio-playing');
     setTtsActive(true);                                  // arm barge-in for the duration of this clip
     const sayingName = WAKE_WORD_RE.test(String(text || ''));
@@ -6607,6 +6623,53 @@ function playFile(file, seq, text) {
     ttsPlayProc.on('close', done);
     ttsPlayProc.on('error', done);
   });
+}
+function ackSlug(line) { return slugify(line); }
+function ackFilePath(line) { return path.join(ACKS_DIR, ackSlug(line) + '.mp3'); }
+// Play a PRE-RENDERED ack clip directly (single afplay, zero synth latency). Mirrors playFile's
+// barge-in/wake-mute bookkeeping and counts as this turn's first audio for the watchdog. Tracked in
+// ttsPlayProc so stopDesktopTTS()/barge-in kills it. Returns true if it started.
+function playAckFile(seq, file, text) {
+  if (seq !== ttsStreamSeq) return false;
+  try {
+    ttsLastAudioSeq = seq; ttsLastAudioTs = Date.now(); latMark('ack-audio'); setTtsActive(true);
+    const sayingName = WAKE_WORD_RE.test(String(text || ''));
+    if (sayingName) setWakeMute(true);
+    const p = spawn('afplay', [file], { env: { ...process.env, PATH: EXEC_PATH } });
+    ttsPlayProc = p;
+    const done = () => {
+      if (ttsPlayProc === p) ttsPlayProc = null;
+      // Only disarm if no reply audio has taken over (rest drain / ws stream still owns it otherwise).
+      if (seq === ttsStreamSeq && !ttsStreamDraining && !ttsStreamQ.length && !_ttsWsSess) setTtsActive(false);
+      if (sayingName) setWakeMute(false);
+    };
+    p.on('close', done); p.on('error', done);
+    return true;
+  } catch { return false; }
+}
+// Lazily render the ack + holding lines in the CONFIGURED voice so ack and reply sound identical.
+// Runs once in the background at boot; skips clips already on disk. Uses the existing ElevenLabs
+// synth path (resolves the vaulted key + honors the cooldown). No-op without an EL key.
+async function maybeRenderAcks() {
+  const c = loadConfig();
+  if (c.prerenderAcks === false || !c.elevenLabsKey || _ackRendering) return;
+  _ackRendering = true;
+  try {
+    fs.mkdirSync(ACKS_DIR, { recursive: true });
+    const lines = [...new Set([...ACKS, ...HOLDING])];
+    let rendered = 0;
+    for (const line of lines) {
+      const f = ackFilePath(line);
+      if (fs.existsSync(f)) continue;
+      const r = await elevenLabsSynth(normalizeForSpeech(line), c, {});
+      if (r && r.success && r.audio) { try { fs.writeFileSync(f, Buffer.from(r.audio, 'base64')); rendered++; } catch {} }
+      else if (r && r.cooldown) break;   // EL cooling down (quota/auth) → try again next boot
+      await sleep(300);
+    }
+    try { fs.writeFileSync(path.join(ACKS_DIR, 'index.json'), JSON.stringify(lines.map((l) => ({ slug: ackSlug(l), text: l })), null, 2)); } catch {}
+    if (rendered) console.log(`[acks] pre-rendered ${rendered} ack clip(s) → ${ACKS_DIR}`);
+  } catch (e) { console.warn('[acks] render failed:', e.message); }
+  finally { _ackRendering = false; }
 }
 async function speakDesktop(text, opts = {}) {
   const c = loadConfig();
@@ -6682,7 +6745,7 @@ function ttsWsEnsure(seq) {
   _ttsWsSeq = seq;
   _ttsWsNorm = createSpeechNormalizer(normalizeForSpeech);   // stream-safe: never splits a URL/decimal token
   const sess = _ttsWs.create(seq);
-  sess.onFirstAudio(() => { ttsLastAudioSeq = seq; setTtsActive(true); try { latMark('first-audio-playing'); } catch {} });
+  sess.onFirstAudio(() => { ttsLastAudioSeq = seq; ttsLastAudioTs = Date.now(); setTtsActive(true); try { latMark('first-audio-playing'); } catch {} });
   sess.onDrained(() => { if (seq === ttsStreamSeq) { setTtsActive(false); emitTtsIdle(seq); } });
   _ttsWsSess = sess;
   ttsStreamProduced = true;   // ws will put audio on the wire → reserve the drain→tts-idle contract
@@ -6795,7 +6858,10 @@ function maybeAck(seq, userText) {
   if (c.instantAck === false || c.ttsEnabled === false) return;
   if (!ACTION_RE.test(userText || '')) return;     // only acknowledge action requests, not idle chat
   latMark('ack-queued');
-  ttsStreamFeed(seq, ACKS[Math.floor(Math.random() * ACKS.length)] + ' ');   // trailing space = clean token boundary for the ws normalizer
+  const line = ACKS[Math.floor(Math.random() * ACKS.length)];
+  // Instant path: play the pre-rendered clip directly (zero synth latency). Fall back to live synth.
+  if (c.prerenderAcks !== false) { const f = ackFilePath(line); if (fs.existsSync(f) && playAckFile(seq, f, line)) return; }
+  ttsStreamFeed(seq, line + ' ');   // trailing space = clean token boundary for the ws normalizer
 }
 // Watchdog behind maybeAck: guarantees SOME voice within ~5s of ANY message, not just
 // action-shaped ones. If nothing has reached the speaker — and nothing is queued or mid-
@@ -6809,6 +6875,8 @@ function armAckWatchdog(seq, ms = 2500) {
     if (loadConfig().ttsEnabled === false || loadConfig().instantAck === false) return;
     latMark('ack-queued');
     const line = HOLDING[Math.floor(Math.random() * HOLDING.length)];
+    // Instant path: pre-rendered holding clip. Else ws-stream it, else the REST enqueue.
+    if (loadConfig().prerenderAcks !== false) { const f = ackFilePath(line); if (fs.existsSync(f) && playAckFile(seq, f, line)) return; }
     if (ttsWsActive()) ttsStreamFeed(seq, line + ' ');   // ws path: stream it, don't spawn a competing REST clip
     else ttsStreamEnqueue(seq, line);
   }, ms);
@@ -7419,7 +7487,7 @@ function primeAppAutomation(force = false) {
 // ---------------------------------------------------------------------------
 // Lifecycle
 // ---------------------------------------------------------------------------
-// Task 5 — cache keep-alive (opt-in, config.cacheKeepAlive, default off). The ephemeral prompt
+// Task 5 — cache keep-alive (config.cacheKeepAlive, default ON as of the latency pass). The ephemeral prompt
 // cache TTL is ~5min; for a bursty ambient assistant an idle gap >5min re-bills the full static
 // prompt + tool schemas on the next turn. When on, refresh the Sonnet cache with a 1-token no-op
 // every ~4min — but ONLY within KEEPALIVE_ACTIVE_MS of a real turn, so a genuinely idle machine is
@@ -7431,7 +7499,7 @@ const KEEPALIVE_ACTIVE_MS = 30 * 60 * 1000;
 function startCacheKeepAlive() {
   const t = setInterval(async () => {
     try {
-      if (!loadConfig().cacheKeepAlive) return;
+      if (loadConfig().cacheKeepAlive === false) return;   // default ON — keep the static prefix hot for fast first token
       if (Date.now() - _lastActivityTs > KEEPALIVE_ACTIVE_MS) return;   // idle → let the cache lapse
       const key = getApiKey(); if (!key) return;
       await anthropicRequest({ model: MODEL_SONNET, max_tokens: 1,
@@ -7465,7 +7533,8 @@ app.whenReady().then(() => {
     // remains available; re-enable by calling it if you ever want the timed brief back.)
     startScheduler();   // proactive recurring/one-off tasks
     startAmbient();     // #18 opt-in ambient awareness (no-op unless config.ambient.enabled)
-    startCacheKeepAlive();   // Task 5 — opt-in prompt-cache warm-keeper (no-op unless config.cacheKeepAlive)
+    startCacheKeepAlive();   // Task 5 — prompt-cache warm-keeper (default on; keeps first token fast after idle gaps)
+    setTimeout(() => { maybeRenderAcks().catch(() => {}); }, 6000);   // pre-render ack clips in the background (instant first audio)
     // Live state feed (state.json + events.jsonl) — bind main's live values, then persist on a loop.
     rstate.bind({
       agent: () => ({ state: agentState, lastUser: String(_lastUserText || '').slice(0, 200) }),
