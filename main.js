@@ -42,7 +42,7 @@ const subagents = require('./lib/subagents');          // #20 — persistent spe
 const agentTeam = require('./lib/orchestrator');        // C — parallel same-task ensemble + independent app-tester
 const planner = require('./lib/planner');               // B1 — decompose a goal into a task DAG for the team
 const ambient = require('./lib/ambient');              // #18 — opt-in proactive Calendar/Mail awareness (OFF by default)
-const { textHintFromSelector, splitForSpeech, estimateToolCost, stripReasoning, classifySpeech, createSpeechNormalizer } = require('./lib/pure');  // SPLIT_PLAN step 1
+const { textHintFromSelector, splitForSpeech, estimateToolCost, stripReasoning, classifySpeech, createSpeechNormalizer, isPromissory, shouldExtendBudget, toolSig } = require('./lib/pure');  // SPLIT_PLAN step 1
 const WebSocket = require('ws');
 const { createTtsWs } = require('./lib/ttsws');   // T1 — continuous ws streaming TTS transport (config.ttsTransport==='ws')
 const speech = require('./lib/speech');                 // human-speech shaping: emoji→spoken-cue/drop + context-aware punctuation
@@ -4083,6 +4083,21 @@ function appendToLastUser(history, text) {
   return false;
 }
 
+// Post-turn ACTION VERIFICATION (Siddhant's choice). A cheap judge decides whether the assistant
+// actually CARRIED OUT the requested action or merely promised/described it. Fail-open (acted:true)
+// so a judge error never traps the loop. Uses the cheap tier (local-first, Sonnet fallback).
+async function verifyActionDone(userText, replyText, toolNames) {
+  try {
+    const sys = 'You audit whether an assistant CARRIED OUT a requested action or merely talked about doing it. Be strict: a promise ("I\'ll open it", "let me run that") without a matching tool action = NOT done. Reply with STRICT JSON only, no prose.';
+    const usr = `User request: "${String(userText).slice(0, 600)}"\nAssistant's final reply: "${String(replyText).slice(0, 800)}"\nTools the assistant ACTUALLY executed this turn: ${toolNames && toolNames.length ? toolNames.join(', ') : '(none)'}\n\nDid the assistant actually DO what was asked — or was it a pure question/info/conversational request that needs no action? Output JSON: {"acted": true|false, "missing": "<short phrase naming the action still not performed; empty if acted>"}`;
+    const r = await cheapText(sys, usr, { maxTokens: 120 });
+    const m = (r.text || '').match(/\{[\s\S]*\}/);
+    if (!m) return { acted: true };
+    const j = JSON.parse(m[0]);
+    return { acted: j.acted !== false, missing: String(j.missing || '').slice(0, 200) };
+  } catch { return { acted: true }; }
+}
+
 async function agentLoop(history, apiKey, event, opts = {}) {
   agentState = 'running';
   _userSpokeSinceOpen = true;     // Feat-1: the user engaged → don't pop the idle briefing offer
@@ -4179,7 +4194,13 @@ async function agentLoop(history, apiKey, event, opts = {}) {
 
   // Step budget: headroom for complex tasks that diagnose + retry across several approaches.
   // Configurable (agentMaxSteps); never below the default so a stale low value can't throttle.
-  const maxIters = Math.max(Number(loadConfig().agentMaxSteps) || 0, MAX_AGENT_ITERATIONS);
+  let maxIters = Math.max(Number(loadConfig().agentMaxSteps) || 0, MAX_AGENT_ITERATIONS);
+  // Auto-extend (Siddhant's choice): keep going past the budget while genuinely productive, up to a
+  // HARD ceiling that bounds worst-case spend even if the agent loops. Unproductive = consecutive
+  // iterations with no NOVEL tool signature (stuck/repeating) → stop extending.
+  const HARD_CEILING = Math.max(maxIters, Number(loadConfig().agentMaxStepsHard) || 60);
+  const userText0 = lastUserText(history);            // the original request, for the action-verify judge
+  let toolsRan = 0, unproductive = 0, verifyCount = 0; const toolNamesRan = []; const seenSigs = [];
   while (iterations < maxIters) {
     if (agentState === 'stopped') return finish('⏹ Stopped.');
     while (agentState === 'paused') await sleep(300);
@@ -4200,6 +4221,22 @@ async function agentLoop(history, apiKey, event, opts = {}) {
 
     if (!hasTools || response.stop_reason === 'end_turn') {
       const text = response.content.filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim();
+      // POST-TURN ACTION VERIFICATION (Siddhant's choice): if this was an ACTION request and the reply
+      // reads as a promise (or zero tools ran), have a cheap judge confirm the action was actually
+      // performed. If it was only promised → inject a "do it now" directive and re-enter the loop
+      // instead of accepting the promise. Bounded (≤2 redos), fail-open, action tasks only.
+      if (loadConfig().actionVerify !== false && verifyCount < 2 && looksLikeToolTask(userText0)
+          && (toolsRan === 0 || isPromissory(text))) {
+        const v = await verifyActionDone(userText0, text, toolNamesRan);
+        if (!v.acted) {
+          verifyCount++;
+          sendToActivity('tool-update', { type: 'thinking', text: '🔁 action check — you described it but did not do it; performing it now' });
+          history = [...history, { role: 'user', content: `[ACTION CHECK — this is NOT done yet: ${v.missing || 'the requested action'}. Perform it NOW with the appropriate tools. Do not describe, promise, or ask — do it, then confirm with the actual result.]` }];
+          if (maxIters - iterations < 5) maxIters = Math.min(HARD_CEILING, maxIters + 5);   // room for the redo
+          iterations++;
+          continue;
+        }
+      }
       return finish(text);
     }
 
@@ -4270,6 +4307,14 @@ async function agentLoop(history, apiKey, event, opts = {}) {
     }
 
     history = [...history, { role: 'user', content: toolResults }];
+    // Productivity tracking for auto-extend: a turn is "productive" if it ran ≥1 tool with a NOVEL
+    // signature (not a repeat of a recent call). A stuck agent re-calling the same thing stops
+    // extending; one exploring new actions keeps its budget.
+    const sigs = toolUses.map((b) => toolSig(b.name, b.input));
+    toolsRan += toolUses.length; for (const b of toolUses) toolNamesRan.push(b.name);
+    const novel = sigs.some((s) => !seenSigs.includes(s));
+    for (const s of sigs) seenSigs.push(s); while (seenSigs.length > 12) seenSigs.shift();
+    unproductive = novel ? 0 : unproductive + 1;
     // Mid-loop context guard: a single turn that fans out into dozens of tool calls can approach
     // the window before the next user message. Summarize the old head in place so long autonomous /
     // self-drive runs keep fidelity instead of getting hard-dropped by capTokens at the wire.
@@ -4279,6 +4324,12 @@ async function agentLoop(history, apiKey, event, opts = {}) {
       if (history.length < before) sendToActivity('tool-update', { type: 'thinking', text: `🗜 context summarized mid-loop (${before}→${history.length} msgs) to stay within the window` });
     }
     iterations++;
+    // AUTO-EXTEND (Siddhant's choice): about to hit the budget but still doing new work → raise it,
+    // bounded by HARD_CEILING. Keeps genuine long tasks finishing instead of dead-ending at 20 steps.
+    if (iterations >= maxIters && loadConfig().autoExtend !== false && shouldExtendBudget({ maxIters, hardCeiling: HARD_CEILING, unproductive })) {
+      const prev = maxIters; maxIters = Math.min(HARD_CEILING, maxIters + 15);
+      if (maxIters > prev) sendToActivity('tool-update', { type: 'thinking', text: `⏳ still making progress — extending step budget to ${maxIters}` });
+    }
   }
   // Budget exhausted — don't dead-end. One final tool-less turn so the user gets a concrete
   // progress report + the next action instead of a bare "max iterations" stub.
