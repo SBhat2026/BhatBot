@@ -824,6 +824,37 @@ function capTokens(messages, maxTok = wireCapTokens()) {
   return validateHistory(msgs);
 }
 
+// Incremental prompt caching for the CONVERSATION. The static prompt+tools already carry a
+// cache_control breakpoint; this adds a SECOND one at the very end of the message array, so the
+// whole conversation prefix is cached and reused on the next call. Within a multi-tool turn (many
+// calls seconds apart) and across turns inside the ~5-min TTL, this makes the now-large (~150K)
+// working memory cheap on cache HITS and bills the reused prefix at the cache-read rate instead of
+// full input — the cost mitigation that makes the aggressive wire cap affordable. Anthropic allows
+// up to 4 breakpoints (we use 2); a prefix under the model's min cacheable size is ignored cleanly.
+// PURE + clones only what it touches (callers' message objects are never mutated).
+function tagLastBlockForCache(messages) {
+  if (!Array.isArray(messages) || !messages.length) return messages;
+  const li = messages.length - 1;
+  const last = messages[li];
+  if (!last || typeof last !== 'object') return messages;
+  let newContent;
+  if (typeof last.content === 'string') {
+    if (!last.content) return messages;
+    newContent = [{ type: 'text', text: last.content, cache_control: { type: 'ephemeral' } }];
+  } else if (Array.isArray(last.content) && last.content.length) {
+    const bi = last.content.length - 1;
+    const blk = last.content[bi];
+    if (!blk || typeof blk !== 'object' || blk.cache_control) return messages;   // untaggable / already tagged
+    newContent = last.content.slice();
+    newContent[bi] = { ...blk, cache_control: { type: 'ephemeral' } };
+  } else {
+    return messages;
+  }
+  const out = messages.slice();
+  out[li] = { ...last, content: newContent };
+  return out;
+}
+
 // Centralized Anthropic call with exponential backoff on 429 / 529 / 5xx, honoring the
 // Retry-After header. Transient rate limits self-heal instead of erroring to the user.
 // --- Rolling per-minute, PER-MODEL token tracker. Anthropic enforces BOTH input-tokens/min (ITPM)
@@ -1161,6 +1192,15 @@ async function ollamaChat(messages, system, model) {
 }
 
 async function anthropicRequest(body, apiKey, { retries = 5 } = {}) {
+  // Add the conversation cache breakpoint when the payload is big enough to be worth a cache write
+  // (small one-off judge/plan calls skip it — the write premium would outweigh a prefix that never
+  // repeats). Gated by config.convoCache (default on). Failure here must never block the call.
+  try {
+    if (loadConfig().convoCache !== false && Array.isArray(body && body.messages) && body.messages.length
+        && estimateTokens(body.messages) >= 2000) {
+      body = { ...body, messages: tagLastBlockForCache(body.messages) };
+    }
+  } catch {}
   let attempt = 0;
   while (true) {
     let res;

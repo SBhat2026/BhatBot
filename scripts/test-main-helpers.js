@@ -127,5 +127,29 @@ ok(routesTo('prove that this series converges') === 'opus', 'route: pure proof �
 ok(routesTo('build a realistic fluid dynamics simulation') === 'fable', 'route: sim build → Fable');
 ok(routesTo('derive the equations then build a solver and test it') === 'fable', 'route: derive+build+test → Fable (fan-out wins)');
 
+// ---- tagLastBlockForCache (incremental conversation prompt-caching breakpoint) ----
+const tagCache = load('tagLastBlockForCache');
+{
+  // string content → wrapped into a tagged text block, earlier messages untouched
+  const inp = [{ role: 'user', content: 'hi' }, { role: 'assistant', content: 'hello there' }];
+  const out = tagCache(inp);
+  ok(Array.isArray(out[1].content) && out[1].content[0].cache_control && out[1].content[0].cache_control.type === 'ephemeral', 'cache: string last message → tagged text block');
+  ok(out[0] === inp[0], 'cache: earlier messages are the same objects (only last cloned)');
+  ok(inp[1].content === 'hello there', 'cache: original message NOT mutated');
+}
+{
+  // array content → last block tagged, prior blocks untouched
+  const inp = [{ role: 'user', content: [{ type: 'text', text: 'a' }, { type: 'text', text: 'b' }] }];
+  const out = tagCache(inp);
+  ok(out[0].content[1].cache_control && !out[0].content[0].cache_control, 'cache: array content → only LAST block tagged');
+}
+{
+  // already tagged → returns input unchanged (idempotent, no double breakpoint)
+  const inp = [{ role: 'user', content: [{ type: 'text', text: 'a', cache_control: { type: 'ephemeral' } }] }];
+  ok(tagCache(inp) === inp, 'cache: already-tagged last block → unchanged (idempotent)');
+}
+ok(tagCache([]) .length === 0, 'cache: empty messages → empty');
+ok(Array.isArray(tagCache('nope')) === false, 'cache: non-array → returned as-is');
+
 console.log(`\n${fail === 0 ? '✅' : '❌'} ${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);
