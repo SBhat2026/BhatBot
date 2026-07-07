@@ -20,3 +20,7 @@ spoken-model.json
 spoken.jsonl
 .episodic-vec.json
 .phase4-backup/
+
+# visual-check screenshots (Playwright artifacts, regenerated on demand)
+scripts/_rail-shot.png
+scripts/_health-shot.png
