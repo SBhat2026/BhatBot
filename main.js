@@ -6116,7 +6116,7 @@ ipcMain.handle('get-voice-config', () => {
     vadFloorMargin: (c.vad && c.vad.floorMargin) || 1.8, verifyUser: !!(c.voice && c.voice.verifyUser),
     ttsEnabled: c.ttsEnabled !== false, ttsProvider, hasTTS,
     ttsSpeed: c.ttsSpeed != null ? c.ttsSpeed : 1.05,
-    ttsTransport: c.ttsTransport === 'ws' ? 'ws' : 'rest',   // T1 transport (surfaced for the ops panel)
+    ttsTransport: ttsWsActive() ? 'ws' : 'rest',   // T1 transport, RESOLVED (auto→ws when usable) — surfaced for the ops panel
     uiTheme: c.uiTheme === 'hud' ? 'hud' : 'zen',            // T10 default: minimalist zen (config can force 'hud')
     hasReplicateKey: !!c.replicateKey, hasImageGen: !!c.openaiKey
   };
@@ -6821,7 +6821,16 @@ const _ttsWs = createTtsWs({
   onWakeMute: (on) => setWakeMute(on),
 });
 let _ttsWsSess = null, _ttsWsSeq = -1, _ttsWsNorm = null;
-function ttsWsActive() { const c = loadConfig(); return c.ttsTransport === 'ws' && _ttsWs.available(); }
+// TTS transport. Default 'auto' = use the low-latency continuous ws stream (one ElevenLabs
+// stream-input ws → one persistent ffplay/sox PCM player, no per-sentence REST POST + afplay
+// respawn) WHENEVER it's usable, else fall back to the REST per-sentence path. 'ws' forces it
+// (still guarded by available()); 'rest' pins the old path. Flipped from 'rest' default now that
+// ffplay is present here — kills the inter-sentence latency on every spoken turn.
+function ttsTransportMode() {
+  const t = loadConfig().ttsTransport;
+  return t === 'rest' ? 'rest' : t === 'ws' ? 'ws' : 'auto';
+}
+function ttsWsActive() { return ttsTransportMode() !== 'rest' && _ttsWs.available(); }
 function ttsWsEnsure(seq) {
   if (_ttsWsSess && _ttsWsSeq === seq) return _ttsWsSess;
   if (_ttsWsSess) { try { _ttsWsSess.close(); } catch {} }
