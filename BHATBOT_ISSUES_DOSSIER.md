@@ -1,14 +1,40 @@
 # BhatBot — Functional Issues Dossier
 _Compiled 2026-06-30. Grounded in the codebase + issues observed live this session. Ordered by the areas you asked about (context, tokens, parallelism, multi-agent) then everything else, however minor._
 
+> **STATUS UPDATE — 2026-07-07 (voice/complex-task/UI pass).** Most of the systemic limiters below
+> are now FIXED. Re-audited against current `main.js` (the code moved a lot since 2026-06-30, so
+> several items were already resolved by intervening sprints). Item-by-item:
+>
+> - **§1 Context management → ✅ RESOLVED.** Trim is token-budgeted (`estimateTokens`) AND runs
+>   mid-loop (`agentLoop` re-trims past `contextTrimBudget()`), and the working-memory clamp was
+>   raised from ~32K to **~150K** (`wireCapTokens`, `CONTEXT_TRIM_BUDGET` 120K / `CONTEXT_KEEP_TAIL`
+>   80K) so long autonomous tasks actually use the 200K window. A second prompt-cache breakpoint on
+>   the conversation prefix (`tagLastBlockForCache`) makes the bigger context affordable. **This was
+>   the #1 thing capping complex tasks.** (commits `0536e2d`, `21bc9d2`)
+> - **§3 Parallelism / Opus OTPM → ✅ MITIGATED.** Heavy-tier routing is now "auto by shape": fan-out
+>   fleet builds go to **Fable 5** (roomier OTPM, so drones aren't throttled to ~3 by Opus's 16K),
+>   solo deep-reasoning stays on Opus (`heavyModel(text)`). Live rate headers already self-correct the
+>   per-model budgets. (commit `0536e2d`)
+> - **§5.1 STT hallucination injection → ✅ RESOLVED** (already, pre-this-pass): `sanitizeSteering`
+>   guards the cloud path, local path, AND guidance injection; guidance is deduped + capped
+>   (`MAX_GUIDANCE_CHARS`). **§5.2 barge-in TTS-tail → ✅ adequately covered** (`stopSpeaking()` before
+>   mic open + echo cancellation + main-side `bargeInInterrupt()` kill). Plus TTS now defaults to the
+>   low-latency **ws transport** when usable (`auto`). (commit `808eb97`)
+> - **§2 Token/caching → ✅ IMPROVED** (see §1: conversation-prefix caching). **§4 local pipeline →
+>   ⚠️ STILL OPEN** (unchanged — tool tasks still escalate to cloud). **§5.4 secret-file read →
+>   ⚠️ open. Phone strict-EL silence → ⚠️ open** (desktop has Kokoro fallback; phone doesn't).
+>
+> The remaining open items are §4 (local pipeline tool-mangling) and the minor §5.4 / phone-EL
+> resilience. Detail preserved below for history.
+
 ---
 
 ## 0. Executive summary
 BhatBot is functional and the agent loop works (the Anthropic-key desync that had it fully dark is fixed this session). The biggest *systemic* limiters are, in order:
-1. **Context management is message-count-based, not token-based, and doesn't run mid-loop** → long autonomous tasks can silently approach the 200K window and lose fidelity to a 200-word summary.
-2. **Effective parallelism is OTPM-bound (~19 Sonnet), well below the nominal 24-agent cap** — raising caps doesn't buy more real throughput.
-3. **Local multi-agent pipeline mangles tool tasks**, so the system leans on cloud (Claude) for anything tool-heavy, which reconcentrates cost + rate-limit pressure.
-4. **Voice/STT injects hallucinated transcriptions as live steering** with no sanity guard (the "Talaser Talaser…" loop you saw).
+1. ✅ **Context management is message-count-based, not token-based, and doesn't run mid-loop** → **RESOLVED 2026-07-07** (token-budgeted + mid-loop + 150K working memory). Was → long autonomous tasks could silently approach the 200K window and lose fidelity to a 200-word summary.
+2. ✅ **Effective parallelism is OTPM-bound (~19 Sonnet), well below the nominal 24-agent cap** → **MITIGATED 2026-07-07** (auto-shape routing puts fleets on Fable 5's roomier OTPM; live headers self-correct budgets).
+3. ⚠️ **Local multi-agent pipeline mangles tool tasks**, so the system leans on cloud (Claude) for anything tool-heavy, which reconcentrates cost + rate-limit pressure. **STILL OPEN.**
+4. ✅ **Voice/STT injects hallucinated transcriptions as live steering** → **RESOLVED** (`sanitizeSteering` on all paths + capped/deduped guidance).
 
 ---
 

@@ -335,3 +335,38 @@ limiting." Verify-green (42 suites). Three coherent felt-latency wins:
 - **New config keys:** `prerenderAcks` (on), `spokenProgress` (on), `spokenProgressMs` (20000);
   `cacheKeepAlive` default flipped on. **New artifact:** `~/.bhatbot/voice/acks/*.mp3` + `index.json`.
 - **Tests:** `lib/pure.progressLine` in `test:actionguard` (now 22 assertions).
+
+## 16. Complex-task ceiling + voice latency + voice-first UI (2026-07-07, on `main`, pushed)
+Siddhant: "identify all TTS/STT issues; fix what's holding complex tasks back (I have a higher token
+threshold — it should do more); voice-focused UI with management/health viewpoints; get the issues
+dossier back to proper functioning." Interviewed for the majors → chose **aggressive ~150K working
+memory**, **auto-by-shape heavy model**, **summonable side drawers**, **commit+push to main**.
+Verify-green (38 suites). **Restart the desktop app to load.**
+
+- **Complex-task ceiling — the root fix.** It was a tiny working-memory clamp, not a missing
+  mechanism (the context trim was already token-budgeted + mid-loop). `capTokens` default **32K→150K**
+  (`wireCapTokens()`, config `wireCapTokens` / env `BB_WIRE_CAP`); `CONTEXT_TRIM_BUDGET` **28K→120K**,
+  `CONTEXT_KEEP_TAIL` **16K→80K** — now actually uses the 200K window instead of discarding ~85%.
+  (`0536e2d`)
+- **Incremental conversation caching** makes that affordable: a 2nd cache breakpoint at the end of
+  the message array (`tagLastBlockForCache`, in the single `anthropicRequest` chokepoint) caches the
+  whole conversation prefix, so the big working memory serves at cache-read rates within a turn and
+  inside the ~5-min TTL. Gated `config.convoCache` (on) + a ≥2K-token floor. (`21bc9d2`)
+- **Heavy tier = auto by shape** (`heavyModel(text)`): fan-out/fleet builds → **Fable 5** (roomier
+  OTPM so drones aren't throttled to ~3 by Opus's 16K), solo deep-reasoning → **Opus**. New
+  `config.heavyRouting` ('auto'|'fable'|'opus', default auto); `useFable`/`heavyToolModel` still
+  hard-override. Approval-gate wording + yes-regex name the resolved model. (`0536e2d`)
+- **Voice: ws transport now default `auto`** — resolves auto→ws whenever `_ttsWs.available()` (EL key
+  + ffplay/sox present here), killing the per-sentence REST/afplay respawn latency; falls back to REST
+  cleanly. The barge-in TTS-tail was already covered (stopSpeaking + echo-cancel + main-side kill).
+  Full TTS/STT audit in the session report — most dossier voice items were already fixed. (`808eb97`)
+- **Voice-first UI: summonable side drawers** (`src/index.html`, additive under `body.voicefirst`,
+  HUD untouched). Orb stage is home; a left icon **rail** (Manage 🛰 · Health ❤ · Activity 📊 ·
+  Fleet 🦾 · Memory 🧠 · Voice 🎚 · Config ⚙) slides each viewpoint in as a **drawer over the orb**
+  (blurred, scrim, orb visible behind). Controls: rail click (re-click closes), **⌘/Ctrl 1–6**,
+  scrim/Esc → back to voice. New Memory panel (`#notes-panel`). Reusable Playwright check
+  `scripts/voicefirst-visual-check.js`. (`84ac005`)
+- **New config keys:** `wireCapTokens` (150000), `heavyRouting` ('auto'), `convoCache` (on).
+- **New tests:** shape routing + `tagLastBlockForCache` in `test-main-helpers` (63 pass).
+- **Dossier:** `BHATBOT_ISSUES_DOSSIER.md` updated — §1 context ✅ resolved, §3 parallelism ✅
+  mitigated, §5 voice ✅ resolved; §4 local-pipeline tool-mangling + minor §5.4/phone-EL remain open.
