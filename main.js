@@ -137,9 +137,13 @@ const MAX_AGENT_ITERATIONS = 20;   // step ceiling; complex tasks need headroom 
 // burst — proven 4×+ in scripts/parallel-bench). Stateful/mutating tools (browser page, run_shell,
 // write_file, vision_click, screen_parse's shared worker, save_memory, system/media_control) are
 // deliberately EXCLUDED and always run sequentially in order.
+// Tools with NO side effects and no shared-resource contention → safe to run CONCURRENTLY when the
+// model fires a burst of them in one turn (main loop + every sub-agent/drone loop). Excludes anything
+// that writes, mutates shared state, or contends a single resource (screen/browser/GPU/vision model).
 const PARALLEL_SAFE = new Set([
   'read_file', 'list_directory', 'fetch_url', 'web_search', 'news', 'world_cup', 'notion_search',
   'ask_ai', 'keychain_lookup', 'onepassword_lookup', 'predict_function', 'maps', 'molecule', 'weather',
+  'find_papers', 'math_reason', 'ops_status',
 ]);
 const EXEC_PATH = `${process.env.PATH || ''}:/usr/local/bin:/opt/homebrew/bin:/Library/Frameworks/Python.framework/Versions/Current/bin:/Library/Frameworks/Python.framework/Versions/3.13/bin`;
 // SPLIT_PLAN step 7: raw shell exec + destructive-command pattern lists live in lib/shell.js now.
@@ -3027,6 +3031,7 @@ function subagentDeps() {
   return {
     anthropicRequest: pacedSubagentRequest, executeTool, toolDefs: TOOLS, apiKey: getApiKey(),
     models: { sonnet: MODEL_SONNET, haiku: MODEL_SONNET },   // Haiku retired → any 'haiku' role resolves to Sonnet (was undefined → broke lifeadmin/haiku roles)
+    parallelSafe: (name) => PARALLEL_SAFE.has(name),   // lets each fleet/ensemble suit run a read-burst concurrently (same set the main loop uses)
     fleetWidth, fleetFloor: 3,
     canDowngrade: () => false,   // no sub-Sonnet cloud tier anymore
     // T7 — a fresh SHARED blackboard per fan-out batch: ensemble/fleet pass it to every sibling so
@@ -3067,11 +3072,15 @@ async function droneAgentRun(ctx, task) {
     const step = ctx.onStep ? ctx.onStep({ usd, note: (text || 'tool step').slice(0, 60) }) : { budgetLeft: true };
     const tus = content.filter((b) => b.type === 'tool_use');
     if (!tus.length || resp.stop_reason === 'end_turn' || (step && step.budgetLeft === false) || (step && step.terminated)) break;
-    const results = [];
-    for (const tu of tus) {
+    const runOne = async (tu) => {
       const r = (ctx.tools || []).includes(tu.name) ? await executeTool(tu.name, tu.input) : { success: false, error: `tool "${tu.name}" is not permitted for this drone` };
-      results.push({ type: 'tool_result', tool_use_id: tu.id, content: JSON.stringify(r).slice(0, 16 * 1024), is_error: r && r.success === false });
-    }
+      return { type: 'tool_result', tool_use_id: tu.id, content: JSON.stringify(r).slice(0, 16 * 1024), is_error: r && r.success === false };
+    };
+    // Same read-burst throughput win as the main loop: independent read-only tools this turn run
+    // concurrently (order preserved for pairing); anything stateful stays sequential.
+    let results;
+    if (tus.length > 1 && tus.every((b) => PARALLEL_SAFE.has(b.name))) results = await Promise.all(tus.map(runOne));
+    else { results = []; for (const tu of tus) results.push(await runOne(tu)); }
     hist.push({ role: 'user', content: results });
   }
   return { status: 'ok', summary: finalText || '(completed, no text output)' };
