@@ -33,6 +33,8 @@ const { classifyDepth } = require('./lib/depth');       // A3 — per-turn respo
 const depthmodel = require('./lib/depthmodel');         // Phase 3 #1 — learned depth model (heuristic = fallback)
 const taper = require('./lib/taper');                   // Phase 3 #2 — conversation-position ceiling taper
 const episodic = require('./lib/episodic');             // Phase 3 #3 — episodic VECTOR recall (read-path only)
+const procedural = require('./lib/procedural');         // procedural memory — learned recurring step-series (faster over time)
+const { createReadCache } = require('./lib/readcache'); // shared TTL read-cache: fleet dedup + speculative prefetch
 const risk = require('./lib/risk');                    // W3 tool tiers + Phase 6 desire classification + frozen-zone gate
 const { riskOf } = risk;                               // per-tool key-risk classification (auto|confirm|stepup)
 const graph = require('./lib/graph');                  // W4 — knowledge-graph memory (entities + typed edges, multi-hop)
@@ -336,6 +338,14 @@ function summarizeBrowsing(events) {
 
 const WORKFLOW_DIR = path.join(os.homedir(), '.bhatbot', 'workflows');
 const NOTES_DIR = path.join(os.homedir(), '.bhatbot', 'notes');
+const PROCEDURAL_PATH = path.join(os.homedir(), '.bhatbot', 'procedural.json');   // learned step-series
+// Read tools whose results are content-stable enough to cache briefly (fleet dedup + prefetch).
+// NEVER credential tools (keychain/1Password/TOTP), nothing that mutates, nothing time-critical.
+const READ_CACHEABLE = new Set([
+  'read_file', 'list_directory', 'fetch_url', 'web_search', 'find_papers',
+  'predict_function', 'molecule', 'maps', 'math_reason',
+]);
+const _readCache = createReadCache();   // process-global → every agent/suit/drone shares it
 const pendingConfirms = new Map();
 let pendingGuidance = [];   // live feedback queued mid-task (steering)
 const MAX_GUIDANCE_CHARS = 500;   // cap total queued steering text so a garbage burst can't balloon a turn
@@ -658,6 +668,28 @@ async function refreshEpisodicVec(query) {
   } catch { _episodicVec = { key: query || '', text: '', seen: null }; }
 }
 
+// Procedural recall (tier 7 — learned step-series). Cheap + synchronous (keyword match, no embeddings):
+// look up routines that worked for tasks like THIS one, stash the hint block for buildMemoryBlock, and
+// remember the top routine id so finish() can reinforce/decay it by outcome. If the top routine records
+// a concrete read as its first step, SPECULATIVELY PREFETCH it now — warm before the model even asks.
+let _proceduralRecall = { key: '', text: '', routineId: null };
+function refreshProceduralRecall(query) {
+  try {
+    if (loadConfig().procedural === false) { _proceduralRecall = { key: '', text: '', routineId: null }; return; }
+    const key = notionRecallKey(query);
+    if (!key) { _proceduralRecall = { key: '', text: '', routineId: null }; return; }
+    if (key === _proceduralRecall.key) return;                            // dedupe identical consecutive turns
+    const hints = procedural.recall(PROCEDURAL_PATH, query, { limit: 2 });
+    _proceduralRecall = { key, text: hints.length ? procedural.format(hints) : '', routineId: hints[0] ? hints[0].id : null };
+    if (hints.length) console.log(`[procedural] ↻ ${hints.length} learned routine(s) for this task (top ${Math.round(hints[0].confidence * 100)}% / ${hints[0].uses}×)`);
+    // Speculative prefetch: warm the top routine's known first read while the model call is in flight.
+    const fr = hints[0] && hints[0].firstRead;
+    if (fr && fr.name && READ_CACHEABLE.has(fr.name) && loadConfig().proceduralPrefetch !== false) {
+      try { _readCache.prefetch(fr.name, fr.input || {}, () => executeTool(fr.name, fr.input || {})); } catch {}
+    }
+  } catch { _proceduralRecall = { key: query || '', text: '', routineId: null }; }
+}
+
 function buildMemoryBlock(query) {
   const cfg = loadConfig();
   const longTerm = memoryRetrieve(query, cfg.memoryTopK || 14);                              // tier 3
@@ -681,6 +713,8 @@ function buildMemoryBlock(query) {
   if (episodicMem) out += '\n\n## RECALLED FROM PAST SESSIONS (episodic)\n\n' + episodicMem;
   if (seenBlock) out += seenBlock;
   if (working) out += '\n\n## THIS SESSION SO FAR (working)\n\n' + working;
+  const proc = (_proceduralRecall.text && _proceduralRecall.key === notionRecallKey(query)) ? _proceduralRecall.text : '';  // tier 7 (learned routines)
+  if (proc) out += '\n\n' + proc;
   try { const proj = projects.contextBlock(); if (proj) out += '\n\n' + proj; } catch {}   // #24 active project context
   return out ? redactSecrets(out) : '';
 }
@@ -3225,6 +3259,15 @@ async function executeTool(name, input) {
       return result;
     }
   }
+  // Shared read-cache: for a side-effect-free read, serve a fresh cached result (or ride an in-flight
+  // prefetch) instead of re-running it — this is the fleet-dedup + speculative-prefetch fast path.
+  const __cacheable = READ_CACHEABLE.has(name) && loadConfig().readCache !== false;
+  if (__cacheable) {
+    try {
+      const hit = await _readCache.getAsync(name, input);
+      if (hit !== undefined) { auditLog(name, auditInput, hit, Date.now() - __auditT0, _lastUsage); return hit; }
+    } catch {}
+  }
   const maxAttempts = isRetryableTool(name, input) ? 2 : 1;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
   try {
@@ -4003,6 +4046,12 @@ async function executeTool(name, input) {
       else if (name === 'web_search' && typeof result.result === 'string') result.result = security.sanitizeExternalContent(result.result, 'web-search');
     }
   } catch {}
+  // Populate the shared read-cache on a successful read; a write invalidates any stale cached read of
+  // that path so a read-after-write in the same batch never sees old bytes.
+  try {
+    if (__cacheable && result && result.success !== false) _readCache.set(name, input, result);
+    else if ((name === 'write_file' || name === 'edit_file') && result && result.success !== false && input && input.path) _readCache.invalidatePath(expandPath(input.path));
+  } catch {}
   auditLog(name, auditInput, result, Date.now() - __auditT0, _lastUsage);   // log handles + LLM-step telemetry, never resolved secrets
   return result;
 }
@@ -4211,6 +4260,7 @@ async function agentLoop(history, apiKey, event, opts = {}) {
   // Passive auto-recall from the shared Notion bank — fold relevant facts (written by the Mac,
   // the cloud backend, or any other agent) into the memory block before we answer. Bounded to 4s.
   await Promise.all([refreshNotionRecall(lastUserText(history)), refreshSemanticRecall(lastUserText(history)), refreshEpisodicVec(lastUserText(history))]);
+  refreshProceduralRecall(lastUserText(history));   // learned step-series (sync) + speculative prefetch of the known first read
 
   // W1 — context-rot prevention: inject only the tools relevant to THIS turn (top-k by embedding
   // similarity + a small always-present CORE set), computed ONCE here and reused across every
@@ -4281,6 +4331,16 @@ async function agentLoop(history, apiKey, event, opts = {}) {
     // pipeline-local too, which used to be dropped — starving the W5 fine-tune loop). Not here.
     // #24 project memory: if a project is open, record the turn + cheaply refresh its living summary.
     try { const slug = projects.activeSlug(); if (slug) { projects.recordTurn(slug, lastUserText(history), clean); projects.maybeAutoSummarize(slug, { summarize: projectSummarize }).catch(() => {}); } } catch {}
+    // Procedural memory: bank THIS turn's step-series so look-alike tasks get faster next time. "ok" =
+    // the turn finished on its own (not stopped/aborted) with a real series of ≥2 tools. record() finds
+    // the matching routine by signature and reinforces it (wins++) or seeds a new one — so following a
+    // recalled routine that still works strengthens it, and paths that changed simply age out. F&F.
+    try {
+      if (loadConfig().procedural !== false && toolTrace.length >= procedural.MIN_STEPS) {
+        const ok = agentState !== 'stopped' && !/^⏹|interrupted/i.test(String(text || ''));
+        procedural.record(PROCEDURAL_PATH, { trigger: userText0, steps: toolTrace, ok, ms: Date.now() - _turnT0, firstRead: _firstRead });
+      }
+    } catch {}
     return { text: clean, history, _streamed: stream };
   };
 
@@ -4293,6 +4353,7 @@ async function agentLoop(history, apiKey, event, opts = {}) {
   const HARD_CEILING = Math.max(maxIters, Number(loadConfig().agentMaxStepsHard) || 60);
   const userText0 = lastUserText(history);            // the original request, for the action-verify judge
   let toolsRan = 0, unproductive = 0, verifyCount = 0; const toolNamesRan = []; const seenSigs = [];
+  const toolTrace = []; let _firstRead = null;   // procedural memory: this turn's ordered step-series + its first cacheable read
   if (stream) ttsLastAudioTs = Date.now();            // measure the progress-heartbeat silence from turn start
   while (iterations < maxIters) {
     if (agentState === 'stopped') return finish('⏹ Stopped.');
@@ -4405,6 +4466,12 @@ async function agentLoop(history, apiKey, event, opts = {}) {
     // extending; one exploring new actions keeps its budget.
     const sigs = toolUses.map((b) => toolSig(b.name, b.input));
     toolsRan += toolUses.length; for (const b of toolUses) toolNamesRan.push(b.name);
+    // Procedural memory: capture the ordered step-series + the FIRST cacheable read (with its concrete
+    // input) so a future look-alike turn can be prefetched. Bounded so a long turn can't balloon it.
+    for (const b of toolUses) {
+      if (toolTrace.length < 40) toolTrace.push(b.name);
+      if (!_firstRead && READ_CACHEABLE.has(b.name)) _firstRead = { name: b.name, input: b.input };
+    }
     const novel = sigs.some((s) => !seenSigs.includes(s));
     for (const s of sigs) seenSigs.push(s); while (seenSigs.length > 12) seenSigs.shift();
     unproductive = novel ? 0 : unproductive + 1;

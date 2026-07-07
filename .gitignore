@@ -19,6 +19,8 @@ depth-model.json
 spoken-model.json
 spoken.jsonl
 .episodic-vec.json
+# procedural memory — learned step-series (lives in ~/.bhatbot, per-user, never committed)
+procedural.json
 .phase4-backup/
 
 # visual-check screenshots (Playwright artifacts, regenerated on demand)
