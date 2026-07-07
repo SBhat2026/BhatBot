@@ -111,5 +111,21 @@ ok(looksHeavyTool('open spotify') === false, 'heavy: open spotify → NOT heavy'
 // heavy tasks should also register as complex, so the Sonnet-then-Opus routing chain is coherent
 ok(looksComplexTool('make a simulation of DNA replication') && looksHeavyTool('make a simulation of DNA replication'), 'heavy ⊂ complex: DNA sim is both (Sonnet gate then Opus override)');
 
+// ---- heavy-tier SHAPE routing (auto: fan-out → Fable 5, solo deep-reasoning → Opus) ----
+const looksFanOut = load('looksFanOut');
+const looksSoloDeep = load('looksSoloDeep');
+ok(looksFanOut('build a realistic fluid dynamics simulation') === true, 'shape: build a simulation → fan-out (Fable)');
+ok(looksFanOut('research protein folding papers and implement a model') === true, 'shape: research + implement → fan-out (Fable)');
+ok(looksFanOut('build a dashboard, analyze the data and render charts') === true, 'shape: chained build/analyze/render → fan-out (Fable)');
+ok(looksFanOut('design a comprehensive climate model') === true, 'shape: design a model → fan-out (Fable)');
+ok(looksSoloDeep('prove that this series converges') === true, 'shape: prove → solo deep (Opus)');
+ok(looksSoloDeep('derive the closed-form solution for this ODE') === true, 'shape: derive closed-form → solo deep (Opus)');
+ok(looksSoloDeep('explain the mechanism rigorously from first principles') === true, 'shape: explain mechanism rigorously → solo deep (Opus)');
+// routing rule: solo-deep AND NOT fan-out ⇒ Opus, else Fable
+const routesTo = (t) => (looksSoloDeep(t) && !looksFanOut(t)) ? 'opus' : 'fable';
+ok(routesTo('prove that this series converges') === 'opus', 'route: pure proof → Opus');
+ok(routesTo('build a realistic fluid dynamics simulation') === 'fable', 'route: sim build → Fable');
+ok(routesTo('derive the equations then build a solver and test it') === 'fable', 'route: derive+build+test → Fable (fan-out wins)');
+
 console.log(`\n${fail === 0 ? '✅' : '❌'} ${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);

@@ -794,10 +794,21 @@ function estimateTokens(obj) {
 function leadsWithToolResult(m) {
   return m && m.role === 'user' && Array.isArray(m.content) && m.content.some((b) => b && b.type === 'tool_result');
 }
-// Trim oldest turns until the message payload fits a token budget. Tier-1 cap is 50k
-// input tokens/min; we keep messages well under that (system+tools eat the rest) so a
-// single big call can't blow the limit. Pairing-safe: never start on an orphan tool_result.
-function capTokens(messages, maxTok = 32000) {   // tier-2 headroom → keep more conversation in working memory (was 20k)
+// The wire cap = how much CONVERSATION (messages, excl. the cached static prompt + tools) may ride
+// on a single API call. This is the real ceiling on complex-task working memory: on a 200K-window
+// model, a small cap throws away most of the window and forces lossy mid-task summarization. Sized
+// AGGRESSIVELY (~150K) so long autonomous fan-outs keep full-fidelity history; prompt caching on the
+// static prefix + the per-turn rate preflight (which dynamically shrinks this under live pressure,
+// see the budget.inSafe cap ~1576) keep cost/latency bounded. Config `wireCapTokens` / env BB_WIRE_CAP.
+const WIRE_CAP_DEFAULT = Number(process.env.BB_WIRE_CAP) || 150000;
+function wireCapTokens() {
+  try { const v = Number(loadConfig().wireCapTokens); if (v > 0) return v; } catch {}
+  return WIRE_CAP_DEFAULT;
+}
+// Trim oldest turns until the message payload fits a token budget. Pairing-safe: never start on an
+// orphan tool_result. Default cap = wireCapTokens() (aggressive working memory); callers under rate
+// pressure pass a smaller explicit maxTok.
+function capTokens(messages, maxTok = wireCapTokens()) {
   if (!Array.isArray(messages)) return messages;
   let msgs = messages.slice();
   while (msgs.length > 2 && estimateTokens(msgs) > maxTok) {
@@ -1072,9 +1083,39 @@ async function cheapText(system, userText, { maxTokens = 512 } = {}) {
     return { text: (r.content || []).filter((b) => b.type === 'text').map((b) => b.text).join(' ').trim(), via: 'sonnet' };
   } catch (e) { return { text: '', via: 'none', error: e.message }; }
 }
-// Resolve the HEAVY/orchestrator tier: Opus by default, or Fable-5 (native subagents, more autonomous)
-// when opted in. Used by the heavy-task routing + autonomous paths.
-function heavyModel() { const c = loadConfig(); return c.useFable ? MODEL_FABLE : (c.heavyToolModel || MODEL_OPUS); }
+// SHAPE of a heavy task, for the "auto by shape" heavy-tier routing (Siddhant's choice):
+//  • FAN-OUT  → a multi-lane build that the HEAVY_FLEET_DIRECTIVE decomposes into concurrent
+//    research/design/code/test drones. Wants the roomy-OTPM model (Fable 5) so the fleet isn't
+//    throttled to ~3 by Opus's 16K OTPM.
+//  • SOLO DEEP → a single hard reasoning artifact (a proof, a derivation, one closed-form solve)
+//    with no natural parallel decomposition. Wants Opus's depth on one linear call.
+function looksFanOut(text) {
+  const t = String(text || '').toLowerCase();
+  const build = /\b(build|create|implement|develop|make|design|scaffold|deploy|engineer)\b/.test(t)
+    && /\b(system|app|application|pipeline|framework|dashboard|engine|platform|website|web ?app|tool|simulation|game|model|service|api|bot)\b/.test(t);
+  const researchPlusBuild = /\b(research|papers?|literature|survey|state.?of.?the.?art)\b/.test(t)
+    && /\b(implement|code|build|write|design|test|visuali[sz]e|benchmark|prototype)\b/.test(t);
+  const chained = (/\b(and then|then|after that|also|plus|as well as|followed by)\b/.test(t)
+    || (t.match(/\band\b/g) || []).length >= 2)
+    && /\b(build|create|implement|design|analy[sz]e|render|deploy|write)\b/.test(t);
+  return build || researchPlusBuild || chained;
+}
+function looksSoloDeep(text) {
+  const t = String(text || '').toLowerCase();
+  return /\b(prove|proof|derive|derivation|solve\b|reason (?:through|about)|explain (?:why|the mechanism|rigorously)|analy[sz]e whether|theorem|lemma|closed.?form|analytic(?:al|ally)?|first principles?)\b/.test(t);
+}
+// Resolve the HEAVY/orchestrator tier. Order: explicit model override (heavyToolModel) → legacy
+// useFable opt-in → config.heavyRouting ('auto'|'fable'|'opus', default 'auto'). AUTO routes by task
+// shape: solo deep-reasoning → Opus; fan-out/fleet builds → Fable 5 (roomier OTPM for the drones).
+function heavyModel(text = '') {
+  const c = loadConfig();
+  if (c.heavyToolModel) return c.heavyToolModel;         // explicit model override wins
+  if (c.useFable) return MODEL_FABLE;                    // legacy hard opt-in
+  const mode = c.heavyRouting || 'auto';
+  if (mode === 'opus') return MODEL_OPUS;
+  if (mode === 'fable') return MODEL_FABLE;
+  return (looksSoloDeep(text) && !looksFanOut(text)) ? MODEL_OPUS : MODEL_FABLE;   // auto
+}
 // VANGUARD admission controller (Phase 1) — shared token-reservation ledger over the SAME rolling
 // rate windows as the main preflight (rateBudget). Sub-agent calls acquire/release through this so
 // concurrent suits self-throttle to live budget instead of convoying into the rate limit together.
@@ -1535,7 +1576,8 @@ async function callModel(messages, apiKey, allowDarkbloom, onText) {
   // before switching and sets _opusApproved for the session. If we reach here un-approved (or the knob
   // is off), we simply stay on Sonnet — never silently spend Opus rates.
   if (!overBudget() && toolish && (cfg.allowOpusHeavy !== false) && (cfg.opusRequiresApproval === false || _opusApproved) && looksHeavyTool(lastUserText(messages))) {
-    claudeModel = heavyModel(); _lastModel = claudeModel; _lastRouterTask = cfg.useFable ? 'heavy-fable-upgrade' : 'heavy-opus-upgrade';
+    claudeModel = heavyModel(lastUserText(messages)); _lastModel = claudeModel;
+    _lastRouterTask = 'heavy-' + (claudeModel === MODEL_FABLE ? 'fable' : claudeModel === MODEL_OPUS ? 'opus' : 'tier') + '-upgrade';
   }
 
   // Preflight rate-limit check: if this request would blow the per-minute INPUT or OUTPUT budget,
@@ -1648,17 +1690,18 @@ async function askAI(input) {
 // text note so vision works without re-sending megabytes every iteration.
 // evictOldImages moved to lib/history.js (SPLIT_PLAN step 9).
 
-// The effective wire cap is capTokens() (~32K messages by default) — the model never sees more
-// than that regardless of the 200K window. So we summarize JUST UNDER that cap: past this budget
-// capTokens would otherwise HARD-DROP the oldest turns (losing fidelity). Summarizing first means
-// a dense summary survives capTokens instead of raw truncation. Keep the most recent
-// CONTEXT_KEEP_TAIL tokens verbatim; both fit under the wire cap with headroom. Env-overridable.
-const CONTEXT_TRIM_BUDGET = Number(process.env.BB_CONTEXT_BUDGET) || 28000;
-const CONTEXT_KEEP_TAIL = Number(process.env.BB_CONTEXT_TAIL) || 16000;
+// The effective wire cap is capTokens() (~150K messages by default). We summarize JUST UNDER that
+// cap: past this budget capTokens would otherwise HARD-DROP the oldest turns (losing fidelity).
+// Summarizing first means a dense summary survives capTokens instead of raw truncation. Keep the
+// most recent CONTEXT_KEEP_TAIL tokens verbatim; both fit under the wire cap with headroom. Raised
+// with the wire cap so a long autonomous fan-out keeps ~80K of verbatim recent context (was 16K)
+// and only summarizes past ~120K (was 28K) — i.e. we now actually USE the 200K window. Env-overridable.
+const CONTEXT_TRIM_BUDGET = Number(process.env.BB_CONTEXT_BUDGET) || 120000;
+const CONTEXT_KEEP_TAIL = Number(process.env.BB_CONTEXT_TAIL) || 80000;
 // Live threshold: config.midLoopTrimThreshold overrides the default at runtime (no restart).
-// NOTE: the sensible ceiling is the ~32K capTokens wire cap, NOT the 200K window — past ~32K
-// capTokens already hard-drops oldest turns on every call, so trimming later than that can't
-// recover the lost fidelity. Values above the wire cap are accepted but won't help.
+// NOTE: the sensible ceiling is the capTokens wire cap (~150K), NOT the full 200K window — past the
+// wire cap, capTokens hard-drops oldest turns on every call, so trimming later than that can't
+// recover lost fidelity. Values above the wire cap are accepted but won't help.
 function contextTrimBudget() {
   try { const v = Number(loadConfig().midLoopTrimThreshold); if (v > 0) return v; } catch {}
   return CONTEXT_TRIM_BUDGET;
@@ -7318,7 +7361,7 @@ ipcMain.handle('chat', async (event, { history }) => {
   {
     const cfgOpus = loadConfig();
     if (_pendingOpusTask) {
-      const yes = /^\s*(use opus|opus\b|yes|yeah|yep|sure|ok(ay)?|go ahead|go for it|do it|proceed|approved?|permission granted)\b/i.test(ut) && !/\?/.test(ut);
+      const yes = /^\s*(use (opus|fable)|opus\b|fable\b|heavy tier|yes|yeah|yep|sure|ok(ay)?|go ahead|go for it|do it|proceed|approved?|permission granted)\b/i.test(ut) && !/\?/.test(ut);
       const no = /^\s*(no|nope|stay on sonnet|sonnet|keep sonnet|don'?t|cheaper|not now)\b/i.test(ut);
       if (yes) { const p = _pendingOpusTask; _pendingOpusTask = null; _opusApproved = true; history = p.history; }        // re-run on Opus
       else if (no) { const p = _pendingOpusTask; _pendingOpusTask = null; _opusSuppressAsk = true; history = p.history; } // re-run on Sonnet
@@ -7327,7 +7370,12 @@ ipcMain.handle('chat', async (event, { history }) => {
     if (!_opusApproved && !_opusSuppressAsk && cfgOpus.opusRequiresApproval !== false && cfgOpus.allowOpusHeavy !== false
         && !overBudget() && looksLikeToolTask(ut) && looksHeavyTool(ut)) {
       _pendingOpusTask = { history, at: Date.now() };
-      const q = 'This one\'s heavy — a scientific simulation / deep build. I can run it on **Opus** (my deepest model) and fan it out across a research → design → code → test fleet, which is more capable but costs more, or keep it on Sonnet. Want me on Opus? Say "use opus" or "stay on sonnet".';
+      const hm = heavyModel(ut);
+      const hmName = hm === MODEL_FABLE ? 'Fable 5' : hm === MODEL_OPUS ? 'Opus' : 'the heavy tier';
+      const why = hm === MODEL_FABLE
+        ? 'my most capable tier, with the output headroom to fan this out across a research → design → code → test fleet in parallel'
+        : 'my deepest reasoning model, best for a single hard derivation/solve';
+      const q = `This one's heavy — a scientific simulation / deep build. I can run it on **${hmName}** (${why}), which is more capable but costs more, or keep it on Sonnet. Want me on ${hmName}? Say "use ${hm === MODEL_FABLE ? 'fable' : 'opus'}" (or just "yes") or "stay on sonnet".`;
       return { text: q, history: [...history, { role: 'assistant', content: q }] };
     }
     _opusSuppressAsk = false;   // one-shot: only suppresses the immediate re-run
