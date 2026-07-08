@@ -56,6 +56,8 @@ contextBridge.exposeInMainWorld('bhatbot', {
   onRateStatus: (cb) => ipcRenderer.on('rate-status', (_e, p) => cb(p)),
   onOptionsRequired: (cb) => ipcRenderer.on('options-required', (_e, p) => cb(p)),
   answerOptions: (id, selected) => ipcRenderer.send('options-answer', { id, selected }),
+  onCanvasAdd: (cb) => ipcRenderer.on('canvas-add', (_e, p) => cb(p)),
+  onCanvasClear: (cb) => ipcRenderer.on('canvas-clear', (_e, p) => cb(p)),
   endSession: () => ipcRenderer.send('end-session'),
   onSessionNote: (cb) => ipcRenderer.on('session-note', (_e, n) => cb(n)),
   attachPaths: (paths) => ipcRenderer.invoke('attach-paths', paths),

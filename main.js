@@ -35,6 +35,7 @@ const taper = require('./lib/taper');                   // Phase 3 #2 — conver
 const episodic = require('./lib/episodic');             // Phase 3 #3 — episodic VECTOR recall (read-path only)
 const procedural = require('./lib/procedural');         // procedural memory — learned recurring step-series (faster over time)
 const { createReadCache } = require('./lib/readcache'); // shared TTL read-cache: fleet dedup + speculative prefetch
+const imagesearch = require('./lib/imagesearch');       // keyless real-photo search for the visual canvas + option cards
 const risk = require('./lib/risk');                    // W3 tool tiers + Phase 6 desire classification + frozen-zone gate
 const { riskOf } = risk;                               // per-tool key-risk classification (auto|confirm|stepup)
 const graph = require('./lib/graph');                  // W4 — knowledge-graph memory (entities + typed edges, multi-hop)
@@ -3284,36 +3285,105 @@ async function generateStudioArtifact(goal, spec, buildNotes, physics, emit, fix
   } catch { return null; }
 }
 
-async function buildProject(input = {}, opts = {}) {
-  const goal = String(input.goal || input.task || '').trim();
-  if (!goal) return { success: false, error: 'build_project needs a `goal` (what to design/build). Gather the specs first (ask_options), then call build_project.' };
-  const spec = (input.spec && typeof input.spec === 'object') ? input.spec : (input.spec ? { brief: String(input.spec) } : {});
-  const deliverable = ['studio', 'sim', 'both'].includes(input.deliverable) ? input.deliverable : 'both';
-  const emit = (t) => { try { (opts.onUpdate || ((x) => sendToActivity('tool-update', { type: 'thinking', text: x })))(t); } catch {} };
+// ── MULTI-PART ARTIFACT ASSEMBLY ─────────────────────────────────────────────────────────────────
+// A single 8k-token HTML can truncate on a big build. Instead: a DETERMINISTIC Three.js SKELETON
+// (scene/camera/lights/controls/spec-sheet — never model-generated, so it always renders) + one
+// bounded geometry function PER subsystem, generated IN PARALLEL, then stitched in. Robust + parallel.
+const STUDIO_SKELETON = `<!doctype html><html><head><meta charset="utf8"><title>__TITLE__</title>
+<style>html,body{margin:0;height:100%;background:#0a0e14;overflow:hidden;font-family:-apple-system,Segoe UI,Roboto,sans-serif}
+#c{width:100%;height:100%;display:block}
+#spec{position:fixed;top:14px;left:14px;max-width:320px;background:rgba(10,16,22,.82);border:1px solid #1d6e86;border-radius:12px;padding:14px 16px;color:#cfe8f2;font-size:13px;line-height:1.5;backdrop-filter:blur(8px)}
+#spec h1{margin:0 0 8px;font-size:15px;color:#7fe3ff;letter-spacing:.02em}#spec .row{display:flex;justify-content:space-between;gap:14px;padding:2px 0;border-bottom:1px solid rgba(127,212,232,.1)}#spec .k{color:#8fb8c8}#spec .v{color:#eaf6fb;text-align:right}
+#hint{position:fixed;bottom:12px;left:14px;color:#5b7187;font-size:11px}</style>
+<script type="importmap">{"imports":{"three":"https://unpkg.com/three@0.160.0/build/three.module.js","three/addons/":"https://unpkg.com/three@0.160.0/examples/jsm/"}}</script>
+</head><body><canvas id="c"></canvas><div id="spec">__SPECSHEET__</div><div id="hint">drag to orbit · scroll to zoom</div>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+const SPECS = __SPECSJSON__;
+const renderer = new THREE.WebGLRenderer({canvas:document.getElementById('c'),antialias:true});
+renderer.setSize(innerWidth,innerHeight);renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+const scene = new THREE.Scene();scene.background=new THREE.Color(0x0a0e14);
+const camera = new THREE.PerspectiveCamera(50,innerWidth/innerHeight,0.1,2000);camera.position.set(3.2,2.2,5.2);
+const controls = new OrbitControls(camera,renderer.domElement);controls.enableDamping=true;controls.target.set(0,1,0);
+scene.add(new THREE.HemisphereLight(0xbfe3ff,0x223,0.9));
+const key=new THREE.DirectionalLight(0xffffff,1.1);key.position.set(5,8,6);scene.add(key);
+const rim=new THREE.DirectionalLight(0x7fd4e8,0.6);rim.position.set(-6,3,-4);scene.add(rim);
+const grid=new THREE.GridHelper(20,20,0x1d6e86,0x122);grid.position.y=0;scene.add(grid);
+const group = new THREE.Group();scene.add(group);
+/*__PARTS__*/
+/*__CALLS__*/
+// frame the whole build
+try{const box=new THREE.Box3().setFromObject(group);if(!box.isEmpty()){const c=box.getCenter(new THREE.Vector3());const s=box.getSize(new THREE.Vector3());controls.target.copy(c);const r=Math.max(s.x,s.y,s.z)||3;camera.position.set(c.x+r*1.1,c.y+r*0.8,c.z+r*1.6);}}catch(e){}
+addEventListener('resize',()=>{camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();renderer.setSize(innerWidth,innerHeight);});
+(function loop(){requestAnimationFrame(loop);group.rotation.y+=0.0016;controls.update();renderer.render(scene,camera);})();
+</script></body></html>`;
 
-  // 1) Durable project — everything below persists here so Siddhant can resume the build later.
-  const proj = projects.open(input.projectName || goal.slice(0, 60));
-  const slug = proj.slug; try { projects.setActive(slug); projects.recordSpec(slug, spec); } catch {}
-  projects.note(slug, 'Build started: ' + goal, 'milestone');
-  emit(`🗂 project "${proj.name}" — decomposing into parallel lanes`);
+function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+function specSheetHtml(goal, spec, physics) {
+  const rows = [];
+  const s = spec && typeof spec === 'object' ? spec : {};
+  for (const k of Object.keys(s).slice(0, 14)) rows.push(`<div class="row"><span class="k">${esc(k)}</span><span class="v">${esc(String(s[k]).slice(0, 40))}</span></div>`);
+  if (physics && physics.summary) {
+    for (const line of String(physics.summary).split('\n').slice(0, 8)) {
+      const m = line.match(/^(.*?)[:=]\s*(.+)$/);
+      if (m) rows.push(`<div class="row"><span class="k">${esc(m[1].trim().slice(0, 28))}</span><span class="v">${esc(m[2].trim().slice(0, 40))}</span></div>`);
+    }
+  }
+  return `<h1>${esc(String(goal).slice(0, 50))}</h1>${rows.join('') || '<div class="row"><span class="k">spec</span><span class="v">—</span></div>'}`;
+}
+// Pull the notes most relevant to one lane out of the integrated build (keep each part-gen focused).
+function laneNotes(buildNotes, role) {
+  const txt = String(buildNotes || '');
+  const re = new RegExp('###[^\\n]*' + role.replace(/[-_]/g, '[\\s-_]*') + '[\\s\\S]*?(?=\\n###|$)', 'i');
+  const m = txt.match(re);
+  return (m ? m[0] : txt).slice(0, 2600);
+}
 
-  // 2) Decompose → parallel lanes.
-  const streams = (Array.isArray(input.workstreams) && input.workstreams.length)
-    ? input.workstreams.map((w, i) => ({ role: (w && w.role) || ('lane-' + (i + 1)), task: (w && (w.task || w)) })).filter((w) => w.task)
-    : await designWorkstreams(goal, spec, deliverable);
+// Assemble the interactive 3D scene from PARALLEL per-subsystem geometry functions stitched into the
+// deterministic skeleton. Falls back to the single-shot generator if the parts don't materialize.
+async function assembleStudioArtifact(goal, spec, buildNotes, physics, lanes, emit) {
+  emit('🎨 assembling the 3D scene — subsystems in parallel');
+  const list = (Array.isArray(lanes) && lanes.length ? lanes : [{ role: 'body', task: goal }]).slice(0, 6);
+  const specStr = JSON.stringify(spec || {}).slice(0, 700);
+  const genPart = async (lane, i) => {
+    const sys = `You write ONE JavaScript function that adds a single subsystem's 3D geometry to a Three.js scene. Signature EXACTLY: function part_${i}(THREE, scene, group, specs){ ... }. Build real, recognizable geometry for the "${lane.role}" subsystem using THREE primitives (Box/Cylinder/Sphere/Cone/Torus/Lathe/Extrude), MeshStandardMaterial with the specified colours/metalness, and Groups for structure; position parts sensibly (up = +Y, human-ish scale ~1.8 units tall). Add everything to \`group\`. NO imports, NO HTML, NO OrbitControls, NO renderer/scene creation, NO markdown. Output ONLY the function.`;
+    const usr = `Overall build: ${goal}\nThis subsystem — ${lane.role}: ${lane.task}\nSpecs: ${specStr}\nDesign notes:\n${laneNotes(buildNotes, lane.role)}`;
+    try {
+      const r = await anthropicRequest({ model: MODEL_FABLE, max_tokens: 2400, system: sys, messages: [{ role: 'user', content: usr }] }, getApiKey());
+      const code = extractCode((r.content || []).filter((b) => b.type === 'text').map((b) => b.text).join(''), 'javascript');
+      const fn = code.match(new RegExp('function part_' + i + '\\s*\\([\\s\\S]*'));
+      return (fn ? fn[0] : '') && /function part_/.test(fn ? fn[0] : '') ? (fn[0]) : `function part_${i}(THREE,scene,group,specs){}`;
+    } catch { return `function part_${i}(THREE,scene,group,specs){}`; }
+  };
+  let parts;
+  try { parts = await Promise.all(list.map(genPart)); } catch { parts = []; }   // PARALLEL geometry gen
+  const good = (parts || []).filter((p) => p && /function part_\d+\s*\([\s\S]*\{[\s\S]*\}/.test(p));
+  if (!good.length) { emit('↩︎ part assembly empty — single-shot fallback'); return generateStudioArtifact(goal, spec, buildNotes, physics, emit); }
+  const calls = list.map((_, i) => `try{part_${i}(THREE,scene,group,SPECS);}catch(e){console.warn('part ${i}',e);}`).join('\n');
+  return STUDIO_SKELETON
+    .replace('__TITLE__', esc(goal).slice(0, 60))
+    .replace('__SPECSHEET__', specSheetHtml(goal, spec, physics))
+    .replace('__SPECSJSON__', JSON.stringify(spec || {}))
+    .replace('/*__PARTS__*/', parts.join('\n\n'))
+    .replace('/*__CALLS__*/', calls);
+}
+
+// ONE build/refine pass: decompose → PARALLEL fleet → integrate → assemble (physics + multi-part 3D)
+// → render (completion-gated) → persist artifacts. extraNotes carries refinement feedback so the same
+// pass doubles as a refine step. Returns everything the caller needs to critique/iterate.
+async function buildPass(goal, spec, deliverable, slug, emit, extraNotes = '') {
+  const streams = await designWorkstreams(goal, spec, deliverable);
   emit(`🧩 ${streams.length} lanes in parallel: ${streams.map((s) => s.role).join(', ')}`);
-
-  // 3) PARALLEL fleet build on a shared blackboard, integrated into one build spec.
-  const fleetTasks = streams.map((s, i) => ({ id: 'lane-' + (i + 1), role: s.role, task: s.task + specBrief(spec, goal) }));
+  const fleetTasks = streams.map((s, i) => ({ id: 'lane-' + (i + 1), role: s.role, task: s.task + specBrief(spec, goal) + (extraNotes ? `\n\nINCORPORATE THIS FEEDBACK: ${extraNotes}` : '') }));
   let fleetOut;
   try { fleetOut = await agentTeam.fleet(fleetTasks, subagentDeps(), { maxParallel: fleetWidth(), integrate: true, onUpdate: (u) => fleetBroadcast(u) }); }
   catch (e) { fleetOut = { agents: [], result: 'lane build failed: ' + (e && e.message || e) }; }
   const agents = (fleetOut && fleetOut.agents) || [];
-  const buildNotes = (fleetOut && fleetOut.result) || agents.map((a) => `### ${a.role}\n${a.result}`).join('\n\n') || goal;
+  const buildNotes = ((fleetOut && fleetOut.result) || agents.map((a) => `### ${a.role}\n${a.result}`).join('\n\n') || goal) + (extraNotes ? '\n\nREQUESTED CHANGES: ' + extraNotes : '');
   try { for (const a of agents) projects.note(slug, `[${a.role}] ${String(a.result).slice(0, 220)}`, 'lane'); } catch {}
   emit('🔗 lanes integrated — building the deliverable');
 
-  // 4) Assemble artifact(s): real physics pass + interactive 3D scene.
   let physics = null, firstImage = null; const made = [];
   if (deliverable === 'sim' || deliverable === 'both') {
     physics = await runPhysicsPass(goal, spec, buildNotes, emit);
@@ -3321,31 +3391,171 @@ async function buildProject(input = {}, opts = {}) {
   }
   let studioOk = false;
   if (deliverable === 'studio' || deliverable === 'both') {
-    let html = await generateStudioArtifact(goal, spec, buildNotes, physics, emit);
+    let html = await assembleStudioArtifact(goal, spec, buildNotes, physics, streams, emit);   // MULTI-PART assembly
     if (html) {
       let w = await executeTool('studio_write', { html });
-      if (!w || w.success === false) {   // completion gate: one focused retry with the error fed back
+      if (!w || w.success === false) {   // completion gate: one focused single-shot retry
         const html2 = await generateStudioArtifact(goal, spec, buildNotes, physics, emit, (w && w.error) || 'did not render');
         if (html2) w = await executeTool('studio_write', { html: html2 });
       }
       if (w && w.success !== false) { studioOk = true; made.push('3D viewer'); if (w._image && !firstImage) firstImage = w._image; try { projects.recordArtifact(slug, { kind: 'studio', title: goal.slice(0, 60), path: STUDIO_INDEX }); } catch {} }
     }
   }
+  return { streams, buildNotes, physics, made, studioOk, firstImage };
+}
 
-  // 5) Persist detailed context + refresh the resumable summary.
-  const done = made.length ? made.join(' + ') : 'design notes only';
-  const summary = `Built ${goal} → ${done}. Lanes: ${streams.map((s) => s.role).join(', ')}.${physics && physics.ok ? ' Physics: ' + physics.summary.split('\n')[0].slice(0, 120) : ''}`;
+// Critic pass for auto-run: score the current build + list the highest-value gaps to address next.
+async function critiqueBuild(goal, spec, buildNotes, physics) {
+  const sys = 'You are a demanding design/engineering critic. Given a build and its current state, output ONLY JSON: {"score":0-100,"done":bool,"gaps":["the 1-3 highest-value concrete improvements to make next"]}. done=true only if the build is genuinely complete and polished (score ≥ 88) or further work would be diminishing returns.';
+  try {
+    const r = await anthropicRequest({ model: MODEL_SONNET, max_tokens: 500, system: sys, messages: [{ role: 'user', content: `Goal: ${goal}\nSpecs: ${JSON.stringify(spec).slice(0, 500)}\nPhysics: ${physics && physics.summary ? physics.summary.slice(0, 500) : 'n/a'}\nCurrent build notes:\n${String(buildNotes).slice(0, 5000)}` }] }, getApiKey());
+    const m = ((r.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('')).match(/\{[\s\S]*\}/);
+    const j = m ? JSON.parse(m[0]) : {};
+    return { score: Number(j.score) || 0, done: !!j.done, gaps: Array.isArray(j.gaps) ? j.gaps.slice(0, 3) : [] };
+  } catch { return { score: 0, done: false, gaps: [] }; }
+}
+
+function autoBuildCaps(input) {
+  const c = loadConfig().autoBuild || {};
+  return { usd: Number(input.budgetUsd || c.budgetUsd || 10), hours: Number(input.hours || c.hours || 4), maxRounds: Number(input.maxRounds || c.maxRounds || 20) };
+}
+
+// AUTO-RUN — a DETACHED loop that keeps building/refining until it self-judges done, or hits the spend
+// / time / round cap (Siddhant's pick: budget + time + done). Persists every round; notifies on finish.
+async function runAutoBuild(jobId, goal, spec, deliverable, slug) {
+  const caps = autoBuildCaps({}); const t0 = Date.now(); const usd0 = costToday().usd;
+  const emit = (t) => { try { jobsBus.update(jobId, { note: t }); sendToActivity('tool-update', { type: 'thinking', text: '🤖 auto-build: ' + t }); } catch {} };
+  let round = 0, best = null, notes = '';
+  try {
+    while (round < caps.maxRounds) {
+      round++;
+      emit(`round ${round} — building`);
+      const pass = await buildPass(goal, spec, deliverable, slug, emit, notes);
+      best = pass;
+      const spent = +(costToday().usd - usd0).toFixed(2); const hrs = (Date.now() - t0) / 3.6e6;
+      try { projects.note(slug, `auto round ${round}: ${pass.made.join(' + ') || 'notes'} (spent $${spent}, ${hrs.toFixed(1)}h)`, 'milestone'); } catch {}
+      if (spent >= caps.usd) { emit(`stopped — hit $${caps.usd} budget`); break; }
+      if (hrs >= caps.hours) { emit(`stopped — hit ${caps.hours}h`); break; }
+      const crit = await critiqueBuild(goal, spec, pass.buildNotes, pass.physics);
+      emit(`round ${round}: score ${crit.score}${crit.done ? ' — done' : ''}`);
+      if (crit.done || !crit.gaps.length) { emit('stopped — build complete'); break; }
+      notes = crit.gaps.join('; ');
+    }
+    const spent = +(costToday().usd - usd0).toFixed(2);
+    try { projects.recordTurn(slug, 'Auto-build: ' + goal, `Auto-build finished after ${round} rounds ($${spent}). ${best ? best.made.join(' + ') : ''}`); await projects.updateSummary(slug, { summarize: projectSummarize }); } catch {}
+    jobsBus.update(jobId, { status: 'done', note: `finished — ${round} rounds, $${spent}` });
+    try { if (loadConfig().ttsEnabled !== false) speakDesktop(`<speak>Auto build finished, sir. ${round} rounds on ${goal.slice(0, 60)}.</speak>`); } catch {}
+    try { telegramNotify(`🤖 Auto-build done: ${goal} — ${round} rounds, $${spent}. Project saved.`); } catch {}
+  } catch (e) { jobsBus.update(jobId, { status: 'error', note: String(e && e.message || e) }); }
+}
+
+async function buildProject(input = {}, opts = {}) {
+  const goal = String(input.goal || input.task || '').trim();
+  if (!goal) return { success: false, error: 'build_project needs a `goal` (what to design/build). Gather the specs first (ask_options), then call build_project.' };
+  const spec = (input.spec && typeof input.spec === 'object') ? input.spec : (input.spec ? { brief: String(input.spec) } : {});
+  const deliverable = ['studio', 'sim', 'both'].includes(input.deliverable) ? input.deliverable : 'both';
+  const mode = ['auto', 'collaborative'].includes(input.mode) ? input.mode : (loadConfig().buildMode === 'auto' ? 'auto' : 'collaborative');
+  const emit = (t) => { try { (opts.onUpdate || ((x) => sendToActivity('tool-update', { type: 'thinking', text: x })))(t); } catch {} };
+
+  // Durable project — everything persists here so Siddhant can resume the build later.
+  const proj = projects.open(input.projectName || goal.slice(0, 60));
+  const slug = proj.slug; try { projects.setActive(slug); projects.recordSpec(slug, spec); } catch {}
+  projects.note(slug, 'Build started: ' + goal + ' (' + mode + ')', 'milestone');
+
+  // AUTO-RUN — kick off the detached refine loop and return immediately (it runs for "hours").
+  if (mode === 'auto') {
+    const caps = autoBuildCaps(input);
+    const job = jobsBus.create({ name: 'auto-build: ' + goal.slice(0, 80), kind: 'project' });
+    runAutoBuild(job.id, goal, spec, deliverable, slug);   // NOT awaited — detached
+    return {
+      success: true, mode: 'auto', started: true, background: true, job_id: job.id, project: proj.name, projectSlug: slug,
+      note: `Auto-build running in the background on "${proj.name}" — it will keep refining until done or it hits the cap ($${caps.usd} / ${caps.hours}h). Tell Siddhant it's underway in ONE short sentence and END your turn; do NOT wait. It saves each round and announces when finished; steer via manage_jobs.`,
+    };
+  }
+
+  // COLLABORATIVE (default) — one pass, then check in and refine WITH Siddhant until he's happy.
+  emit(`🗂 project "${proj.name}" — collaborative build`);
+  let pass = await buildPass(goal, spec, deliverable, slug, emit);
+  let rounds = 1; const interactive = !isRemote() && mainWindow && !mainWindow.isDestroyed() && input.checkpoint !== false;
+  while (interactive && rounds < 6) {
+    let choice = [];
+    try {
+      choice = await requestOptions(
+        `"${proj.name}" — ${pass.made.join(' + ') || 'draft'} ready. What next?`,
+        [
+          { label: 'Looks good — finish', description: 'Keep it as is and save the project.' },
+          { label: 'Refine the design', description: 'Improve geometry / proportions / detail.' },
+          { label: 'Adjust materials & colours', description: 'Change the look, finish, or palette.' },
+          { label: 'Add / change a feature', description: 'Add, remove, or modify a subsystem.' },
+        ], false);
+    } catch { choice = []; }
+    const pick = (choice[0] || '').toLowerCase();
+    if (!pick || /looks good|finish/.test(pick)) break;
+    const feedback = /* let him type specifics via the same picker's Other, else a generic directive */ pick;
+    emit('🔧 refining: ' + feedback);
+    pass = await buildPass(goal, spec, deliverable, slug, emit, feedback);
+    rounds++;
+  }
+
+  const done = pass.made.length ? pass.made.join(' + ') : 'design notes only';
+  const summary = `Built ${goal} → ${done} (${rounds} pass${rounds > 1 ? 'es' : ''}). Lanes: ${pass.streams.map((s) => s.role).join(', ')}.${pass.physics && pass.physics.ok ? ' Physics: ' + pass.physics.summary.split('\n')[0].slice(0, 120) : ''}`;
   try { projects.note(slug, 'Deliverable: ' + done, 'milestone'); projects.recordTurn(slug, 'Build: ' + goal, summary); await projects.updateSummary(slug, { summarize: projectSummarize }); } catch {}
   emit(`✅ ${proj.name}: ${done}`);
 
   return {
-    success: true, project: proj.name, projectSlug: slug, deliverable,
-    lanes: streams.map((s) => s.role),
-    physics: physics ? physics.summary : undefined,
-    artifactRendered: studioOk, produced: made,
-    summary, resume: `Saved as project "${proj.name}". Say "continue ${proj.name}" (or ask for a change) to keep working on it — the specs + artifacts are remembered.`,
-    _image: firstImage || undefined, _imageMime: 'image/jpeg',
+    success: true, mode: 'collaborative', project: proj.name, projectSlug: slug, deliverable, rounds,
+    lanes: pass.streams.map((s) => s.role),
+    physics: pass.physics ? pass.physics.summary : undefined,
+    artifactRendered: pass.studioOk, produced: pass.made,
+    summary, resume: `Saved as project "${proj.name}". Say "continue ${proj.name}" (or ask for a change) to keep working on it — the specs + artifacts are remembered. Set mode:"auto" to let it refine autonomously for hours.`,
+    _image: pass.firstImage || undefined, _imageMime: 'image/jpeg',
   };
+}
+
+// ── VISUAL LAYER — canvas + option thumbnails ────────────────────────────────────────────────────
+// Smart-mix image resolver (Siddhant's pick): a real photo for a real thing (Colosseum, a place, a
+// product) via keyless search; an AI-generated image for a concept/abstract option. Returns a URL
+// (https for search results, data: URI for generated) suitable for an <img src>.
+async function resolveImage(query, { generate } = {}) {
+  const q = String(query || '').trim(); if (!q) return null;
+  if (generate) {
+    try { const g = await generateImage({ prompt: q }); if (g && g.success && g._image) return `data:${g._imageMime || 'image/png'};base64,${g._image}`; } catch {}
+    return null;
+  }
+  try { const r = await imagesearch.search(q, { limit: 1 }); if (r && r[0]) return r[0].thumb || r[0].url; } catch {}
+  return null;
+}
+
+// show_visuals — open the in-app CANVAS and layer draggable/resizable image cards while BhatBot keeps
+// talking. Sources images smart-mix (real search default; generate:true for concepts) or takes explicit urls.
+async function showVisuals(input = {}) {
+  const title = String(input.title || input.query || 'Visuals').slice(0, 90);
+  let images = [];
+  if (Array.isArray(input.urls) && input.urls.length) {
+    images = input.urls.slice(0, 12).map((u, i) => ({ url: String(u), caption: (input.captions && input.captions[i]) || '' }));
+  } else if (input.generate) {
+    const n = Math.min(Number(input.count) || 1, 4);
+    const gens = await Promise.all(Array.from({ length: n }, () => resolveImage(input.query || title, { generate: true })));
+    images = gens.filter(Boolean).map((u) => ({ url: u, caption: input.query || title }));
+  } else {
+    try { const r = await imagesearch.search(input.query || title, { limit: Math.min(Number(input.count) || 6, 12) }); images = r.map((x) => ({ url: x.thumb || x.url, full: x.url, caption: x.title, by: x.by, source: x.source })); } catch {}
+  }
+  if (!images.length) return { success: false, error: 'no images found for "' + (input.query || title) + '" — describe it in words instead, or try generate:true.' };
+  try { if (mainWindow && !mainWindow.isDestroyed()) { mainWindow.show(); mainWindow.webContents.send('canvas-add', { title, images }); mainWindow.webContents.send('show-panel', 'canvas'); } } catch {}
+  return { success: true, shown: images.length, title, note: 'Images are ON the canvas now — keep talking about the subject; do NOT read image URLs aloud.' };
+}
+
+// Resolve any per-option imagery for an ask_options card (imageQuery → search, generate:true → AI),
+// bounded so the card still pops promptly.
+async function resolveOptionImages(opts) {
+  await Promise.all(opts.map(async (o) => {
+    if (o.image || (!o.imageQuery && !o.generate)) return;
+    try {
+      const u = await Promise.race([resolveImage(o.imageQuery || o.label, { generate: !!o.generate }), new Promise((r) => setTimeout(() => r(null), 6000))]);
+      if (u) o.image = u;
+    } catch {}
+  }));
+  return opts;
 }
 
 // edit_file (Phase 1, Deliverable #1) — surgical single-string patch. Safety posture: the file must
@@ -3531,14 +3741,17 @@ async function executeTool(name, input) {
       case 'notify_user':
         result = await notifyUser(input.message, input.urgency || 'low', { awaitReply: !!input.awaitReply, taskId: input.taskId }); break;
       case 'ask_options': {
-        const opts = Array.isArray(input.options) ? input.options.filter((o) => o && (o.label || typeof o === 'string')).map((o) => (typeof o === 'string' ? { label: o } : { label: String(o.label), description: o.description ? String(o.description) : undefined })).slice(0, 12) : [];
-        if (!input.question || opts.length < 2) { result = { success: false, error: 'ask_options needs a `question` and ≥2 `options` (each {label, description?}).' }; break; }
+        const opts = Array.isArray(input.options) ? input.options.filter((o) => o && (o.label || typeof o === 'string')).map((o) => (typeof o === 'string' ? { label: o } : { label: String(o.label), description: o.description ? String(o.description) : undefined, image: o.image ? String(o.image) : undefined, imageQuery: o.imageQuery ? String(o.imageQuery) : undefined, generate: !!o.generate })).slice(0, 12) : [];
+        if (!input.question || opts.length < 2) { result = { success: false, error: 'ask_options needs a `question` and ≥2 `options` (each {label, description?, imageQuery?}).' }; break; }
         // Interactive picker is a desktop-window feature; on phone/headless/remote fall back to text.
         if (isRemote() || !mainWindow || mainWindow.isDestroyed()) { result = { success: false, error: 'No interactive UI on this surface — instead, list the options in your reply as a numbered list and ask Siddhant to reply with his pick(s).' }; break; }
+        if (opts.some((o) => o.imageQuery || o.generate)) { try { sendToActivity('tool-update', { type: 'thinking', text: '🖼 fetching option visuals' }); await resolveOptionImages(opts); } catch {} }   // visual options
         const selected = await requestOptions(input.question, opts, !!input.multi);
         result = { success: true, selected, note: selected.length ? undefined : 'Siddhant made no selection (dismissed the card) — proceed with sensible defaults or ask again in text.' };
         break;
       }
+      case 'show_visuals':
+        result = await showVisuals(input || {}); break;
       case 'keychain_lookup':
         result = keychainLookup(input); break;
       case 'onepassword_lookup':

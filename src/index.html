@@ -725,6 +725,35 @@
   #opt-card .opt-confirm:disabled { opacity: .45; cursor: not-allowed; }
   #opt-card .opt-skip { background: transparent; color: var(--text-dim); border-color: var(--line); font-weight: 400; }
   #opt-card .opt-skip:hover { color: var(--text); border-color: var(--accent-dim); }
+  /* visual option thumbnails */
+  #opt-card .opt-thumb { flex-shrink: 0; width: 68px; height: 68px; border-radius: 9px; object-fit: cover;
+    border: 1px solid var(--line); background: #0c1116; }
+  #opt-card .opt-item.has-img { align-items: center; }
+
+  /* VISUAL CANVAS — a freeform board of draggable, resizable image cards, layered while BhatBot talks */
+  #canvas-panel .panel-head .cv-clear { margin-left: auto; font-size: 12px; color: var(--text-dim); cursor: pointer; -webkit-app-region: no-drag; padding: 3px 9px; border: 1px solid var(--line); border-radius: 7px; }
+  #canvas-panel .panel-head .cv-clear:hover { color: var(--accent); border-color: var(--accent-dim); }
+  #canvas-board { position: relative; flex: 1; min-height: 0; overflow: hidden;
+    background:
+      radial-gradient(circle at 20% 30%, rgba(127,212,232,.05), transparent 40%),
+      repeating-linear-gradient(0deg, transparent 0 23px, rgba(127,212,232,.045) 23px 24px),
+      repeating-linear-gradient(90deg, transparent 0 23px, rgba(127,212,232,.045) 23px 24px);
+  }
+  #canvas-board .cv-empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #5b7187; font-size: 13px; text-align: center; padding: 0 30px; pointer-events: none; }
+  .cv-card { position: absolute; width: 240px; background: #0d141b; border: 1px solid var(--accent-dim); border-radius: 10px;
+    box-shadow: 0 14px 34px -14px rgba(0,0,0,.7); overflow: hidden; -webkit-app-region: no-drag; user-select: none; animation: cvIn .22s ease; }
+  @keyframes cvIn { from { opacity: 0; transform: scale(.94) } to { opacity: 1; transform: scale(1) } }
+  .cv-card.dragging, .cv-card.resizing { box-shadow: 0 22px 50px -14px rgba(0,0,0,.85); border-color: var(--accent); z-index: 60 !important; }
+  .cv-card .cv-bar { display: flex; align-items: center; gap: 6px; height: 24px; padding: 0 8px; cursor: grab; background: rgba(127,212,232,.08); font-size: 11px; color: var(--text-dim); }
+  .cv-card .cv-bar:active { cursor: grabbing; }
+  .cv-card .cv-bar .cv-t { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .cv-card .cv-bar .cv-x { cursor: pointer; padding: 0 4px; color: var(--text-dim2); }
+  .cv-card .cv-bar .cv-x:hover { color: var(--warn); }
+  .cv-card img { display: block; width: 100%; height: calc(100% - 24px); object-fit: cover; background: #0c1116; pointer-events: none; }
+  .cv-card .cv-cap { position: absolute; left: 0; right: 0; bottom: 0; padding: 5px 8px; font-size: 10.5px; color: #cfe8f2;
+    background: linear-gradient(0deg, rgba(6,10,14,.88), transparent); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none; }
+  .cv-card .cv-rz { position: absolute; right: 0; bottom: 0; width: 16px; height: 16px; cursor: nwse-resize;
+    background: linear-gradient(135deg, transparent 50%, var(--accent-dim) 50%); }
 </style>
 </head>
 <body>
@@ -801,8 +830,9 @@
     <button class="railbtn" data-panel="vanguard" title="Fleet — parallel agent suits (⌘4)"><span>🦾</span><small>Fleet</small></button>
     <button class="railbtn" data-panel="notes"    title="Memory — session notes (⌘5)"><span>🧠</span><small>Memory</small></button>
     <button class="railbtn" data-panel="routines" title="Routines — learned skills (⌘6)"><span>🧭</span><small>Routines</small></button>
+    <button class="railbtn" data-panel="canvas"   title="Canvas — visual board (⌘7)"><span>🖼</span><small>Canvas</small></button>
     <span class="railspacer"></span>
-    <button class="railbtn" data-panel="voice"    title="Voice — tune JARVIS (⌘7)"><span>🎚</span><small>Voice</small></button>
+    <button class="railbtn" data-panel="voice"    title="Voice — tune JARVIS (⌘8)"><span>🎚</span><small>Voice</small></button>
     <button class="railbtn" data-panel="settings" title="Settings — API key & config"><span>⚙</span><small>Config</small></button>
   </nav>
   <div id="drawerscrim" title="Close (Esc)"></div>
@@ -819,6 +849,12 @@
     <div class="panel-head"><b>🧭 ROUTINES</b><span class="panel-back" data-back>← Chat</span></div>
     <div style="padding:8px 12px;color:var(--text-dim2);font-size:12.5px">Paths BhatBot has learned from doing things — reused to work faster next time. 📌 Pin one to keep it forever; prune one that's wrong.</div>
     <div id="routines-list" style="flex:1;min-height:0;overflow-y:auto;padding:6px 12px 12px"></div>
+  </div>
+
+  <!-- Canvas — the visual board: draggable/resizable images BhatBot layers in while it talks -->
+  <div id="canvas-panel" class="stage-panel">
+    <div class="panel-head"><b>🖼 CANVAS</b><span class="cv-clear" id="cv-clear">Clear</span><span class="panel-back" data-back style="margin-left:8px">← Chat</span></div>
+    <div id="canvas-board"><div class="cv-empty">A blank board — BhatBot layers images here as it talks. Drag to move, drag the corner to resize.</div></div>
   </div>
 
   <div id="nexus-panel" class="stage-panel">
@@ -1608,7 +1644,7 @@ document.querySelectorAll('#railnav .railbtn').forEach((b) =>
 // Scrim behind an open drawer → click to dismiss back to the orb.
 { const scrim = document.getElementById('drawerscrim'); if (scrim) scrim.addEventListener('click', () => showPanel('chat')); }
 // ⌘/Ctrl 1–6 jump straight to a viewpoint (toggle closed if already open).
-const RAIL_KEYS = { '1': 'manage', '2': 'health', '3': 'activity', '4': 'vanguard', '5': 'notes', '6': 'routines', '7': 'voice' };
+const RAIL_KEYS = { '1': 'manage', '2': 'health', '3': 'activity', '4': 'vanguard', '5': 'notes', '6': 'routines', '7': 'canvas', '8': 'voice' };
 document.addEventListener('keydown', (e) => {
   if (!(e.metaKey || e.ctrlKey) || e.shiftKey || e.altKey) return;
   const id = RAIL_KEYS[e.key];
@@ -1654,8 +1690,9 @@ function renderOptionCard({ id, question, options, multi }) {
   const submit = (sel) => { closeOptionCard(); try { window.bhatbot.answerOptions(id, sel); } catch {} };
   (options || []).forEach((o, i) => {
     const it = document.createElement('button');
-    it.className = 'opt-item' + (multi ? '' : ' single');
+    it.className = 'opt-item' + (multi ? '' : ' single') + (o.image ? ' has-img' : '');
     const box = document.createElement('span'); box.className = 'opt-box';
+    if (o.image) { const im = document.createElement('img'); im.className = 'opt-thumb'; im.src = o.image; im.onerror = () => im.remove(); it.appendChild(im); }
     const txt = document.createElement('span'); txt.className = 'opt-txt';
     const lb = document.createElement('span'); lb.className = 'opt-label'; lb.textContent = o.label || ('Option ' + (i + 1));
     txt.appendChild(lb);
@@ -1686,6 +1723,58 @@ function renderOptionCard({ id, question, options, multi }) {
   _optState = { card, scrim, id };
 }
 window.bhatbot.onOptionsRequired && window.bhatbot.onOptionsRequired((p) => renderOptionCard(p));
+
+// ===== Visual canvas: draggable / resizable image cards layered while BhatBot talks =====
+let _cvZ = 10, _cvN = 0;
+function canvasBoard() { return document.getElementById('canvas-board'); }
+function cvClear() { const b = canvasBoard(); if (!b) return; b.querySelectorAll('.cv-card').forEach((c) => c.remove()); const e = b.querySelector('.cv-empty'); if (e) e.style.display = ''; _cvN = 0; }
+function cvAddImage(img, idx) {
+  const board = canvasBoard(); if (!board) return;
+  const e = board.querySelector('.cv-empty'); if (e) e.style.display = 'none';
+  const bw = board.clientWidth || 600, bh = board.clientHeight || 500;
+  const card = document.createElement('div'); card.className = 'cv-card';
+  const w = 240, h = 210;
+  // cascade the cards so they layer rather than stack exactly
+  const x = Math.max(6, Math.min(bw - w - 6, 24 + (idx % 4) * 46 + Math.floor(idx / 4) * 20));
+  const y = Math.max(6, Math.min(bh - h - 6, 20 + (idx % 4) * 34 + Math.floor(idx / 4) * 40));
+  card.style.left = x + 'px'; card.style.top = y + 'px'; card.style.width = w + 'px'; card.style.height = h + 'px'; card.style.zIndex = ++_cvZ;
+  const bar = document.createElement('div'); bar.className = 'cv-bar';
+  const t = document.createElement('span'); t.className = 'cv-t'; t.textContent = img.caption || ('image ' + (idx + 1));
+  const x2 = document.createElement('span'); x2.className = 'cv-x'; x2.textContent = '✕'; x2.title = 'remove';
+  bar.appendChild(t); bar.appendChild(x2);
+  const im = document.createElement('img'); im.src = img.url; im.alt = img.caption || ''; im.draggable = false;
+  im.onerror = () => { card.remove(); };
+  const cap = document.createElement('div'); cap.className = 'cv-cap'; cap.textContent = (img.by ? '© ' + img.by : (img.source || '')); if (!cap.textContent) cap.style.display = 'none';
+  const rz = document.createElement('div'); rz.className = 'cv-rz';
+  card.appendChild(bar); card.appendChild(im); card.appendChild(cap); card.appendChild(rz);
+  board.appendChild(card);
+  const bringFront = () => { card.style.zIndex = ++_cvZ; };
+  card.addEventListener('mousedown', bringFront);
+  x2.addEventListener('click', (ev) => { ev.stopPropagation(); card.remove(); });
+  // drag by the title bar
+  bar.addEventListener('mousedown', (ev) => {
+    if (ev.target === x2) return;
+    ev.preventDefault(); bringFront(); card.classList.add('dragging');
+    const sx = ev.clientX, sy = ev.clientY, ox = card.offsetLeft, oy = card.offsetTop;
+    const mv = (e) => { card.style.left = Math.max(0, Math.min(board.clientWidth - 40, ox + e.clientX - sx)) + 'px'; card.style.top = Math.max(0, Math.min(board.clientHeight - 24, oy + e.clientY - sy)) + 'px'; };
+    const up = () => { card.classList.remove('dragging'); document.removeEventListener('mousemove', mv); document.removeEventListener('mouseup', up); };
+    document.addEventListener('mousemove', mv); document.addEventListener('mouseup', up);
+  });
+  // resize by the corner handle
+  rz.addEventListener('mousedown', (ev) => {
+    ev.preventDefault(); ev.stopPropagation(); bringFront(); card.classList.add('resizing');
+    const sx = ev.clientX, sy = ev.clientY, ow = card.offsetWidth, oh = card.offsetHeight;
+    const mv = (e) => { card.style.width = Math.max(120, ow + e.clientX - sx) + 'px'; card.style.height = Math.max(110, oh + e.clientY - sy) + 'px'; };
+    const up = () => { card.classList.remove('resizing'); document.removeEventListener('mousemove', mv); document.removeEventListener('mouseup', up); };
+    document.addEventListener('mousemove', mv); document.addEventListener('mouseup', up);
+  });
+}
+window.bhatbot.onCanvasAdd && window.bhatbot.onCanvasAdd((p) => {
+  if (!p || !Array.isArray(p.images)) return;
+  p.images.forEach((img) => cvAddImage(img, _cvN++));
+});
+window.bhatbot.onCanvasClear && window.bhatbot.onCanvasClear(() => cvClear());
+{ const cb = document.getElementById('cv-clear'); if (cb) cb.addEventListener('click', cvClear); }
 
 // Step-up / confirm gate — renders the human-approval card for high-risk tools (self_drive,
 // self_fix, remote-destructive, etc.). Was orphaned when the Activity window was retired, so

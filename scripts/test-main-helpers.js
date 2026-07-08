@@ -162,6 +162,17 @@ ok(Array.isArray(tagCache('nope')) === false, 'cache: non-array → returned as-
   ok(looksHeavyTool('reply to that email') === false, 'heavy: a routine action → not heavy');
 }
 
+// ---- esc / laneNotes (multi-part artifact assembly helpers) ----
+{
+  const esc = load('esc');
+  ok(esc('<b>"a"&b</b>') === '&lt;b&gt;&quot;a&quot;&amp;b&lt;/b&gt;', 'esc: escapes HTML metacharacters');
+  const laneNotes = load('laneNotes');
+  const notes = '### exterior-geometry\nblue plates, 1.8m tall\n\n### power-systems\narc reactor 2.4MW';
+  ok(laneNotes(notes, 'power-systems').includes('arc reactor'), 'laneNotes: slices the matching lane section');
+  ok(laneNotes(notes, 'exterior-geometry').includes('blue plates'), 'laneNotes: matches hyphenated role names');
+  ok(laneNotes('no headings here', 'anything').includes('no headings'), 'laneNotes: no section → returns the notes');
+}
+
 // ---- extractCode (build_project artifact/code extraction) ----
 {
   const extractCode = load('extractCode');
