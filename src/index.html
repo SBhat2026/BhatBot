@@ -679,6 +679,52 @@
     border-radius: 8px; border: 1px solid var(--line); background: transparent; color: var(--text-dim); transition: .12s; }
   .rt-btn:hover { color: var(--accent); border-color: var(--accent-dim); background: rgba(127,212,232,.08); }
   .rt-btn.warn:hover { color: var(--warn); border-color: var(--warn); background: rgba(255,120,120,.08); }
+
+  /* Subtle rate-limit chip in the titlebar (shown only while pacing) */
+  .ratechip {
+    display: none; margin-left: 12px; padding: 2px 9px; border-radius: 999px; font-size: 11px;
+    letter-spacing: .04em; color: #f4c96b; background: rgba(244,201,107,.10);
+    border: 1px solid rgba(244,201,107,.34); -webkit-app-region: no-drag; white-space: nowrap;
+    animation: ratepulse 1.8s ease-in-out infinite;
+  }
+  .ratechip.show { display: inline-block; }
+  @keyframes ratepulse { 0%,100% { opacity: .62 } 50% { opacity: 1 } }
+
+  /* Interactive option picker (ask_options) — a checkbox card centered over the stage */
+  #opt-scrim { position: fixed; inset: 0; z-index: 90; background: rgba(4,8,12,.42);
+    -webkit-backdrop-filter: blur(3px); backdrop-filter: blur(3px); -webkit-app-region: no-drag; animation: scrimIn .16s ease; }
+  #opt-card {
+    position: fixed; z-index: 91; left: 50%; top: 50%; transform: translate(-50%,-50%);
+    width: min(560px, 88vw); max-height: 82vh; overflow-y: auto; -webkit-app-region: no-drag;
+    background: color-mix(in srgb, var(--surface) 96%, transparent); border: 1px solid var(--accent-dim);
+    border-radius: 16px; padding: 20px 20px 18px; box-shadow: 0 30px 80px -24px rgba(0,0,0,.8);
+    animation: optIn .18s cubic-bezier(.4,0,.2,1);
+  }
+  @keyframes optIn { from { opacity: 0; transform: translate(-50%,-46%) scale(.97) } to { opacity: 1; transform: translate(-50%,-50%) scale(1) } }
+  #opt-card .opt-q { font-size: 18px; font-weight: 600; color: var(--text); margin-bottom: 4px; }
+  #opt-card .opt-sub { font-size: 12px; color: var(--text-dim2); margin-bottom: 14px; }
+  #opt-card .opt-item {
+    display: flex; align-items: flex-start; gap: 12px; width: 100%; text-align: left; cursor: pointer;
+    background: transparent; border: 1px solid var(--line); border-radius: 12px; padding: 13px 14px;
+    margin-bottom: 9px; color: var(--text); font: inherit; transition: .12s;
+  }
+  #opt-card .opt-item:hover { border-color: var(--accent-dim); background: rgba(127,212,232,.06); }
+  #opt-card .opt-item.on { border-color: var(--accent); background: rgba(127,212,232,.13); }
+  #opt-card .opt-box { flex-shrink: 0; width: 22px; height: 22px; border-radius: 6px; border: 2px solid var(--accent-dim);
+    display: flex; align-items: center; justify-content: center; font-size: 14px; color: var(--accent); margin-top: 1px; }
+  #opt-card .opt-item.single .opt-box { border-radius: 50%; }
+  #opt-card .opt-item.on .opt-box { border-color: var(--accent); background: var(--accent); color: #06222b; }
+  #opt-card .opt-txt { display: flex; flex-direction: column; gap: 2px; }
+  #opt-card .opt-label { font-size: 15.5px; font-weight: 500; }
+  #opt-card .opt-desc { font-size: 12.5px; color: var(--text-dim2); line-height: 1.4; }
+  #opt-card .opt-foot { display: flex; justify-content: flex-end; gap: 10px; margin-top: 14px; }
+  #opt-card .opt-confirm, #opt-card .opt-skip {
+    -webkit-app-region: no-drag; cursor: pointer; font: inherit; font-size: 14px; padding: 9px 18px;
+    border-radius: 10px; border: 1px solid var(--accent); background: var(--accent); color: #06222b; font-weight: 600; transition: .12s;
+  }
+  #opt-card .opt-confirm:disabled { opacity: .45; cursor: not-allowed; }
+  #opt-card .opt-skip { background: transparent; color: var(--text-dim); border-color: var(--line); font-weight: 400; }
+  #opt-card .opt-skip:hover { color: var(--text); border-color: var(--accent-dim); }
 </style>
 </head>
 <body>
@@ -703,6 +749,7 @@
         <circle cx="12" cy="12" r="1.3" fill="#00c8ff" stroke="none"/>
       </svg>
       <span class="brand" id="brand">BHATBOT</span>
+      <span class="ratechip" id="ratechip" title="BhatBot is pacing itself against the API rate limit — it'll continue in a moment"></span>
     </div>
     <div class="tb-btns">
       <button class="tb-btn" id="min" title="Minimize">—</button>
@@ -1574,6 +1621,71 @@ document.addEventListener('keydown', (e) => {
 // Main process can request a panel (e.g. studio_write surfaces Studio).
 window.bhatbot.onShowPanel && window.bhatbot.onShowPanel((id) => showPanel(id));
 window.bhatbot.onStudioReload && window.bhatbot.onStudioReload(() => reloadStudio());
+
+// Subtle rate-limit chip in the titlebar — appears only while BhatBot is pacing itself.
+window.bhatbot.onRateStatus && window.bhatbot.onRateStatus((p) => {
+  const chip = $('#ratechip'); if (!chip) return;
+  clearTimeout(chip._t);
+  if (p && p.state === 'pacing') {
+    const m = p.model ? p.model.replace(/^claude-/, '') : '';
+    chip.textContent = `◔ pacing${m ? ' · ' + m : ''}${p.pct != null ? ' ' + p.pct + '%' : ''}`;
+    chip.classList.add('show');
+    chip._t = setTimeout(() => chip.classList.remove('show'), 15000);   // safety auto-clear if 'clear' is missed
+  } else { chip.classList.remove('show'); }
+});
+
+// Interactive option picker (ask_options) — a checkbox card over the stage; taps resolve the tool.
+let _optState = null;
+function closeOptionCard() {
+  if (!_optState) return;
+  try { _optState.card.remove(); _optState.scrim.remove(); } catch {}
+  _optState = null;
+}
+function renderOptionCard({ id, question, options, multi }) {
+  closeOptionCard();
+  const scrim = document.createElement('div'); scrim.id = 'opt-scrim';
+  const card = document.createElement('div'); card.id = 'opt-card';
+  const q = document.createElement('div'); q.className = 'opt-q'; q.textContent = question || 'Choose:';
+  const sub = document.createElement('div'); sub.className = 'opt-sub';
+  sub.textContent = multi ? 'Select any that apply, then Confirm.' : 'Tap one to choose.';
+  card.appendChild(q); card.appendChild(sub);
+  const chosen = new Set();
+  const items = [];
+  const submit = (sel) => { closeOptionCard(); try { window.bhatbot.answerOptions(id, sel); } catch {} };
+  (options || []).forEach((o, i) => {
+    const it = document.createElement('button');
+    it.className = 'opt-item' + (multi ? '' : ' single');
+    const box = document.createElement('span'); box.className = 'opt-box';
+    const txt = document.createElement('span'); txt.className = 'opt-txt';
+    const lb = document.createElement('span'); lb.className = 'opt-label'; lb.textContent = o.label || ('Option ' + (i + 1));
+    txt.appendChild(lb);
+    if (o.description) { const de = document.createElement('span'); de.className = 'opt-desc'; de.textContent = o.description; txt.appendChild(de); }
+    it.appendChild(box); it.appendChild(txt);
+    it.addEventListener('click', () => {
+      if (multi) {
+        const on = it.classList.toggle('on'); box.textContent = on ? '✓' : '';
+        if (on) chosen.add(o.label); else chosen.delete(o.label);
+        confirmBtn.textContent = 'Confirm' + (chosen.size ? ' · ' + chosen.size : '');
+        confirmBtn.disabled = chosen.size === 0;
+      } else {
+        submit([o.label]);   // single-select: one tap submits
+      }
+    });
+    items.push(it); card.appendChild(it);
+  });
+  const foot = document.createElement('div'); foot.className = 'opt-foot';
+  const skip = document.createElement('button'); skip.className = 'opt-skip'; skip.textContent = 'Skip';
+  skip.addEventListener('click', () => submit([]));
+  const confirmBtn = document.createElement('button'); confirmBtn.className = 'opt-confirm'; confirmBtn.textContent = 'Confirm'; confirmBtn.disabled = true;
+  confirmBtn.addEventListener('click', () => submit([...chosen]));
+  foot.appendChild(skip);
+  if (multi) foot.appendChild(confirmBtn);
+  card.appendChild(foot);
+  scrim.addEventListener('click', () => submit([]));   // dismiss = no selection
+  document.body.appendChild(scrim); document.body.appendChild(card);
+  _optState = { card, scrim, id };
+}
+window.bhatbot.onOptionsRequired && window.bhatbot.onOptionsRequired((p) => renderOptionCard(p));
 
 // Step-up / confirm gate — renders the human-approval card for high-risk tools (self_drive,
 // self_fix, remote-destructive, etc.). Was orphaned when the Activity window was retired, so

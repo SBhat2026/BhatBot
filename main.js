@@ -1118,18 +1118,24 @@ function budgetOk(model, needIn, needOut) {
   const b = rateBudget(model);
   return b.inFree >= needIn && (b.outFree === Infinity || b.outFree >= needOut);
 }
+// Subtle rate cue for the main window (titlebar chip): headroom % + which model is being paced.
+function ratePct(model) { try { const b = rateBudget(model); return Math.max(0, Math.min(100, Math.round((b.inFree / (b.inSafe || 1)) * 100))); } catch { return null; } }
+function emitRateStatus(p) { try { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('rate-status', p); } catch {} }
 async function waitForBudget(model, needIn, needOut = 0, maxWaitMs = 75000) {
   const start = Date.now(); let announced = false;
+  const clear = () => { if (announced) emitRateStatus({ state: 'clear' }); };
   while (Date.now() - start < maxWaitMs) {
-    if (budgetOk(model, needIn, needOut)) return true;
+    if (budgetOk(model, needIn, needOut)) { clear(); return true; }
     if (!announced) {
       const b = rateBudget(model);
       const which = b.inFree < needIn ? `${Math.round(needIn / 1000)}k in` : `${Math.round(needOut / 1000)}k out`;
       sendToActivity('tool-update', { type: 'thinking', text: `⏳ pacing for the ${model.replace(/^claude-/, '')} rate limit — continuing in a moment (${which} needed)` });
+      emitRateStatus({ state: 'pacing', model, pct: ratePct(model) });   // subtle titlebar chip in the main window
       announced = true;
     }
     await sleep(3000);
   }
+  clear();
   return budgetOk(model, needIn, needOut);
 }
 async function ollamaUp() {
@@ -2124,6 +2130,24 @@ function requestConfirm(command, reason, opts = {}) {
     sendToActivity('confirm-required', { id, command, reason });
   });
 }
+
+// Interactive option picker (ask_options tool): show a checkbox card in the MAIN window and resolve
+// with the labels Siddhant taps. Mirrors requestConfirm's promise-per-id pattern. A safety timeout
+// resolves empty so the agent loop can never hang on an ignored card.
+const pendingOptions = new Map();
+function requestOptions(question, options, multi) {
+  return new Promise((resolve) => {
+    const id = String(Date.now()) + Math.random().toString(36).slice(2, 6);
+    pendingOptions.set(id, resolve);
+    try { if (mainWindow && !mainWindow.isDestroyed()) { mainWindow.show(); mainWindow.webContents.send('options-required', { id, question, options, multi: !!multi }); } else { pendingOptions.delete(id); resolve([]); return; } }
+    catch { pendingOptions.delete(id); resolve([]); return; }
+    setTimeout(() => { if (pendingOptions.has(id)) { pendingOptions.delete(id); resolve([]); } }, 5 * 60 * 1000);
+  });
+}
+ipcMain.on('options-answer', (_e, { id, selected } = {}) => {
+  const r = pendingOptions.get(id);
+  if (r) { pendingOptions.delete(id); r(Array.isArray(selected) ? selected.map(String) : []); }
+});
 
 // runShell now provided by lib/shell.js (constructed at top). The web-handling helpers continue below.
 // --- Web-handling helpers: real geolocation, auto-dismiss popups, persist window position ----
@@ -3362,6 +3386,15 @@ async function executeTool(name, input) {
         result = await makePrintable(input); break;
       case 'notify_user':
         result = await notifyUser(input.message, input.urgency || 'low', { awaitReply: !!input.awaitReply, taskId: input.taskId }); break;
+      case 'ask_options': {
+        const opts = Array.isArray(input.options) ? input.options.filter((o) => o && (o.label || typeof o === 'string')).map((o) => (typeof o === 'string' ? { label: o } : { label: String(o.label), description: o.description ? String(o.description) : undefined })).slice(0, 12) : [];
+        if (!input.question || opts.length < 2) { result = { success: false, error: 'ask_options needs a `question` and ≥2 `options` (each {label, description?}).' }; break; }
+        // Interactive picker is a desktop-window feature; on phone/headless/remote fall back to text.
+        if (isRemote() || !mainWindow || mainWindow.isDestroyed()) { result = { success: false, error: 'No interactive UI on this surface — instead, list the options in your reply as a numbered list and ask Siddhant to reply with his pick(s).' }; break; }
+        const selected = await requestOptions(input.question, opts, !!input.multi);
+        result = { success: true, selected, note: selected.length ? undefined : 'Siddhant made no selection (dismissed the card) — proceed with sensible defaults or ask again in text.' };
+        break;
+      }
       case 'keychain_lookup':
         result = keychainLookup(input); break;
       case 'onepassword_lookup':
@@ -3882,6 +3915,12 @@ async function executeTool(name, input) {
       case 'ask_ai':
         result = await askAI(input); break;
       case 'studio_write': {
+        // Guard the empty/no-arg call ({} or non-string html) that used to throw "data must be a
+        // string" and leave the turn stalled — return a crisp corrective so the model retries with real HTML.
+        if (typeof input.html !== 'string' || !input.html.trim()) {
+          result = { success: false, error: 'studio_write was called with no `html`. Provide the COMPLETE HTML document as a string in `html` (a full <!doctype html>… page with inline CSS/JS — the simulation/render), then call studio_write again.' };
+          break;
+        }
         fs.mkdirSync(STUDIO_DIR, { recursive: true });
         fs.writeFileSync(STUDIO_INDEX, input.html);
         // Studio is an in-window webview panel now. Surface it, reload the guest, then capture
@@ -4436,6 +4475,14 @@ async function agentLoop(history, apiKey, event, opts = {}) {
       // short-circuit to a crisp corrective result — no wasted spawn, pairing intact, precise retry cue.
       if ((block.name === 'simulate' || block.name === 'sci_compute') && (block.input.action || 'run') === 'run' && !String(block.input.code || '').trim()) {
         const r = { success: false, error: `${block.name} was called with no \`code\`. Write the Python to run (call action:"capabilities" first if unsure what's installed), then call ${block.name} again with a non-empty \`code\`.` };
+        sendToAll(event, 'tool-update', { type: 'tool_done', name: block.name, result: r });
+        return { type: 'tool_result', tool_use_id: block.id, content: JSON.stringify(r), is_error: true };
+      }
+      // Same guard for a required-string arg fired empty (the studio_write {} → "data must be a string"
+      // stall). Return the retry cue instead of throwing, so the model re-issues it with real content.
+      const _needArg = { studio_write: 'html', write_file: 'content' }[block.name];
+      if (_needArg && (typeof block.input[_needArg] !== 'string' || !String(block.input[_needArg]).trim())) {
+        const r = { success: false, error: `${block.name} was called with an empty/missing \`${_needArg}\`. Provide the full \`${_needArg}\` string, then call ${block.name} again.` };
         sendToAll(event, 'tool-update', { type: 'tool_done', name: block.name, result: r });
         return { type: 'tool_result', tool_use_id: block.id, content: JSON.stringify(r), is_error: true };
       }
@@ -6937,7 +6984,18 @@ function ttsTransportMode() {
   const t = loadConfig().ttsTransport;
   return t === 'rest' ? 'rest' : t === 'ws' ? 'ws' : 'auto';
 }
-function ttsWsActive() { return ttsTransportMode() !== 'rest' && _ttsWs.available(); }
+// The one resolved TTS voice for THIS config (same precedence synthesizeSpeech uses). Default is
+// local Kokoro when installed; explicit ttsProvider overrides.
+function resolvedTtsProvider() {
+  const c = loadConfig();
+  return c.ttsProvider || (kokoroAvailable() ? 'kokoro' : (c.elevenLabsKey ? 'elevenlabs' : (c.openaiKey ? 'openai' : (c.piperBin ? 'piper' : null))));
+}
+// ONE VOICE: the ws stream IS an ElevenLabs transport, so only use it when EL is the chosen voice.
+// Otherwise streamed replies would speak in EL while side-channel speech (acks, plan read-out,
+// "Noted", drone notices) goes through synthesizeSpeech in the configured voice (e.g. Kokoro) → two
+// voices in one session. Gating on the provider makes every utterance the SAME voice: Kokoro-default
+// → ws off, everything streams through Kokoro; provider 'elevenlabs' → ws on, everything is EL.
+function ttsWsActive() { return ttsTransportMode() !== 'rest' && resolvedTtsProvider() === 'elevenlabs' && _ttsWs.available(); }
 function ttsWsEnsure(seq) {
   if (_ttsWsSess && _ttsWsSeq === seq) return _ttsWsSess;
   if (_ttsWsSess) { try { _ttsWsSess.close(); } catch {} }

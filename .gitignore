@@ -26,3 +26,4 @@ procedural.json
 # visual-check screenshots (Playwright artifacts, regenerated on demand)
 scripts/_rail-shot.png
 scripts/_health-shot.png
+scripts/_opt-shot.png
