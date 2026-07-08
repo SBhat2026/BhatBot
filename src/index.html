@@ -739,6 +739,59 @@
     border: 1px solid var(--line); background: #0c1116; }
   #opt-card .opt-item.has-img { align-items: center; }
 
+  /* MULTI-FIELD FORM card (ask_form) — reuses #opt-scrim; several labelled inputs on one card */
+  #form-card { position: fixed; z-index: 91; left: 50%; top: 50%; transform: translate(-50%,-50%);
+    width: min(560px, 88vw); max-height: 84vh; overflow-y: auto; -webkit-app-region: no-drag;
+    background: color-mix(in srgb, var(--surface) 96%, transparent); border: 1px solid var(--accent-dim);
+    border-radius: 16px; padding: 20px 20px 18px; box-shadow: 0 30px 80px -24px rgba(0,0,0,.8);
+    animation: optIn .18s cubic-bezier(.4,0,.2,1); }
+  #form-card .form-title { font-size: 18px; font-weight: 600; color: var(--text); margin-bottom: 14px; }
+  #form-card .form-field { margin-bottom: 13px; }
+  #form-card .form-lb { display: block; font-size: 12.5px; color: var(--text-dim); margin-bottom: 5px; font-weight: 500; }
+  #form-card .form-lb .req { color: var(--accent); margin-left: 3px; }
+  #form-card .form-in, #form-card textarea.form-in, #form-card select.form-in {
+    width: 100%; box-sizing: border-box; padding: 10px 12px; border-radius: 10px;
+    border: 1px solid var(--line); background: #0c1116; color: var(--text); font: inherit; font-size: 14px; transition: .12s; }
+  #form-card .form-in:focus { outline: none; border-color: var(--accent); background: #0e151c; }
+  #form-card textarea.form-in { min-height: 70px; resize: vertical; }
+  #form-card .form-in.missing { border-color: #e0715f; }
+  #form-card .form-chips { display: flex; flex-wrap: wrap; gap: 7px; }
+  #form-card .form-chip { cursor: pointer; -webkit-app-region: no-drag; font: inherit; font-size: 13px; padding: 7px 13px;
+    border-radius: 999px; border: 1px solid var(--line); background: transparent; color: var(--text); transition: .12s; }
+  #form-card .form-chip:hover { border-color: var(--accent-dim); }
+  #form-card .form-chip.on { border-color: var(--accent); background: rgba(127,212,232,.16); color: var(--text); }
+  #form-card .form-foot { display: flex; justify-content: flex-end; gap: 10px; margin-top: 16px; }
+  #form-card .form-btn { -webkit-app-region: no-drag; cursor: pointer; font: inherit; font-size: 14px; padding: 9px 18px;
+    border-radius: 10px; border: 1px solid var(--accent); background: var(--accent); color: #06222b; font-weight: 600; transition: .12s; }
+  #form-card .form-cancel { background: transparent; color: var(--text-dim); border-color: var(--line); font-weight: 400; }
+  #form-card .form-cancel:hover { color: var(--text); border-color: var(--accent-dim); }
+
+  /* LIVE PROGRESS tracker — a persistent, ticking checklist of the plan + a running work log so the
+     procedural work is visible and it's clear how much is done. Sits pinned at the top of the chat. */
+  #progress { -webkit-app-region: no-drag; position: sticky; top: 4px; z-index: 6; margin: 4px 0 10px;
+    border: 1px solid var(--accent-dim); border-radius: 13px; backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+    background: color-mix(in srgb, var(--surface) 90%, transparent); overflow: hidden; animation: optIn .2s ease; }
+  #progress .pg-head { display: flex; align-items: center; gap: 9px; padding: 10px 13px 8px; }
+  #progress .pg-spin { width: 13px; height: 13px; border-radius: 50%; border: 2px solid var(--accent-dim); border-top-color: var(--accent); animation: pgspin .8s linear infinite; flex-shrink: 0; }
+  #progress.done .pg-spin { border: 2px solid var(--accent); border-top-color: var(--accent); animation: none; }
+  @keyframes pgspin { to { transform: rotate(360deg) } }
+  #progress .pg-title { font-size: 13px; font-weight: 600; color: var(--text); flex: 1; }
+  #progress .pg-count { font-size: 11.5px; color: var(--text-dim2); font-variant-numeric: tabular-nums; }
+  #progress .pg-bar { height: 3px; background: var(--line); }
+  #progress .pg-bar > i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--accent-dim), var(--accent)); transition: width .4s ease; }
+  #progress .pg-steps { list-style: none; margin: 0; padding: 8px 13px 4px; }
+  #progress .pg-step { display: flex; align-items: flex-start; gap: 9px; font-size: 12.5px; color: var(--text-dim); padding: 3px 0; line-height: 1.4; }
+  #progress .pg-step .pg-mk { flex-shrink: 0; width: 15px; text-align: center; color: var(--text-dim2); }
+  #progress .pg-step.active { color: var(--text); }
+  #progress .pg-step.active .pg-mk { color: var(--accent); }
+  #progress .pg-step.done { color: var(--text-dim2); }
+  #progress .pg-step.done .pg-mk { color: var(--accent); }
+  #progress .pg-log { padding: 2px 13px 10px; max-height: 108px; overflow-y: auto; }
+  #progress .pg-logrow { font-size: 11.5px; color: var(--text-dim2); padding: 2px 0; display: flex; gap: 7px; align-items: baseline; }
+  #progress .pg-logrow .pg-ic { flex-shrink: 0; }
+  #progress .pg-logrow.ok .pg-ic { color: var(--accent); }
+  #progress .pg-logrow.fail .pg-ic { color: #e0715f; }
+
   /* VISUAL CANVAS — a freeform board of draggable, resizable image cards, layered while BhatBot talks */
   #canvas-panel .panel-head .cv-clear { margin-left: auto; font-size: 12px; color: var(--text-dim); cursor: pointer; -webkit-app-region: no-drag; padding: 3px 9px; border: 1px solid var(--line); border-radius: 7px; }
   #canvas-panel .panel-head .cv-clear:hover { color: var(--accent); border-color: var(--accent-dim); }
@@ -1317,14 +1370,17 @@ function liveAppend(delta) {
 function closeLiveBubble() { liveBubble = null; }
 window.bhatbot.onToolUpdate((u) => {
   if (u.type === 'token') { rmThinking(); streamedThisTurn = true; if (!voiceFirst) liveAppend(u.text); else { setSpeaking(true); setOrbState('speaking'); } }
-  else if (u.type === 'tool_start') { rmThinking(); closeLiveBubble(); toolStart(u); addThinking(); actLog(u.name + ' ' + shortArg(u.name, u.input), 'run'); showToolLine(String(u.name || '').replace(/_/g, ' ')); }
+  else if (u.type === 'tool_start') { rmThinking(); closeLiveBubble(); toolStart(u); addThinking(); actLog(u.name + ' ' + shortArg(u.name, u.input), 'run'); showToolLine(String(u.name || '').replace(/_/g, ' ')); pgToolStart(u.name); }
   else if (u.type === 'tool_done') {
     toolDone(u); const ok = u.result && u.result.success !== false;
     actLog((u.name || 'tool') + (ok ? ' ✓' : ' ✗'), ok ? 'ok' : 'fail');
+    pgToolDone(u.name, ok);
     if (u.preview) addHoloImage(u.preview, u.name === 'generate_image' ? 'GENERATED IMAGE' : u.name === 'studio_write' ? 'STUDIO RENDER' : 'CAPTURE');
     if (u.model3d) addHolo3D(u.model3d);
   }
-  else if (u.type === 'thinking' && u.text) { rmThinking(); addThought(u.text); addThinking(); actLog('… ' + u.text.slice(0, 120)); }
+  else if (u.type === 'thinking' && u.text) { rmThinking(); addThought(u.text); addThinking(); actLog('… ' + u.text.slice(0, 120));
+    // Advance the plan checklist on a real between-step narration (prose, not an internal status line like 🎛/🧰/⚡/🔋).
+    if (_pg.el && /^[A-Za-z"'(]/.test(u.text.trim()) && u.text.trim().length > 12) pgAdvanceStep(); }
   else if (u.type === 'provider_used') {
     lastProvider = u.provider === 'darkbloom'
       ? 'darkbloom · ' + (u.model || '')
@@ -1334,7 +1390,7 @@ window.bhatbot.onToolUpdate((u) => {
   }
   else if (u.type === 'plan' && Array.isArray(u.steps)) {
     rmThinking();
-    addThought('📋 Plan: ' + u.steps.map((s, i) => (i + 1) + ') ' + s).join('  '));
+    pgBuild(u.steps, 'Executing plan');   // persistent ticking checklist pinned atop the chat
     addThinking();
     actLog('📋 plan (' + u.steps.length + ' steps) — executing; type in the steer box anytime to adjust');
   }
@@ -1480,12 +1536,14 @@ async function send(text) {
   // removes them with ✕ / "clear all" when done. (Re-sent each turn to survive context trimming.)
   setBusy(true);
   streamedThisTurn = false; liveBubble = null;
+  pgReset();                       // new turn → next plan/tool builds a fresh progress card
   ttsIdle = false;                 // turn in flight; conversation mode re-arms on tts-idle
   setOrbState('thinking');
   addThinking();
   try {
     const res = await window.bhatbot.chat({ history });
     rmThinking();
+    pgComplete();   // finalize the progress card for this turn (all steps ✓, elapsed shown)
     if (res.error) { addErr(res.error); closeLiveBubble(); }
     else {
       history = res.history;
@@ -1531,6 +1589,7 @@ async function send(text) {
   } catch (e) {
     rmThinking(); closeLiveBubble(); addErr(String(e.message || e));
   } finally {
+    pgComplete();   // never leave the progress card spinning if the turn threw
     setBusy(false);
   }
 }
@@ -1745,6 +1804,138 @@ function renderOptionCard({ id, question, options, multi, allowText, textPlaceho
   _optState = { card, scrim, id };
 }
 window.bhatbot.onOptionsRequired && window.bhatbot.onOptionsRequired((p) => renderOptionCard(p));
+
+// ===== Multi-field FORM card (ask_form) — collect several inputs at once =====
+let _formState = null;
+function closeFormCard() { if (_formState) { try { _formState.card.remove(); _formState.scrim.remove(); } catch {} _formState = null; } }
+function renderFormCard(p) {
+  if (!p || !Array.isArray(p.fields) || !p.fields.length) return;
+  closeFormCard(); closeOptionCard && closeOptionCard();
+  const scrim = document.createElement('div'); scrim.id = 'opt-scrim';
+  const card = document.createElement('div'); card.id = 'form-card';
+  const h = document.createElement('div'); h.className = 'form-title'; h.textContent = p.title || 'Fill in the details';
+  card.appendChild(h);
+  const getters = [];   // () => { key, value, ok }
+  p.fields.forEach((f) => {
+    const wrap = document.createElement('div'); wrap.className = 'form-field';
+    const lb = document.createElement('label'); lb.className = 'form-lb'; lb.textContent = f.label || f.key;
+    if (f.required) { const r = document.createElement('span'); r.className = 'req'; r.textContent = '*'; lb.appendChild(r); }
+    wrap.appendChild(lb);
+    let read;
+    if (f.type === 'select' || f.type === 'multiselect') {
+      const chips = document.createElement('div'); chips.className = 'form-chips';
+      const chosen = new Set(); const multi = f.type === 'multiselect';
+      const def = Array.isArray(f.default) ? f.default.map(String) : (f.default != null ? [String(f.default)] : []);
+      (f.options || []).forEach((o) => {
+        const c = document.createElement('button'); c.type = 'button'; c.className = 'form-chip'; c.textContent = o;
+        if (def.includes(String(o))) { c.classList.add('on'); chosen.add(o); }
+        c.addEventListener('click', () => {
+          if (multi) { const on = c.classList.toggle('on'); if (on) chosen.add(o); else chosen.delete(o); }
+          else { chips.querySelectorAll('.form-chip').forEach((x) => x.classList.remove('on')); c.classList.add('on'); chosen.clear(); chosen.add(o); }
+        });
+        chips.appendChild(c);
+      });
+      wrap.appendChild(chips);
+      read = () => { const v = [...chosen]; return { key: f.key, value: multi ? v : (v[0] ?? ''), ok: !f.required || v.length > 0, el: chips }; };
+    } else if (f.type === 'textarea') {
+      const ta = document.createElement('textarea'); ta.className = 'form-in'; ta.placeholder = f.placeholder || ''; if (f.default != null) ta.value = String(f.default);
+      wrap.appendChild(ta);
+      read = () => ({ key: f.key, value: ta.value.trim(), ok: !f.required || !!ta.value.trim(), el: ta });
+    } else {
+      const inp = document.createElement('input'); inp.className = 'form-in'; inp.type = f.type === 'number' ? 'number' : 'text';
+      inp.placeholder = f.placeholder || ''; if (f.default != null) inp.value = String(f.default);
+      inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); submit(); } });
+      wrap.appendChild(inp);
+      read = () => { const raw = inp.value.trim(); return { key: f.key, value: f.type === 'number' ? (raw === '' ? '' : Number(raw)) : raw, ok: !f.required || raw !== '', el: inp }; };
+    }
+    getters.push(read); card.appendChild(wrap);
+  });
+  const foot = document.createElement('div'); foot.className = 'form-foot';
+  const cancel = document.createElement('button'); cancel.className = 'form-btn form-cancel'; cancel.textContent = 'Cancel';
+  const ok = document.createElement('button'); ok.className = 'form-btn'; ok.textContent = p.submitLabel || 'Submit';
+  foot.appendChild(cancel); foot.appendChild(ok); card.appendChild(foot);
+  function submit() {
+    const values = {}; let bad = false;
+    getters.forEach((g) => { const r = g(); if (!r.ok) { bad = true; if (r.el) r.el.classList.add('missing'); } else if (r.el) r.el.classList.remove('missing'); values[r.key] = r.value; });
+    if (bad) return;   // a required field is empty — highlight + block
+    closeFormCard(); try { window.bhatbot.answerForm(p.id, values, false); } catch {}
+  }
+  const dismiss = () => { closeFormCard(); try { window.bhatbot.answerForm(p.id, null, true); } catch {} };
+  ok.addEventListener('click', submit);
+  cancel.addEventListener('click', dismiss);
+  scrim.addEventListener('click', dismiss);
+  document.body.appendChild(scrim); document.body.appendChild(card);
+  const first = card.querySelector('input, textarea'); if (first) setTimeout(() => first.focus(), 60);
+  _formState = { card, scrim, id: p.id };
+}
+window.bhatbot.onFormRequired && window.bhatbot.onFormRequired((p) => renderFormCard(p));
+
+// ===== LIVE PROGRESS tracker — persistent ticking checklist + running work log =====
+// Makes the procedural work visible: the plan steps tick off, a work log streams each tool as it
+// runs/finishes, and a count + bar show how much is done. One card per turn; it stays in the
+// transcript when the turn completes.
+const _pg = { el: null, stepsEl: null, logEl: null, barEl: null, countEl: null, titleEl: null, steps: [], active: 0, tools: 0, ok: 0, t0: 0 };
+function pgReset() { _pg.el = null; }   // detach the active card (it remains in the transcript as history) so the next turn builds a fresh one
+function pgBuild(steps, title) {
+  const el = document.createElement('div'); el.id = 'progress';
+  el.innerHTML = '<div class="pg-head"><span class="pg-spin"></span><span class="pg-title"></span><span class="pg-count"></span></div>'
+    + '<div class="pg-bar"><i></i></div><ul class="pg-steps"></ul><div class="pg-log"></div>';
+  _pg.el = el; _pg.stepsEl = el.querySelector('.pg-steps'); _pg.logEl = el.querySelector('.pg-log');
+  _pg.barEl = el.querySelector('.pg-bar > i'); _pg.countEl = el.querySelector('.pg-count'); _pg.titleEl = el.querySelector('.pg-title');
+  _pg.steps = steps.slice(0, 12); _pg.active = 0; _pg.tools = 0; _pg.ok = 0; _pg.t0 = Date.now();
+  _pg.titleEl.textContent = title || 'Working';
+  _pg.steps.forEach((s, i) => {
+    const li = document.createElement('li'); li.className = 'pg-step' + (i === 0 ? ' active' : '');
+    li.innerHTML = '<span class="pg-mk"></span><span class="pg-tx"></span>';
+    li.querySelector('.pg-mk').textContent = i === 0 ? '▸' : '○';
+    li.querySelector('.pg-tx').textContent = s;
+    _pg.stepsEl.appendChild(li);
+  });
+  if (!_pg.steps.length) _pg.stepsEl.style.display = 'none';
+  chat.appendChild(el); scroll();
+}
+function pgEnsure() { if (!_pg.el || !_pg.el.isConnected) pgBuild([], 'Working'); }
+function pgRenderCount() { _pg.countEl.textContent = _pg.tools ? (_pg.tools + (_pg.tools === 1 ? ' step' : ' steps')) : ''; }
+function pgSetBar() {
+  let frac;
+  if (_pg.steps.length) frac = Math.min(1, (_pg.active + 0.5) / _pg.steps.length);
+  else frac = Math.min(0.92, 0.12 + _pg.tools * 0.12);
+  _pg.barEl.style.width = Math.round(frac * 100) + '%';
+}
+function pgAdvanceStep() {
+  if (!_pg.steps.length) return;
+  const rows = _pg.stepsEl.children;
+  if (_pg.active < _pg.steps.length - 1) {
+    const cur = rows[_pg.active]; if (cur) { cur.className = 'pg-step done'; cur.querySelector('.pg-mk').textContent = '✓'; }
+    _pg.active++;
+    const nx = rows[_pg.active]; if (nx) { nx.className = 'pg-step active'; nx.querySelector('.pg-mk').textContent = '▸'; }
+    pgSetBar();
+  }
+}
+function pgLog(text, cls, icon) {
+  if (!_pg.logEl) return;
+  const r = document.createElement('div'); r.className = 'pg-logrow' + (cls ? ' ' + cls : '');
+  r.innerHTML = '<span class="pg-ic"></span><span class="pg-tt"></span>';
+  r.querySelector('.pg-ic').textContent = icon || '▹'; r.querySelector('.pg-tt').textContent = text;
+  _pg.logEl.appendChild(r);
+  while (_pg.logEl.childElementCount > 60) _pg.logEl.removeChild(_pg.logEl.firstChild);
+  _pg.logEl.scrollTop = _pg.logEl.scrollHeight;
+}
+function pgToolStart(name) { pgEnsure(); pgLog(String(name || 'tool').replace(/_/g, ' '), 'run', '▹'); }
+function pgToolDone(name, ok) {
+  pgEnsure(); _pg.tools++; if (ok) _pg.ok++;
+  pgLog(String(name || 'tool').replace(/_/g, ' ') + (ok ? '' : ' — failed'), ok ? 'ok' : 'fail', ok ? '✓' : '✗');
+  pgRenderCount(); pgSetBar();
+}
+function pgComplete() {
+  if (!_pg.el) return;
+  _pg.el.classList.add('done');
+  const rows = _pg.stepsEl ? _pg.stepsEl.children : [];
+  for (let i = 0; i < rows.length; i++) { rows[i].className = 'pg-step done'; rows[i].querySelector('.pg-mk').textContent = '✓'; }
+  if (_pg.barEl) _pg.barEl.style.width = '100%';
+  if (_pg.titleEl) { const secs = Math.round((Date.now() - _pg.t0) / 1000); _pg.titleEl.textContent = 'Done' + (_pg.tools ? ' · ' + _pg.tools + (_pg.tools === 1 ? ' step' : ' steps') : '') + (secs > 1 ? ' · ' + secs + 's' : ''); }
+  pgReset();
+}
 
 // ===== Visual canvas: draggable / resizable image cards layered while BhatBot talks =====
 let _cvZ = 10, _cvN = 0;

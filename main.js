@@ -46,6 +46,7 @@ const subagents = require('./lib/subagents');          // #20 — persistent spe
 const agentTeam = require('./lib/orchestrator');        // C — parallel same-task ensemble + independent app-tester
 const planner = require('./lib/planner');               // B1 — decompose a goal into a task DAG for the team
 const ambient = require('./lib/ambient');              // #18 — opt-in proactive Calendar/Mail awareness (OFF by default)
+const phonemirror = require('./lib/phonemirror');       // iPhone Mirroring glue — open/focus + gesture shortcuts + window geometry for the phone_mirror tool
 const { textHintFromSelector, splitForSpeech, estimateToolCost, stripReasoning, classifySpeech, createSpeechNormalizer, isPromissory, shouldExtendBudget, toolSig, progressLine } = require('./lib/pure');  // SPLIT_PLAN step 1
 const WebSocket = require('ws');
 const { createTtsWs } = require('./lib/ttsws');   // T1 — continuous ws streaming TTS transport (config.ttsTransport==='ws')
@@ -147,7 +148,7 @@ const MAX_AGENT_ITERATIONS = 20;   // step ceiling; complex tasks need headroom 
 const PARALLEL_SAFE = new Set([
   'read_file', 'list_directory', 'fetch_url', 'web_search', 'news', 'world_cup', 'notion_search',
   'ask_ai', 'keychain_lookup', 'onepassword_lookup', 'predict_function', 'maps', 'molecule', 'weather',
-  'find_papers', 'math_reason', 'ops_status',
+  'find_papers', 'math_reason', 'ops_status', 'generate_totp',
 ]);
 const EXEC_PATH = `${process.env.PATH || ''}:/usr/local/bin:/opt/homebrew/bin:/Library/Frameworks/Python.framework/Versions/Current/bin:/Library/Frameworks/Python.framework/Versions/3.13/bin`;
 // SPLIT_PLAN step 7: raw shell exec + destructive-command pattern lists live in lib/shell.js now.
@@ -2154,6 +2155,26 @@ ipcMain.on('options-answer', (_e, { id, selected, text } = {}) => {
   if (r) { pendingOptions.delete(id); r({ selected: Array.isArray(selected) ? selected.map(String) : [], text: String(text || '').trim() }); }
 });
 
+// Multi-field FORM (ask_form tool): show ONE card with several labelled inputs and resolve with
+// { values: { key: value } } once Siddhant submits. Same promise-per-id + safety-timeout pattern as
+// requestOptions so the agent loop can never hang on an ignored form.
+const pendingForms = new Map();
+function requestForm(title, fields, opts = {}) {
+  return new Promise((resolve) => {
+    const id = String(Date.now()) + Math.random().toString(36).slice(2, 6);
+    pendingForms.set(id, resolve);
+    try {
+      if (mainWindow && !mainWindow.isDestroyed()) { mainWindow.show(); mainWindow.webContents.send('form-required', { id, title: title || 'Fill in the details', fields, submitLabel: opts.submitLabel || 'Submit' }); }
+      else { pendingForms.delete(id); resolve({ values: null, dismissed: true }); return; }
+    } catch { pendingForms.delete(id); resolve({ values: null, dismissed: true }); return; }
+    setTimeout(() => { if (pendingForms.has(id)) { pendingForms.delete(id); resolve({ values: null, dismissed: true }); } }, 5 * 60 * 1000);
+  });
+}
+ipcMain.on('form-answer', (_e, { id, values, dismissed } = {}) => {
+  const r = pendingForms.get(id);
+  if (r) { pendingForms.delete(id); r({ values: (values && typeof values === 'object') ? values : null, dismissed: !!dismissed }); }
+});
+
 // Voice clarity gate (borderline path): a cheap local yes/no on whether an ambiguous utterance is a
 // clear, actionable request. The instant heuristic (pure.looksActionable) runs in the renderer first;
 // only 'borderline' utterances reach this. Fail-OPEN (treat as actionable) so it can never eat a real command.
@@ -3711,6 +3732,25 @@ async function executeTool(name, input) {
         result = { success: true, selected: ans.selected, text: ans.text || undefined, note: (ans.selected.length || ans.text) ? undefined : 'Siddhant made no selection (dismissed the card) — proceed with sensible defaults or ask again in text.' };
         break;
       }
+      case 'ask_form': {
+        const raw = Array.isArray(input.fields) ? input.fields : [];
+        const fields = raw.filter((f) => f && f.key && f.label).map((f) => ({
+          key: String(f.key), label: String(f.label),
+          type: ['text', 'number', 'textarea', 'select', 'multiselect'].includes(f.type) ? f.type : 'text',
+          placeholder: f.placeholder ? String(f.placeholder) : '',
+          required: !!f.required,
+          options: Array.isArray(f.options) ? f.options.map(String).slice(0, 20) : undefined,
+          default: f.default
+        })).slice(0, 10);
+        if (!fields.length) { result = { success: false, error: 'ask_form needs a `fields` array (each {key, label, type?}).' }; break; }
+        if (isRemote() || !mainWindow || mainWindow.isDestroyed()) { result = { success: false, error: 'No interactive UI on this surface — instead, ask for the fields in your reply and let Siddhant type them back.' }; break; }
+        const ans = await requestForm(input.title, fields, { submitLabel: input.submitLabel });
+        if (ans.dismissed || !ans.values) { result = { success: true, values: {}, note: 'Siddhant dismissed the form without submitting — proceed with sensible defaults or ask again in text.' }; break; }
+        result = { success: true, values: ans.values };
+        break;
+      }
+      case 'phone_mirror':
+        result = await phoneMirror(input || {}); break;
       case 'show_visuals':
         result = await showVisuals(input || {}); break;
       case 'keychain_lookup':
@@ -4631,6 +4671,18 @@ async function verifyActionDone(userText, replyText, toolNames) {
   } catch { return { acted: true }; }
 }
 
+// SPEED gate for per-turn long-term recall (Notion/semantic/episodic). Returns false only for
+// trivial turns that provably can't use recalled facts — greetings, one-word acks, yes/no/stop —
+// so those skip the ~up-to-4s blocking recall and hit the model immediately. Fails toward TRUE
+// (recall) for anything with real content, so no substantive turn ever loses its memory.
+function turnNeedsRecall(text) {
+  const t = String(text || '').trim().toLowerCase();
+  if (!t) return false;
+  // A short utterance that is ONLY a greeting/ack/control word → no recall.
+  if (t.length <= 24 && /^(hi|hey|hello|yo|sup|thanks|thank you|ty|thx|ok|okay|k|cool|nice|great|got it|gotcha|yes|yep|yeah|no|nope|nah|stop|pause|resume|continue|go|go ahead|done|good|perfect|awesome|lol|haha|👍|🙏|❤️|sure)[.!?…]*$/i.test(t)) return false;
+  return true;
+}
+
 async function agentLoop(history, apiKey, event, opts = {}) {
   agentState = 'running';
   _userSpokeSinceOpen = true;     // Feat-1: the user engaged → don't pop the idle briefing offer
@@ -4651,7 +4703,13 @@ async function agentLoop(history, apiKey, event, opts = {}) {
 
   // Passive auto-recall from the shared Notion bank — fold relevant facts (written by the Mac,
   // the cloud backend, or any other agent) into the memory block before we answer. Bounded to 4s.
-  await Promise.all([refreshNotionRecall(lastUserText(history)), refreshSemanticRecall(lastUserText(history)), refreshEpisodicVec(lastUserText(history))]);
+  // SPEED: this blocks the FIRST token on every turn. Skip it for trivial turns (greetings, short
+  // acks, "yes"/"stop"/"thanks") that can't benefit from long-term recall — those answer instantly.
+  // The three recalls still run for anything substantive. Gate is config-tunable (recallGate:false
+  // forces the old always-recall behaviour).
+  if (loadConfig().recallGate === false || turnNeedsRecall(lastUserText(history))) {
+    await Promise.all([refreshNotionRecall(lastUserText(history)), refreshSemanticRecall(lastUserText(history)), refreshEpisodicVec(lastUserText(history))]);
+  }
   refreshProceduralRecall(lastUserText(history));   // learned step-series (sync) + speculative prefetch of the known first read
 
   // W1 — context-rot prevention: inject only the tools relevant to THIS turn (top-k by embedding
@@ -4816,7 +4874,7 @@ async function agentLoop(history, apiKey, event, opts = {}) {
       catch (e) { result = { success: false, error: 'tool threw: ' + (e && e.message || String(e)) }; }
       // Jarvis HUD: surface visuals inline in chat — generated images / design renders /
       // explicit screenshots as holo-cards, and 3D outputs as an in-chat spinning model.
-      const showImage = result._image && (['generate_image', 'make_figure', 'simulate', 'sci_compute', 'studio_write', 'ui_inspect', 'screen_parse', 'vision_click', 'molecule', 'maps'].includes(block.name)
+      const showImage = result._image && (['generate_image', 'make_figure', 'simulate', 'sci_compute', 'studio_write', 'ui_inspect', 'screen_parse', 'vision_click', 'molecule', 'maps', 'phone_mirror'].includes(block.name)
         || (block.name === 'browser' && block.input && block.input.action === 'screenshot'));
       const model3d = (block.name === 'generate_3d' || block.name === 'make_printable') && result.success && result.path ? result.path : undefined;
       sendToAll(event, 'tool-update', {
@@ -5738,6 +5796,57 @@ async function twilioCall(message) {
     const call = await client.calls.create({ twiml, to: c.myPhone, from: c.twilioFrom });
     return { sent: true, via: 'twilio', sid: call.sid };
   } catch (e) { return { sent: false, error: e.message }; }
+}
+
+// phone_mirror tool backend — operate Siddhant's iPhone via macOS iPhone Mirroring. The actual
+// TAPPING reuses the existing vision loop (screen_parse → vision_click on the mirrored window); this
+// handles the lifecycle around it: launch/focus, connection status, gesture shortcuts, a phone
+// screenshot the model can see, and the "call me to open my phone" flow. Attaches _image (the phone
+// screen) so the model gets a closed loop on open/status/home/screenshot.
+async function phoneMirror(input) {
+  const action = String(input.action || 'status');
+  const withShot = async (base) => {
+    try {
+      const b64 = await captureScreenJpeg();
+      if (b64) { base._image = b64; base._imageMime = 'image/jpeg'; }
+    } catch {}
+    return base;
+  };
+  try {
+    if (action === 'call_to_start') {
+      const msg = String(input.message || 'This is BhatBot. I need to do something on your iPhone. Please unlock your Mac and phone and open iPhone Mirroring, then tell me to go ahead.').slice(0, 600);
+      const r = await twilioCall(msg);
+      return r.sent
+        ? { success: true, via: r.via, sid: r.sid, note: 'Called Siddhant to bring the phone online. He can speak instructions on the call (they route back to you). Once he confirms, call phone_mirror action:"open" then screen_parse/vision_click to operate the phone.' }
+        : { success: false, error: r.error || 'call failed', note: 'Twilio call could not be placed. Fall back to notify_user or ask him in chat to open iPhone Mirroring.' };
+    }
+    if (action === 'open') {
+      const o = await phonemirror.open();
+      if (!o.ok) return { success: false, error: o.note || 'could not open iPhone Mirroring', note: 'iPhone Mirroring may not be set up (needs macOS 15+ and a one-time pairing). Ask Siddhant, or use call_to_start.' };
+      const conn = await phonemirror.connected();
+      return await withShot({ success: true, launched: o.launched, connected: conn.connected, bounds: conn.bounds,
+        note: conn.connected
+          ? 'iPhone Mirroring is live. Now screen_parse(target:"screen") the phone window and vision_click an element to tap it.'
+          : (conn.reason || 'Mirroring window not connected — the phone/Mac may be locked. Use call_to_start to ask Siddhant to unlock it.') });
+    }
+    if (action === 'home') {
+      const g = await phonemirror.gesture('home');
+      if (!g.ok) return { success: false, error: g.error };
+      await new Promise((res) => setTimeout(res, 400));
+      return await withShot({ success: true, note: 'Sent Home. Re-parse the screen before tapping.' });
+    }
+    if (action === 'screenshot') {
+      const running = await phonemirror.isRunning();
+      if (!running) return { success: false, error: 'iPhone Mirroring is not open. Call phone_mirror action:"open" (or call_to_start if the phone is locked).' };
+      await phonemirror.open();   // ensure frontmost so the screenshot shows the phone
+      return await withShot({ success: true, note: 'Phone screen captured. Use screen_parse for click coordinates.' });
+    }
+    // status (default)
+    const running = await phonemirror.isRunning();
+    if (!running) return { success: true, running: false, connected: false, note: 'iPhone Mirroring is not open. Call phone_mirror action:"open" to launch it, or call_to_start if you need Siddhant to unlock the phone first.' };
+    const conn = await phonemirror.connected();
+    return await withShot({ success: true, running: true, connected: conn.connected, bounds: conn.bounds, note: conn.reason || 'iPhone Mirroring is live — screen_parse + vision_click to operate the phone.' });
+  } catch (e) { return { success: false, error: 'phone_mirror failed: ' + (e && e.message || String(e)) }; }
 }
 
 // notify_user tool backend. Routes by urgency. Telegram is free + always tried; a call
