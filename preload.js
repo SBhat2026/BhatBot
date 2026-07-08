@@ -59,6 +59,7 @@ contextBridge.exposeInMainWorld('bhatbot', {
   answerOptions: (id, selected, text) => ipcRenderer.send('options-answer', { id, selected, text }),
   onFormRequired: (cb) => ipcRenderer.on('form-required', (_e, p) => cb(p)),
   answerForm: (id, values, dismissed) => ipcRenderer.send('form-answer', { id, values, dismissed }),
+  onSpeechSummary: (cb) => ipcRenderer.on('speech-summary', (_e, p) => cb(p)),
   onCanvasAdd: (cb) => ipcRenderer.on('canvas-add', (_e, p) => cb(p)),
   onCanvasClear: (cb) => ipcRenderer.on('canvas-clear', (_e, p) => cb(p)),
   voiceGate: (text) => { try { return require('./lib/pure').looksActionable(text); } catch { return { action: 'ok', reason: 'gate-error' }; } },

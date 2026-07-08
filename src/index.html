@@ -792,6 +792,17 @@
   #progress .pg-logrow.ok .pg-ic { color: var(--accent); }
   #progress .pg-logrow.fail .pg-ic { color: #e0715f; }
 
+  /* SPOKEN-SUMMARY card — the concise VISUAL twin of the spoken digest: headline + scannable key
+     points, shown above the full reply so a quick verbal summary is backed by a quick visual one. */
+  .spk-summary { -webkit-app-region: no-drag; margin: 6px 0 8px; border: 1px solid var(--accent-dim); border-radius: 13px;
+    background: linear-gradient(180deg, rgba(127,212,232,.09), color-mix(in srgb, var(--surface) 92%, transparent)); padding: 11px 14px; animation: optIn .22s ease; }
+  .spk-summary .spk-h { display: flex; align-items: baseline; gap: 8px; }
+  .spk-summary .spk-ic { font-size: 12px; color: var(--accent); flex-shrink: 0; }
+  .spk-summary .spk-headline { font-size: 14px; font-weight: 600; color: var(--text); line-height: 1.4; }
+  .spk-summary .spk-points { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+  .spk-summary .spk-pt { font-size: 12.5px; color: var(--text-dim); line-height: 1.4; display: flex; gap: 8px; align-items: flex-start; }
+  .spk-summary .spk-pt::before { content: '▪'; color: var(--accent-dim); flex-shrink: 0; }
+
   /* VISUAL CANVAS — a freeform board of draggable, resizable image cards, layered while BhatBot talks */
   #canvas-panel .panel-head .cv-clear { margin-left: auto; font-size: 12px; color: var(--text-dim); cursor: pointer; -webkit-app-region: no-drag; padding: 3px 9px; border: 1px solid var(--line); border-radius: 7px; }
   #canvas-panel .panel-head .cv-clear:hover { color: var(--accent); border-color: var(--accent-dim); }
@@ -1869,6 +1880,23 @@ function renderFormCard(p) {
   _formState = { card, scrim, id: p.id };
 }
 window.bhatbot.onFormRequired && window.bhatbot.onFormRequired((p) => renderFormCard(p));
+
+// ===== Spoken-summary card — concise VISUAL twin of the spoken digest (headline + key points) =====
+function renderSpeechSummary(p) {
+  if (!p || !p.headline || voiceFirst) return;   // voice-first uses the caption instead
+  const card = document.createElement('div'); card.className = 'spk-summary';
+  const h = document.createElement('div'); h.className = 'spk-h';
+  const ic = document.createElement('span'); ic.className = 'spk-ic'; ic.textContent = '🔊';
+  const hl = document.createElement('span'); hl.className = 'spk-headline'; hl.textContent = p.headline;
+  h.appendChild(ic); h.appendChild(hl); card.appendChild(h);
+  if (Array.isArray(p.points) && p.points.length) {
+    const ul = document.createElement('ul'); ul.className = 'spk-points';
+    p.points.forEach((pt) => { const li = document.createElement('li'); li.className = 'spk-pt'; li.textContent = pt; ul.appendChild(li); });
+    card.appendChild(ul);
+  }
+  chat.appendChild(card); scroll();
+}
+window.bhatbot.onSpeechSummary && window.bhatbot.onSpeechSummary((p) => renderSpeechSummary(p));
 
 // ===== LIVE PROGRESS tracker — persistent ticking checklist + running work log =====
 // Makes the procedural work visible: the plan steps tick off, a work log streams each tool as it

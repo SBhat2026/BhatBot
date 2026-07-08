@@ -3727,6 +3727,8 @@ async function executeTool(name, input) {
         if (!input.question || opts.length < 2) { result = { success: false, error: 'ask_options needs a `question` and ≥2 `options` (each {label, description?, imageQuery?}).' }; break; }
         // Interactive picker is a desktop-window feature; on phone/headless/remote fall back to text.
         if (isRemote() || !mainWindow || mainWindow.isDestroyed()) { result = { success: false, error: 'No interactive UI on this surface — instead, list the options in your reply as a numbered list and ask Siddhant to reply with his pick(s).' }; break; }
+        // autoVisual: give every un-imaged option a photo from its own label so the choice is visual.
+        if (input.autoVisual) for (const o of opts) { if (!o.image && !o.imageQuery && !o.generate) o.imageQuery = o.label; }
         if (opts.some((o) => o.imageQuery || o.generate)) { try { sendToActivity('tool-update', { type: 'thinking', text: '🖼 fetching option visuals' }); await resolveOptionImages(opts); } catch {} }   // visual options
         const ans = await requestOptions(input.question, opts, !!input.multi, { allowText: input.allowText !== false, textPlaceholder: input.textPlaceholder || 'or type your own…' });
         result = { success: true, selected: ans.selected, text: ans.text || undefined, note: (ans.selected.length || ans.text) ? undefined : 'Siddhant made no selection (dismissed the card) — proceed with sensible defaults or ask again in text.' };
@@ -7636,6 +7638,40 @@ function partialTagTail(s, tag) {
 //     sentence (no more silent replies). Decision is made early so audio starts at ~the
 //     first sentence; once committed to plain mode we never go silent.
 // Handles tags split across deltas. ttsStreamFeed strips markdown/code before synth.
+// Build + push a concise on-screen SUMMARY card to accompany a spoken digest: a headline (the
+// spoken one-liner) plus scannable key points scanned from the full reply's own structure (bullets,
+// numbered items, headers). Pure/local — no extra model call. Renderer shows it pinned above the
+// full reply so the quick verbal version has a matching quick VISUAL version.
+function extractKeyPoints(full) {
+  const clean = (s) => String(s || '')
+    .replace(/`([^`]+)`/g, '$1').replace(/\*\*([^*]+)\*\*/g, '$1').replace(/\*([^*]+)\*/g, '$1')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1').replace(/^\s*#{1,6}\s*/, '').replace(/^\s*([-*]|\d+[.)])\s+/, '')
+    .replace(/\s+/g, ' ').trim();
+  const pts = [];
+  for (const line of String(full || '').split('\n')) {
+    if (/^\s*([-*]\s|\d+[.)]\s)/.test(line) || /^\s*#{1,6}\s+\S/.test(line)) {
+      const t = clean(line);
+      if (t && t.length >= 3 && !pts.includes(t)) pts.push(t.slice(0, 110));
+    }
+    if (pts.length >= 6) break;
+  }
+  return pts;
+}
+function emitSpeechSummary(spoken, full) {
+  try {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (loadConfig().speechSummaryCard === false) return;
+    const headline = String(spoken || '').trim();
+    if (!headline) return;
+    let points = extractKeyPoints(full);
+    // No inherent structure → fall back to the summary's own sentences as points (still concise/visual).
+    if (!points.length) {
+      points = headline.split(/(?<=[.!?])\s+/).map((s) => s.trim()).filter((s) => s.length > 2).slice(0, 4);
+      if (points.length < 2) points = [];   // a single-sentence summary needs no bullet list
+    }
+    mainWindow.webContents.send('speech-summary', { headline, points });
+  } catch {}
+}
 function makeSpeakStream(seq) {
   const OPEN = '<speak>', CLOSE = '</speak>';
   let pending = '', inside = false, sawTag = false, full = '', mode = 'undecided';
@@ -7681,6 +7717,10 @@ function makeSpeakStream(seq) {
         try { const r = await summarizeForSpeech(strip(full)); if (r && r.success && r.text) spoken = r.text.trim(); } catch {}
         if (seq !== ttsStreamSeq) return;                      // a newer turn now owns tts-idle
         if (!spoken) { const m = strip(full).trim().match(/[^.!?\n]*[.!?]/); spoken = (m ? m[0] : strip(full).trim().slice(0, 200)).trim(); }  // floor: first sentence
+        // Pair the concise SPOKEN summary with a concise ON-SCREEN summary card (headline + key
+        // points scanned from the full reply), so the quick verbal version is backed visually while
+        // the full detail stays below. Zero extra model cost — reuses the summary text + reply structure.
+        emitSpeechSummary(spoken, strip(full));
         if (spoken) { ttsStreamEnqueue(seq, spoken); recordSpoken(spoken); }
         else emitTtsIdle(seq);
       })();
@@ -8005,7 +8045,7 @@ ipcMain.handle('transcribe-audio', async (_e, { audioBuffer, mimeType }) => {
 // Spoken-summary: long replies get condensed for voice (the full text still shows on
 // screen / can be read in full on demand). Haiku first (tiny + fast + negligible quota);
 // if Haiku is rate-limited/unavailable, fall back to the local model so voice never dies.
-const SPEECH_SYS = "You are J.A.R.V.I.S., a refined British butler, distilling a written reply into spoken form for Siddhant. Convey the actual MEANING and outcome — the direct answer, the key result or conclusion, any important numbers/names, and what was done or recommended — not merely the topic. Stay faithful; never invent or add. Speak naturally in 1–3 flowing sentences as you would aloud. No markdown, lists, code, or preamble — just the spoken line.";
+const SPEECH_SYS = "You are J.A.R.V.I.S., a refined British butler, distilling a written reply into SPOKEN form for Siddhant — the full text is already on his screen, so you are giving the quick verbal version, not reading the document. HEADLINE FIRST: open with the single most important thing (the direct answer, the key number/name, the verdict, or what you did). Then add only what genuinely earns a breath. If the reply is a LIST, say how many and name just the top one or two — never enumerate all of them aloud. Cut every hedge, preamble, and piece of list/heading scaffolding. Stay faithful; never invent or add. 1–3 short, natural spoken sentences. No markdown, lists, code, or URLs — just the spoken line.";
 // Trim a possibly-truncated tail back to the last complete sentence so a spoken summary that hit
 // the token cap never ends on a half-sentence (a direct cause of "the voice gets cut off").
 function trimToSentence(s) {
