@@ -679,13 +679,23 @@ function refreshProceduralRecall(query) {
     const key = notionRecallKey(query);
     if (!key) { _proceduralRecall = { key: '', text: '', routineId: null }; return; }
     if (key === _proceduralRecall.key) return;                            // dedupe identical consecutive turns
-    const hints = procedural.recall(PROCEDURAL_PATH, query, { limit: 2 });
+    const c = loadConfig();
+    const hints = procedural.recall(PROCEDURAL_PATH, query, { limit: c.proceduralRecallK || 3, minUses: c.proceduralMinUses, minScore: c.proceduralMinScore });
     _proceduralRecall = { key, text: hints.length ? procedural.format(hints) : '', routineId: hints[0] ? hints[0].id : null };
     if (hints.length) console.log(`[procedural] ↻ ${hints.length} learned routine(s) for this task (top ${Math.round(hints[0].confidence * 100)}% / ${hints[0].uses}×)`);
-    // Speculative prefetch: warm the top routine's known first read while the model call is in flight.
-    const fr = hints[0] && hints[0].firstRead;
-    if (fr && fr.name && READ_CACHEABLE.has(fr.name) && loadConfig().proceduralPrefetch !== false) {
-      try { _readCache.prefetch(fr.name, fr.input || {}, () => executeTool(fr.name, fr.input || {})); } catch {}
+    // AUTO-RUN READ-ONLY PREFIX (Siddhant's choice): for a confident match, execute the top routine's
+    // leading read-only steps NOW — into the shared cache, while the model call is still in flight — so
+    // their results are ready the instant the model asks. Read-only + cacheable only; never mutations.
+    const top = hints[0];
+    if (top && loadConfig().proceduralPrefetch !== false && Array.isArray(top.readPrefix) && top.readPrefix.length) {
+      const minConf = loadConfig().proceduralAutorunConfidence != null ? loadConfig().proceduralAutorunConfidence : 0.6;
+      if (top.pinned || top.confidence >= minConf) {
+        for (const st of top.readPrefix) {
+          if (st && st.name && READ_CACHEABLE.has(st.name)) {
+            try { _readCache.prefetch(st.name, st.input || {}, () => executeTool(st.name, st.input || {})); } catch {}
+          }
+        }
+      }
     }
   } catch { _proceduralRecall = { key: query || '', text: '', routineId: null }; }
 }
@@ -3066,6 +3076,15 @@ function subagentDeps() {
     anthropicRequest: pacedSubagentRequest, executeTool, toolDefs: TOOLS, apiKey: getApiKey(),
     models: { sonnet: MODEL_SONNET, haiku: MODEL_SONNET },   // Haiku retired → any 'haiku' role resolves to Sonnet (was undefined → broke lifeadmin/haiku roles)
     parallelSafe: (name) => PARALLEL_SAFE.has(name),   // lets each fleet/ensemble suit run a read-burst concurrently (same set the main loop uses)
+    // Procedural learning from delegated agents too (Siddhant's choice: main + fleet/drones). Each suit
+    // banks the step-series it ran for its sub-task, so the skill bank grows from parallel work as well.
+    recordTrace: (trigger, steps, ok, ms) => {
+      try {
+        const c = loadConfig();
+        if (c.procedural === false || c.proceduralLearnFleet === false) return;
+        procedural.record(PROCEDURAL_PATH, { trigger, steps, ok, ms }, { clusterJaccard: c.proceduralClusterJaccard });
+      } catch {}
+    },
     fleetWidth, fleetFloor: 3,
     canDowngrade: () => false,   // no sub-Sonnet cloud tier anymore
     // T7 — a fresh SHARED blackboard per fan-out batch: ensemble/fleet pass it to every sibling so
@@ -3093,6 +3112,7 @@ async function droneAgentRun(ctx, task) {
   let hist = [{ role: 'user', content: String(goal) }];
   const maxTurns = Math.max(1, Math.min((ctx.budget && ctx.budget.maxTurns) || 8, 12));
   let finalText = '';
+  const _droneT0 = Date.now(); const _droneTrace = [];   // procedural learning from drones (main + fleet/drones)
   for (let i = 0; i < maxTurns; i++) {
     let resp;
     try { resp = await pacedSubagentRequest({ model, max_tokens: 3072, system: ctx.system, tools: toolDefs, messages: hist.slice(-24) }, getApiKey()); }
@@ -3106,6 +3126,7 @@ async function droneAgentRun(ctx, task) {
     const step = ctx.onStep ? ctx.onStep({ usd, note: (text || 'tool step').slice(0, 60) }) : { budgetLeft: true };
     const tus = content.filter((b) => b.type === 'tool_use');
     if (!tus.length || resp.stop_reason === 'end_turn' || (step && step.budgetLeft === false) || (step && step.terminated)) break;
+    for (const b of tus) if (_droneTrace.length < 40) _droneTrace.push(b.name);
     const runOne = async (tu) => {
       const r = (ctx.tools || []).includes(tu.name) ? await executeTool(tu.name, tu.input) : { success: false, error: `tool "${tu.name}" is not permitted for this drone` };
       return { type: 'tool_result', tool_use_id: tu.id, content: JSON.stringify(r).slice(0, 16 * 1024), is_error: r && r.success === false };
@@ -3117,6 +3138,13 @@ async function droneAgentRun(ctx, task) {
     else { results = []; for (const tu of tus) results.push(await runOne(tu)); }
     hist.push({ role: 'user', content: results });
   }
+  // Bank this drone's step-series into the shared skill bank (gated by config; main + fleet/drones).
+  try {
+    const c = loadConfig();
+    if (c.procedural !== false && c.proceduralLearnFleet !== false && _droneTrace.length >= procedural.MIN_STEPS) {
+      procedural.record(PROCEDURAL_PATH, { trigger: String(goal), steps: _droneTrace, ok: true, ms: Date.now() - _droneT0 }, { clusterJaccard: c.proceduralClusterJaccard });
+    }
+  } catch {}
   return { status: 'ok', summary: finalText || '(completed, no text output)' };
 }
 
@@ -4338,7 +4366,7 @@ async function agentLoop(history, apiKey, event, opts = {}) {
     try {
       if (loadConfig().procedural !== false && toolTrace.length >= procedural.MIN_STEPS) {
         const ok = agentState !== 'stopped' && !/^⏹|interrupted/i.test(String(text || ''));
-        procedural.record(PROCEDURAL_PATH, { trigger: userText0, steps: toolTrace, ok, ms: Date.now() - _turnT0, firstRead: _firstRead });
+        procedural.record(PROCEDURAL_PATH, { trigger: userText0, steps: toolTrace, ok, ms: Date.now() - _turnT0, readPrefix: _readPrefix }, { clusterJaccard: loadConfig().proceduralClusterJaccard });
       }
     } catch {}
     return { text: clean, history, _streamed: stream };
@@ -4353,7 +4381,7 @@ async function agentLoop(history, apiKey, event, opts = {}) {
   const HARD_CEILING = Math.max(maxIters, Number(loadConfig().agentMaxStepsHard) || 60);
   const userText0 = lastUserText(history);            // the original request, for the action-verify judge
   let toolsRan = 0, unproductive = 0, verifyCount = 0; const toolNamesRan = []; const seenSigs = [];
-  const toolTrace = []; let _firstRead = null;   // procedural memory: this turn's ordered step-series + its first cacheable read
+  const toolTrace = []; const _readPrefix = []; let _prefixOpen = true;   // procedural memory: this turn's ordered step-series + its leading read-only run (auto-runnable ahead of the model next time)
   if (stream) ttsLastAudioTs = Date.now();            // measure the progress-heartbeat silence from turn start
   while (iterations < maxIters) {
     if (agentState === 'stopped') return finish('⏹ Stopped.');
@@ -4466,11 +4494,14 @@ async function agentLoop(history, apiKey, event, opts = {}) {
     // extending; one exploring new actions keeps its budget.
     const sigs = toolUses.map((b) => toolSig(b.name, b.input));
     toolsRan += toolUses.length; for (const b of toolUses) toolNamesRan.push(b.name);
-    // Procedural memory: capture the ordered step-series + the FIRST cacheable read (with its concrete
-    // input) so a future look-alike turn can be prefetched. Bounded so a long turn can't balloon it.
+    // Procedural memory: capture the ordered step-series + the LEADING RUN of read-only steps (with
+    // concrete inputs) so a future look-alike turn can auto-run that prefix ahead of the model. Bounded.
     for (const b of toolUses) {
       if (toolTrace.length < 40) toolTrace.push(b.name);
-      if (!_firstRead && READ_CACHEABLE.has(b.name)) _firstRead = { name: b.name, input: b.input };
+      if (_prefixOpen) {
+        if (READ_CACHEABLE.has(b.name) && _readPrefix.length < 4) _readPrefix.push({ name: b.name, input: b.input });
+        else _prefixOpen = false;   // the first non-read (or a full prefix) ends the leading read-only run
+      }
     }
     const novel = sigs.some((s) => !seenSigs.includes(s));
     for (const s of sigs) seenSigs.push(s); while (seenSigs.length > 12) seenSigs.shift();
@@ -7529,6 +7560,17 @@ ipcMain.handle('chat', async (event, { history }) => {
   catch (e) { clearTimeout(ackTimer); emitTtsIdle(ttsSeq); return { error: String(e && e.message ? e.message : e) }; }
 });
 ipcMain.handle('list-notes', () => listNotes());
+// Routines panel (procedural memory inspection/curation): list the learned skill bank; pin/unpin so a
+// skill never fades, or prune one that's wrong. Read/curate only — never runs a routine.
+ipcMain.handle('list-routines', () => { try { return procedural.list(PROCEDURAL_PATH, { limit: 200 }); } catch { return []; } });
+ipcMain.handle('routine-action', (_e, { id, action, value } = {}) => {
+  try {
+    if (action === 'delete') return { ok: procedural.remove(PROCEDURAL_PATH, id) };
+    if (action === 'pin') return { ok: procedural.setPinned(PROCEDURAL_PATH, id, value !== false) };
+    if (action === 'rename') return { ok: procedural.rename(PROCEDURAL_PATH, id, value) };
+    return { ok: false, error: 'unknown action' };
+  } catch (e) { return { ok: false, error: String(e && e.message || e) }; }
+});
 ipcMain.on('end-session', () => endSession('manual'));
 // Encrypted credential vault (safeStorage). The model never calls these — user-driven only.
 ipcMain.handle('cred-store', (_e, { label, domain, username, secret }) => { try { return { ref: credentials.store(label, domain, username, secret) }; } catch (e) { return { error: e.message }; } });

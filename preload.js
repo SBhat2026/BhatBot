@@ -51,6 +51,8 @@ contextBridge.exposeInMainWorld('bhatbot', {
   permStatus: () => ipcRenderer.invoke('perm-status'),
   sendGuidance: (text) => ipcRenderer.send('agent-guidance', { text }),
   listNotes: () => ipcRenderer.invoke('list-notes'),
+  listRoutines: () => ipcRenderer.invoke('list-routines'),
+  routineAction: (id, action, value) => ipcRenderer.invoke('routine-action', { id, action, value }),
   endSession: () => ipcRenderer.send('end-session'),
   onSessionNote: (cb) => ipcRenderer.on('session-note', (_e, n) => cb(n)),
   attachPaths: (paths) => ipcRenderer.invoke('attach-paths', paths),

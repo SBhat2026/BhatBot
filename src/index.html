@@ -604,33 +604,54 @@
   #railnav { display: none; }
   #drawerscrim { display: none; }
   body.voicefirst #ctxbar { display: none; }                 /* rail replaces the top tab strip */
+  /* COLLAPSED: a slim glowing strip on the left edge — the tabs are HIDDEN. Hovering it POPS OUT the
+     full labeled tab column as an overlay, so the orb keeps the entire screen. */
   body.voicefirst #railnav {
-    display: flex; flex-direction: column; align-items: stretch; gap: 2px;
-    position: fixed; left: 0; top: var(--titleh); bottom: 0; width: 64px; z-index: 40;
-    padding: 12px 7px; background: var(--surface); border-right: 1px solid var(--line);
-    -webkit-app-region: no-drag;
+    display: flex; flex-direction: column; align-items: stretch; gap: 5px;
+    position: fixed; left: 0; top: var(--titleh); bottom: 0; width: 16px; z-index: 48;
+    padding: 16px 0; overflow: hidden; -webkit-app-region: no-drag;
+    background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 20%, transparent), transparent 85%);
+    border-right: 1px solid rgba(127,212,232,.16);
+    transition: width .2s cubic-bezier(.4,0,.2,1), padding .2s, background .2s, box-shadow .2s;
   }
-  body.voicefirst.ambient #railnav { background: transparent; border-right-color: rgba(255,255,255,.04); }
+  body.voicefirst.ambient #railnav { border-right-color: rgba(127,212,232,.12); }
+  /* the "tabs live here" affordance, shown only while collapsed */
+  #railhint {
+    position: absolute; left: 1px; top: 50%; transform: translateY(-50%);
+    writing-mode: vertical-rl; text-orientation: mixed; font-size: 10px; letter-spacing: .34em;
+    text-transform: uppercase; color: var(--accent); opacity: .55; pointer-events: none;
+    transition: opacity .16s; white-space: nowrap;
+  }
+  body.voicefirst #railnav:hover, body.voicefirst #railnav:focus-within {
+    width: 236px; padding: 16px 12px; gap: 4px;
+    background: color-mix(in srgb, var(--surface) 95%, transparent);
+    -webkit-backdrop-filter: blur(17px); backdrop-filter: blur(17px);
+    border-right: 1px solid var(--line); box-shadow: 26px 0 64px -26px rgba(0,0,0,.72);
+  }
+  body.voicefirst #railnav:hover #railhint, body.voicefirst #railnav:focus-within #railhint { opacity: 0; }
+  /* tabs: clipped when collapsed, LARGE + labeled when the sidebar pops out */
   .railbtn {
-    -webkit-app-region: no-drag; display: flex; flex-direction: column; align-items: center; gap: 3px;
-    background: transparent; border: 1px solid transparent; border-radius: 9px; cursor: pointer;
-    color: var(--text-dim); padding: 9px 2px; transition: .14s; font: inherit;
+    -webkit-app-region: no-drag; display: flex; flex-direction: row; align-items: center; gap: 14px;
+    background: transparent; border: 1px solid transparent; border-radius: 13px; cursor: pointer;
+    color: var(--text-dim); padding: 13px 13px; transition: .14s; font: inherit; white-space: nowrap;
+    opacity: 0; transform: translateX(-10px);
   }
-  .railbtn span { font-size: 17px; line-height: 1; filter: saturate(.45) opacity(.85); }
-  .railbtn small { font-size: 8.5px; letter-spacing: .03em; opacity: .82; }
-  .railbtn:hover { color: var(--accent); border-color: var(--accent-dim); background: rgba(127,212,232,.06); }
-  .railbtn.active { color: var(--accent); border-color: var(--accent); background: rgba(127,212,232,.11); }
+  body.voicefirst #railnav:hover .railbtn, body.voicefirst #railnav:focus-within .railbtn { opacity: 1; transform: none; }
+  .railbtn span { font-size: 24px; line-height: 1; width: 28px; text-align: center; flex-shrink: 0; filter: saturate(.5) opacity(.9); }
+  .railbtn small { font-size: 15.5px; letter-spacing: .01em; opacity: .95; font-weight: 500; }
+  .railbtn:hover { color: var(--accent); border-color: var(--accent-dim); background: rgba(127,212,232,.08); }
+  .railbtn.active { color: var(--accent); border-color: var(--accent); background: rgba(127,212,232,.14); }
   .railbtn.active span { filter: none; }
-  .railspacer { flex: 1; }
-  /* orb stage + any flow content clear the fixed rail (drawers overlay from the rail edge) */
+  .railspacer { flex: 1; min-height: 10px; }
+  /* orb + flow content span the FULL width behind the slim strip; drawers overlay from the left edge */
   body.voicefirst #vstage,
   body.voicefirst #chat,
   body.voicefirst #inputbar,
   body.voicefirst #attachbar,
-  body.voicefirst #chips { margin-left: 64px; }
+  body.voicefirst #chips { margin-left: 16px; }
   body.voicefirst .stage-panel.active {
-    position: fixed; left: 64px; top: var(--titleh); bottom: 0;
-    width: min(580px, 48vw); z-index: 46; margin: 0;
+    position: fixed; left: 16px; top: var(--titleh); bottom: 0;
+    width: min(640px, 52vw); z-index: 46; margin: 0;
     background: color-mix(in srgb, var(--surface) 93%, transparent);
     -webkit-backdrop-filter: blur(15px); backdrop-filter: blur(15px);
     border-right: 1px solid var(--line); box-shadow: 26px 0 60px -30px rgba(0,0,0,.72);
@@ -638,10 +659,26 @@
   }
   @keyframes drawerIn { to { transform: translateX(0); opacity: 1; } }
   body.voicefirst.drawer-open #drawerscrim {
-    display: block; position: fixed; left: 64px; top: var(--titleh); right: 0; bottom: 0;
+    display: block; position: fixed; left: 16px; top: var(--titleh); right: 0; bottom: 0;
     z-index: 45; background: rgba(4,8,12,.30); -webkit-app-region: no-drag; animation: scrimIn .18s ease;
   }
   @keyframes scrimIn { from { opacity: 0 } to { opacity: 1 } }
+  /* THE ORB DOMINATES: enlarge it (proportional scale keeps the reactor rings intact) + bigger captions */
+  body.voicefirst #vstage { gap: 30px; }
+  body.voicefirst #orb { transform: scale(1.5); margin: 66px 0; }
+  body.voicefirst #vstatus { font-size: 14px; letter-spacing: .26em; }
+  body.voicefirst #vcap { font-size: 21px; max-width: 760px; line-height: 1.5; }
+  body.voicefirst #vhint { font-size: 13.5px; }
+  /* Routines panel rows */
+  .rt-row { border: 1px solid var(--line); border-radius: 11px; padding: 11px 13px; margin-bottom: 9px; background: rgba(127,212,232,.03); }
+  .rt-row.pinned { border-color: var(--accent-dim); background: rgba(127,212,232,.07); }
+  .rt-sig { font-size: 14.5px; color: var(--text); word-break: break-word; }
+  .rt-meta { font-size: 12px; color: var(--text-dim2); margin-top: 4px; }
+  .rt-acts { display: flex; gap: 8px; margin-top: 9px; }
+  .rt-btn { -webkit-app-region: no-drag; cursor: pointer; font: inherit; font-size: 12.5px; padding: 5px 11px;
+    border-radius: 8px; border: 1px solid var(--line); background: transparent; color: var(--text-dim); transition: .12s; }
+  .rt-btn:hover { color: var(--accent); border-color: var(--accent-dim); background: rgba(127,212,232,.08); }
+  .rt-btn.warn:hover { color: var(--warn); border-color: var(--warn); background: rgba(255,120,120,.08); }
 </style>
 </head>
 <body>
@@ -709,14 +746,16 @@
   </div>
 
   <!-- ===== voice-first summon rail: viewpoints slide in as drawers over the orb ===== -->
-  <nav id="railnav" aria-label="Viewpoints">
+  <nav id="railnav" aria-label="Viewpoints" tabindex="0">
+    <span id="railhint">tabs</span>
     <button class="railbtn" data-panel="manage"   title="Manage — live services + agents (⌘1)"><span>🛰</span><small>Manage</small></button>
     <button class="railbtn" data-panel="health"   title="Health — biometrics + system (⌘2)"><span>❤</span><small>Health</small></button>
     <button class="railbtn" data-panel="activity" title="Activity — live agent log (⌘3)"><span>📊</span><small>Activity</small></button>
     <button class="railbtn" data-panel="vanguard" title="Fleet — parallel agent suits (⌘4)"><span>🦾</span><small>Fleet</small></button>
     <button class="railbtn" data-panel="notes"    title="Memory — session notes (⌘5)"><span>🧠</span><small>Memory</small></button>
+    <button class="railbtn" data-panel="routines" title="Routines — learned skills (⌘6)"><span>🧭</span><small>Routines</small></button>
     <span class="railspacer"></span>
-    <button class="railbtn" data-panel="voice"    title="Voice — tune JARVIS (⌘6)"><span>🎚</span><small>Voice</small></button>
+    <button class="railbtn" data-panel="voice"    title="Voice — tune JARVIS (⌘7)"><span>🎚</span><small>Voice</small></button>
     <button class="railbtn" data-panel="settings" title="Settings — API key & config"><span>⚙</span><small>Config</small></button>
   </nav>
   <div id="drawerscrim" title="Close (Esc)"></div>
@@ -726,6 +765,13 @@
   <div id="notes-panel" class="stage-panel">
     <div class="panel-head"><b>🧠 MEMORY</b><span class="panel-back" data-back>← Voice</span></div>
     <div id="notes-list" style="flex:1;min-height:0;overflow-y:auto;padding:10px 12px"></div>
+  </div>
+
+  <!-- Routines — procedural memory: the step-series BhatBot has learned. Pin to protect, prune if wrong. -->
+  <div id="routines-panel" class="stage-panel">
+    <div class="panel-head"><b>🧭 ROUTINES</b><span class="panel-back" data-back>← Chat</span></div>
+    <div style="padding:8px 12px;color:var(--text-dim2);font-size:12.5px">Paths BhatBot has learned from doing things — reused to work faster next time. 📌 Pin one to keep it forever; prune one that's wrong.</div>
+    <div id="routines-list" style="flex:1;min-height:0;overflow-y:auto;padding:6px 12px 12px"></div>
   </div>
 
   <div id="nexus-panel" class="stage-panel">
@@ -1461,6 +1507,7 @@ function showPanel(id) {
   if (id === 'nexus') initNexus();
   else if (id === 'studio') initStudio();
   else if (id === 'notes') loadNotes();
+  else if (id === 'routines') loadRoutines();
   else if (id === 'health') initHealth();
   else if (id === 'manage') initManage();
   else if (id === 'voice') initVoice();
@@ -1514,7 +1561,7 @@ document.querySelectorAll('#railnav .railbtn').forEach((b) =>
 // Scrim behind an open drawer → click to dismiss back to the orb.
 { const scrim = document.getElementById('drawerscrim'); if (scrim) scrim.addEventListener('click', () => showPanel('chat')); }
 // ⌘/Ctrl 1–6 jump straight to a viewpoint (toggle closed if already open).
-const RAIL_KEYS = { '1': 'manage', '2': 'health', '3': 'activity', '4': 'vanguard', '5': 'notes', '6': 'voice' };
+const RAIL_KEYS = { '1': 'manage', '2': 'health', '3': 'activity', '4': 'vanguard', '5': 'notes', '6': 'routines', '7': 'voice' };
 document.addEventListener('keydown', (e) => {
   if (!(e.metaKey || e.ctrlKey) || e.shiftKey || e.altKey) return;
   const id = RAIL_KEYS[e.key];
@@ -1758,6 +1805,34 @@ function noteCard(n) {
     </div>
     <div style="color:#8aa0b4;font-size:12.5px;line-height:1.5;margin-top:6px">${mdToHtml(n.markdown)}</div>`;
   return d;
+}
+// Routines panel — the learned procedural skill bank (inspect / pin / prune). Never runs a routine.
+async function loadRoutines() {
+  const list = $('#routines-list'); if (!list) return;
+  let rows = [];
+  try { rows = await window.bhatbot.listRoutines(); } catch {}
+  if (!rows || !rows.length) {
+    list.innerHTML = '<div style="color:#5b7187;text-align:center;margin-top:40px">No learned routines yet. As BhatBot repeats a kind of task, the winning sequence of steps lands here — and it starts taking that shortcut automatically.</div>';
+    return;
+  }
+  list.innerHTML = '';
+  for (const r of rows) list.appendChild(routineRow(r));
+}
+function routineRow(r) {
+  const el = document.createElement('div');
+  el.className = 'rt-row' + (r.pinned ? ' pinned' : '');
+  const pct = Math.round((r.confidence || 0) * 100);
+  const sig = document.createElement('div'); sig.className = 'rt-sig'; sig.textContent = (r.pinned ? '📌 ' : '') + (r.sig || '');
+  const meta = document.createElement('div'); meta.className = 'rt-meta';
+  meta.textContent = `used ${r.uses}× · ${pct}% success${r.ms ? ` · ~${Math.round(r.ms / 1000)}s` : ''}${r.trigger ? ` · e.g. "${String(r.trigger).slice(0, 60)}"` : ''}`;
+  const acts = document.createElement('div'); acts.className = 'rt-acts';
+  const pin = document.createElement('button'); pin.className = 'rt-btn'; pin.textContent = r.pinned ? 'Unpin' : '📌 Pin';
+  pin.onclick = async () => { try { await window.bhatbot.routineAction(r.id, 'pin', !r.pinned); loadRoutines(); } catch {} };
+  const del = document.createElement('button'); del.className = 'rt-btn warn'; del.textContent = 'Prune';
+  del.onclick = async () => { try { await window.bhatbot.routineAction(r.id, 'delete'); loadRoutines(); } catch {} };
+  acts.appendChild(pin); acts.appendChild(del);
+  el.appendChild(sig); el.appendChild(meta); el.appendChild(acts);
+  return el;
 }
 async function loadNotes() {
   const list = $('#notes-list'); if (!list) return;

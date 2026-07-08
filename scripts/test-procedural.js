@@ -23,23 +23,36 @@ const ok = (c, m) => { if (c) { pass++; console.log('✅ ' + m); } else { fail++
 
   // ── record: a single ≥2-step series seeds a routine; a lone step does not ──
   ok(proc.record(file, { trigger: 'open spotify and play jazz', steps: ['browser'], ok: true }, { now }) === null, 'record: a single tool is NOT a series (ignored)');
-  const r1 = proc.record(file, { trigger: 'open spotify and play jazz', steps: ['browser', 'screen_parse', 'vision_click'], ok: true, firstRead: null }, { now });
+  const r1 = proc.record(file, { trigger: 'open spotify and play jazz', steps: ['browser', 'screen_parse', 'vision_click'], ok: true,
+    readPrefix: [{ name: 'read_file', input: { path: '/x' } }] }, { now });
   ok(r1 && r1.sig === 'browser→screen_parse→vision_click' && r1.uses === 1, 'record: ≥2-step series seeds a routine');
 
-  // ── recall: not yet eligible (needs MIN_USES repetitions) ─────────────────
-  ok(proc.recall(file, 'please open spotify and play some jazz', { now }).length === 0, 'recall: a once-seen routine is not suggested yet (needs repetition)');
+  // ── AGGRESSIVE: suggested after the FIRST successful run (MIN_USES=1) ──────
+  const rec1 = proc.recall(file, 'please open spotify and play some jazz', { now });
+  ok(rec1.length === 1 && rec1[0].sig === 'browser→screen_parse→vision_click', 'recall(aggressive): suggests after ONE win');
+  ok(rec1[0].readPrefix && rec1[0].readPrefix[0].name === 'read_file', 'recall: carries the auto-run/prefetch read prefix');
+  // ── but a stricter minUses override still gates it ─────────────────────────
+  ok(proc.recall(file, 'open spotify play jazz', { now, minUses: 2 }).length === 0, 'recall: minUses override still gates (tunable)');
 
-  // ── repeat the SAME kind of task → clusters onto the routine, becomes eligible ──
+  // ── repeat the SAME kind of task → clusters onto the routine, confidence up ─
   t += 60_000;
-  const r2 = proc.record(file, { trigger: 'spotify play jazz music', steps: ['browser', 'screen_parse', 'vision_click'], ok: true, firstRead: { name: 'read_file', input: { path: '/x' } } }, { now });
+  const r2 = proc.record(file, { trigger: 'spotify play jazz music', steps: ['browser', 'screen_parse', 'vision_click'], ok: true }, { now });
   ok(r2 && r2.id === r1.id && r2.uses === 2, 'record: a look-alike request reinforces the SAME routine (uses→2)');
   const rec = proc.recall(file, 'open spotify, play jazz', { now });
-  ok(rec.length === 1 && rec[0].sig === 'browser→screen_parse→vision_click', 'recall: now suggests the learned path for a look-alike request');
-  ok(rec[0].confidence >= 0.7, 'recall: two clean wins → high confidence');
-  ok(rec[0].firstRead && rec[0].firstRead.name === 'read_file', 'recall: carries the first-read prefetch hint');
+  ok(rec.length === 1 && rec[0].confidence >= 0.7, 'recall: two clean wins → high confidence');
 
   // ── an UNRELATED task does not match ──────────────────────────────────────
   ok(proc.recall(file, 'what is the weather in Tokyo', { now }).length === 0, 'recall: unrelated request → no false match');
+
+  // ── inspection + curation: list / pin / prune (the Routines panel) ─────────
+  const all = proc.list(file, { now });
+  ok(all.length >= 1 && all[0].sig && all[0].uses >= 1, 'list: returns the skill bank with sigs + stats');
+  const target = all.find((x) => x.sig.startsWith('browser'));
+  ok(proc.setPinned(file, target.id, true), 'setPinned: pins a routine');
+  ok(proc.list(file, { now }).find((x) => x.id === target.id).pinned === true, 'list: reflects the pinned flag');
+  ok(proc.recall(file, 'open spotify play jazz', { now, minUses: 99 }).some((x) => x.id === target.id && x.pinned), 'recall: a PINNED routine is always eligible (bypasses minUses) + ranks first');
+  ok(proc.remove(file, target.id), 'remove: prunes a routine');
+  ok(!proc.list(file, { now }).some((x) => x.id === target.id), 'remove: it is gone from the bank');
 
   // ── decay: a routine that keeps FAILING expires and stops being suggested ──
   t += 60_000; proc.record(file, { trigger: 'delete old logs then rebuild', steps: ['run_shell', 'run_shell', 'write_file'], ok: true }, { now });
