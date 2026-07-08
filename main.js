@@ -3204,6 +3204,150 @@ const projectSummarize = async (prompt) => {
   return (j.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim();
 };
 
+// ── BUILD_PROJECT — the one-turn completion engine ───────────────────────────────────────────────
+// Takes a gathered goal + specs and drives a heavy creative/engineering build ALL THE WAY to a finished,
+// persisted deliverable in a single turn: decompose → PARALLEL fleet build (shared blackboard) →
+// integrate → assemble the artifact(s) (a real physics pass via `simulate` + an interactive Three.js
+// scene via `studio_write`) → completion-gate the render → save everything as a resumable Project.
+// Completion is prioritised over breadth: unspecified specs get sensible defaults (noted), and the
+// pipeline never ends without producing (or honestly reporting a failure to produce) the artifact.
+
+// Fold the locked specs into a task so every lane builds to the SAME concrete brief.
+function specBrief(spec, goal) {
+  const s = spec && typeof spec === 'object' ? spec : {};
+  const keys = Object.keys(s);
+  const lines = keys.length ? keys.map((k) => `- ${k}: ${String(s[k]).slice(0, 120)}`).join('\n') : '(no explicit specs — choose sensible defaults and NOTE each assumption)';
+  return `\n\nOVERALL GOAL: ${goal}\n\nLOCKED SPECIFICATIONS:\n${lines}\n\nStay strictly within your lane; produce concrete, buildable output (numbers, materials, geometry, parameters) the integrator can drop straight into the final artifact.`;
+}
+
+// Decompose a build into 3–6 INDEPENDENT parallel lanes tailored to the goal + deliverable.
+async function designWorkstreams(goal, spec, deliverable) {
+  const want = deliverable === 'sim' ? 'a physics/quantitative simulation' : deliverable === 'studio' ? 'an interactive 3D visualization' : 'BOTH an interactive 3D visualization AND a physics simulation';
+  const sys = `You decompose a design/build request into INDEPENDENT workstreams that specialists can build IN PARALLEL, then get integrated into ${want}. Output ONLY JSON: {"lanes":[{"role":"kebab-name","task":"one crisp sentence of what THIS lane produces"}]}. 3–6 lanes, distinct and complementary (e.g. for a wearable machine: exterior-geometry, materials-armor, power-systems, control-HUD, mobility-flight-physics). Each lane must yield concrete buildable output.`;
+  try {
+    const r = await anthropicRequest({ model: MODEL_SONNET, max_tokens: 700, system: sys, messages: [{ role: 'user', content: `Build: ${goal}\nDeliverable: ${want}\nSpecs: ${JSON.stringify(spec).slice(0, 600)}` }] }, getApiKey());
+    const txt = (r.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('');
+    const m = txt.match(/\{[\s\S]*\}/);
+    const lanes = m ? (JSON.parse(m[0]).lanes || []) : [];
+    const clean = lanes.filter((l) => l && l.task).slice(0, 6).map((l, i) => ({ role: l.role || ('lane-' + (i + 1)), task: String(l.task) }));
+    if (clean.length >= 2) return clean;
+  } catch {}
+  // Fallback lanes so a build ALWAYS proceeds even if decomposition fails.
+  return [
+    { role: 'design-spec', task: 'Define the concrete design: form, dimensions, key components and how they fit together.' },
+    { role: 'engineering', task: 'Work out the engineering: materials, power/energy, structure, and the governing numbers.' },
+    { role: 'systems-features', task: 'Detail the functional systems / features and how each behaves and is controlled.' },
+  ];
+}
+
+// Strip a fenced/backticked code wrapper → the raw payload (HTML or code). Pure + testable.
+function extractCode(text, lang = '') {
+  const s = String(text || '');
+  const fence = new RegExp('```(?:' + (lang || '[a-z]*') + ')?\\s*\\n([\\s\\S]*?)```', 'i');
+  const m = s.match(fence);
+  let out = (m ? m[1] : s).trim();
+  // If a full HTML doc is embedded in prose, slice from <!doctype/<html to </html>.
+  const h = out.match(/<!doctype[\s\S]*<\/html>|<html[\s\S]*<\/html>/i);
+  if (lang === 'html' && h) out = h[0];
+  return out.trim();
+}
+
+// A real physics/quantitative pass: write Python from the integrated build, RUN it via `simulate`
+// (numpy/scipy + a matplotlib plot), and return the computed numbers + figure.
+async function runPhysicsPass(goal, spec, buildNotes, emit) {
+  emit('🧮 physics pass — deriving the numbers');
+  const sys = 'You write ONE self-contained Python script (numpy/scipy; matplotlib for ONE figure saved to the provided out path or shown) that computes the KEY quantitative characteristics of the described build (e.g. mass, power/energy, thrust-to-weight, thermal, structural, flight/dynamics as relevant) from first principles + the given specs. Print a concise labelled summary of the headline numbers. Output ONLY the Python code, no prose.';
+  try {
+    const r = await anthropicRequest({ model: MODEL_FABLE, max_tokens: 2200, system: sys, messages: [{ role: 'user', content: `Build: ${goal}\nSpecs: ${JSON.stringify(spec).slice(0, 800)}\n\nIntegrated design notes:\n${String(buildNotes).slice(0, 6000)}` }] }, getApiKey());
+    const code = extractCode((r.content || []).filter((b) => b.type === 'text').map((b) => b.text).join(''), 'python');
+    if (!code || code.length < 20) return { ok: false, summary: 'physics pass produced no code' };
+    const out = await executeTool('simulate', { code });
+    const summary = String(out && (out.stdout || out.output || out.result || '') || '').slice(0, 1400).trim();
+    return { ok: !!(out && out.success !== false), summary: summary || 'simulation ran', image: out && out._image, error: out && out.error };
+  } catch (e) { return { ok: false, summary: 'physics pass failed: ' + (e && e.message || e) }; }
+}
+
+// Assemble the final INTERACTIVE artifact: a complete self-contained Three.js document implementing
+// the build, with orbit controls + an on-screen spec sheet (incl. any physics numbers). fixHint feeds
+// a render error back for the single completion-gate retry.
+async function generateStudioArtifact(goal, spec, buildNotes, physics, emit, fixHint) {
+  emit(fixHint ? '🎨 re-rendering the 3D deliverable' : '🎨 assembling the interactive 3D deliverable');
+  const physLine = physics && physics.summary ? `\n\nPHYSICS RESULTS to display on the spec sheet:\n${physics.summary}` : '';
+  const sys = 'You output ONE COMPLETE, SELF-CONTAINED HTML document (starts <!doctype html>) that renders an INTERACTIVE 3D visualization of the described build with Three.js. Requirements: load Three.js + OrbitControls from a CDN (unpkg/jsdelivr, importmap ok); build the actual geometry from the design notes (not a placeholder cube); orbit/zoom controls; tasteful lighting + the specified colours; a fixed overlay "spec sheet" panel listing the key specs + any physics numbers; runs offline-capable in a normal browser. Output ONLY the HTML — no markdown, no prose, no explanation.';
+  const usr = `Build: ${goal}\nSpecs: ${JSON.stringify(spec).slice(0, 900)}\n\nIntegrated design (use these concrete details for the geometry + spec sheet):\n${String(buildNotes).slice(0, 9000)}${physLine}${fixHint ? '\n\nThe previous attempt failed to render with: ' + String(fixHint).slice(0, 300) + ' — fix it and output a corrected, complete document.' : ''}`;
+  try {
+    // Fable 5 has the OUTPUT headroom (32k OTPM) for a large single-shot HTML; pace against the limit.
+    try { await waitForBudget(MODEL_FABLE, estimateTokens([{ role: 'user', content: usr }]) + 1500, 8000); } catch {}
+    const r = await anthropicRequest({ model: MODEL_FABLE, max_tokens: 8000, system: sys, messages: [{ role: 'user', content: usr }] }, getApiKey());
+    const html = extractCode((r.content || []).filter((b) => b.type === 'text').map((b) => b.text).join(''), 'html');
+    return /<html[\s\S]*<\/html>|<!doctype/i.test(html) ? html : null;
+  } catch { return null; }
+}
+
+async function buildProject(input = {}, opts = {}) {
+  const goal = String(input.goal || input.task || '').trim();
+  if (!goal) return { success: false, error: 'build_project needs a `goal` (what to design/build). Gather the specs first (ask_options), then call build_project.' };
+  const spec = (input.spec && typeof input.spec === 'object') ? input.spec : (input.spec ? { brief: String(input.spec) } : {});
+  const deliverable = ['studio', 'sim', 'both'].includes(input.deliverable) ? input.deliverable : 'both';
+  const emit = (t) => { try { (opts.onUpdate || ((x) => sendToActivity('tool-update', { type: 'thinking', text: x })))(t); } catch {} };
+
+  // 1) Durable project — everything below persists here so Siddhant can resume the build later.
+  const proj = projects.open(input.projectName || goal.slice(0, 60));
+  const slug = proj.slug; try { projects.setActive(slug); projects.recordSpec(slug, spec); } catch {}
+  projects.note(slug, 'Build started: ' + goal, 'milestone');
+  emit(`🗂 project "${proj.name}" — decomposing into parallel lanes`);
+
+  // 2) Decompose → parallel lanes.
+  const streams = (Array.isArray(input.workstreams) && input.workstreams.length)
+    ? input.workstreams.map((w, i) => ({ role: (w && w.role) || ('lane-' + (i + 1)), task: (w && (w.task || w)) })).filter((w) => w.task)
+    : await designWorkstreams(goal, spec, deliverable);
+  emit(`🧩 ${streams.length} lanes in parallel: ${streams.map((s) => s.role).join(', ')}`);
+
+  // 3) PARALLEL fleet build on a shared blackboard, integrated into one build spec.
+  const fleetTasks = streams.map((s, i) => ({ id: 'lane-' + (i + 1), role: s.role, task: s.task + specBrief(spec, goal) }));
+  let fleetOut;
+  try { fleetOut = await agentTeam.fleet(fleetTasks, subagentDeps(), { maxParallel: fleetWidth(), integrate: true, onUpdate: (u) => fleetBroadcast(u) }); }
+  catch (e) { fleetOut = { agents: [], result: 'lane build failed: ' + (e && e.message || e) }; }
+  const agents = (fleetOut && fleetOut.agents) || [];
+  const buildNotes = (fleetOut && fleetOut.result) || agents.map((a) => `### ${a.role}\n${a.result}`).join('\n\n') || goal;
+  try { for (const a of agents) projects.note(slug, `[${a.role}] ${String(a.result).slice(0, 220)}`, 'lane'); } catch {}
+  emit('🔗 lanes integrated — building the deliverable');
+
+  // 4) Assemble artifact(s): real physics pass + interactive 3D scene.
+  let physics = null, firstImage = null; const made = [];
+  if (deliverable === 'sim' || deliverable === 'both') {
+    physics = await runPhysicsPass(goal, spec, buildNotes, emit);
+    if (physics && physics.ok) { try { projects.recordArtifact(slug, { kind: 'sim', title: 'physics', meta: { summary: physics.summary.slice(0, 400) } }); } catch {} if (physics.image) firstImage = physics.image; made.push('physics'); }
+  }
+  let studioOk = false;
+  if (deliverable === 'studio' || deliverable === 'both') {
+    let html = await generateStudioArtifact(goal, spec, buildNotes, physics, emit);
+    if (html) {
+      let w = await executeTool('studio_write', { html });
+      if (!w || w.success === false) {   // completion gate: one focused retry with the error fed back
+        const html2 = await generateStudioArtifact(goal, spec, buildNotes, physics, emit, (w && w.error) || 'did not render');
+        if (html2) w = await executeTool('studio_write', { html: html2 });
+      }
+      if (w && w.success !== false) { studioOk = true; made.push('3D viewer'); if (w._image && !firstImage) firstImage = w._image; try { projects.recordArtifact(slug, { kind: 'studio', title: goal.slice(0, 60), path: STUDIO_INDEX }); } catch {} }
+    }
+  }
+
+  // 5) Persist detailed context + refresh the resumable summary.
+  const done = made.length ? made.join(' + ') : 'design notes only';
+  const summary = `Built ${goal} → ${done}. Lanes: ${streams.map((s) => s.role).join(', ')}.${physics && physics.ok ? ' Physics: ' + physics.summary.split('\n')[0].slice(0, 120) : ''}`;
+  try { projects.note(slug, 'Deliverable: ' + done, 'milestone'); projects.recordTurn(slug, 'Build: ' + goal, summary); await projects.updateSummary(slug, { summarize: projectSummarize }); } catch {}
+  emit(`✅ ${proj.name}: ${done}`);
+
+  return {
+    success: true, project: proj.name, projectSlug: slug, deliverable,
+    lanes: streams.map((s) => s.role),
+    physics: physics ? physics.summary : undefined,
+    artifactRendered: studioOk, produced: made,
+    summary, resume: `Saved as project "${proj.name}". Say "continue ${proj.name}" (or ask for a change) to keep working on it — the specs + artifacts are remembered.`,
+    _image: firstImage || undefined, _imageMime: 'image/jpeg',
+  };
+}
+
 // edit_file (Phase 1, Deliverable #1) — surgical single-string patch. Safety posture: the file must
 // already exist + be readable; old_string must match exactly (unique unless replace_all); a 0/>1
 // match is a FAILED patch that changes nothing; the write is atomic (temp file + rename on the same
@@ -3706,6 +3850,13 @@ async function executeTool(name, input) {
           shouldStop: (id) => fleetShouldStop(id),
         });
         try { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('fleet-update', { phase: 'done' }); } catch {}
+        break;
+      }
+      case 'build_project': {
+        // One-turn completion engine: parallel-fleet build → integrate → physics + 3D artifact →
+        // persisted resumable project. Surface the Vanguard panel so the parallel lanes are visible.
+        try { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('show-panel', 'vanguard'); } catch {}
+        result = await buildProject(input, { onUpdate: (t) => sendToActivity('tool-update', { type: 'thinking', text: t }) });
         break;
       }
       case 'deploy_drones': {
@@ -4687,25 +4838,30 @@ function looksHeavyTool(text) {
   const t = String(text || '').toLowerCase();
   const sim = /\b(simulat\w*|\bengine\b|\bsolver\b|from scratch|end.?to.?end|n-?body|monte.?carlo|\bode\b|\bpde\b|\bcfd\b|\bfem\b|finite element|molecular dynamics)\b/.test(t);
   const sciDomain = /\b(dna|rna|genom\w*|protein|molecul\w*|enzyme|cell(?:ular)?|biolog\w*|replication|transcription|translation|(?:protein )?folding|physics|quantum|orbital|fluid|aerodynam\w*|thermodynam\w*|climate|epidemi\w*|reaction.?diffusion|lattice|kinetics)\b/.test(t);
-  const heavyBuild = /\b(build|create|implement|develop|write|design|model)\b/.test(t) && /\b(simulat\w*|model|engine|system|pipeline|solver|framework|dashboard|app|analysis)\b/.test(t);
-  const explicitHeavy = /\b(complex|detailed|rigorous|comprehensive|realistic|high.?fidelity|publication.?(?:grade|quality)|research.?grade)\b/.test(t) && heavyBuild;
-  return (sim && (sciDomain || heavyBuild)) || (sciDomain && heavyBuild) || explicitHeavy;
+  const buildVerb = /\b(build|create|implement|develop|write|design|model|generate|make|simulate|prototype)\b/.test(t);
+  const heavyBuild = buildVerb && /\b(simulat\w*|model|engine|system|pipeline|solver|framework|dashboard|app|analysis)\b/.test(t);
+  // Physical / creative "build a whole THING" — a suit, device, machine, robot, vehicle, game, 3D
+  // world, etc. This is the "design and simulate an Iron Man suit" class → route to the build engine.
+  const thing = /\b(suit|device|machine|robot|drone|vehicle|car|plane|rocket|gadget|wearable|exoskeleton|weapon|gun|armou?r|game|3d|scene|world|environment|level|creature|character|product|contraption|apparatus|instrument)\b/.test(t);
+  const physicalBuild = buildVerb && thing;
+  const explicitHeavy = /\b(complex|detailed|rigorous|comprehensive|realistic|high.?fidelity|whole|entire|full|complete)\b/.test(t) && (heavyBuild || physicalBuild);
+  return (sim && (sciDomain || heavyBuild || thing)) || (sciDomain && heavyBuild) || physicalBuild || explicitHeavy;
 }
 
 // Injected (uncached, trailing) into the system when a HEAVY task is detected — turns the single
 // linear agent loop into a parallel fleet. This is the whole point of the subagent fleet: research,
 // design, code, and testing proceed concurrently, then get synthesized with real interpretation.
 const HEAVY_FLEET_DIRECTIVE = [
-  'HEAVY TASK — multi-faceted build detected (deep coding + interpretation, e.g. a scientific simulation).',
-  'Do NOT grind through it in one linear pass. DECOMPOSE and run specialists IN PARALLEL via',
-  'plan_and_run (task DAG) or deploy_drones (fleet + shared blackboard), typically four lanes:',
-  '• RESEARCH — find_papers/web_search to ground the model in the real mechanism & parameters.',
-  '• DESIGN — studio_write/make_figure for the visualization (what the sim should render).',
-  '• CODE — sci_compute/simulate to implement AND run the model.',
-  '• TEST — sanity-check the outputs (conservation laws, units, numerical stability, plausibility).',
-  'Independent lanes run concurrently; dependent ones wait for upstream results. Then SYNTHESIZE the',
-  'lanes into one coherent deliverable with your OWN interpretation (what the result means, caveats).',
-  'Use your full reasoning depth — you are on the Opus tier for exactly this.'
+  'HEAVY TASK — multi-faceted build detected (e.g. "design and simulate an Iron Man suit", a device, a game, a simulation).',
+  'FINISH IT THIS TURN — completion over breadth. The fastest reliable path:',
+  '1) If Siddhant hasn\'t already given the key specs, gather them with ONE ask_options round (dimensions,',
+  '   colours, features) — do NOT run a long multi-stage interview. For anything he leaves out, ASSUME a',
+  '   sensible default and note it.',
+  '2) Then call build_project{goal, spec, deliverable:"both"} — it decomposes the build into PARALLEL',
+  '   lanes, runs them as a fleet, integrates, runs a real physics pass (simulate) AND renders an',
+  '   interactive 3D scene (studio_write), and saves it as a RESUMABLE project. One call, whole thing.',
+  'Only hand-roll plan_and_run / deploy_drones / a manual fleet+studio+sim sequence if build_project',
+  'genuinely doesn\'t fit. Either way: end the turn with a PRODUCED, rendered artifact — never a promise to build.'
 ].join(' ');
 
 // Natural-language toggle for the pipeline, usable from any entry point (desktop,

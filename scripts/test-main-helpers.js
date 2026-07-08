@@ -151,5 +151,28 @@ const tagCache = load('tagLastBlockForCache');
 ok(tagCache([]) .length === 0, 'cache: empty messages → empty');
 ok(Array.isArray(tagCache('nope')) === false, 'cache: non-array → returned as-is');
 
+// ---- looksHeavyTool (routes to the build engine / heavy tier) ----
+{
+  const looksHeavyTool = load('looksHeavyTool');
+  ok(looksHeavyTool('design and simulate a whole iron man suit that I might wear') === true, 'heavy: "design and simulate an iron man suit" → heavy build');
+  ok(looksHeavyTool('Generate a simulation of an ironman suit') === true, 'heavy: "generate a simulation of an ironman suit" → heavy build');
+  ok(looksHeavyTool('build a robot arm and simulate its motion') === true, 'heavy: physical build (robot) → heavy');
+  ok(looksHeavyTool('simulate protein folding from scratch') === true, 'heavy: sci-domain simulation → heavy');
+  ok(looksHeavyTool('what is the weather in Tokyo') === false, 'heavy: a plain question → not heavy');
+  ok(looksHeavyTool('reply to that email') === false, 'heavy: a routine action → not heavy');
+}
+
+// ---- extractCode (build_project artifact/code extraction) ----
+{
+  const extractCode = load('extractCode');
+  ok(extractCode('```python\nprint(1)\n```', 'python') === 'print(1)', 'extractCode: unwraps a fenced python block');
+  ok(extractCode('```\nx=1\n```') === 'x=1', 'extractCode: unwraps an unlabelled fence');
+  ok(extractCode('no fences here just text').includes('no fences'), 'extractCode: no fence → returns trimmed text');
+  const html = extractCode('Here you go:\n```html\n<!doctype html><html><body>hi</body></html>\n```', 'html');
+  ok(html.startsWith('<!doctype html>') && html.endsWith('</html>'), 'extractCode: html mode → slices the full document');
+  const embedded = extractCode('intro prose <html><body>x</body></html> trailing', 'html');
+  ok(embedded === '<html><body>x</body></html>', 'extractCode: html embedded in prose → sliced to the doc');
+}
+
 console.log(`\n${fail === 0 ? '✅' : '❌'} ${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);
