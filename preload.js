@@ -27,6 +27,7 @@ contextBridge.exposeInMainWorld('bhatbot', {
   sendFleetFeedback: (id, text) => ipcRenderer.invoke('fleet-feedback', { id, text }),
   sendFleetControl: (id, action) => ipcRenderer.invoke('fleet-control', { id, action }),
   openAgentWindow: (id) => ipcRenderer.invoke('open-agent-window', id),
+  openActionView: () => ipcRenderer.invoke('open-action-view'),
   getHealth: () => ipcRenderer.invoke('get-health'),
   getBiometrics: (opts) => ipcRenderer.invoke('get-biometrics', opts),                  // Health panel — Garmin biometrics
   onBiometricsUpdate: (cb) => ipcRenderer.on('biometrics-update', (_e, d) => cb(d)),     // proactive monitor pushes

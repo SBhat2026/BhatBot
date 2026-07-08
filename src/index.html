@@ -1370,7 +1370,7 @@ function liveAppend(delta) {
 function closeLiveBubble() { liveBubble = null; }
 window.bhatbot.onToolUpdate((u) => {
   if (u.type === 'token') { rmThinking(); streamedThisTurn = true; if (!voiceFirst) liveAppend(u.text); else { setSpeaking(true); setOrbState('speaking'); } }
-  else if (u.type === 'tool_start') { rmThinking(); closeLiveBubble(); toolStart(u); addThinking(); actLog(u.name + ' ' + shortArg(u.name, u.input), 'run'); showToolLine(String(u.name || '').replace(/_/g, ' ')); pgToolStart(u.name); }
+  else if (u.type === 'tool_start') { rmThinking(); closeLiveBubble(); toolStart(u); addThinking(); actLog(u.name + ' ' + shortArg(u.name, u.input), 'run'); showToolLine(u.narrate || String(u.name || '').replace(/_/g, ' ')); pgToolStart(u.narrate || u.name); }
   else if (u.type === 'tool_done') {
     toolDone(u); const ok = u.result && u.result.success !== false;
     actLog((u.name || 'tool') + (ok ? ' ✓' : ' ✗'), ok ? 'ok' : 'fail');

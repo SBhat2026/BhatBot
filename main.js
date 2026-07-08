@@ -4563,6 +4563,87 @@ function openAgentWindow(id) {
   return { success: true };
 }
 ipcMain.handle('open-agent-window', (_e, id) => openAgentWindow(id));
+
+// ===========================================================================
+// LIVE ACTION VIEW — a pop-up "watch me work" window that mirrors what the MAIN agent is doing in
+// real time: the current action in plain English, a rolling log, and (for screen/browser/desktop
+// work) periodic SCREENSHOTS of the actual screen. Reuses agentmon.html (id='live') so all the
+// rendering already exists; we just feed it 'fleet-update' payloads tagged id:'live'.
+// ===========================================================================
+let actionViewWin = null;
+let _avLastShot = 0;   // throttle live screenshots
+function openActionView() {
+  try {
+    if (actionViewWin && !actionViewWin.isDestroyed()) { actionViewWin.show(); return { success: true }; }
+    const asset = path.join(__dirname, 'assets', 'agentmon.html');
+    if (!fs.existsSync(asset)) return { success: false, error: 'agentmon.html missing' };
+    actionViewWin = new BrowserWindow({
+      width: 620, height: 760, resizable: true, minWidth: 380, minHeight: 400,
+      title: 'BhatBot — Live Action View', backgroundColor: '#0a0f17', alwaysOnTop: false,
+      webPreferences: { contextIsolation: true, preload: path.join(__dirname, 'preload-agentmon.js') },
+    });
+    actionViewWin.loadFile(asset, { query: { id: 'live' } });
+    actionViewWin.on('closed', () => { actionViewWin = null; });
+    actionViewWin.webContents.once('did-finish-load', () => { try { actionViewWin.webContents.send('fleet-update', { id: 'live', role: 'BhatBot', status: 'working', note: 'Live action view attached.' }); } catch {} });
+    return { success: true };
+  } catch (e) { return { success: false, error: e.message }; }
+}
+// Push one live-view update (no-op if the window isn't open). shot = base64 jpeg of the screen.
+function actionView(payload) {
+  try { if (actionViewWin && !actionViewWin.isDestroyed()) actionViewWin.webContents.send('fleet-update', { id: 'live', ...payload }); } catch {}
+}
+// Capture a throttled screenshot of the actual screen for the live view (so Siddhant SEES the agent
+// acting on his machine). Best-effort; skips if we grabbed one very recently.
+async function actionViewShot(caption) {
+  if (!actionViewWin || actionViewWin.isDestroyed()) return;
+  if (Date.now() - _avLastShot < 1800) return;   // ≥1.8s between captures
+  _avLastShot = Date.now();
+  try { const b64 = await captureScreenJpeg(); if (b64) actionView({ shot: b64, shotMime: 'image/jpeg', note: caption || 'live screen' }); } catch {}
+}
+ipcMain.handle('open-action-view', () => openActionView());
+// Tools that ACTUATE the machine (browser/desktop/screen/shell) — these are what a "watch me work"
+// view is for, so they auto-open the Action View and stream screenshots.
+const ACTUATING_TOOLS = new Set([
+  'browser', 'browser_workflow', 'browser_observe', 'open_in_browser', 'screen_parse', 'screen_observe',
+  'vision_click', 'vision_local', 'ui_inspect', 'system_control', 'media_control', 'run_shell',
+  'smart_login', 'manage_logins', 'phone_mirror',
+]);
+// Continuous plain-English narration of the current action (the "what am I doing right now" line).
+function describeAction(name, input = {}) {
+  const s = (v, n = 48) => String(v == null ? '' : v).replace(/\s+/g, ' ').trim().slice(0, n);
+  try {
+    switch (name) {
+      case 'web_search': return `Searching the web for “${s(input.query)}”`;
+      case 'find_papers': return `Searching papers for “${s(input.query || input.q)}”`;
+      case 'fetch_url': case 'open_in_browser': { let h = s(input.url, 60); try { h = new URL(input.url).host; } catch {} return `Opening ${h}`; }
+      case 'browser': return input.action ? `Browser: ${s(input.action)}${input.url ? ' → ' + s(input.url, 40) : ''}` : 'Driving the browser';
+      case 'browser_workflow': return `Running a browser workflow`;
+      case 'run_shell': return `Running: ${s(input.command || input.cmd, 60)}`;
+      case 'read_file': return `Reading ${s(input.path || input.file, 60)}`;
+      case 'write_file': case 'edit_file': return `Writing ${s(input.path || input.file, 60)}`;
+      case 'list_directory': return `Listing ${s(input.path || '.', 60)}`;
+      case 'system_control': return `${s(input.action || 'controlling')} ${s(input.app || input.text || '', 40)}`.trim();
+      case 'media_control': return `Media: ${s(input.action)}`;
+      case 'screen_parse': case 'screen_observe': return 'Looking at the screen';
+      case 'ui_inspect': return 'Inspecting the UI';
+      case 'vision_click': return `Clicking ${s(input.expect || input.query || 'an element')}`;
+      case 'phone_mirror': return `Phone: ${s(input.action)}`;
+      case 'generate_image': return `Generating an image of “${s(input.prompt || input.query)}”`;
+      case 'generate_3d': case 'make_printable': return 'Building a 3D model';
+      case 'simulate': case 'sci_compute': return 'Running a computation';
+      case 'studio_write': return 'Rendering the 3D scene';
+      case 'make_figure': return 'Making a figure';
+      case 'molecule': return `Rendering molecule ${s(input.query || input.name)}`;
+      case 'maps': return `Mapping ${s(input.query || input.place)}`;
+      case 'save_memory': return 'Saving to memory';
+      case 'notion_search': return `Searching Notion for “${s(input.query)}”`;
+      case 'ask_ai': return 'Consulting a second model';
+      case 'notify_user': return 'Reaching you out-of-band';
+      case 'build_project': return `Building: ${s(input.goal, 60)}`;
+      default: return `Working on ${String(name || 'the task').replace(/_/g, ' ')}`;
+    }
+  } catch { return `Working on ${String(name || 'the task').replace(/_/g, ' ')}`; }
+}
 function fleetDrainFeedback(id) {
   const a = fleetAgents.get(id);
   if (!a || !a.feedback || !a.feedback.length) return [];
@@ -4756,6 +4837,7 @@ async function agentLoop(history, apiKey, event, opts = {}) {
       if (plan) {
         sendToAll(event, 'tool-update', { type: 'plan', steps: plan.steps, spoken: plan.spoken });
         sendToActivity('plan', { steps: plan.steps, spoken: plan.spoken });
+        actionView({ role: 'BhatBot', status: 'working', task: lastUserText(history).slice(0, 200), note: '📋 Plan: ' + plan.steps.map((s, i) => (i + 1) + ') ' + s).join('  ') });
         if (ttsSeq != null) ttsStreamFeed(ttsSeq, plan.spoken);   // read the plan aloud
         appendToLastUser(history, `[EXECUTION PLAN — you have ALREADY spoken this summary to Siddhant aloud; do NOT re-read or restate it. Execute these steps now, in order, and incorporate any "[Live guidance from Siddhant]" notes as they arrive. Keep spoken output to brief progress + the final result.]\n` + plan.steps.map((s, i) => `${i + 1}. ${s}`).join('\n'));
       }
@@ -4791,18 +4873,26 @@ async function agentLoop(history, apiKey, event, opts = {}) {
         procedural.record(PROCEDURAL_PATH, { trigger: userText0, steps: toolTrace, ok, ms: Date.now() - _turnT0, readPrefix: _readPrefix }, { clusterJaccard: loadConfig().proceduralClusterJaccard });
       }
     } catch {}
+    if (stream) { const stopped = agentState === 'stopped' || /^⏹/.test(String(text || '')); actionView({ status: stopped ? 'stopped' : 'done', step: stopped ? 'Stopped.' : 'Finished.', text: clean.slice(0, 400) }); }
     return { text: clean, history, _streamed: stream };
   };
 
+  // PERSISTENCE — how hard BhatBot pushes to FINISH a complex task before it reports back. Tunable via
+  // config.persistence: 'normal' (default), 'high', or 'relentless'. Higher = more step headroom, a
+  // higher hard ceiling, bigger auto-extend jumps, and a "second wind" replan when it gets stuck.
+  const PERSIST = { normal: { base: 0, hard: 60, ext: 15, secondWind: false }, high: { base: 32, hard: 120, ext: 20, secondWind: true }, relentless: { base: 48, hard: 200, ext: 25, secondWind: true } };
+  const pcfg = PERSIST[loadConfig().persistence] || PERSIST.normal;
   // Step budget: headroom for complex tasks that diagnose + retry across several approaches.
   // Configurable (agentMaxSteps); never below the default so a stale low value can't throttle.
-  let maxIters = Math.max(Number(loadConfig().agentMaxSteps) || 0, MAX_AGENT_ITERATIONS);
+  let maxIters = Math.max(Number(loadConfig().agentMaxSteps) || 0, MAX_AGENT_ITERATIONS, pcfg.base);
   // Auto-extend (Siddhant's choice): keep going past the budget while genuinely productive, up to a
   // HARD ceiling that bounds worst-case spend even if the agent loops. Unproductive = consecutive
   // iterations with no NOVEL tool signature (stuck/repeating) → stop extending.
-  const HARD_CEILING = Math.max(maxIters, Number(loadConfig().agentMaxStepsHard) || 60);
+  const HARD_CEILING = Math.max(maxIters, Number(loadConfig().agentMaxStepsHard) || 0, pcfg.hard);
+  const EXTEND_STEP = pcfg.ext;
   const userText0 = lastUserText(history);            // the original request, for the action-verify judge
   let toolsRan = 0, unproductive = 0, verifyCount = 0; const toolNamesRan = []; const seenSigs = [];
+  let consecFail = 0, failNudgedAt = -1, _secondWind = false, _lastNarrateTs = Date.now();   // persistence: failure-retry ladder + one-time stuck replan + text-heartbeat clock
   const toolTrace = []; const _readPrefix = []; let _prefixOpen = true;   // procedural memory: this turn's ordered step-series + its leading read-only run (auto-runnable ahead of the model next time)
   if (stream) ttsLastAudioTs = Date.now();            // measure the progress-heartbeat silence from turn start
   while (iterations < maxIters) {
@@ -4853,7 +4943,17 @@ async function agentLoop(history, apiKey, event, opts = {}) {
     // tool_result block. A thrown tool used to escape the loop, leaving the assistant tool_use with
     // NO matching tool_result → the next API call 400s. Always resolve to a result so pairing holds.
     const runOneTool = async (block) => {
-      sendToAll(event, 'tool-update', { type: 'tool_start', name: block.name, input: block.input });
+      // Continuous plain-English status of what's happening right now (chat + live view + heartbeat).
+      const say = describeAction(block.name, block.input);
+      sendToAll(event, 'tool-update', { type: 'tool_start', name: block.name, input: block.input, narrate: say });
+      _lastNarrateTs = Date.now();
+      if (stream) {
+        // Auto-pop the "watch me work" window the first time this turn ACTUATES the machine (unless
+        // disabled). Then mirror the current action + a live screenshot into it.
+        if (ACTUATING_TOOLS.has(block.name) && loadConfig().actionView !== false && !isRemote()) openActionView();
+        actionView({ role: 'BhatBot', status: 'working', step: say });
+        if (ACTUATING_TOOLS.has(block.name)) actionViewShot(say);   // show the actual screen as it acts
+      }
       // Guard empty code-tool calls (weak model or an interrupted stream that parsed tool input as {}):
       // short-circuit to a crisp corrective result — no wasted spawn, pairing intact, precise retry cue.
       if ((block.name === 'simulate' || block.name === 'sci_compute') && (block.input.action || 'run') === 'run' && !String(block.input.code || '').trim()) {
@@ -4883,6 +4983,14 @@ async function agentLoop(history, apiKey, event, opts = {}) {
         preview: showImage ? { image: result._image, mime: result._imageMime || 'image/jpeg' } : undefined,
         model3d
       });
+      if (stream) {
+        const okTool = result.success !== false;
+        actionView({ note: String(block.name).replace(/_/g, ' ') + (okTool ? ' ✓' : ' ✗') });
+        // Show what changed on screen: the tool's own capture if it has one, else a fresh screenshot
+        // for actuating tools (so the live view reflects the machine's real state after the action).
+        if (result._image) actionView({ shot: result._image, shotMime: result._imageMime || 'image/jpeg', note: describeAction(block.name, block.input) });
+        else if (ACTUATING_TOOLS.has(block.name)) actionViewShot('after ' + String(block.name).replace(/_/g, ' '));
+      }
       let trContent;
       if (result._image) {
         const { _image, _imageMime, ...rest } = result;
@@ -4918,6 +5026,23 @@ async function agentLoop(history, apiKey, event, opts = {}) {
       sendToAll(event, 'tool-update', { type: 'guidance_applied', text: gJoined });
     }
 
+    // PERSISTENCE — failure-retry ladder. Track consecutive all-failing tool batches; after ≥2 in a
+    // row, inject an escalating directive to STOP repeating the same call, diagnose the root cause from
+    // the error text, and try a genuinely different approach/tool — and grant a little extra budget so
+    // the recovery has room. Keeps BhatBot from either giving up or looping on the same broken call.
+    const batchErr = toolResults.filter((r) => r && r.is_error).length;
+    const batchTools = toolResults.filter((r) => r && r.type === 'tool_result').length;
+    if (batchTools > 0 && batchErr === batchTools) consecFail++; else if (batchErr === 0) consecFail = 0;
+    if (consecFail >= 2 && failNudgedAt !== iterations) {
+      failNudgedAt = iterations;
+      const rung = consecFail >= 4 ? 'You have failed the SAME way several times. Step back completely: question your assumptions, re-read the goal, and switch to a fundamentally different method (a different tool, a different path, or gather more information first).'
+        : 'That approach keeps failing. Read the error carefully, diagnose the ROOT cause, and try a DIFFERENT approach or tool — do not simply repeat the same call.';
+      toolResults.unshift({ type: 'text', text: `[PERSISTENCE — ${consecFail} consecutive failures. ${rung} Do NOT give up or hand this back to Siddhant unless you have genuinely exhausted the options.]` });
+      if (maxIters - iterations < 4) maxIters = Math.min(HARD_CEILING, maxIters + EXTEND_STEP);   // room to recover
+      sendToAll(event, 'tool-update', { type: 'thinking', text: `🧭 ${consecFail} failures — changing approach` });
+      actionView({ note: `🧭 ${consecFail} failures — changing approach` });
+    }
+
     history = [...history, { role: 'user', content: toolResults }];
     // Productivity tracking for auto-extend: a turn is "productive" if it ran ≥1 tool with a NOVEL
     // signature (not a repeat of a recent call). A stuck agent re-calling the same thing stops
@@ -4946,6 +5071,18 @@ async function agentLoop(history, apiKey, event, opts = {}) {
         ttsLastAudioTs = Date.now();   // reset so progress lines don't stack
       }
     }
+    // TEXT progress heartbeat: independent of TTS, so even a muted long turn keeps showing a
+    // "still working on X" line in chat + the live view rather than going silent for many steps.
+    if (stream && loadConfig().textProgress !== false) {
+      const tThresh = Number(loadConfig().textProgressMs) || 12000;
+      if (Date.now() - _lastNarrateTs > tThresh) {
+        const lastTool = toolUses[toolUses.length - 1] && toolUses[toolUses.length - 1].name;
+        const line = `⏳ still working — ${describeAction(lastTool, (toolUses[toolUses.length - 1] || {}).input)} · step ${iterations + 1}`;
+        sendToAll(event, 'tool-update', { type: 'thinking', text: line });
+        actionView({ note: line });
+        _lastNarrateTs = Date.now();
+      }
+    }
     // Mid-loop context guard: a single turn that fans out into dozens of tool calls can approach
     // the window before the next user message. Summarize the old head in place so long autonomous /
     // self-drive runs keep fidelity instead of getting hard-dropped by capTokens at the wire.
@@ -4957,9 +5094,21 @@ async function agentLoop(history, apiKey, event, opts = {}) {
     iterations++;
     // AUTO-EXTEND (Siddhant's choice): about to hit the budget but still doing new work → raise it,
     // bounded by HARD_CEILING. Keeps genuine long tasks finishing instead of dead-ending at 20 steps.
-    if (iterations >= maxIters && loadConfig().autoExtend !== false && shouldExtendBudget({ maxIters, hardCeiling: HARD_CEILING, unproductive })) {
-      const prev = maxIters; maxIters = Math.min(HARD_CEILING, maxIters + 15);
-      if (maxIters > prev) sendToActivity('tool-update', { type: 'thinking', text: `⏳ still making progress — extending step budget to ${maxIters}` });
+    if (iterations >= maxIters && loadConfig().autoExtend !== false) {
+      if (shouldExtendBudget({ maxIters, hardCeiling: HARD_CEILING, unproductive })) {
+        const prev = maxIters; maxIters = Math.min(HARD_CEILING, maxIters + EXTEND_STEP);
+        if (maxIters > prev) { sendToAll(event, 'tool-update', { type: 'thinking', text: `⏳ still making progress — extending step budget to ${maxIters}` }); actionView({ note: `⏳ extended budget to ${maxIters} steps` }); }
+      } else if (pcfg.secondWind && !_secondWind && maxIters < HARD_CEILING) {
+        // PERSISTENCE second wind (high/relentless only): about to give up because it's STUCK (repeating
+        // itself), not because the task is done. Grant ONE more budget bump + force a fresh-approach
+        // replan directive, then reset the stuck counter so it genuinely tries something different once
+        // more before falling through to the progress report. Bounded to once per turn → no infinite loop.
+        _secondWind = true; unproductive = 0;
+        maxIters = Math.min(HARD_CEILING, maxIters + EXTEND_STEP);
+        history = [...history, { role: 'user', content: '[SECOND WIND — you look stuck repeating the same actions, but this task is NOT finished. Do not stop. Step back, re-read the original goal, and attack it a completely different way (different tool, different decomposition, or gather missing information first). This is your one extra push before you must report progress.]' }];
+        sendToAll(event, 'tool-update', { type: 'thinking', text: '🌬 second wind — stepping back to try a different approach' });
+        actionView({ note: '🌬 second wind — trying a different approach' });
+      }
     }
   }
   // Budget exhausted — don't dead-end. One final tool-less turn so the user gets a concrete
@@ -8261,6 +8410,8 @@ app.whenReady().then(() => {
     // ⌘⇧L — toggle VOICE LOCK (continuous listening, no wake word) from anywhere. Global so it works
     // while another app is focused; it only drives the local mic loop, never blocks Telegram/phone/MCP.
     try { globalShortcut.register('CommandOrControl+Shift+L', () => { try { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('toggle-voice-lock'); } catch {} }); } catch {}
+    // ⌘⇧V — pop the LIVE ACTION VIEW ("watch me work": current action + rolling log + live screenshots).
+    try { globalShortcut.register('CommandOrControl+Shift+V', () => { try { openActionView(); } catch {} }); } catch {}
     startWakeHelper();
     // Ask for Screen Recording + Accessibility on launch so they appear in System Settings.
     // Deferred 1.5s so it doesn't fight the window-show animation. Opens the Settings pane
