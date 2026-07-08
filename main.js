@@ -36,6 +36,7 @@ const episodic = require('./lib/episodic');             // Phase 3 #3 — episod
 const procedural = require('./lib/procedural');         // procedural memory — learned recurring step-series (faster over time)
 const { createReadCache } = require('./lib/readcache'); // shared TTL read-cache: fleet dedup + speculative prefetch
 const imagesearch = require('./lib/imagesearch');       // keyless real-photo search for the visual canvas + option cards
+const studioscene = require('./lib/studioscene');       // deterministic Three.js scene skeleton + multi-part stitch
 const risk = require('./lib/risk');                    // W3 tool tiers + Phase 6 desire classification + frozen-zone gate
 const { riskOf } = risk;                               // per-tool key-risk classification (auto|confirm|stepup)
 const graph = require('./lib/graph');                  // W4 — knowledge-graph memory (entities + typed edges, multi-hop)
@@ -2136,18 +2137,36 @@ function requestConfirm(command, reason, opts = {}) {
 // with the labels Siddhant taps. Mirrors requestConfirm's promise-per-id pattern. A safety timeout
 // resolves empty so the agent loop can never hang on an ignored card.
 const pendingOptions = new Map();
-function requestOptions(question, options, multi) {
+// Resolves with { selected:[labels], text:'' } — text is the optional inline free-text box (allowText).
+function requestOptions(question, options, multi, opts = {}) {
   return new Promise((resolve) => {
     const id = String(Date.now()) + Math.random().toString(36).slice(2, 6);
     pendingOptions.set(id, resolve);
-    try { if (mainWindow && !mainWindow.isDestroyed()) { mainWindow.show(); mainWindow.webContents.send('options-required', { id, question, options, multi: !!multi }); } else { pendingOptions.delete(id); resolve([]); return; } }
-    catch { pendingOptions.delete(id); resolve([]); return; }
-    setTimeout(() => { if (pendingOptions.has(id)) { pendingOptions.delete(id); resolve([]); } }, 5 * 60 * 1000);
+    try {
+      if (mainWindow && !mainWindow.isDestroyed()) { mainWindow.show(); mainWindow.webContents.send('options-required', { id, question, options, multi: !!multi, allowText: !!opts.allowText, textPlaceholder: opts.textPlaceholder || '' }); }
+      else { pendingOptions.delete(id); resolve({ selected: [], text: '' }); return; }
+    } catch { pendingOptions.delete(id); resolve({ selected: [], text: '' }); return; }
+    setTimeout(() => { if (pendingOptions.has(id)) { pendingOptions.delete(id); resolve({ selected: [], text: '' }); } }, 5 * 60 * 1000);
   });
 }
-ipcMain.on('options-answer', (_e, { id, selected } = {}) => {
+ipcMain.on('options-answer', (_e, { id, selected, text } = {}) => {
   const r = pendingOptions.get(id);
-  if (r) { pendingOptions.delete(id); r(Array.isArray(selected) ? selected.map(String) : []); }
+  if (r) { pendingOptions.delete(id); r({ selected: Array.isArray(selected) ? selected.map(String) : [], text: String(text || '').trim() }); }
+});
+
+// Voice clarity gate (borderline path): a cheap local yes/no on whether an ambiguous utterance is a
+// clear, actionable request. The instant heuristic (pure.looksActionable) runs in the renderer first;
+// only 'borderline' utterances reach this. Fail-OPEN (treat as actionable) so it can never eat a real command.
+ipcMain.handle('voice-intent', async (_e, { text } = {}) => {
+  try {
+    const t = String(text || '').trim();
+    if (!t) return { ok: false };
+    if (loadConfig().voiceClarityModel === false) return { ok: true };   // model check disabled → don't drop
+    const r = await cheapText('You judge if a short transcribed utterance is a CLEAR, ACTIONABLE request/command to an assistant (answer strictly "yes"), or just rambling / thinking aloud / an incomplete fragment with no clear ask (answer strictly "no").', t, { maxTokens: 4 });
+    const yes = /\byes\b/i.test(r.text || '');
+    const no = /\bno\b/i.test(r.text || '');
+    return { ok: yes || !no };   // fail-open: only drop on an explicit "no"
+  } catch { return { ok: true }; }
 });
 
 // runShell now provided by lib/shell.js (constructed at top). The web-handling helpers continue below.
@@ -3287,68 +3306,15 @@ async function generateStudioArtifact(goal, spec, buildNotes, physics, emit, fix
 
 // ── MULTI-PART ARTIFACT ASSEMBLY ─────────────────────────────────────────────────────────────────
 // A single 8k-token HTML can truncate on a big build. Instead: a DETERMINISTIC Three.js SKELETON
-// (scene/camera/lights/controls/spec-sheet — never model-generated, so it always renders) + one
-// bounded geometry function PER subsystem, generated IN PARALLEL, then stitched in. Robust + parallel.
-const STUDIO_SKELETON = `<!doctype html><html><head><meta charset="utf8"><title>__TITLE__</title>
-<style>html,body{margin:0;height:100%;background:#0a0e14;overflow:hidden;font-family:-apple-system,Segoe UI,Roboto,sans-serif}
-#c{width:100%;height:100%;display:block}
-#spec{position:fixed;top:14px;left:14px;max-width:320px;background:rgba(10,16,22,.82);border:1px solid #1d6e86;border-radius:12px;padding:14px 16px;color:#cfe8f2;font-size:13px;line-height:1.5;backdrop-filter:blur(8px)}
-#spec h1{margin:0 0 8px;font-size:15px;color:#7fe3ff;letter-spacing:.02em}#spec .row{display:flex;justify-content:space-between;gap:14px;padding:2px 0;border-bottom:1px solid rgba(127,212,232,.1)}#spec .k{color:#8fb8c8}#spec .v{color:#eaf6fb;text-align:right}
-#hint{position:fixed;bottom:12px;left:14px;color:#5b7187;font-size:11px}</style>
-<script type="importmap">{"imports":{"three":"https://unpkg.com/three@0.160.0/build/three.module.js","three/addons/":"https://unpkg.com/three@0.160.0/examples/jsm/"}}</script>
-</head><body><canvas id="c"></canvas><div id="spec">__SPECSHEET__</div><div id="hint">drag to orbit · scroll to zoom</div>
-<script type="module">
-import * as THREE from 'three';
-import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-const SPECS = __SPECSJSON__;
-const renderer = new THREE.WebGLRenderer({canvas:document.getElementById('c'),antialias:true});
-renderer.setSize(innerWidth,innerHeight);renderer.setPixelRatio(Math.min(devicePixelRatio,2));
-const scene = new THREE.Scene();scene.background=new THREE.Color(0x0a0e14);
-const camera = new THREE.PerspectiveCamera(50,innerWidth/innerHeight,0.1,2000);camera.position.set(3.2,2.2,5.2);
-const controls = new OrbitControls(camera,renderer.domElement);controls.enableDamping=true;controls.target.set(0,1,0);
-scene.add(new THREE.HemisphereLight(0xbfe3ff,0x223,0.9));
-const key=new THREE.DirectionalLight(0xffffff,1.1);key.position.set(5,8,6);scene.add(key);
-const rim=new THREE.DirectionalLight(0x7fd4e8,0.6);rim.position.set(-6,3,-4);scene.add(rim);
-const grid=new THREE.GridHelper(20,20,0x1d6e86,0x122);grid.position.y=0;scene.add(grid);
-const group = new THREE.Group();scene.add(group);
-/*__PARTS__*/
-/*__CALLS__*/
-// frame the whole build
-try{const box=new THREE.Box3().setFromObject(group);if(!box.isEmpty()){const c=box.getCenter(new THREE.Vector3());const s=box.getSize(new THREE.Vector3());controls.target.copy(c);const r=Math.max(s.x,s.y,s.z)||3;camera.position.set(c.x+r*1.1,c.y+r*0.8,c.z+r*1.6);}}catch(e){}
-addEventListener('resize',()=>{camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();renderer.setSize(innerWidth,innerHeight);});
-(function loop(){requestAnimationFrame(loop);group.rotation.y+=0.0016;controls.update();renderer.render(scene,camera);})();
-</script></body></html>`;
-
-function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
-function specSheetHtml(goal, spec, physics) {
-  const rows = [];
-  const s = spec && typeof spec === 'object' ? spec : {};
-  for (const k of Object.keys(s).slice(0, 14)) rows.push(`<div class="row"><span class="k">${esc(k)}</span><span class="v">${esc(String(s[k]).slice(0, 40))}</span></div>`);
-  if (physics && physics.summary) {
-    for (const line of String(physics.summary).split('\n').slice(0, 8)) {
-      const m = line.match(/^(.*?)[:=]\s*(.+)$/);
-      if (m) rows.push(`<div class="row"><span class="k">${esc(m[1].trim().slice(0, 28))}</span><span class="v">${esc(m[2].trim().slice(0, 40))}</span></div>`);
-    }
-  }
-  return `<h1>${esc(String(goal).slice(0, 50))}</h1>${rows.join('') || '<div class="row"><span class="k">spec</span><span class="v">—</span></div>'}`;
-}
-// Pull the notes most relevant to one lane out of the integrated build (keep each part-gen focused).
-function laneNotes(buildNotes, role) {
-  const txt = String(buildNotes || '');
-  const re = new RegExp('###[^\\n]*' + role.replace(/[-_]/g, '[\\s-_]*') + '[\\s\\S]*?(?=\\n###|$)', 'i');
-  const m = txt.match(re);
-  return (m ? m[0] : txt).slice(0, 2600);
-}
-
-// Assemble the interactive 3D scene from PARALLEL per-subsystem geometry functions stitched into the
-// deterministic skeleton. Falls back to the single-shot generator if the parts don't materialize.
+// (lib/studioscene — never model-generated, so it always renders) + one bounded geometry function
+// PER subsystem, generated IN PARALLEL, then stitched in. Robust + parallel.
 async function assembleStudioArtifact(goal, spec, buildNotes, physics, lanes, emit) {
   emit('🎨 assembling the 3D scene — subsystems in parallel');
   const list = (Array.isArray(lanes) && lanes.length ? lanes : [{ role: 'body', task: goal }]).slice(0, 6);
   const specStr = JSON.stringify(spec || {}).slice(0, 700);
   const genPart = async (lane, i) => {
     const sys = `You write ONE JavaScript function that adds a single subsystem's 3D geometry to a Three.js scene. Signature EXACTLY: function part_${i}(THREE, scene, group, specs){ ... }. Build real, recognizable geometry for the "${lane.role}" subsystem using THREE primitives (Box/Cylinder/Sphere/Cone/Torus/Lathe/Extrude), MeshStandardMaterial with the specified colours/metalness, and Groups for structure; position parts sensibly (up = +Y, human-ish scale ~1.8 units tall). Add everything to \`group\`. NO imports, NO HTML, NO OrbitControls, NO renderer/scene creation, NO markdown. Output ONLY the function.`;
-    const usr = `Overall build: ${goal}\nThis subsystem — ${lane.role}: ${lane.task}\nSpecs: ${specStr}\nDesign notes:\n${laneNotes(buildNotes, lane.role)}`;
+    const usr = `Overall build: ${goal}\nThis subsystem — ${lane.role}: ${lane.task}\nSpecs: ${specStr}\nDesign notes:\n${studioscene.laneNotes(buildNotes, lane.role)}`;
     try {
       const r = await anthropicRequest({ model: MODEL_FABLE, max_tokens: 2400, system: sys, messages: [{ role: 'user', content: usr }] }, getApiKey());
       const code = extractCode((r.content || []).filter((b) => b.type === 'text').map((b) => b.text).join(''), 'javascript');
@@ -3360,13 +3326,7 @@ async function assembleStudioArtifact(goal, spec, buildNotes, physics, lanes, em
   try { parts = await Promise.all(list.map(genPart)); } catch { parts = []; }   // PARALLEL geometry gen
   const good = (parts || []).filter((p) => p && /function part_\d+\s*\([\s\S]*\{[\s\S]*\}/.test(p));
   if (!good.length) { emit('↩︎ part assembly empty — single-shot fallback'); return generateStudioArtifact(goal, spec, buildNotes, physics, emit); }
-  const calls = list.map((_, i) => `try{part_${i}(THREE,scene,group,SPECS);}catch(e){console.warn('part ${i}',e);}`).join('\n');
-  return STUDIO_SKELETON
-    .replace('__TITLE__', esc(goal).slice(0, 60))
-    .replace('__SPECSHEET__', specSheetHtml(goal, spec, physics))
-    .replace('__SPECSJSON__', JSON.stringify(spec || {}))
-    .replace('/*__PARTS__*/', parts.join('\n\n'))
-    .replace('/*__CALLS__*/', calls);
+  return studioscene.stitch(goal, spec, physics, parts);
 }
 
 // ONE build/refine pass: decompose → PARALLEL fleet → integrate → assemble (physics + multi-part 3D)
@@ -3478,20 +3438,21 @@ async function buildProject(input = {}, opts = {}) {
   let pass = await buildPass(goal, spec, deliverable, slug, emit);
   let rounds = 1; const interactive = !isRemote() && mainWindow && !mainWindow.isDestroyed() && input.checkpoint !== false;
   while (interactive && rounds < 6) {
-    let choice = [];
+    let ans = { selected: [], text: '' };
     try {
-      choice = await requestOptions(
+      ans = await requestOptions(
         `"${proj.name}" — ${pass.made.join(' + ') || 'draft'} ready. What next?`,
         [
           { label: 'Looks good — finish', description: 'Keep it as is and save the project.' },
           { label: 'Refine the design', description: 'Improve geometry / proportions / detail.' },
           { label: 'Adjust materials & colours', description: 'Change the look, finish, or palette.' },
           { label: 'Add / change a feature', description: 'Add, remove, or modify a subsystem.' },
-        ], false);
-    } catch { choice = []; }
-    const pick = (choice[0] || '').toLowerCase();
-    if (!pick || /looks good|finish/.test(pick)) break;
-    const feedback = /* let him type specifics via the same picker's Other, else a generic directive */ pick;
+        ], false, { allowText: true, textPlaceholder: 'or describe a specific change (e.g. "bulkier shoulders, matte finish")' });
+    } catch { ans = { selected: [], text: '' }; }
+    const pick = (ans.selected[0] || '').toLowerCase();
+    if (!ans.text && (!pick || /looks good|finish/.test(pick))) break;
+    // Prefer the free-text change he typed; else the picked category as a directive.
+    const feedback = ans.text || pick;
     emit('🔧 refining: ' + feedback);
     pass = await buildPass(goal, spec, deliverable, slug, emit, feedback);
     rounds++;
@@ -3746,8 +3707,8 @@ async function executeTool(name, input) {
         // Interactive picker is a desktop-window feature; on phone/headless/remote fall back to text.
         if (isRemote() || !mainWindow || mainWindow.isDestroyed()) { result = { success: false, error: 'No interactive UI on this surface — instead, list the options in your reply as a numbered list and ask Siddhant to reply with his pick(s).' }; break; }
         if (opts.some((o) => o.imageQuery || o.generate)) { try { sendToActivity('tool-update', { type: 'thinking', text: '🖼 fetching option visuals' }); await resolveOptionImages(opts); } catch {} }   // visual options
-        const selected = await requestOptions(input.question, opts, !!input.multi);
-        result = { success: true, selected, note: selected.length ? undefined : 'Siddhant made no selection (dismissed the card) — proceed with sensible defaults or ask again in text.' };
+        const ans = await requestOptions(input.question, opts, !!input.multi, { allowText: input.allowText !== false, textPlaceholder: input.textPlaceholder || 'or type your own…' });
+        result = { success: true, selected: ans.selected, text: ans.text || undefined, note: (ans.selected.length || ans.text) ? undefined : 'Siddhant made no selection (dismissed the card) — proceed with sensible defaults or ask again in text.' };
         break;
       }
       case 'show_visuals':
@@ -7742,14 +7703,43 @@ async function verifyEnrolledSpeaker(buf, ext) {
     return { ok: r.match, score: r.score, threshold: r.threshold };
   } catch { return { ok: true, skipped: 'exception' }; }
 }
+// PASSIVE SPEAKER LEARNING (Siddhant's pick): with no enrollment session, quietly bank the first N
+// clear utterances as the owner's voiceprint, auto-enroll, then start gating others (soft — the
+// verify step fails open). Assumes the first several interactions are the owner (personal device).
+const SPK_SAMPLES_DIR = path.join(os.homedir(), '.bhatbot', 'voiceid-samples');
+let _spkLearnBusy = false;
+async function passiveSpeakerLearn(buf, ext, text) {
+  try {
+    const c = loadConfig();
+    if ((c.voice && c.voice.speakerLearn === false) || _spkLearnBusy) return;
+    if (!voiceid.ready() || voiceid.isEnrolled()) return;                        // done once enrolled
+    if (!text || String(text).trim().split(/\s+/).length < 4) return;            // learn only from real, clear speech
+    fs.mkdirSync(SPK_SAMPLES_DIR, { recursive: true });
+    const clips = () => fs.readdirSync(SPK_SAMPLES_DIR).filter((f) => /\.(webm|wav|m4a|ogg)$/.test(f));
+    const need = Number(c.voice && c.voice.learnSamples) || 8;
+    if (clips().length < need) { fs.writeFileSync(path.join(SPK_SAMPLES_DIR, `s${Date.now()}.${ext}`), buf); return; }
+    _spkLearnBusy = true;
+    const samples = clips().map((f) => path.join(SPK_SAMPLES_DIR, f));
+    console.log(`[voiceid] passive-learn: enrolling your voiceprint from ${samples.length} samples…`);
+    await voiceid.enroll(samples).catch((e) => console.warn('[voiceid] enroll error:', e && e.message));
+    if (voiceid.isEnrolled()) {
+      const v = { ...(loadConfig().voice || {}), verifyUser: true }; saveConfig({ voice: v });
+      console.log('[voiceid] passive-learn complete — now focusing on your voice (soft gating).');
+      try { if (loadConfig().ttsEnabled !== false) speakDesktop('<speak>I have learned your voice, sir. I will focus on you now.</speak>'); } catch {}
+    }
+    _spkLearnBusy = false;
+  } catch { _spkLearnBusy = false; }
+}
 ipcMain.handle('transcribe-audio', async (_e, { audioBuffer, mimeType }) => {
   const res = await transcribeAudio(audioBuffer, mimeType);
   const c = loadConfig();
+  const mt = (mimeType || 'audio/webm').split(';')[0].trim();
+  const ext = mt === 'audio/mp4' || mt === 'audio/m4a' ? 'm4a' : mt === 'audio/wav' ? 'wav' : mt === 'audio/ogg' ? 'ogg' : 'webm';
   if (res && res.success && res.text && c.voice && c.voice.verifyUser) {
-    const mt = (mimeType || 'audio/webm').split(';')[0].trim();
-    const ext = mt === 'audio/mp4' || mt === 'audio/m4a' ? 'm4a' : mt === 'audio/wav' ? 'wav' : mt === 'audio/ogg' ? 'ogg' : 'webm';
     const v = await verifyEnrolledSpeaker(Buffer.from(audioBuffer), ext);
     if (!v.ok) { console.log(`[voiceid] discarded non-enrolled speaker (score ${v.score}, thr ${v.threshold})`); return { success: true, text: '', _dropped: 'not_enrolled_speaker', score: v.score }; }
+  } else if (res && res.success && res.text) {
+    passiveSpeakerLearn(Buffer.from(audioBuffer), ext, res.text);   // fire-and-forget: build the voiceprint
   }
   return res;
 });
@@ -8159,6 +8149,9 @@ app.whenReady().then(() => {
     createWindow();
     mainWindow.show();
     if (!globalShortcut.register(HOTKEY, toggleWindow)) console.warn('Hotkey failed — may be claimed by another app.');
+    // ⌘⇧L — toggle VOICE LOCK (continuous listening, no wake word) from anywhere. Global so it works
+    // while another app is focused; it only drives the local mic loop, never blocks Telegram/phone/MCP.
+    try { globalShortcut.register('CommandOrControl+Shift+L', () => { try { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('toggle-voice-lock'); } catch {} }); } catch {}
     startWakeHelper();
     // Ask for Screen Recording + Accessibility on launch so they appear in System Settings.
     // Deferred 1.5s so it doesn't fight the window-show animation. Opens the Settings pane
