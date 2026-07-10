@@ -24,6 +24,7 @@ module.exports = function makeWindowManager(ctx) {
   let viewerWindow = null, pendingModel = null;
   let molWindow = null, pendingMol = null;
   let mapsWindow = null, pendingMap = null, mapRenderedCb = null;
+  let presenceWindow = null, pendingPresence = null;
 
   function toggleWindow() {
     const mainWindow = getMainWindow();
@@ -195,6 +196,24 @@ module.exports = function makeWindowManager(ctx) {
     mapsWindow.on('closed', () => { mapsWindow = null; });
   }
   function sendPendingMap(e) { try { if (pendingMap) e.sender.send('map', pendingMap); } catch {} }
+
+  // --- Presence: a 3D "operations room" showing the fleet as animated agent avatars (visual feeling) ---
+  function openPresenceWindow(payload) {
+    if (payload) pendingPresence = payload;
+    if (presenceWindow && !presenceWindow.isDestroyed()) { presenceWindow.show(); presenceWindow.focus(); if (payload) try { presenceWindow.webContents.send('presence-update', payload); } catch {} return; }
+    presenceWindow = new BrowserWindow({
+      width: 900, height: 660, x: 170, y: 100, title: 'BhatBot — Presence',
+      backgroundColor: '#070b12', webPreferences: { contextIsolation: true, nodeIntegration: false, preload: path.join(__dirname, 'src', 'preload-presence.js') },
+    });
+    presenceWindow.loadFile(path.join(__dirname, 'src', 'presence.html'));
+    presenceWindow.on('closed', () => { presenceWindow = null; });
+  }
+  // Push live fleet state to the presence window IF it's open (no-op otherwise — cheap to call often).
+  function updatePresence(payload) {
+    pendingPresence = payload;
+    try { if (presenceWindow && !presenceWindow.isDestroyed()) presenceWindow.webContents.send('presence-update', payload); } catch {}
+  }
+  function sendPendingPresence(e) { try { if (pendingPresence) e.sender.send('presence-update', pendingPresence); } catch {} }
   function fireMapRendered() { if (mapRenderedCb) { const cb = mapRenderedCb; mapRenderedCb = null; cb(); } }
 
   // Open the map AND capture a PNG snapshot once it's fully drawn → inline "visualization" the agent
@@ -226,5 +245,6 @@ module.exports = function makeWindowManager(ctx) {
     openInteractive3D, sendPendingModel,
     openMoleculeWindow, sendPendingMol,
     openMapsWindow, openMapsWindowSnapshot, sendPendingMap, fireMapRendered,
+    openPresenceWindow, updatePresence, sendPendingPresence,
   };
 };

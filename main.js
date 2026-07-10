@@ -3150,8 +3150,9 @@ const wm = require('./window-manager')({
 });
 const { toggleWindow, studioWebContents, openNexusWindow, ensureStudio, openStudioWindow,
   openChessWindow, openChessApplet, openWorldCupWindow, openInteractive3D,
-  openMoleculeWindow, openMapsWindow, openMapsWindowSnapshot } = wm;
+  openMoleculeWindow, openMapsWindow, openMapsWindowSnapshot, openPresenceWindow } = wm;
 ipcMain.on('viewer-ready', (e) => wm.sendPendingModel(e));
+ipcMain.on('presence-ready', (e) => wm.sendPendingPresence(e));
 // Creation tools (image / image→3D / printable STL) live in tools/creation.js (B-b decomposition).
 // Electron window glue (openStudioWindow/openInteractive3D) + lazy lastImagePath are injected; the
 // thin wrappers below keep existing call sites unchanged. Deps resolve via hoisting at call time.
@@ -4562,6 +4563,12 @@ async function executeTool(name, input) {
       case 'hud_control': {
         // Agent-driven HUD: surface a work panel, switch the command layout, or refocus a column.
         // Tool names are the user-facing tab names; the renderer keeps its historical panel ids.
+        // 'presence' is the 3D fleet-presence surface — its own window (like molecule/maps), not a renderer panel.
+        if (input && input.panel === 'presence') {
+          try { openPresenceWindow(); wm.updatePresence(presenceSnapshot()); result = { success: true, result: 'Opened the 3D fleet presence.' }; }
+          catch (e) { result = { success: false, error: e.message }; }
+          break;
+        }
         const PANEL_ID = { command: 'chat', fleet: 'vanguard', management: 'manage' };
         const cmd = {};
         if (input && input.panel) cmd.panel = PANEL_ID[input.panel] || input.panel;
@@ -6821,6 +6828,22 @@ function startMemoryMaintenance() {
   });
   console.log(`[memmaint] started (every ${intervalMs / 60000}min): semantic decay/dedup + log bounding`);
 }
+
+// Map live background jobs → agent-presence avatars for the 3D presence window.
+const JOB_STATE = { running: 'working', active: 'working', queued: 'thinking', blocked: 'thinking', done: 'done', completed: 'done', failed: 'error', error: 'error', cancelled: 'idle' };
+function presenceSnapshot() {
+  let jobs = [];
+  try { jobs = (jobsBus.active ? jobsBus.active() : jobsBus.list()) || []; } catch {}
+  const agents = jobs.slice(0, 12).map((j) => ({ role: j.name || j.kind || 'agent', state: JOB_STATE[j.status] || 'idle', label: (j.note || '').slice(0, 40) }));
+  return { agents };
+}
+// Push live fleet state to the presence window a few times a second while it's open (updatePresence
+// no-ops when the window is closed, so this is cheap). Empty snapshots are skipped so the window's
+// built-in demo animation keeps it alive when nothing is running.
+function startPresenceFeed() {
+  const t = setInterval(() => { try { const snap = presenceSnapshot(); if (snap.agents.length) wm.updatePresence(snap); } catch {} }, 1200);
+  t.unref?.();
+}
 async function tickScheduler() {
   if (schedulerBusy) return;                       // SERIAL: never run two scheduled tasks at once
   if (agentState !== 'idle') return;               // PRECEDENCE: yield to a live foreground turn; retry next tick
@@ -8702,6 +8725,7 @@ app.whenReady().then(() => {
     startScheduler();   // proactive recurring/one-off tasks
     startAmbient();     // #18 opt-in ambient awareness (no-op unless config.ambient.enabled)
     startMemoryMaintenance();   // always-on memory upkeep (runs on a timer, independent of the window)
+    startPresenceFeed();        // stream live fleet state to the 3D presence window while it's open
     startCacheKeepAlive();   // Task 5 — prompt-cache warm-keeper (default on; keeps first token fast after idle gaps)
     setTimeout(() => { maybeRenderAcks().catch(() => {}); }, 6000);   // pre-render ack clips in the background (instant first audio)
     // Live state feed (state.json + events.jsonl) — bind main's live values, then persist on a loop.
