@@ -59,6 +59,7 @@ const notion = require('./lib/notion');               // P3  — Notion long-ter
 const google = require('./lib/google');               // Gmail + Calendar + Drive (one OAuth2, degrades gracefully)
 const routermodel = require('./lib/routermodel');     // learned text→tier router (shadow → active); degrades to regex
 const bioart = require('./lib/bioart');               // NIH BioArt — public-domain scientific illustrations
+const memmaint = require('./lib/memmaint');           // always-on memory maintenance (decay/dedup + log bounding)
 const figures = require('./lib/figures');             // data-accurate matplotlib/seaborn figures
 const logins = require('./lib/logins');               // domain-keyed login profiles (CRED_REF handles)
 const modePrompts = require('./lib/prompts');         // P4  — mode-switching system prompts
@@ -6792,6 +6793,34 @@ function startScheduler() {
   console.log('[scheduler] started (30s tick), ' + scheduler.list().length + ' schedule(s) loaded');
   setTimeout(tickScheduler, 4000);   // catch anything already overdue shortly after boot
 }
+
+// Always-on memory maintenance: periodic decay/dedup of the semantic store + per-workspace compaction
+// + bounding of runaway OPERATIONAL logs (never the training datasets). Runs on a timer in the main
+// process, so it keeps memory healthy whether or not the window is open — and 24/7 under the daemon.
+// config.memoryMaintenance: { enabled(default true), intervalMinutes(default 30), maxEpisodicAgeDays(45) }.
+function startMemoryMaintenance() {
+  const c = (loadConfig().memoryMaintenance) || {};
+  if (c.enabled === false) { console.log('[memmaint] disabled by config'); return; }
+  const intervalMs = Math.max(5, c.intervalMinutes || 30) * 60 * 1000;
+  memmaint.start({
+    intervalMs,
+    deps: {
+      maxLogLines: c.maxLogLines || 20000,
+      // OPERATIONAL logs only — training datasets (router-train/spoken/depth .jsonl) are excluded on purpose.
+      trimLogs: [ROUTER_LOG, LOG_PATH],
+      semanticMaintain: () => { try { return semantic.maintain({ maxEpisodicAgeDays: c.maxEpisodicAgeDays || 45 }); } catch (e) { return { error: e.message }; } },
+      onReport: (r) => {
+        try {
+          const s = r.semantic || {};
+          if (s.decayed || s.merged) console.log(`[memmaint] semantic ${s.before}→${s.after} (decayed ${s.decayed}, merged ${s.merged})`);
+          const trimmed = (r.logs || []).reduce((n, l) => n + (l.trimmed || 0), 0);
+          if (trimmed) console.log(`[memmaint] trimmed ${trimmed} old log lines`);
+        } catch {}
+      },
+    },
+  });
+  console.log(`[memmaint] started (every ${intervalMs / 60000}min): semantic decay/dedup + log bounding`);
+}
 async function tickScheduler() {
   if (schedulerBusy) return;                       // SERIAL: never run two scheduled tasks at once
   if (agentState !== 'idle') return;               // PRECEDENCE: yield to a live foreground turn; retry next tick
@@ -8672,6 +8701,7 @@ app.whenReady().then(() => {
     // remains available; re-enable by calling it if you ever want the timed brief back.)
     startScheduler();   // proactive recurring/one-off tasks
     startAmbient();     // #18 opt-in ambient awareness (no-op unless config.ambient.enabled)
+    startMemoryMaintenance();   // always-on memory upkeep (runs on a timer, independent of the window)
     startCacheKeepAlive();   // Task 5 — prompt-cache warm-keeper (default on; keeps first token fast after idle gaps)
     setTimeout(() => { maybeRenderAcks().catch(() => {}); }, 6000);   // pre-render ack clips in the background (instant first audio)
     // Live state feed (state.json + events.jsonl) — bind main's live values, then persist on a loop.
