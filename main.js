@@ -58,6 +58,7 @@ const security = require('./lib/security');          // P0.4 — injection sanit
 const notion = require('./lib/notion');               // P3  — Notion long-term memory (degrades gracefully)
 const google = require('./lib/google');               // Gmail + Calendar + Drive (one OAuth2, degrades gracefully)
 const routermodel = require('./lib/routermodel');     // learned text→tier router (shadow → active); degrades to regex
+const bioart = require('./lib/bioart');               // NIH BioArt — public-domain scientific illustrations
 const figures = require('./lib/figures');             // data-accurate matplotlib/seaborn figures
 const logins = require('./lib/logins');               // domain-keyed login profiles (CRED_REF handles)
 const modePrompts = require('./lib/prompts');         // P4  — mode-switching system prompts
@@ -4062,6 +4063,20 @@ async function executeTool(name, input) {
       }
       case 'browser_devtools':
         result = await browserDevtools(input); break;
+      case 'bioart': {
+        if (input.action === 'search') {
+          const r = await bioart.search(input.query, { limit: input.limit });
+          // Trim the token-heavy filesinfo out of the model-facing payload (kept server-side for `get`).
+          if (r.success) result = { success: true, count: r.count, query: r.query,
+            results: r.results.map((x) => ({ id: x.id, title: x.title, description: x.description, formats: x.formats, thumbnail: x.thumbnail, detail: x.detail })) };
+          else result = r;
+        } else if (input.action === 'get') {
+          const r = await bioart.fetchAsset({ id: input.id, format: input.format || 'PNG', fileId: input.fileId });
+          if (r.success) { try { showVisuals({ urls: ['file://' + r.path], title: 'BioArt ' + input.id }); } catch {} }
+          result = r;
+        } else result = { success: false, error: 'Unknown bioart action: ' + input.action };
+        break;
+      }
       case 'media_control':
         result = await mediaControl(input); break;
       case 'system_control':
@@ -4782,6 +4797,7 @@ function describeAction(name, input = {}) {
       case 'calendar': return input.action === 'create' ? `Adding to calendar: ${s(input.summary, 40)}` : input.action === 'list' ? 'Checking the calendar' : input.action === 'delete' ? 'Removing a calendar event' : 'Updating a calendar event';
       case 'drive': return input.action === 'search' ? `Searching Drive: ${s(input.query, 40)}` : input.action === 'read' ? 'Reading a Drive file' : `Saving to Drive: ${s(input.name, 40)}`;
       case 'browser_devtools': return input.action === 'network' ? 'Inspecting network traffic' : input.action === 'console' ? 'Reading the console' : input.action === 'metrics' ? 'Measuring page performance' : 'Running a page probe';
+      case 'bioart': return input.action === 'search' ? `Searching NIH BioArt: ${s(input.query, 40)}` : `Fetching a BioArt illustration`;
       case 'ask_ai': return 'Consulting a second model';
       case 'notify_user': return 'Reaching you out-of-band';
       case 'build_project': return `Building: ${s(input.goal, 60)}`;
