@@ -4419,6 +4419,21 @@ async function executeTool(name, input) {
         result = { success: true, result: snap.summary, ...snap };
         break;
       }
+      case 'hud_control': {
+        // Agent-driven HUD: surface a work panel, switch the command layout, or refocus a column.
+        // Tool names are the user-facing tab names; the renderer keeps its historical panel ids.
+        const PANEL_ID = { command: 'chat', fleet: 'vanguard', management: 'manage' };
+        const cmd = {};
+        if (input && input.panel) cmd.panel = PANEL_ID[input.panel] || input.panel;
+        if (input && input.layout) cmd.layout = Number(input.layout);
+        if (input && input.focus) cmd.focus = input.focus;
+        if (!Object.keys(cmd).length) { result = { success: false, error: 'Pass panel, layout, or focus.' }; break; }
+        try {
+          if (mainWindow && !mainWindow.isDestroyed()) { mainWindow.show(); mainWindow.webContents.send('hud-command', cmd); }
+          result = { success: true, result: 'HUD updated: ' + JSON.stringify(cmd) };
+        } catch (e) { result = { success: false, error: e.message }; }
+        break;
+      }
       case 'self_reflect': {
         // PROACTIVE self-reflection: introspect → (scope filter) → reflect (Opus) → narrate. Surfaces
         // OPINIONS only; never triggers self_fix/self_improve. Pipeline degrades gracefully on sparse telemetry.
@@ -8158,6 +8173,39 @@ ipcMain.handle('get-health', async () => {
     memEntries, memKb, ollamaOnline, agentState,
     telegram: !!cfg.telegramToken, briefingHour: cfg.briefingHour ?? null
   };
+});
+// Live system vitals for the HUD gauges + status-bar telemetry (cheap: os module + cached
+// net-bytes delta; no extra deps). NET is machine-wide throughput sampled between calls.
+let _netPrev = null;
+function netBytesNow() {
+  try {
+    const out = require('child_process').execSync('netstat -ib', { timeout: 900 }).toString();
+    let rx = 0, tx = 0;
+    for (const l of out.split('\n').slice(1)) {
+      const c = l.trim().split(/\s+/);
+      if (c.length >= 10 && /^en\d/.test(c[0])) { rx += Number(c[6]) || 0; tx += Number(c[9]) || 0; }
+    }
+    return { rx, tx, t: Date.now() };
+  } catch { return null; }
+}
+ipcMain.handle('get-vitals', () => {
+  const cores = os.cpus().length || 1;
+  const cpu = Math.max(0, Math.min(100, Math.round((os.loadavg()[0] / cores) * 100)));
+  const mem = Math.round((1 - os.freemem() / os.totalmem()) * 100);
+  let pwr = null, charging = null;
+  try {
+    const b = require('child_process').execSync('pmset -g batt', { timeout: 900 }).toString();
+    const m = b.match(/(\d+)%/); if (m) pwr = Number(m[1]);
+    charging = /AC Power/.test(b);
+  } catch {}
+  let netMbs = null;
+  const now = netBytesNow();
+  if (now && _netPrev && now.t > _netPrev.t) {
+    const dt = (now.t - _netPrev.t) / 1000;
+    netMbs = Math.max(0, Math.round(((now.rx + now.tx) - (_netPrev.rx + _netPrev.tx)) / dt / 1024 / 1024 * 10) / 10);
+  }
+  if (now) _netPrev = now;
+  return { cpu, mem, net: netMbs, pwr, charging, cores, uptime: os.uptime() };
 });
 ipcMain.handle('hide-window', () => mainWindow && mainWindow.hide());
 ipcMain.handle('minimize-window', () => mainWindow && mainWindow.minimize());
