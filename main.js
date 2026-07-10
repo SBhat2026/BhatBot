@@ -57,6 +57,7 @@ const visualInspect = require('./lib/inspect');
 const security = require('./lib/security');          // P0.4 — injection sanitizer + daily audit
 const notion = require('./lib/notion');               // P3  — Notion long-term memory (degrades gracefully)
 const google = require('./lib/google');               // Gmail + Calendar + Drive (one OAuth2, degrades gracefully)
+const routermodel = require('./lib/routermodel');     // learned text→tier router (shadow → active); degrades to regex
 const figures = require('./lib/figures');             // data-accurate matplotlib/seaborn figures
 const logins = require('./lib/logins');               // domain-keyed login profiles (CRED_REF handles)
 const modePrompts = require('./lib/prompts');         // P4  — mode-switching system prompts
@@ -1050,6 +1051,7 @@ function overBudget() { const c = loadConfig(); return !!(c.dailyBudgetUsd && co
 // correction. routerStats() aggregates; no behavior change yet — this is the measurement layer. ---
 const ROUTER_LOG = path.join(os.homedir(), '.bhatbot', 'router.jsonl');
 let _lastModel = null, _lastRouterTask = null;
+let _routerFeatures = null, _routerShadowTier = null;   // learned-router shadow: features + suggestion for this turn's training row
 // W1 — per-turn tool subset. agentLoop sets this once (relevant tools for the turn) and clears it in
 // finish(); every Claude tool-loop call reads it via activeTools(). null ⇒ full catalog (default,
 // and the graceful fallback when retrieval is off / unavailable / low-confidence).
@@ -1677,6 +1679,31 @@ async function callModel(messages, apiKey, allowDarkbloom, onText) {
     claudeModel = heavyModel(lastUserText(messages)); _lastModel = claudeModel;
     _lastRouterTask = 'heavy-' + (claudeModel === MODEL_FABLE ? 'fable' : claudeModel === MODEL_OPUS ? 'opus' : 'tier') + '-upgrade';
   }
+
+  // LEARNED ROUTER (shadow → active). Predict the tier from the message features and stash it so the
+  // turn's telemetry row carries a training label (see routermodel.js). SHADOW by default: the regex
+  // above still decides; we only record what the learned model WOULD have said. When cfg.routerLearned
+  // is on AND the model is confident, it may ESCALATE (never downgrade — safer): a plainly-worded hard
+  // task the regex under-routed gets pulled up to the learned tier. Never spends Opus without approval.
+  try {
+    _routerFeatures = routermodel.extractFeatures(lastUserText(messages));
+    const shadow = routermodel.predict(lastUserText(messages));
+    _routerShadowTier = shadow ? shadow.tier : null;
+    if (cfg.routerLearned && shadow && shadow.confidence >= (cfg.routerLearnedMinConf ?? 0.5) && !overBudget() && toolish) {
+      const curTier = _lastRouterTask === 'simple' ? 'simple' : (_lastRouterTask || '').startsWith('heavy') ? 'heavy' : 'reasoning';
+      const order = { simple: 0, reasoning: 1, heavy: 2 };
+      if (order[shadow.tier] > order[curTier]) {                       // escalate only
+        if (shadow.tier === 'heavy' && (cfg.opusRequiresApproval !== false && !_opusApproved)) {
+          claudeModel = MODEL_SONNET;                                  // heavy needs approval → hold at Sonnet
+        } else if (shadow.tier === 'heavy') {
+          claudeModel = heavyModel(lastUserText(messages));
+        } else {
+          claudeModel = MODEL_SONNET;                                  // reasoning tier = Sonnet floor
+        }
+        _lastModel = claudeModel; _lastRouterTask = 'learned-' + shadow.tier;
+      }
+    }
+  } catch {}
 
   // Preflight rate-limit check: if this request would blow the per-minute INPUT or OUTPUT budget,
   // either run it on a local Ollama model (free, no quota) or — if local is unavailable
@@ -4976,6 +5003,18 @@ async function agentLoop(history, apiKey, event, opts = {}) {
     // Strip any <speak> tags from the returned text (renderer shows this as the final bubble).
     reflectOnCorrection(history, lastUserText(history), text);   // async, non-blocking
     try { logRouterDecision({ taskType: _lastRouterTask || currentMode, model: _lastModel, ms: Date.now() - _turnT0, usd: +(costToday().usd - _usd0).toFixed(5) }); } catch {}   // #13
+    // LEARNED ROUTER training row: features of the ask + the tier that was actually used this turn
+    // (the label) + what the shadow model predicted. Builds the dataset the learned router trains on,
+    // then retrains in the background once enough rows exist. Never blocks the reply.
+    try {
+      if (_routerFeatures) {
+        const usedTier = (_lastRouterTask || '').startsWith('heavy') || (_lastRouterTask || '').startsWith('learned-heavy') ? 'heavy'
+          : (_lastRouterTask === 'simple' || _lastRouterTask === 'budget') ? 'simple' : 'reasoning';
+        routermodel.logRow({ f: _routerFeatures, tier: usedTier, shadowTier: _routerShadowTier, model: (_lastModel || '').replace(/^claude-/, '') });
+        setTimeout(() => { try { routermodel.maybeRetrain(); } catch {} }, 50);
+      }
+    } catch {}
+    _routerFeatures = null; _routerShadowTier = null;
     const clean = stripReasoning(String(text || '')).replace(/<\/?speak>/g, '').trim();
     // #12 episodic memory is now recorded centrally in _dispatchTurnInner (covers fastReply +
     // pipeline-local too, which used to be dropped — starving the W5 fine-tune loop). Not here.

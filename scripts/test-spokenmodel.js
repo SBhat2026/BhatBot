@@ -51,7 +51,7 @@ const m2 = sm.train(withInt);
 ok(m2.interruptP75 === 15, 'censor: interruptP75 learned from observed barge-in positions (15)');
 
 // ---- fallback below MIN_ROWS ----
-ok(sm.train(rows.slice(0, 50)).ok === false, 'fallback: <MIN_ROWS → not ok (caller keeps heuristic)');
+ok(sm.train(rows.slice(0, sm.MIN_ROWS - 10)).ok === false, 'fallback: <MIN_ROWS → not ok (caller keeps heuristic)');
 
 // ---- L metric ----
 const clean = Array.from({ length: 90 }, () => ({ outcome: 'clean', to_next_ms: 4000 }));
