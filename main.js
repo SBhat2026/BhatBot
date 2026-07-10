@@ -56,6 +56,7 @@ const projects = require('./lib/projects');            // #24 — project memory
 const visualInspect = require('./lib/inspect');
 const security = require('./lib/security');          // P0.4 — injection sanitizer + daily audit
 const notion = require('./lib/notion');               // P3  — Notion long-term memory (degrades gracefully)
+const google = require('./lib/google');               // Gmail + Calendar + Drive (one OAuth2, degrades gracefully)
 const figures = require('./lib/figures');             // data-accurate matplotlib/seaborn figures
 const logins = require('./lib/logins');               // domain-keyed login profiles (CRED_REF handles)
 const modePrompts = require('./lib/prompts');         // P4  — mode-switching system prompts
@@ -2233,6 +2234,13 @@ async function dismissInterruptions(p) {
 
 // Attach per-page handlers: auto-accept JS dialogs (alert/confirm/beforeunload) so they don't
 // freeze Playwright, and keep the observer flag honest.
+// DevTools ring buffers — populated by page listeners so browser_devtools can report console
+// output and network history retroactively (no pre-arming needed). Bounded to avoid unbounded growth.
+const DEVTOOLS_CAP = 300;
+let devtoolsConsole = [];   // { type, text, ts }
+let devtoolsNetwork = [];   // { url, method, status, type, size, ts }
+const pushCapped = (arr, item) => { arr.push(item); if (arr.length > DEVTOOLS_CAP) arr.splice(0, arr.length - DEVTOOLS_CAP); };
+
 function attachPageHandlers(p) {
   try {
     p.on('dialog', async (dlg) => {
@@ -2240,6 +2248,67 @@ function attachPageHandlers(p) {
       try { await dlg.accept(); } catch { try { await dlg.dismiss(); } catch {} }
     });
   } catch {}
+  // Buffer console + page errors for browser_devtools (best-effort; never block the page).
+  try {
+    p.on('console', (msg) => { try { pushCapped(devtoolsConsole, { type: msg.type(), text: (msg.text() || '').slice(0, 500), ts: Date.now() }); } catch {} });
+    p.on('pageerror', (err) => { try { pushCapped(devtoolsConsole, { type: 'error', text: ('[pageerror] ' + (err && err.message || err)).slice(0, 500), ts: Date.now() }); } catch {} });
+    p.on('response', async (res) => {
+      try {
+        const req = res.request();
+        let size = null; try { const h = await res.allHeaders(); size = Number(h['content-length']) || null; } catch {}
+        pushCapped(devtoolsNetwork, { url: res.url().slice(0, 300), method: req.method(), status: res.status(), type: req.resourceType(), size, ts: Date.now() });
+      } catch {}
+    });
+  } catch {}
+}
+
+// browser_devtools — inspect the live page: network history, console output, load metrics, or eval JS.
+async function browserDevtools(input) {
+  const a = input.action;
+  if (a === 'network') {
+    let rows = devtoolsNetwork.slice();
+    if (input.filter) rows = rows.filter((r) => r.url.includes(input.filter));
+    rows = rows.slice(-(input.limit || 30));
+    return { success: true, count: rows.length, requests: rows };
+  }
+  if (a === 'console') {
+    const rows = devtoolsConsole.slice(-(input.limit || 30));
+    return { success: true, count: rows.length, messages: rows };
+  }
+  if (!page) return { success: false, error: 'No browser page open — call the `browser` tool first.' };
+  if (a === 'metrics') {
+    try {
+      const m = await page.evaluate(() => {
+        const nav = performance.getEntriesByType('navigation')[0] || {};
+        const paint = performance.getEntriesByType('paint') || [];
+        const fcp = (paint.find((p) => p.name === 'first-contentful-paint') || {}).startTime || null;
+        let lcp = null;
+        try { const l = performance.getEntriesByType('largest-contentful-paint'); if (l && l.length) lcp = l[l.length - 1].startTime; } catch {}
+        return {
+          url: location.href,
+          domContentLoaded: nav.domContentLoadedEventEnd ? Math.round(nav.domContentLoadedEventEnd) : null,
+          load: nav.loadEventEnd ? Math.round(nav.loadEventEnd) : null,
+          responseTime: nav.responseEnd ? Math.round(nav.responseEnd - nav.requestStart) : null,
+          transferBytes: nav.transferSize || null,
+          fcp: fcp ? Math.round(fcp) : null, lcp: lcp ? Math.round(lcp) : null,
+          resources: (performance.getEntriesByType('resource') || []).length,
+        };
+      });
+      return { success: true, metrics: m };
+    } catch (e) { return { success: false, error: e.message }; }
+  }
+  if (a === 'evaluate') {
+    if (!input.expression) return { success: false, error: 'evaluate needs an `expression`.' };
+    try {
+      const v = await page.evaluate((expr) => {
+        // eslint-disable-next-line no-eval
+        const out = eval(expr);
+        try { return JSON.parse(JSON.stringify(out)); } catch { return String(out); }
+      }, input.expression);
+      return { success: true, value: v };
+    } catch (e) { return { success: false, error: e.message }; }
+  }
+  return { success: false, error: 'Unknown browser_devtools action: ' + a };
 }
 
 // Persist the browser window's position/size so it reopens where you left it (you can shove it
@@ -3938,6 +4007,34 @@ async function executeTool(name, input) {
       }
       case 'notion_log_activity':
         result = await notion.logActivity(input); break;
+      case 'gmail': {
+        const a = input.action;
+        if (a === 'search') result = await google.gmailSearch(input.query, { limit: input.limit });
+        else if (a === 'read') result = await google.gmailRead(input.id);
+        else if (a === 'draft') result = await google.gmailDraft(input);
+        else if (a === 'label') result = await google.gmailLabel(input.id, { add: input.add || [], remove: input.remove || [] });
+        else result = { success: false, error: 'Unknown gmail action: ' + a };
+        break;
+      }
+      case 'calendar': {
+        const a = input.action;
+        if (a === 'list') result = await google.calendarList(input);
+        else if (a === 'create') result = await google.calendarCreate(input);
+        else if (a === 'update') result = await google.calendarUpdate(input.id, input);
+        else if (a === 'delete') result = await google.calendarDelete(input.id, input);
+        else result = { success: false, error: 'Unknown calendar action: ' + a };
+        break;
+      }
+      case 'drive': {
+        const a = input.action;
+        if (a === 'search') result = await google.driveSearch(input.query, { limit: input.limit });
+        else if (a === 'read') result = await google.driveRead(input.id);
+        else if (a === 'create') result = await google.driveCreate(input);
+        else result = { success: false, error: 'Unknown drive action: ' + a };
+        break;
+      }
+      case 'browser_devtools':
+        result = await browserDevtools(input); break;
       case 'media_control':
         result = await mediaControl(input); break;
       case 'system_control':
@@ -4654,6 +4751,10 @@ function describeAction(name, input = {}) {
       case 'maps': return `Mapping ${s(input.query || input.place)}`;
       case 'save_memory': return 'Saving to memory';
       case 'notion_search': return `Searching Notion for “${s(input.query)}”`;
+      case 'gmail': return input.action === 'search' ? `Searching Gmail: ${s(input.query, 40)}` : input.action === 'draft' ? `Drafting an email${input.to ? ` to ${s(input.to, 30)}` : ''}` : input.action === 'read' ? 'Reading an email' : 'Updating an email';
+      case 'calendar': return input.action === 'create' ? `Adding to calendar: ${s(input.summary, 40)}` : input.action === 'list' ? 'Checking the calendar' : input.action === 'delete' ? 'Removing a calendar event' : 'Updating a calendar event';
+      case 'drive': return input.action === 'search' ? `Searching Drive: ${s(input.query, 40)}` : input.action === 'read' ? 'Reading a Drive file' : `Saving to Drive: ${s(input.name, 40)}`;
+      case 'browser_devtools': return input.action === 'network' ? 'Inspecting network traffic' : input.action === 'console' ? 'Reading the console' : input.action === 'metrics' ? 'Measuring page performance' : 'Running a page probe';
       case 'ask_ai': return 'Consulting a second model';
       case 'notify_user': return 'Reaching you out-of-band';
       case 'build_project': return `Building: ${s(input.goal, 60)}`;
