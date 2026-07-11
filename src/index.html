@@ -1452,8 +1452,11 @@ window.bhatbot.onToolUpdate((u) => {
     if (u.preview) addHoloImage(u.preview, u.name === 'generate_image' ? 'GENERATED IMAGE' : u.name === 'studio_write' ? 'STUDIO RENDER' : 'CAPTURE');
     if (u.model3d) addHolo3D(u.model3d);
   }
-  else if (u.type === 'thinking' && u.text) { rmThinking(); addThought(u.text); addThinking(); actLog('… ' + u.text.slice(0, 120));
-    // Advance the plan checklist on a real between-step narration (prose, not an internal status line like 🎛/🧰/⚡/🔋).
+  else if (u.type === 'thinking' && u.text) {
+    // Ambient status (mode / action-check / health / session-note / knowledge-graph / tool narration)
+    // goes to the ACTIVITY panel + progress card ONLY — never the chat. The chat stays clean: just
+    // your messages and BhatBot's actual replies. (Siddhant's call — status noise was the worst part.)
+    actLog('… ' + u.text.slice(0, 120));
     if (_pg.el && /^[A-Za-z"'(]/.test(u.text.trim()) && u.text.trim().length > 12) pgAdvanceStep(); }
   else if (u.type === 'provider_used') {
     lastProvider = u.provider === 'darkbloom'

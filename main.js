@@ -5754,6 +5754,14 @@ function quickRoute(text, history = []) {
 
 // Concierge fast reply: ONE streaming Haiku completion, no tools, server-cached static
 // system block. First token ~0.6s. Returns agentLoop's shape so callers are interchangeable.
+// A trivial acknowledgement/greeting the local model can't botch ("ok", "thanks", "hey", "yes").
+// Everything with real content goes to Claude — the local gemma tier was emitting Python scripts,
+// leaked JSON and invented personas for ordinary chat (Siddhant's call: quality over the free tier).
+function isTinyAck(text) {
+  const t = String(text || '').trim().toLowerCase();
+  if (!t || t.length > 24) return false;
+  return /^(hi|hey|hello|yo|sup|thanks|thank you|ty|thx|ok|okay|k|kk|cool|nice|great|got it|gotcha|yes|yep|yeah|yup|no|nope|nah|sure|good|perfect|awesome|nvm|never ?mind|right|indeed|word|lol|haha|hehe|👍|🙏)[.!?…]*$/i.test(t);
+}
 async function fastReply(history, apiKey, event, opts = {}) {
   const stream = !!opts.stream, ttsSeq = opts.ttsSeq;
   const parser = (stream && ttsSeq != null) ? makeSpeakStream(ttsSeq) : null;
@@ -5763,9 +5771,10 @@ async function fastReply(history, apiKey, event, opts = {}) {
     if (disp) { try { event && event.sender && event.sender.send('tool-update', { type: 'token', text: disp }); } catch {} }
   } : null;
   const ut = lastUserText(history);
-  // CHEAP TIER (Haiku retired): a fast conversational reply runs FREE on a local model when Ollama is
-  // up. Emitted whole (like the Darkbloom path) so makeSpeakStream still chunks it for TTS.
-  if (cheapEnabled() && await ollamaReady()) {
+  // CHEAP TIER: the free local model is now reserved for TRIVIAL acks/greetings only (isTinyAck) —
+  // it botched real chat (Python scripts, leaked JSON, invented personas). Anything with real
+  // content falls straight through to Claude below for reliable, in-character replies.
+  if (cheapEnabled() && isTinyAck(ut) && await ollamaReady()) {
     try {
       const text = stripReasoning(await ollamaChat(history, buildSystemPrompt(ut), cheapLocalModel()) || '').replace(/<\/?speak>/g, '').trim();
       if (text) {
