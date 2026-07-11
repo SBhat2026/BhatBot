@@ -26,6 +26,11 @@ contextBridge.exposeInMainWorld('bhatbot', {
   onFleetUpdate: (cb) => ipcRenderer.on('fleet-update', (_e, d) => cb(d)),           // C-Fleet — live suit relay
   onPresenceUpdate: (cb) => ipcRenderer.on('presence-update', (_e, d) => cb(d)),     // 3D fleet-presence (FLEET tab iframe)
   onTurnState: (cb) => ipcRenderer.on('turn-state', (_e, d) => cb(d)),               // T2 — single merged display-state snapshot per turn
+  synapseGraph: () => ipcRenderer.invoke('synapse-graph'),                            // SYNAPSE second brain — current graph
+  synapseBuild: () => ipcRenderer.invoke('synapse-build'),                            // hydrate + connect
+  synapsePrune: (kind, id) => ipcRenderer.invoke('synapse-prune', { kind, id }),      // permanent prune (curation)
+  synapseConfirm: (kind, id) => ipcRenderer.invoke('synapse-confirm', { kind, id }),  // promote a proposed link
+  onSynapseUpdate: (cb) => ipcRenderer.on('synapse-update', (_e, d) => cb(d)),        // live graph pushes
   sendFleetFeedback: (id, text) => ipcRenderer.invoke('fleet-feedback', { id, text }),
   sendFleetControl: (id, action) => ipcRenderer.invoke('fleet-control', { id, action }),
   openAgentWindow: (id) => ipcRenderer.invoke('open-agent-window', id),

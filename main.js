@@ -61,6 +61,7 @@ const routermodel = require('./lib/routermodel');     // learned text→tier rou
 const bioart = require('./lib/bioart');               // NIH BioArt — public-domain scientific illustrations
 const memmaint = require('./lib/memmaint');           // always-on memory maintenance (decay/dedup + log bounding)
 const { createTurnState } = require('./lib/turnstate'); // T2 — single display-state reducer for a turn (never-quiet snapshot)
+const brain = require('./lib/brain');                 // SYNAPSE — second-brain hybrid knowledge graph (nodes/edges + Connector)
 const figures = require('./lib/figures');             // data-accurate matplotlib/seaborn figures
 const logins = require('./lib/logins');               // domain-keyed login profiles (CRED_REF handles)
 const modePrompts = require('./lib/prompts');         // P4  — mode-switching system prompts
@@ -1260,7 +1261,10 @@ async function ollamaReady() {
 // ~16× slower (17s), which is unusable on the latency-critical voice/fast-reply paths. Override
 // with config.cheapModel (e.g. 'qwen3:latest' if you want reasoning quality over latency).
 function cheapLocalModel() { const c = loadConfig(); return c.cheapModel || c.localModel || 'gemma3:12b'; }
-function cheapEnabled() { return loadConfig().useLocalCheap !== false; }
+// SINGLE VOICE: Claude everywhere by default. The local gemma tier is now OPT-IN (useLocalCheap:true)
+// — it produced a different, lower-quality "voice" (drift, leaked JSON, "feeling reports") that
+// clashed with Claude's. One model = one consistent voice. Every caller already falls back to Claude.
+function cheapEnabled() { return loadConfig().useLocalCheap === true; }
 // One tool-less completion for internal utilities (summaries, session notes, reflection, briefs).
 // Returns { text, via }. Local-first (free), Sonnet cloud fallback.
 async function cheapText(system, userText, { maxTokens = 512 } = {}) {
@@ -6948,6 +6952,82 @@ function startScheduler() {
 // Always-on memory maintenance: periodic decay/dedup of the semantic store + per-workspace compaction
 // + bounding of runaway OPERATIONAL logs (never the training datasets). Runs on a timer in the main
 // process, so it keeps memory healthy whether or not the window is open — and 24/7 under the daemon.
+// ── SYNAPSE — the second brain ────────────────────────────────────────────────────────────────────
+// Hybrid knowledge graph over BhatBot's memory (lib/brain.js). hydrate = import nodes from projects +
+// semantic memories + the user's repos (summaries + key files) + Notion. connect = embed the nodes and
+// let the Connector propose cross-project links, each with an LLM "why related" rationale. The SYNAPSE
+// tab renders + prunes it; a light background worker keeps it fresh (the 24/7 job is the cloud brain).
+let _brain = null;
+function synapse() { if (!_brain) { _brain = brain.createBrain({}); } return _brain; }
+function pushSynapse() { try { const g = synapse().graphView(); if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('synapse-update', g); } catch {} }
+
+// Pull the raw semantic store (records carry their embedding vecs) — so memory nodes reuse embeddings.
+function _semanticRecords() {
+  try { const s = JSON.parse(fs.readFileSync(semantic.STORE_PATH, 'utf8')); return (s.records || []).filter((r) => r && r.text); } catch { return []; }
+}
+// Discover the user's git repos directly under $HOME (top-level project dirs) at the chosen depth.
+function _scanRepos({ max = 40, keyFileCap = 12 } = {}) {
+  const home = os.homedir(); const out = [];
+  let dirs = []; try { dirs = fs.readdirSync(home, { withFileTypes: true }).filter((d) => d.isDirectory() && !d.name.startsWith('.')).map((d) => d.name); } catch { return out; }
+  for (const name of dirs) {
+    if (out.length >= max) break;
+    const root = path.join(home, name);
+    try { if (!fs.existsSync(path.join(root, '.git'))) continue; } catch { continue; }   // git repos only
+    // README (the summary) + the key files (READMEs/docs/entrypoints only — not every file).
+    let readme = '';
+    for (const rn of ['README.md', 'readme.md', 'Readme.md']) { try { readme = fs.readFileSync(path.join(root, rn), 'utf8').slice(0, 6000); break; } catch {} }
+    let all = []; try { all = fs.readdirSync(root).filter((f) => { try { return fs.statSync(path.join(root, f)).isFile(); } catch { return false; } }); } catch {}
+    try { const s = fs.readdirSync(path.join(root, 'src')).map((f) => 'src/' + f); all = all.concat(s); } catch {}
+    const key = brain.keyFilesFor(all, keyFileCap);
+    const files = [];
+    for (const rel of key) { try { files.push({ path: rel, text: fs.readFileSync(path.join(root, rel), 'utf8').slice(0, 4000) }); } catch {} }
+    out.push({ name, path: root, readme, files });
+  }
+  return out;
+}
+async function synapseHydrate({ repos = true, memories = true, notionPages = true } = {}) {
+  const b = synapse(); const ts = Date.now(); let added = 0;
+  const push = (n) => { if (n) { b.upsertNode(n, ts); added++; } };
+  const pushBundle = (bundle) => { for (const n of (bundle.nodes || [])) push(n); for (const e of (bundle.edges || [])) b.upsertEdge(e, ts); };
+  try { for (const p of projects.list()) push(brain.projectNode(projects.get(p.slug))); } catch {}                    // BhatBot projects
+  if (memories) { const recs = _semanticRecords(); recs.slice(0, 600).forEach((m, i) => push(brain.memoryNode(m, i))); } // semantic memories (+ vecs)
+  if (repos) { for (const r of _scanRepos()) pushBundle(brain.repoNodes(r)); }                                        // ~/repos (summary + key files)
+  if (notionPages) { try { const pages = notion.listPages ? await notion.listPages({ limit: 60 }) : []; for (const pg of (pages || [])) pushBundle(brain.notionNodes(pg)); } catch {} }
+  b.save(); pushSynapse();
+  return b.stats();
+}
+// Embed any nodes missing a vector (batched), then run the Connector and add a short LLM rationale
+// to each proposed link before committing it. Cross-project only; pruned pairs are never re-proposed.
+async function synapseConnect({ threshold = 0.8, maxRationale = 12 } = {}) {
+  const b = synapse();
+  const all = b.nodes().filter((n) => n.status !== 'pruned');
+  const need = all.filter((n) => !Array.isArray(n.embedding) || !n.embedding.length);
+  for (let i = 0; i < need.length; i += 64) {
+    const batch = need.slice(i, i + 64);
+    try { const { vecs } = await semantic.embedBatch(batch.map((n) => (n.label + '. ' + (n.text || '')).slice(0, 2000))); batch.forEach((n, k) => { if (vecs[k]) b.upsertNode({ id: n.id, type: n.type, ref: n.ref, embedding: vecs[k] }, Date.now()); }); }
+    catch { break; }   // no embed key / offline → stop; existing links stay
+  }
+  const existingPairs = new Set(b.edges().map((e) => [e.from, e.to].sort().join('|')));   // includes pruned → never re-propose
+  const cands = brain.proposeConnections(b.nodes(), { threshold, maxPerNode: 3, existingPairs });
+  // Rationale for the strongest few (cheap; the rest commit without prose and get one lazily on view).
+  cands.sort((a, c) => c.confidence - a.confidence);
+  for (let i = 0; i < cands.length; i++) {
+    const e = cands[i];
+    if (i < maxRationale) {
+      try {
+        const A = b.getNode(e.from), C = b.getNode(e.to);
+        const r = await anthropicRequest({ model: MODEL_SONNET, max_tokens: 90, system: 'In ONE sentence, say specifically how these two items from DIFFERENT projects are related or could inform each other. If not genuinely related, reply exactly "NONE".', messages: [{ role: 'user', content: `A (${A.type}): ${A.label} — ${(A.text || '').slice(0, 400)}\n\nB (${C.type}): ${C.label} — ${(C.text || '').slice(0, 400)}` }] }, getApiKey());
+        const txt = (r.content.filter((x) => x.type === 'text').map((x) => x.text).join(' ') || '').trim();
+        if (/^none/i.test(txt)) continue;   // the model rejects it → don't add
+        e.rationale = txt.slice(0, 300);
+      } catch {}
+    }
+    b.upsertEdge(e, Date.now());
+  }
+  b.save(); pushSynapse();
+  return { proposed: cands.length, ...b.stats() };
+}
+
 // config.memoryMaintenance: { enabled(default true), intervalMinutes(default 30), maxEpisodicAgeDays(45) }.
 function startMemoryMaintenance() {
   const c = (loadConfig().memoryMaintenance) || {};
@@ -8541,6 +8621,15 @@ function netBytesNow() {
     return { rx, tx, t: Date.now() };
   } catch { return null; }
 }
+// SYNAPSE second-brain IPC — the SYNAPSE tab views/builds/prunes the knowledge graph.
+ipcMain.handle('synapse-graph', () => { try { return synapse().graphView(); } catch (e) { return { error: e.message }; } });
+ipcMain.handle('synapse-build', async () => {
+  try { sendToActivity('tool-update', { type: 'thinking', text: '🧠 building the second brain…' }); await synapseHydrate(); const r = await synapseConnect(); return { ok: true, ...r }; }
+  catch (e) { return { error: e.message }; }
+});
+ipcMain.handle('synapse-prune', (_e, { kind, id } = {}) => { try { const ok = synapse().prune(kind, id); synapse().save(); pushSynapse(); return { ok }; } catch (e) { return { error: e.message }; } });
+ipcMain.handle('synapse-confirm', (_e, { kind, id } = {}) => { try { const ok = synapse().confirm(kind, id); synapse().save(); pushSynapse(); return { ok }; } catch (e) { return { error: e.message }; } });
+
 ipcMain.handle('get-vitals', () => {
   const cores = os.cpus().length || 1;
   const cpu = Math.max(0, Math.min(100, Math.round((os.loadavg()[0] / cores) * 100)));

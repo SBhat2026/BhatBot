@@ -161,6 +161,33 @@
     padding: 14px 14px 12px; background: linear-gradient(180deg, rgba(7,11,18,0) 0%, rgba(7,11,18,.82) 30%); pointer-events: none; }
   #vanguard-panel #fleet-list > * { pointer-events: auto; }
   #vanguard-panel #fleet-list:empty { display: none; }
+  /* SYNAPSE — second-brain graph tab */
+  #synapse-panel .sy-tools { display: flex; align-items: center; gap: 8px; margin-left: auto; margin-right: 12px; }
+  #synapse-panel .sy-stats { font-size: 11px; color: var(--text-dim2); letter-spacing: .04em; }
+  #synapse-panel .sy-btn { background: var(--surface); border: 1px solid var(--line); color: var(--text-dim); border-radius: 7px; padding: 4px 10px; font-size: 11.5px; cursor: pointer; }
+  #synapse-panel .sy-btn:hover { color: var(--text); border-color: var(--accent-dim); }
+  #sy-body { position: relative; flex: 1; min-height: 0; }
+  #sy-canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; cursor: grab; }
+  #sy-3d { position: absolute; inset: 0; display: none; }
+  #synapse-panel.mode3d #sy-canvas { display: none; }
+  #synapse-panel.mode3d #sy-3d { display: block; }
+  #sy-inbox { position: absolute; top: 10px; right: 10px; width: 288px; max-height: 62%; overflow-y: auto; z-index: 3;
+    background: color-mix(in srgb, var(--surface) 92%, transparent); border: 1px solid var(--line); border-radius: 10px; padding: 9px 11px; font-size: 12px; }
+  #sy-inbox.empty { display: none; }
+  #sy-inbox .sy-inbox-h { font-size: 10.5px; letter-spacing: .08em; color: var(--text-dim2); margin-bottom: 6px; }
+  #sy-inbox .sy-edge { padding: 6px 0; border-bottom: 1px solid var(--line); }
+  #sy-inbox .sy-why { color: var(--text-dim); line-height: 1.4; margin-top: 2px; }
+  #sy-inbox .sy-acts { display: flex; gap: 6px; margin-top: 5px; }
+  #sy-inbox button { font-size: 10.5px; padding: 2px 9px; border-radius: 6px; border: 1px solid var(--line); background: transparent; color: var(--text-dim); cursor: pointer; }
+  #sy-inbox .sy-ok:hover { color: var(--accent); border-color: var(--accent); }
+  #sy-inbox .sy-no:hover { color: #e0715f; border-color: #e0715f; }
+  #sy-detail { position: absolute; left: 10px; bottom: 10px; width: 320px; z-index: 3;
+    background: color-mix(in srgb, var(--surface) 94%, transparent); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; font-size: 12px; }
+  #sy-detail.hidden { display: none; }
+  #sy-detail .sy-d-t { font-weight: 600; color: var(--text); margin-bottom: 4px; }
+  #sy-detail .sy-d-x { float: right; cursor: pointer; color: var(--text-dim2); }
+  #sy-detail button { font-size: 10.5px; padding: 2px 9px; border-radius: 6px; border: 1px solid var(--line); background: transparent; color: var(--text-dim); cursor: pointer; }
+  #sy-detail button:hover { color: #e0715f; border-color: #e0715f; }
   /* Health + Manage panels */
   #health-body, #ops-body, #voice-body { flex: 1; min-height: 0; overflow-y: auto; padding: 10px 12px; font-family: var(--font-system); }
   .hl-empty { color: #7a8aa0; padding: 24px 8px; text-align: center; font-size: 13px; }
@@ -896,6 +923,7 @@
       <button class="navbtn" data-panel="health"   title="Health — biometrics + system (⌘3)"><span class="g">✚</span>HEALTH</button>
       <button class="navbtn" data-panel="manage"   title="Management — services, projects, schedules (⌘4)"><span class="g">▦</span>MANAGEMENT</button>
       <button class="navbtn" data-panel="code"     title="Code — embedded Claude Code terminal (⌘5)"><span class="g">⌗</span>CODE</button>
+      <button class="navbtn" data-panel="synapse"  title="Synapse — the second brain (⌘6)"><span class="g">✸</span>SYNAPSE</button>
       <div class="rl-foot">
         <button class="navbtn" data-panel="voice"    title="Voice — tune JARVIS (⌘8)"><span class="g">🎚</span>VOICE</button>
         <button class="navbtn" data-panel="settings" title="Settings — API key & config (⌘9)"><span class="g">⚙</span>SETTINGS</button>
@@ -1048,6 +1076,27 @@
   <div id="code-panel" class="stage-panel">
     <div id="codebar"><b>⌗ CODE · CLAUDE CODE TERMINAL</b><span class="sp"></span><button id="code-restart" title="Restart session">⟳</button><button id="code-close" title="Back to Command">✕</button></div>
     <div id="codeterm"></div>
+  </div>
+
+  <!-- SYNAPSE — the second brain: hybrid knowledge graph (2D force-graph + 3D toggle + prune/inbox) -->
+  <div id="synapse-panel" class="stage-panel">
+    <div class="panel-head"><b>✸ SYNAPSE · SECOND BRAIN</b>
+      <span class="sy-tools">
+        <span id="sy-stats" class="sy-stats"></span>
+        <button id="sy-build" class="sy-btn" title="Import memory + find connections">⟳ Build</button>
+        <button id="sy-mode" class="sy-btn" title="Toggle 2D / 3D">3D</button>
+      </span>
+      <span class="panel-back" data-back>← Command</span>
+    </div>
+    <div id="sy-body">
+      <canvas id="sy-canvas"></canvas>
+      <div id="sy-3d"></div>
+      <div id="sy-inbox">
+        <div class="sy-inbox-h">◆ REVIEW QUEUE <span id="sy-inbox-n"></span></div>
+        <div id="sy-inbox-list"></div>
+      </div>
+      <div id="sy-detail" class="hidden"></div>
+    </div>
   </div>
 
     </div><!-- /stage -->
@@ -1824,7 +1873,7 @@ document.querySelectorAll('#rail .navbtn').forEach((b) =>
 );
 document.querySelectorAll('.panel-back').forEach((b) => b.addEventListener('click', () => showPanel('chat')));
 // ⌘/Ctrl shortcuts mirror the rail order (toggle closed if already open).
-const RAIL_KEYS = { '1': 'chat', '2': 'vanguard', '3': 'health', '4': 'manage', '5': 'code', '8': 'voice', '9': 'settings' };
+const RAIL_KEYS = { '1': 'chat', '2': 'vanguard', '3': 'health', '4': 'manage', '5': 'code', '6': 'synapse', '8': 'voice', '9': 'settings' };
 document.addEventListener('keydown', (e) => {
   if (!(e.metaKey || e.ctrlKey) || e.shiftKey || e.altKey) return;
   const id = RAIL_KEYS[e.key];
@@ -1859,6 +1908,109 @@ window.addEventListener('message', (e) => {
   try { window.bhatbot.openAgentWindow(id); } catch {}
 });
 window.bhatbot.onStudioReload && window.bhatbot.onStudioReload(() => reloadStudio());
+
+// ===== SYNAPSE — second-brain 2D force graph + curation + 3D toggle =====
+(() => {
+  const panel = document.getElementById('synapse-panel'); if (!panel) return;
+  const cv = document.getElementById('sy-canvas'); if (!cv) return; const ctx = cv.getContext('2d');
+  const TYPE_COLOR = { project: '#7fd4e8', file: '#8a94a6', memory: '#c9a2ff', concept: '#f2c14e', finding: '#59e39b', notion: '#e08a5a' };
+  let G = { nodes: [], edges: [] }, byId = {}, view = { x: 0, y: 0, k: 1 };
+  let hover = null, dragNode = null, panning = false, last = null, running = false;
+  const esc = (s) => String(s || '').replace(/[<>&]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
+  function size() { const r = cv.getBoundingClientRect(); cv.width = Math.max(1, r.width * devicePixelRatio); cv.height = Math.max(1, r.height * devicePixelRatio); }
+  function ingest(g) {
+    if (!g || g.error) return;
+    const prev = {}; for (const n of G.nodes) prev[n.id] = n; byId = {};
+    G.nodes = (g.nodes || []).map((n) => { const p = prev[n.id] || {}; const node = { ...n, x: p.x != null ? p.x : (Math.random() * 400 - 200), y: p.y != null ? p.y : (Math.random() * 300 - 150), vx: 0, vy: 0 }; byId[n.id] = node; return node; });
+    G.edges = (g.edges || []).filter((e) => byId[e.from] && byId[e.to]);
+    const st = document.getElementById('sy-stats'); if (st && g.stats) st.textContent = `${g.stats.nodes} nodes · ${g.stats.edges} links · ${g.stats.proposed} proposed`;
+    renderInbox(g.edges || []);
+    if (!running) { running = true; loop(); }
+  }
+  function renderInbox(edges) {
+    const list = document.getElementById('sy-inbox-list'), box = document.getElementById('sy-inbox');
+    const props = edges.filter((e) => e.status === 'proposed').sort((a, b) => b.confidence - a.confidence).slice(0, 30);
+    document.getElementById('sy-inbox-n').textContent = props.length || '';
+    if (!props.length) { box.classList.add('empty'); list.innerHTML = ''; return; } box.classList.remove('empty');
+    list.innerHTML = '';
+    for (const e of props) { const a = byId[e.from], b = byId[e.to]; if (!a || !b) continue;
+      const row = document.createElement('div'); row.className = 'sy-edge';
+      row.innerHTML = `<div><b>${esc(a.label)}</b> ↔ <b>${esc(b.label)}</b> <span style="color:var(--text-dim2)">${(e.confidence * 100) | 0}%</span></div>`
+        + `<div class="sy-why">${esc(e.rationale || '(embedding match — reviewing)')}</div>`
+        + '<div class="sy-acts"><button class="sy-ok">✓ keep</button><button class="sy-no">✕ prune</button></div>';
+      row.querySelector('.sy-ok').onclick = () => window.bhatbot.synapseConfirm('edge', e.id);
+      row.querySelector('.sy-no').onclick = () => window.bhatbot.synapsePrune('edge', e.id);
+      list.appendChild(row);
+    }
+  }
+  function tick() {
+    const N = G.nodes; if (N.length > 400) return;   // cap the n^2 sim; huge graphs freeze positions
+    for (let i = 0; i < N.length; i++) { const a = N[i]; a.vx *= 0.9; a.vy *= 0.9;
+      for (let j = i + 1; j < N.length; j++) { const b = N[j]; let dx = a.x - b.x, dy = a.y - b.y; const d2 = dx * dx + dy * dy + 0.01; const f = 1400 / d2, d = Math.sqrt(d2); dx /= d; dy /= d; a.vx += dx * f; a.vy += dy * f; b.vx -= dx * f; b.vy -= dy * f; }
+      a.vx += -a.x * 0.008; a.vy += -a.y * 0.008; }
+    for (const e of G.edges) { const a = byId[e.from], b = byId[e.to]; if (!a || !b) continue; let dx = b.x - a.x, dy = b.y - a.y; const d = Math.sqrt(dx * dx + dy * dy) || 1, f = (d - 70) * 0.02; dx /= d; dy /= d; a.vx += dx * f; a.vy += dy * f; b.vx -= dx * f; b.vy -= dy * f; }
+    for (const a of N) { if (a === dragNode) continue; a.x += a.vx; a.y += a.vy; }
+  }
+  function draw() {
+    ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
+    const w = cv.width / devicePixelRatio, h = cv.height / devicePixelRatio; ctx.clearRect(0, 0, w, h);
+    ctx.save(); ctx.translate(w / 2 + view.x, h / 2 + view.y); ctx.scale(view.k, view.k);
+    for (const e of G.edges) { const a = byId[e.from], b = byId[e.to]; if (!a || !b) continue;
+      ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y);
+      ctx.strokeStyle = e.status === 'confirmed' ? 'rgba(127,212,232,.5)' : 'rgba(150,160,175,.2)';
+      ctx.lineWidth = (e.status === 'confirmed' ? 1.4 : 0.8) / view.k; if (e.status === 'proposed') ctx.setLineDash([3, 3]); ctx.stroke(); ctx.setLineDash([]); }
+    for (const n of G.nodes) { const r = 4 + (n.importance || 1) * 1.5; ctx.beginPath(); ctx.arc(n.x, n.y, r, 0, 6.283);
+      ctx.fillStyle = TYPE_COLOR[n.type] || '#8a94a6'; ctx.globalAlpha = n === hover ? 1 : 0.9; ctx.fill(); ctx.globalAlpha = 1;
+      if (n === hover || view.k > 1.7) { ctx.fillStyle = '#cfe4ee'; ctx.font = (11 / view.k) + 'px system-ui'; ctx.fillText(String(n.label).slice(0, 28), n.x + r + 2, n.y + 3); } }
+    ctx.restore();
+  }
+  function loop() { tick(); draw(); requestAnimationFrame(loop); }
+  const s2w = (mx, my) => ({ x: (mx - cv.clientWidth / 2 - view.x) / view.k, y: (my - cv.clientHeight / 2 - view.y) / view.k });
+  function pick(mx, my) { const p = s2w(mx, my); let best = null, bd = 1e9; for (const n of G.nodes) { const dx = n.x - p.x, dy = n.y - p.y, d = dx * dx + dy * dy, r = 7 + (n.importance || 1) * 1.5; if (d < r * r && d < bd) { bd = d; best = n; } } return best; }
+  cv.addEventListener('mousedown', (e) => { const n = pick(e.offsetX, e.offsetY); if (n) dragNode = n; else { panning = true; last = { x: e.offsetX, y: e.offsetY }; } });
+  cv.addEventListener('mousemove', (e) => { hover = pick(e.offsetX, e.offsetY); cv.style.cursor = hover ? 'pointer' : (panning ? 'grabbing' : 'grab');
+    if (dragNode) { const p = s2w(e.offsetX, e.offsetY); dragNode.x = p.x; dragNode.y = p.y; dragNode.vx = dragNode.vy = 0; }
+    else if (panning && last) { view.x += e.offsetX - last.x; view.y += e.offsetY - last.y; last = { x: e.offsetX, y: e.offsetY }; } });
+  window.addEventListener('mouseup', () => { dragNode = null; panning = false; last = null; });
+  cv.addEventListener('click', (e) => { if (panning) return; const n = pick(e.offsetX, e.offsetY); if (n) showDetail(n); });
+  cv.addEventListener('wheel', (e) => { e.preventDefault(); view.k = Math.max(0.2, Math.min(4, view.k * (e.deltaY < 0 ? 1.1 : 0.9))); }, { passive: false });
+  function showDetail(n) { const d = document.getElementById('sy-detail'); d.classList.remove('hidden');
+    const nb = G.edges.filter((e) => e.from === n.id || e.to === n.id).length;
+    d.innerHTML = `<span class="sy-d-x">✕</span><div class="sy-d-t">${esc(n.label)}</div>`
+      + `<div style="color:var(--text-dim2);font-size:11px">${n.type} · ${nb} link${nb !== 1 ? 's' : ''}</div>`
+      + `<div style="color:var(--text-dim);margin-top:6px;line-height:1.4">${esc((n.text || '').slice(0, 240))}</div>`
+      + '<div style="margin-top:8px"><button class="sy-no">✕ prune node</button></div>';
+    d.querySelector('.sy-d-x').onclick = () => d.classList.add('hidden');
+    d.querySelector('.sy-no').onclick = () => { window.bhatbot.synapsePrune('node', n.id); d.classList.add('hidden'); };
+  }
+  const bBtn = document.getElementById('sy-build');
+  bBtn.onclick = async () => { bBtn.textContent = 'building…'; bBtn.disabled = true; try { await window.bhatbot.synapseBuild(); } catch {} bBtn.textContent = '⟳ Build'; bBtn.disabled = false; };
+  document.getElementById('sy-mode').onclick = () => { panel.classList.toggle('mode3d'); if (panel.classList.contains('mode3d')) init3D(); };
+  window.bhatbot.onSynapseUpdate && window.bhatbot.onSynapseUpdate((g) => { ingest(g); if (panel.classList.contains('mode3d')) update3D(); });
+  const navBtn = document.querySelector('.navbtn[data-panel="synapse"]');
+  if (navBtn) navBtn.addEventListener('click', () => setTimeout(async () => { size(); ingest(await window.bhatbot.synapseGraph()); }, 60));
+  window.addEventListener('resize', () => { if (panel.classList.contains('active')) size(); });
+  // ---- 3D toggle (Three.js constellation; reuses 2D positions + a hashed z spread) ----
+  let three = null;
+  const hashCode = (s) => { let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0; return Math.abs(h); };
+  async function init3D() { if (three) { update3D(); return; }
+    try { const THREE = await import('./vendor/three/three.module.js'); const host = document.getElementById('sy-3d');
+      const rn = new THREE.WebGLRenderer({ antialias: true, alpha: true }); rn.setSize(host.clientWidth, host.clientHeight); host.innerHTML = ''; host.appendChild(rn.domElement);
+      const sc = new THREE.Scene(); const cam = new THREE.PerspectiveCamera(55, host.clientWidth / host.clientHeight, 0.1, 5000); cam.position.set(0, 0, 640);
+      const grp = new THREE.Group(); sc.add(grp); three = { THREE, rn, sc, cam, grp, host, orb: 0 };
+      (function anim() { if (!three) return; three.orb += 0.0018; three.cam.position.x = Math.sin(three.orb) * 640; three.cam.position.z = Math.cos(three.orb) * 640; three.cam.lookAt(0, 0, 0); three.rn.render(three.sc, three.cam); requestAnimationFrame(anim); })();
+      update3D();
+    } catch (e) { console.warn('synapse 3d unavailable', e); }
+  }
+  function update3D() { if (!three) return; const { THREE, grp } = three; while (grp.children.length) grp.remove(grp.children[0]);
+    const pos = {};
+    for (const n of G.nodes) { const z = (hashCode(n.id) % 400) - 200; pos[n.id] = [n.x, -n.y, z];
+      const m = new THREE.Mesh(new THREE.SphereGeometry(3 + (n.importance || 1) * 1.3, 10, 10), new THREE.MeshBasicMaterial({ color: TYPE_COLOR[n.type] || '#8a94a6' })); m.position.set(n.x, -n.y, z); grp.add(m); }
+    for (const e of G.edges) { const a = pos[e.from], b = pos[e.to]; if (!a || !b) continue;
+      const g = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(a[0], a[1], a[2]), new THREE.Vector3(b[0], b[1], b[2])]);
+      grp.add(new THREE.Line(g, new THREE.LineBasicMaterial({ color: 0x3a4a5a, transparent: true, opacity: e.status === 'confirmed' ? 0.5 : 0.2 }))); }
+  }
+})();
 
 // Subtle rate-limit chip in the titlebar — appears only while BhatBot is pacing itself.
 window.bhatbot.onRateStatus && window.bhatbot.onRateStatus((p) => {
