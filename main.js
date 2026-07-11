@@ -47,7 +47,7 @@ const agentTeam = require('./lib/orchestrator');        // C — parallel same-t
 const planner = require('./lib/planner');               // B1 — decompose a goal into a task DAG for the team
 const ambient = require('./lib/ambient');              // #18 — opt-in proactive Calendar/Mail awareness (OFF by default)
 const phonemirror = require('./lib/phonemirror');       // iPhone Mirroring glue — open/focus + gesture shortcuts + window geometry for the phone_mirror tool
-const { textHintFromSelector, splitForSpeech, estimateToolCost, stripReasoning, classifySpeech, createSpeechNormalizer, isPromissory, shouldExtendBudget, toolSig, progressLine } = require('./lib/pure');  // SPLIT_PLAN step 1
+const { textHintFromSelector, splitForSpeech, estimateToolCost, stripReasoning, classifySpeech, createSpeechNormalizer, isPromissory, shouldExtendBudget, toolSig, progressLine, classifyIntake } = require('./lib/pure');  // SPLIT_PLAN step 1
 const WebSocket = require('ws');
 const { createTtsWs } = require('./lib/ttsws');   // T1 — continuous ws streaming TTS transport (config.ttsTransport==='ws')
 const speech = require('./lib/speech');                 // human-speech shaping: emoji→spoken-cue/drop + context-aware punctuation
@@ -1054,6 +1054,15 @@ function overBudget() { const c = loadConfig(); return !!(c.dailyBudgetUsd && co
 const ROUTER_LOG = path.join(os.homedir(), '.bhatbot', 'router.jsonl');
 let _lastModel = null, _lastRouterTask = null;
 let _routerFeatures = null, _routerShadowTier = null;   // learned-router shadow: features + suggestion for this turn's training row
+let _lastIntake = null;                                 // T1/T5 — last intake classification (chat|action|ambiguous)
+// T1 — does the turn refer to work already running? "keep going / the sim / that build / the run" or
+// the actual name of an active background job → treat as action (it wants execution/steering, not chat).
+function referencesRunningJob(text) {
+  const t = String(text || '').toLowerCase();
+  if (/\b(keep going|carry on|continue|go on|resume|the (sim|simulation|build|run|task|job|project|report|analysis|deploy|scan)|that (one|task|job|build|run))\b/.test(t)) return true;
+  try { for (const j of (jobsBus.active ? jobsBus.active() : jobsBus.list()) || []) { const n = String(j.name || '').toLowerCase(); if (n && n.length > 4 && t.includes(n)) return true; } } catch {}
+  return false;
+}
 // W1 — per-turn tool subset. agentLoop sets this once (relevant tools for the turn) and clears it in
 // finish(); every Claude tool-loop call reads it via activeTools(). null ⇒ full catalog (default,
 // and the graceful fallback when retrieval is off / unavailable / low-confidence).
@@ -5736,20 +5745,24 @@ async function _dispatchTurnInner(history, apiKey, event, opts = {}) {
   const spd = maybeAdjustSpeed(userText);
   if (spd) return { text: spd, history: [...history, { role: 'assistant', content: spd }], _provider: 'local', _model: 'intent' };
   const surface = opts.stream ? 'desktop' : 'headless';
+  // T1 — deterministic front-door router. Fail toward the instrumented agentLoop on ANY action signal;
+  // reserve the tool-less fast path (and the local text-pipeline) strictly for clear 'chat'. This is the
+  // fix for "answered without doing the work" / "didn't take my prompt": a tool-needing turn can no
+  // longer be swallowed by fastReply or mangled by the pipeline.
+  let inToolThread = false;
+  try { inToolThread = /tool_result|tool_use/.test(JSON.stringify(history.slice(-2))); } catch {}
+  const intake = classifyIntake(userText, { looksLikeToolTask, referencesJob: referencesRunningJob, inToolThread });
+  _lastIntake = intake;   // T5 audit
   let res;
-  if (loadConfig().fastChat !== false) {
-    const qr = quickRoute(userText, history);
-    if (qr === 'chat') {
+  if (intake === 'action' || intake === 'ambiguous') {
+    res = await agentLoop(history, apiKey, event, opts);        // tools available + full progress instrumentation
+  } else {                                                       // 'chat' — tool-free small talk / short question
+    if (loadConfig().fastChat !== false) {
       try { res = await fastReply(history, apiKey, event, opts); }
-      catch (e) { console.warn('[fast] reply failed → agent:', e.message); }   // fall through to full agent
-    } else if (qr === 'action') {
-      res = await agentLoop(history, apiKey, event, opts);   // obvious tool-work: skip the local router hop
+      catch (e) { console.warn('[fast] reply failed → agent:', e.message); }
     }
-  }
-  if (!res) {
-    res = pipelineCfg().enabled
-      ? await runPipeline(history, apiKey, event, opts)
-      : await agentLoop(history, apiKey, event, opts);
+    // Pipeline can ONLY ever see 'chat' now (never action/ambiguous → never mangles tool work).
+    if (!res) res = pipelineCfg().enabled ? await runPipeline(history, apiKey, event, opts) : await agentLoop(history, apiKey, event, opts);
   }
   if (res && res.text) recordEpisode(userText, res.text, surface);
   return res;
