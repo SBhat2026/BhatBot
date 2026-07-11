@@ -7519,7 +7519,11 @@ async function elevenLabsSynth(t, c, opts = {}) {
   const model = c.ttsModel || 'eleven_flash_v2_5';
   // (1) Cadence: flash/turbo v2.5 honor SSML <break>; v3 does not, so gate on the model.
   const supportsBreaks = c.ttsCadence !== false && /flash|turbo/i.test(model);
-  const text = humanizeCadence(t, { breaks: supportsBreaks });
+  // HARD GUARD: normalize AT the synth call — the lowest choke point every ElevenLabs byte passes
+  // through — so filenames/symbols are spoken correctly no matter which caller reached here (the
+  // streaming path could split "top_10.csv" across tokens and slip a raw dot past upstream passes).
+  // normalizeForSpeech is idempotent, so re-running it on already-normalized text is harmless.
+  const text = humanizeCadence(normalizeForSpeech(t), { breaks: supportsBreaks });
   // (3) Tuned conversational delivery — lower stability + a touch of style = livelier prosody
   // variation (less monotone); speaker_boost adds presence/warmth. All config-overridable.
   const vs = jarvisVoiceSettings(c);
@@ -7625,11 +7629,18 @@ function normalizeForSpeech(input) {
   //     percent"). Runs AFTER currency (which already consumed $5.99) and BEFORE the dot→"dot"
   //     rule; digit.digit never hits the "dot" rule, only letter-adjacent dots do.
   s = s.replace(/(\d)\.(\d)/g, '$1 point $2');
+  // 5d. Underscores inside identifiers → spaces so "top_10" reads "top 10" (filenames/vars), never a
+  //     mumbled run-on. Lookahead keeps runs split (a_b_c → a b c).
+  s = s.replace(/([A-Za-z0-9])_(?=[A-Za-z0-9])/g, '$1 ');
   // 6. In-token dots → "dot" when the next char is a LETTER (filenames/domains/emails:
   //    "main.js"→"main dot js", "gmail.com"→"gmail dot com", "2008.co"→"2008 dot co", "co.uk"→
   //    "co dot uk"). Decimals like 3.5 (digit.digit) stay → TTS says "three point five"; and a
   //    sentence-ending period (followed by space/EOL, not a letter) stays as a natural pause.
   s = s.replace(/([A-Za-z0-9])\.(?=[A-Za-z])/g, '$1 dot ');
+  // 6b. A LEADING-dot file extension (".csv", ".py" — no preceding token, e.g. after a streaming
+  //     token split) still reads as "dot csv", never a full stop. This is the belt-and-suspenders
+  //     guard so filenames are NEVER voiced with a sentence-ending period again.
+  s = s.replace(/(^|\s)\.([A-Za-z][A-Za-z0-9]{0,4})\b/g, '$1dot $2');
   // 7. Symbols → words.
   s = s.replace(/&/g, ' and ').replace(/%/g, ' percent')
        .replace(/(\S)@(\S)/g, '$1 at $2').replace(/\s@\s/g, ' at ')
