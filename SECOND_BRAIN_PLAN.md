@@ -98,8 +98,17 @@ A new nav-rail tab. A force-directed graph (nodes by type/importance, edges by c
 - **P4 — Learning**: threshold models from your curation; importance ranking; better rationales.
 - **P5 — Always-on**: deploy the `cloud/` brain (Fly) so it runs 24/7 when the Mac is off; local↔cloud↔Notion sync.
 
-## Open decisions for Siddhant (need input before P1)
-1. **Viz**: D3 2D force-graph (recommended) vs Three.js 3D (matches the office) vs both.
-2. **Scout autonomy**: auto-add findings to the graph (prune later) vs hold in an inbox for approval first; and a daily search budget.
-3. **Host**: desktop-only for now (simplest) vs deploy the cloud brain now for true 24/7 (bigger lift).
-4. **Scope of "projects"**: just BhatBot's own project records, or also index the user's other repos/Nexus/Notion as project nodes?
+## DECISIONS LOCKED (2026-07-11)
+1. **Viz** → **Both**: D3 2D force-graph as the working/curation view + a Three.js 3D "constellation" toggle for show.
+2. **Scout autonomy** → **Auto-add, prune later**: high-relevance findings auto-join the graph flagged `unreviewed`; Siddhant prunes the bad ones. (Hard daily search budget still applies.)
+3. **Host** → **Deploy the cloud brain now** (Fly), so SYNAPSE is genuinely 24/7 from day one — pulled ahead of the original P5.
+4. **Scope** → **BhatBot memory + ~/repos + Notion**: index project records, local repos, and Notion pages as nodes (denser graph; more ingest + noise to garden).
+
+## Revised sequencing (cloud-first)
+- **D0 — Cloud deploy** *(new first step; needs Fly auth)*: deploy `cloud/` to Fly with the brain secrets so the workers have a 24/7 home. **Dependency:** Siddhant runs `fly auth login` (or provides a Fly API token) + confirms the Fly app/region; the ANTHROPIC/OPENAI keys get set as Fly secrets. I can build everything else while this is pending.
+- **P0 — Substrate**: `lib/brain.js` hybrid node/edge store + importers for semantic/graph/projects **+ a repo indexer (~/repos) + Notion importer**. Runs both local + cloud. Tests.
+- **P1 — Connector + viz**: cross-project edges + the SYNAPSE tab (D3 2D render, 3D toggle).
+- **P2 — Curation**: prune/confirm/inbox + Gardener + learned thresholds.
+- **P3 — Scout**: autonomous web enrichment, auto-add (flagged) + daily budget.
+- **P4 — Learning**: threshold + importance models from curation.
+- **P5 — Sync hardening**: local ↔ cloud ↔ Notion consistency, offline reconciliation.
