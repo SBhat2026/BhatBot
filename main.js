@@ -6810,6 +6810,9 @@ function pushBiometrics() { try { const p = biometricPortrait(); if (mainWindow 
 async function healthTick() {
   const cfg = healthCfg();
   if (!cfg.enabled || !garmin.available()) return;
+  // KILL INTERRUPTIONS: never surface an ambient health ping WHILE a turn is running — it muddies the
+  // active task. Skip this tick; the next one (or idle) catches it. (Siddhant: proactive pokes queue for idle.)
+  if (agentState === 'running' || agentState === 'paused') return;
   if (cfg.quietHours) { const h = new Date().getHours(); if (h < 7 || h >= 23) return; }   // no biometric pings overnight
   try {
     await healthSync();

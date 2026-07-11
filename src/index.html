@@ -549,6 +549,8 @@
   #fleet-list { overflow: auto; padding: 12px 14px; flex: 1; display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; align-content: start; }
   #fleet-list:empty::before { content: 'No Vanguard active — give BhatBot several jobs at once (or call the fleet tool) to launch parallel suits.'; color: var(--text-dim2); font-size: 12.5px; }
   .suit-card { border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 8px; padding: 10px 12px; background: var(--surface); display: flex; flex-direction: column; gap: 5px; }
+  .suit-card.suit-flash { animation: suitFlash 1.1s ease; }
+  @keyframes suitFlash { 0%,100% { box-shadow: none; } 20% { box-shadow: 0 0 0 2px var(--accent), 0 0 18px color-mix(in srgb, var(--accent) 60%, transparent); } }
   .suit-card[data-status="done"] { border-left-color: var(--ok); }
   .suit-card[data-status="failed"] { border-left-color: var(--err); }
   .suit-card[data-status="working"] { border-left-color: var(--accent); box-shadow: 0 0 10px rgba(0,200,255,.12); }
@@ -1840,6 +1842,19 @@ function pushPresenceToIframe(snap) {
 window.bhatbot.onPresenceUpdate && window.bhatbot.onPresenceUpdate((snap) => { _lastPresence = snap; pushPresenceToIframe(snap); });
 // Replay the latest snapshot once the iframe has (re)loaded so it isn't blank on first open.
 document.getElementById('fleet3d') && document.getElementById('fleet3d').addEventListener('load', () => { if (_lastPresence) pushPresenceToIframe(_lastPresence); });
+// Click-to-inspect from the 3D office: a click on a character in the FLEET presence scene focuses
+// that agent's steer-card (scroll + flash + focus its input) AND opens its live monitor window.
+window.addEventListener('message', (e) => {
+  if (!e.data || e.data.type !== 'agent-click' || !e.data.id) return;
+  const id = e.data.id;
+  const el = document.getElementById('suit-card-' + id);
+  if (el) {
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    el.classList.remove('suit-flash'); void el.offsetWidth; el.classList.add('suit-flash');
+    const inp = el.querySelector('.suit-fb-in'); if (inp) setTimeout(() => { try { inp.focus(); } catch {} }, 380);
+  }
+  try { window.bhatbot.openAgentWindow(id); } catch {}
+});
 window.bhatbot.onStudioReload && window.bhatbot.onStudioReload(() => reloadStudio());
 
 // Subtle rate-limit chip in the titlebar — appears only while BhatBot is pacing itself.

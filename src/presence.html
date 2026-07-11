@@ -15,17 +15,22 @@
   #legend { position:fixed; left:16px; bottom:12px; font-size:10.5px; letter-spacing:.06em; color:#6f93a6; line-height:1.85; }
   .dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:7px; vertical-align:middle; }
   #loading { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; color:#4a6376; font-size:12px; letter-spacing:.2em; text-transform:uppercase; }
+  #hoverlabel { position:fixed; z-index:20; pointer-events:none; opacity:0; transform:translate(-50%,-100%); transition:opacity .12s;
+    background:rgba(10,16,22,.92); border:1px solid #23303c; color:#cfe4ee; font-size:11px; letter-spacing:.04em;
+    padding:4px 9px; border-radius:7px; white-space:nowrap; }
 </style>
 </head>
 <body>
   <div id="stage"></div>
   <div id="loading">Loading the room…</div>
+  <div id="hoverlabel"></div>
   <div id="hud"><span>BhatBot · <b>Fleet Presence</b></span><span id="tally">—</span></div>
   <div id="legend">
     <div><span class="dot" style="background:#3a4a5a"></span>idle</div>
     <div><span class="dot" style="background:#f2c14e"></span>thinking</div>
     <div><span class="dot" style="background:#5ad1ff"></span>working</div>
     <div><span class="dot" style="background:#59e39b"></span>done</div>
+    <div style="margin-top:6px;color:#5a7688;">click an agent to check in</div>
   </div>
 
 <script type="importmap">
@@ -138,7 +143,11 @@ function setCount(n) {
 function applyState(list) {
   document.getElementById('tally').textContent = `${list.length} agent${list.length===1?'':'s'} · ${list.filter(x=>x.state==='working').length} working`;
   if (list.length !== agents.length) setCount(list.length);
-  list.forEach((info, i) => { const a = agents[i]; if (!a) return; a.state = info.state || 'idle'; a.target = new THREE.Color(STATE_COLOR[a.state] ?? STATE_COLOR.idle); });
+  list.forEach((info, i) => { const a = agents[i]; if (!a) return;
+    a.state = info.state || 'idle'; a.target = new THREE.Color(STATE_COLOR[a.state] ?? STATE_COLOR.idle);
+    a.id = info.id || null; a.name = info.name || info.codename || info.role || ('Agent ' + (i + 1));   // for click-to-inspect
+    a.group.userData.agentIdx = i;
+  });
 }
 
 // ---- demo + live input ----------------------------------------------------
@@ -149,6 +158,42 @@ function demoTick(t) {
   applyState(DEMO.map((role, i) => ({ role, state: states[(Math.floor(t*0.4)+i)%states.length] })));
 }
 function ingest(payload) { demo = false; applyState((payload && payload.agents) || []); }
+
+// ---- click-to-inspect: walk up to an agent and check in on it --------------
+// Raycast a click against the characters, resolve which agent was hit, and tell the host (the
+// FLEET tab via postMessage, or the popup via window.presence) so it focuses that suit's card /
+// opens its live monitor. Hover shows a name+state chip and a pointer cursor.
+const _ray = new THREE.Raycaster(), _ptr = new THREE.Vector2();
+const _label = document.getElementById('hoverlabel');
+function pickAgent(ev) {
+  if (demo || !agents.length) return null;
+  const rect = renderer.domElement.getBoundingClientRect();
+  _ptr.x = ((ev.clientX - rect.left) / rect.width) * 2 - 1;
+  _ptr.y = -((ev.clientY - rect.top) / rect.height) * 2 + 1;
+  _ray.setFromCamera(_ptr, camera);
+  const hits = _ray.intersectObjects(agents.map((a) => a.group), true);
+  if (!hits.length) return null;
+  let o = hits[0].object;
+  while (o && o.userData.agentIdx == null && o.parent) o = o.parent;
+  return (o && o.userData.agentIdx != null) ? agents[o.userData.agentIdx] : null;
+}
+renderer.domElement.addEventListener('pointermove', (ev) => {
+  const a = pickAgent(ev);
+  renderer.domElement.style.cursor = a ? 'pointer' : 'default';
+  if (_label) {
+    if (a) { _label.textContent = a.name + ' · ' + a.state; _label.style.left = ev.clientX + 'px'; _label.style.top = (ev.clientY - 12) + 'px'; _label.style.opacity = '1'; }
+    else _label.style.opacity = '0';
+  }
+});
+renderer.domElement.addEventListener('click', (ev) => {
+  const a = pickAgent(ev);
+  if (!a) return;
+  const detail = { type: 'agent-click', id: a.id, name: a.name, state: a.state };
+  try { if (window.parent && window.parent !== window) window.parent.postMessage(detail, '*'); } catch {}
+  try { if (window.presence && window.presence.inspect) window.presence.inspect(detail); } catch {}
+  a.group.scale.setScalar(1.12); setTimeout(() => { a.group.scale.setScalar(1); }, 160);   // click confirm
+});
+
 // popup (IPC preload) OR iframe (postMessage) — support both so this file works in either mount.
 if (window.presence && window.presence.onUpdate) window.presence.onUpdate(ingest);
 window.addEventListener('message', (e) => { if (e.data && e.data.type === 'presence') ingest(e.data); });
