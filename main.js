@@ -1117,6 +1117,35 @@ let _routerFeatures = null, _routerShadowTier = null;   // learned-router shadow
 let _lastIntake = null;                                 // T1/T5 — last intake classification (chat|action|ambiguous)
 // T1 — does the turn refer to work already running? "keep going / the sim / that build / the run" or
 // the actual name of an active background job → treat as action (it wants execution/steering, not chat).
+// Keep the ACTIVE project aligned with what Siddhant is actually talking about. When his message
+// clearly names a known project, switch focus to it — so the injected "ACTIVE PROJECT" context (and
+// the turn logging) follow the conversation instead of getting stuck on a stale project (the uricase-
+// vs-Iron-Man drift). Conservative: switches ONLY on a distinctive name match, never on generic words.
+const _PROJ_STOP = new Set(['the', 'a', 'an', 'and', 'project', 'challenge', 'suit', 'app', 'build', 'render', 'thing', 'stuff', 'work', 'task', 'design', 'my', 'this', 'that', 'for', 'with']);
+function maybeSwitchProject(text) {
+  try {
+    const t = String(text || '').toLowerCase();
+    if (!t || t.length < 3) return null;
+    const list = projects.list(); if (!list.length) return null;
+    const cur = projects.activeSlug();
+    let best = null, bestScore = 0;
+    for (const p of list) {
+      const toks = (String(p.name).toLowerCase().match(/[a-z0-9]{3,}/g) || []).filter((w) => !_PROJ_STOP.has(w));
+      if (!toks.length) continue;
+      let hit = 0; for (const tok of toks) if (t.includes(tok)) hit++;
+      let score = hit;
+      if (hit === toks.length) score += 2;                                  // matched ALL distinctive tokens
+      if (t.includes(String(p.name).toLowerCase())) score += 3;             // full project name present verbatim
+      if (score > bestScore) { bestScore = score; best = p; }
+    }
+    if (best && bestScore >= 2 && best.slug !== cur) {
+      projects.setActive(best.slug);
+      sendToActivity('tool-update', { type: 'thinking', text: `🎯 focus → ${best.name}` });
+      return best.slug;
+    }
+    return null;
+  } catch { return null; }
+}
 function referencesRunningJob(text) {
   const t = String(text || '').toLowerCase();
   if (/\b(keep going|carry on|continue|go on|resume|the (sim|simulation|build|run|task|job|project|report|analysis|deploy|scan)|that (one|task|job|build|run))\b/.test(t)) return true;
@@ -5837,6 +5866,7 @@ async function _dispatchTurnInner(history, apiKey, event, opts = {}) {
   // instead of going quiet. turn_done in the finally guarantees the strip never stays stuck.
   turnState.reduce({ type: 'turn_start', text: userText, ts: Date.now() });
   pushTurnState(true);
+  maybeSwitchProject(userText);   // keep the injected "ACTIVE PROJECT" focus aligned with what he just named
   let res = null, _turnErr = null;
   try {
     // T1 — deterministic front-door router. Fail toward the instrumented agentLoop on ANY action signal;
