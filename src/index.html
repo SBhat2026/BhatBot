@@ -149,6 +149,9 @@
   .stage-panel { display: none; position: absolute; inset: 0; z-index: 24; min-height: 0;
     flex-direction: column; background: var(--bg); animation: slidein .18s ease; }
   .stage-panel.active { display: flex; }
+  /* FLEET tab — 3D presence hero (the-delegation office) above the steerable agent cards */
+  #fleet3d { flex: 1 1 60%; min-height: 220px; width: 100%; border: 0; display: block; background: #070b12; }
+  #vanguard-panel #fleet-list { flex: 0 1 40%; overflow-y: auto; }
   /* Health + Manage panels */
   #health-body, #ops-body, #voice-body { flex: 1; min-height: 0; overflow-y: auto; padding: 10px 12px; font-family: var(--font-system); }
   .hl-empty { color: #7a8aa0; padding: 24px 8px; text-align: center; font-size: 13px; }
@@ -969,6 +972,8 @@
   <!-- C-Fleet: VANGUARD live panel — one card per parallel suit, steerable in real time -->
   <div id="vanguard-panel" class="stage-panel">
     <div class="panel-head"><b>⬡ AGENTIC FLEET</b><span class="panel-back" data-back>← Command</span></div>
+    <!-- 3D presence (the-delegation office + characters) — the hero view; live agent cards below. -->
+    <iframe id="fleet3d" src="presence.html" title="Fleet presence" scrolling="no"></iframe>
     <div id="fleet-list"></div>
   </div>
 
@@ -1761,6 +1766,15 @@ document.addEventListener('keydown', (e) => {
 // itself via open-nexus/open-studio IPC + focusBrowser()); the panels + showPanel wiring remain.
 // Main process can request a panel (e.g. studio_write surfaces Studio).
 window.bhatbot.onShowPanel && window.bhatbot.onShowPanel((id) => showPanel(id));
+// Forward live fleet state into the 3D presence iframe (the-delegation office in the FLEET tab).
+let _lastPresence = null;
+function pushPresenceToIframe(snap) {
+  const f = document.getElementById('fleet3d');
+  try { if (f && f.contentWindow) f.contentWindow.postMessage({ type: 'presence', agents: (snap && snap.agents) || [] }, '*'); } catch {}
+}
+window.bhatbot.onPresenceUpdate && window.bhatbot.onPresenceUpdate((snap) => { _lastPresence = snap; pushPresenceToIframe(snap); });
+// Replay the latest snapshot once the iframe has (re)loaded so it isn't blank on first open.
+document.getElementById('fleet3d') && document.getElementById('fleet3d').addEventListener('load', () => { if (_lastPresence) pushPresenceToIframe(_lastPresence); });
 window.bhatbot.onStudioReload && window.bhatbot.onStudioReload(() => reloadStudio());
 
 // Subtle rate-limit chip in the titlebar — appears only while BhatBot is pacing itself.

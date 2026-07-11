@@ -4,20 +4,22 @@
 <meta charset="utf-8" />
 <title>BhatBot — Presence</title>
 <style>
-  :root { --accent:#5ad1ff; --bg:#070b12; }
-  html,body { margin:0; height:100%; background:radial-gradient(120% 90% at 50% 12%, #0c1420 0%, #070b12 60%, #04060a 100%); overflow:hidden;
+  :root { --accent:#5ad1ff; }
+  html,body { margin:0; height:100%; background:radial-gradient(120% 90% at 50% 10%, #0c1420 0%, #070b12 62%, #04060a 100%); overflow:hidden;
     font-family:-apple-system,'Segoe UI',Roboto,sans-serif; color:#cfe6f2; }
   #stage { position:fixed; inset:0; }
-  #hud { position:fixed; left:0; right:0; top:0; padding:14px 20px; display:flex; align-items:center; gap:14px;
-    pointer-events:none; text-transform:uppercase; letter-spacing:.22em; font-size:11px; color:#7fa8bd; }
+  #hud { position:fixed; left:0; right:0; top:0; padding:12px 18px; display:flex; align-items:center; gap:12px;
+    pointer-events:none; text-transform:uppercase; letter-spacing:.2em; font-size:10.5px; color:#7fa8bd; }
   #hud b { color:var(--accent); font-weight:500; }
-  #tally { margin-left:auto; letter-spacing:.14em; }
-  #legend { position:fixed; left:20px; bottom:16px; font-size:11px; letter-spacing:.08em; color:#6f93a6; line-height:1.9; }
+  #tally { margin-left:auto; letter-spacing:.12em; }
+  #legend { position:fixed; left:16px; bottom:12px; font-size:10.5px; letter-spacing:.06em; color:#6f93a6; line-height:1.85; }
   .dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:7px; vertical-align:middle; }
+  #loading { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; color:#4a6376; font-size:12px; letter-spacing:.2em; text-transform:uppercase; }
 </style>
 </head>
 <body>
   <div id="stage"></div>
+  <div id="loading">Loading the room…</div>
   <div id="hud"><span>BhatBot · <b>Fleet Presence</b></span><span id="tally">—</span></div>
   <div id="legend">
     <div><span class="dot" style="background:#3a4a5a"></span>idle</div>
@@ -27,132 +29,185 @@
   </div>
 
 <script type="importmap">
-{ "imports": { "three": "./vendor/three/three.module.js" } }
+{ "imports": {
+  "three": "./vendor/three/three.module.js",
+  "three/addons/": "./vendor/three/jsm/"
+} }
 </script>
 <script type="module">
 import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
+import { clone as skeletonClone } from 'three/addons/utils/SkeletonUtils.js';
 
 const STATE_COLOR = { idle:0x3a4a5a, thinking:0xf2c14e, working:0x5ad1ff, done:0x59e39b, error:0xff6b6b };
 const stage = document.getElementById('stage');
 
 const scene = new THREE.Scene();
-scene.fog = new THREE.FogExp2(0x070b12, 0.045);
-const camera = new THREE.PerspectiveCamera(48, innerWidth/innerHeight, 0.1, 100);
-camera.position.set(0, 5.2, 12);
-camera.lookAt(0, 1.2, 0);
-
+scene.fog = new THREE.FogExp2(0x070b12, 0.03);
+const camera = new THREE.PerspectiveCamera(46, innerWidth/innerHeight, 0.05, 500);
 const renderer = new THREE.WebGLRenderer({ antialias:true, alpha:true });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.setSize(innerWidth, innerHeight);
+renderer.shadowMap.enabled = true; renderer.shadowMap.type = THREE.PCFShadowMap;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
 stage.appendChild(renderer.domElement);
 
-scene.add(new THREE.AmbientLight(0x88a0b8, 0.5));
-const key = new THREE.PointLight(0x9fdcff, 1.2, 60); key.position.set(6, 12, 8); scene.add(key);
-const rim = new THREE.PointLight(0x4a7bd6, 0.8, 60); rim.position.set(-8, 4, -6); scene.add(rim);
+scene.add(new THREE.AmbientLight(0x8298b0, 0.7));
+const key = new THREE.DirectionalLight(0xbfe4ff, 1.4); key.position.set(6, 12, 7); key.castShadow = true;
+key.shadow.mapSize.set(1024, 1024); scene.add(key);
+scene.add(new THREE.HemisphereLight(0x9fc4e0, 0x0a1420, 0.6));
+const rim = new THREE.PointLight(0x4a7bd6, 0.7, 80); rim.position.set(-8, 5, -8); scene.add(rim);
 
-// Floor — a subtle reflective grid disc, the "operations room".
-const grid = new THREE.GridHelper(28, 28, 0x16324a, 0x0e2033);
-grid.material.transparent = true; grid.material.opacity = 0.35; scene.add(grid);
-const disc = new THREE.Mesh(new THREE.CircleGeometry(9, 64), new THREE.MeshBasicMaterial({ color:0x0a1622, transparent:true, opacity:0.6 }));
-disc.rotation.x = -Math.PI/2; disc.position.y = 0.01; scene.add(disc);
+// ---- adaptive framing -----------------------------------------------------
+let focus = new THREE.Vector3(0, 1, 0), radius = 8;
+function frame(box) {
+  box.getCenter(focus);
+  const size = box.getSize(new THREE.Vector3());
+  radius = Math.max(size.x, size.z) * 0.95 + size.y * 0.4;
+  camera.near = radius / 100; camera.far = radius * 12; camera.updateProjectionMatrix();
+}
 
-// Central BhatBot core — the orchestrator the agents orbit.
-const coreGrp = new THREE.Group(); scene.add(coreGrp);
-const core = new THREE.Mesh(new THREE.IcosahedronGeometry(0.9, 1),
-  new THREE.MeshStandardMaterial({ color:0x5ad1ff, emissive:0x2a86b8, emissiveIntensity:0.9, metalness:0.3, roughness:0.35, flatShading:true }));
-core.position.y = 1.4; coreGrp.add(core);
-const halo = new THREE.Mesh(new THREE.RingGeometry(1.25, 1.4, 48), new THREE.MeshBasicMaterial({ color:0x5ad1ff, transparent:true, opacity:0.35, side:THREE.DoubleSide }));
-halo.rotation.x = -Math.PI/2; halo.position.y = 1.4; coreGrp.add(halo);
+// ---- loaders --------------------------------------------------------------
+const draco = new DRACOLoader().setDecoderPath('./vendor/three/jsm/libs/draco/gltf/');
+const gltf = new GLTFLoader().setDRACOLoader(draco);
+const load = (url) => new Promise((res, rej) => gltf.load(url, res, undefined, rej));
 
-// Build one stylized agent avatar: a low-poly capsule body + an orb head + a glow ring underfoot.
-function makeAgent() {
+let charTemplate = null, charClip = null, charScale = 1, floorY = 0, charTargetH = 1.7;
+let seats = [];   // candidate positions on the office floor for agents to occupy
+
+// Stylized fallback avatar (used if the GLB models fail to load) so the panel never blanks.
+function fallbackAvatar() {
   const g = new THREE.Group();
-  const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.28, 0.7, 4, 12),
-    new THREE.MeshStandardMaterial({ color:0x22303f, emissive:0x101820, metalness:0.4, roughness:0.5, flatShading:true }));
+  const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.28, 0.7, 4, 10),
+    new THREE.MeshStandardMaterial({ color:0x22303f, metalness:0.4, roughness:0.5, flatShading:true }));
   body.position.y = 0.75; g.add(body);
   const head = new THREE.Mesh(new THREE.IcosahedronGeometry(0.26, 1),
     new THREE.MeshStandardMaterial({ color:0x3a4a5a, emissive:0x3a4a5a, emissiveIntensity:0.6, flatShading:true }));
   head.position.y = 1.5; g.add(head);
-  const ring = new THREE.Mesh(new THREE.RingGeometry(0.34, 0.44, 28), new THREE.MeshBasicMaterial({ color:0x3a4a5a, transparent:true, opacity:0.5, side:THREE.DoubleSide }));
-  ring.rotation.x = -Math.PI/2; ring.position.y = 0.03; g.add(ring);
-  g.userData = { head, ring, body, state:'idle', phase:Math.random()*6.28, target:new THREE.Color(0x3a4a5a) };
+  g.userData.tintTargets = [head.material];
   return g;
 }
 
-let agents = [];
-function layout(n) {
-  for (const a of agents) scene.remove(a);
-  agents = [];
-  const R = Math.max(3, 2.2 + n*0.35);
-  for (let i=0;i<n;i++) {
-    const a = makeAgent();
-    const ang = (i/n)*Math.PI*2;
-    a.position.set(Math.cos(ang)*R, 0, Math.sin(ang)*R);
-    a.lookAt(0, 0.9, 0);
-    a.userData.baseY = 0; a.userData.ang = ang;
-    scene.add(a); agents.push(a);
+// Collect materials we can tint to reflect an agent's state (skinned mesh materials).
+function tintTargetsOf(root) {
+  const mats = [];
+  root.traverse((o) => { if (o.isMesh && o.material) { const m = Array.isArray(o.material) ? o.material : [o.material]; for (const mm of m) mats.push(mm); } });
+  return mats;
+}
+
+function makeAvatar() {
+  if (!charTemplate) return { group: fallbackAvatar(), mixer: null };
+  const group = skeletonClone(charTemplate);
+  group.scale.setScalar(charScale);
+  group.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.frustumCulled = false; } });
+  let mixer = null;
+  if (charClip) { mixer = new THREE.AnimationMixer(group); mixer.clipAction(charClip).play(); }
+  // a soft state aura ring at the feet
+  const aura = new THREE.Mesh(new THREE.RingGeometry(0.32, 0.46, 28), new THREE.MeshBasicMaterial({ color:0x3a4a5a, transparent:true, opacity:0.5, side:THREE.DoubleSide }));
+  aura.rotation.x = -Math.PI/2; aura.position.y = 0.02; group.add(aura);
+  // a bright status orb floating above the head — the unmistakable at-a-glance state signal. Sized in
+  // world units by dividing out charScale (the group is scaled, this child would otherwise inherit it).
+  const inv = 1 / (charScale || 1);
+  const orb = new THREE.Mesh(new THREE.SphereGeometry(0.14 * inv, 16, 16), new THREE.MeshBasicMaterial({ color:0x3a4a5a }));
+  orb.position.y = (charTargetH + 0.34) * inv; group.add(orb);
+  const glow = new THREE.Mesh(new THREE.SphereGeometry(0.22 * inv, 16, 16), new THREE.MeshBasicMaterial({ color:0x3a4a5a, transparent:true, opacity:0.28 }));
+  orb.add(glow);
+  group.userData.tintTargets = tintTargetsOf(group).slice(0, 2);
+  group.userData.aura = aura; group.userData.orb = orb; group.userData.glow = glow;
+  return { group, mixer };
+}
+
+// ---- agents ---------------------------------------------------------------
+let agents = [];   // { group, mixer, aura, state, target, phase }
+function seatFor(i, n) {
+  if (seats.length) return seats[i % seats.length];
+  // no office loaded → ring layout
+  const R = Math.max(3, 2 + n*0.3), a = (i/Math.max(1,n))*Math.PI*2;
+  return new THREE.Vector3(Math.cos(a)*R, floorY, Math.sin(a)*R);
+}
+function setCount(n) {
+  while (agents.length > n) { const a = agents.pop(); scene.remove(a.group); }
+  while (agents.length < n) {
+    const { group, mixer } = makeAvatar();
+    const av = { group, mixer, aura: group.userData.aura, orb: group.userData.orb, glow: group.userData.glow, tint: group.userData.tintTargets || [], state:'idle', target:new THREE.Color(0x3a4a5a), phase:Math.random()*6.28, baseY:floorY };
+    agents.push(av); scene.add(group);
   }
+  agents.forEach((a, i) => { const p = seatFor(i, agents.length); a.group.position.set(p.x, floorY, p.z); a.group.lookAt(focus.x, floorY, focus.z); });
 }
-
 function applyState(list) {
-  document.getElementById('tally').textContent =
-    `${list.length} agent${list.length===1?'':'s'} · ${list.filter(x=>x.state==='working').length} working`;
-  if (list.length !== agents.length) layout(list.length);
-  list.forEach((info, i) => {
-    const a = agents[i]; if (!a) return;
-    a.userData.state = info.state || 'idle';
-    a.userData.label = info.label || info.role || '';
-    a.userData.target = new THREE.Color(STATE_COLOR[a.userData.state] ?? STATE_COLOR.idle);
-  });
+  document.getElementById('tally').textContent = `${list.length} agent${list.length===1?'':'s'} · ${list.filter(x=>x.state==='working').length} working`;
+  if (list.length !== agents.length) setCount(list.length);
+  list.forEach((info, i) => { const a = agents[i]; if (!a) return; a.state = info.state || 'idle'; a.target = new THREE.Color(STATE_COLOR[a.state] ?? STATE_COLOR.idle); });
 }
 
-// Demo/mock state so the scene is alive standalone (before real fleet data arrives).
+// ---- demo + live input ----------------------------------------------------
 let demo = true;
 const DEMO = ['research','design','code','test','review'];
 function demoTick(t) {
   const states = ['idle','thinking','working','working','done'];
-  applyState(DEMO.map((role, i) => ({ role, state: states[(Math.floor(t*0.5)+i)%states.length] })));
+  applyState(DEMO.map((role, i) => ({ role, state: states[(Math.floor(t*0.4)+i)%states.length] })));
 }
+function ingest(payload) { demo = false; applyState((payload && payload.agents) || []); }
+// popup (IPC preload) OR iframe (postMessage) — support both so this file works in either mount.
+if (window.presence && window.presence.onUpdate) window.presence.onUpdate(ingest);
+window.addEventListener('message', (e) => { if (e.data && e.data.type === 'presence') ingest(e.data); });
 
-// Live data path: main process pushes { agents:[{role,state,label}] } via preload.
-if (window.presence && window.presence.onUpdate) {
-  window.presence.onUpdate((payload) => {
-    demo = false;
-    applyState((payload && payload.agents) || []);
-  });
-}
-
-addEventListener('resize', () => {
-  camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix();
-  renderer.setSize(innerWidth, innerHeight);
-});
-
-const t0 = performance.now();
-(function animate(){
-  requestAnimationFrame(animate);
-  const t = (performance.now() - t0) / 1000;
-  if (demo) demoTick(t);
-  core.rotation.y += 0.006; core.rotation.x += 0.002;
-  halo.rotation.z += 0.01;
-  core.scale.setScalar(1 + Math.sin(t*2)*0.04);
-  coreGrp.position.y = Math.sin(t*0.8)*0.08;
-  for (const a of agents) {
-    const u = a.userData;
-    // ease head/ring color toward the target state color
-    u.head.material.color.lerp(u.target, 0.08);
-    u.head.material.emissive.lerp(u.target, 0.08);
-    u.ring.material.color.lerp(u.target, 0.08);
-    // motion by state: working = brisk bob + spin, thinking = slow pulse, idle = gentle breath
-    const s = u.state;
-    const bob = s==='working' ? Math.sin(t*6 + u.phase)*0.10 : s==='thinking' ? Math.sin(t*2 + u.phase)*0.05 : Math.sin(t*1.1 + u.phase)*0.025;
-    a.position.y = u.baseY + bob;
-    u.head.rotation.y += s==='working' ? 0.06 : s==='thinking' ? 0.02 : 0.004;
-    const glow = s==='working' ? 1.1 : s==='thinking' ? 0.8 : s==='done' ? 0.9 : 0.5;
-    u.head.material.emissiveIntensity = glow + (s==='working' ? Math.sin(t*8+u.phase)*0.25 : 0);
-    u.ring.material.opacity = 0.35 + (s==='working' ? (Math.sin(t*5+u.phase)*0.25+0.25) : 0.15);
+// ---- boot -----------------------------------------------------------------
+Promise.all([ load('./vendor/presence3d/models/office.glb').catch(() => null),
+              load('./vendor/presence3d/models/character.glb').catch(() => null) ])
+.then(([office, character]) => {
+  if (office) {
+    office.scene.traverse((o) => { if (o.isMesh) { o.receiveShadow = true; o.castShadow = true; } });
+    const box = new THREE.Box3().setFromObject(office.scene);
+    floorY = box.min.y;
+    scene.add(office.scene);
+    frame(box);
+    // scatter seat points across the office floor footprint (grid inside the bbox, inset from walls)
+    const size = box.getSize(new THREE.Vector3()), c = box.getCenter(new THREE.Vector3());
+    const cols = 4, rows = 3, ix = size.x*0.62/cols, iz = size.z*0.62/rows;
+    for (let r = 0; r < rows; r++) for (let col = 0; col < cols; col++)
+      seats.push(new THREE.Vector3(c.x + (col - (cols-1)/2)*ix, floorY, c.z + (r - (rows-1)/2)*iz));
+  } else {
+    const grid = new THREE.GridHelper(24, 24, 0x16324a, 0x0e2033); grid.material.transparent = true; grid.material.opacity = 0.3; scene.add(grid);
+    frame(new THREE.Box3(new THREE.Vector3(-6,0,-6), new THREE.Vector3(6,3,6)));
   }
-  // slow orbital drift of the whole ring for a living feel
-  scene.rotation.y = Math.sin(t*0.05)*0.12;
+  if (character) {
+    charTemplate = character.scene;
+    charClip = (character.animations && character.animations[0]) || null;
+    const cb = new THREE.Box3().setFromObject(character.scene);
+    const chH = Math.max(0.001, cb.getSize(new THREE.Vector3()).y);
+    const targetH = office ? Math.min(2, (new THREE.Box3().setFromObject(office.scene).getSize(new THREE.Vector3()).y) * 0.5) : 1.7;
+    charScale = targetH / chH; charTargetH = targetH;
+  }
+  // Any avatars spawned before the models finished loading are fallback capsules — drop them so the
+  // next tick rebuilds every agent as the real rigged character now that charTemplate exists.
+  for (const a of agents) scene.remove(a.group);
+  agents = [];
+  document.getElementById('loading').style.display = 'none';
+})
+.catch((e) => { console.error('presence load failed', e); document.getElementById('loading').textContent = 'scene unavailable'; });
+
+addEventListener('resize', () => { camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight); });
+
+const clockT0 = performance.now(); let prev = clockT0;
+(function animate(now){
+  requestAnimationFrame(animate);
+  now = now || performance.now();
+  const t = (now - clockT0) / 1000, dt = Math.min(0.05, (now - prev) / 1000); prev = now;
+  if (demo) demoTick(t);
+  // slow cinematic orbit around the room
+  const orb = t * 0.12;
+  camera.position.set(focus.x + Math.sin(orb)*radius, focus.y + radius*0.55, focus.z + Math.cos(orb)*radius);
+  camera.lookAt(focus.x, focus.y + radius*0.12, focus.z);
+  for (const a of agents) {
+    if (a.mixer) a.mixer.update(dt * (a.state==='working' ? 1.6 : a.state==='thinking' ? 1.1 : 0.8));
+    if (a.aura) { a.aura.material.color.lerp(a.target, 0.08); a.aura.material.opacity = 0.3 + (a.state==='working' ? (Math.sin(t*5+a.phase)*0.25+0.3) : a.state==='thinking' ? 0.25 : 0.12); }
+    if (a.orb) { a.orb.material.color.lerp(a.target, 0.1); a.orb.position.y += 0; const pulse = a.state==='working' ? 1 + Math.sin(t*6+a.phase)*0.18 : a.state==='thinking' ? 1 + Math.sin(t*3+a.phase)*0.1 : 1; a.orb.scale.setScalar(pulse); }
+    if (a.glow) { a.glow.material.color.lerp(a.target, 0.1); a.glow.material.opacity = a.state==='idle' ? 0.16 : 0.3 + (a.state==='working' ? Math.sin(t*6+a.phase)*0.12 : 0); }
+    for (const m of a.tint) { if (m.emissive) { m.emissive.lerp(a.target, 0.05); m.emissiveIntensity = a.state==='working' ? 0.5 + Math.sin(t*7+a.phase)*0.2 : a.state==='done' ? 0.4 : a.state==='thinking' ? 0.35 : 0.15; } }
+    a.group.position.y = a.baseY + (a.state==='working' ? Math.sin(t*5+a.phase)*0.03 : 0);
+  }
   renderer.render(scene, camera);
 })();
 </script>

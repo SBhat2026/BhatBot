@@ -4572,10 +4572,13 @@ async function executeTool(name, input) {
       case 'hud_control': {
         // Agent-driven HUD: surface a work panel, switch the command layout, or refocus a column.
         // Tool names are the user-facing tab names; the renderer keeps its historical panel ids.
-        // 'presence' is the 3D fleet-presence surface — its own window (like molecule/maps), not a renderer panel.
+        // 'presence' → the 3D fleet-presence lives IN the FLEET tab now (embedded iframe), so just
+        // surface that tab and push the current snapshot into it.
         if (input && input.panel === 'presence') {
-          try { openPresenceWindow(); wm.updatePresence(presenceSnapshot()); result = { success: true, result: 'Opened the 3D fleet presence.' }; }
-          catch (e) { result = { success: false, error: e.message }; }
+          try {
+            if (mainWindow && !mainWindow.isDestroyed()) { mainWindow.show(); mainWindow.webContents.send('show-panel', 'vanguard'); mainWindow.webContents.send('presence-update', presenceSnapshot()); }
+            result = { success: true, result: 'Opened the FLEET tab (3D agent presence).' };
+          } catch (e) { result = { success: false, error: e.message }; }
           break;
         }
         const PANEL_ID = { command: 'chat', fleet: 'vanguard', management: 'manage' };
@@ -6854,7 +6857,14 @@ function presenceSnapshot() {
 // no-ops when the window is closed, so this is cheap). Empty snapshots are skipped so the window's
 // built-in demo animation keeps it alive when nothing is running.
 function startPresenceFeed() {
-  const t = setInterval(() => { try { const snap = presenceSnapshot(); if (snap.agents.length) wm.updatePresence(snap); } catch {} }, 1200);
+  const t = setInterval(() => {
+    try {
+      const snap = presenceSnapshot();
+      if (!snap.agents.length) return;                 // no active agents → let the office idle (demo loop)
+      wm.updatePresence(snap);                          // popup presence window (if open)
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('presence-update', snap);   // FLEET-tab iframe
+    } catch {}
+  }, 1200);
   t.unref?.();
 }
 async function tickScheduler() {
