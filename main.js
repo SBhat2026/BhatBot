@@ -463,6 +463,23 @@ function reconcileVaultRefs() {
   } catch (e) { console.warn('[config] reconcileVaultRefs failed:', e.message); }
 }
 
+// Bridge resolved secrets into process.env so PURE libs that read config.json directly (and thus
+// see the raw CRED_REF handle, not the resolved value) get the real key. semantic.js embeddings
+// read process.env.OPENAI_API_KEY first — without this, a vaulted openaiKey shipped the handle to
+// OpenAI → 401 → every embedding skipped → semantic recall returned nothing (BhatBot "forgot"
+// everything / couldn't surface project context). Only sets keys not already present in env.
+function syncResolvedSecretsToEnv() {
+  try {
+    const c = loadConfig();   // CRED_REF_* already resolved in-process (safeStorage)
+    const map = { OPENAI_API_KEY: c.openaiKey, GEMINI_API_KEY: c.geminiKey };
+    let n = 0;
+    for (const [k, v] of Object.entries(map)) {
+      if (v && !String(v).startsWith('CRED_REF') && !process.env[k]) { process.env[k] = v; n++; }
+    }
+    if (n) console.log('[config] bridged ' + n + ' secret(s) to env for pure libs (semantic recall)');
+  } catch (e) { console.warn('[config] syncResolvedSecretsToEnv failed:', e.message); }
+}
+
 const today = () => new Date().toISOString().slice(0, 10);
 
 const INITIAL_MEMORY = `# Bhatbot Memory
@@ -8792,6 +8809,7 @@ app.whenReady().then(() => {
   try {
     migrateSecretsToVault();   // Phase 4 #1 — vault any plaintext secrets BEFORE anything (cloud bridge, MCP) reads them
     reconcileVaultRefs();      // self-heal: re-point config.json at vaulted secrets if it lost them
+    syncResolvedSecretsToEnv();// bridge vaulted secrets → process.env so pure libs (semantic embeddings) get the REAL key, not the CRED_REF handle (a vaulted openaiKey had silently 401'd all recall)
     createWindow();
     mainWindow.show();
     if (!globalShortcut.register(HOTKEY, toggleWindow)) console.warn('Hotkey failed — may be claimed by another app.');
