@@ -7508,17 +7508,18 @@ function elLimit(fn) {
   return _elLimiter(fn);
 }
 
-// ONE source of truth for the JARVIS voice character (used by both the MP3 desktop path and the
-// μ-law phone path). JARVIS = composed, precise, dry — so: higher stability (even, unflappable),
-// strong similarity (hold the British clone timbre), LOW style (deadpan; theatrics ruin the wit),
-// measured speed. Every field is config-overridable live (D1 voice-customizability hooks here).
+// ONE source of truth for the voice character (used by both the MP3 desktop path and the μ-law phone
+// path). Tuned for a JARVIS × ALFRED blend: JARVIS's composed, unflappable dryness + Alfred's warmer,
+// measured, paternal delivery. So: steadier stability (even + warm, not erratic), strong similarity
+// (hold the British clone timbre), a touch MORE style (warmth/humanity over pure deadpan), and a
+// slightly slower, unhurried pace (gravitas). Every field is config-overridable live.
 function jarvisVoiceSettings(c) {
   return {
-    stability: c.ttsStability != null ? c.ttsStability : 0.38,   // T3: a touch livelier prosody, less monotone
-    similarity_boost: c.ttsSimilarity != null ? c.ttsSimilarity : 0.85,
-    style: c.ttsStyle != null ? c.ttsStyle : 0.22,        // dry deadpan; raise only if it sounds flat
+    stability: c.ttsStability != null ? c.ttsStability : 0.44,   // steady + warm (Alfred), not monotone
+    similarity_boost: c.ttsSimilarity != null ? c.ttsSimilarity : 0.88,   // hold the British timbre
+    style: c.ttsStyle != null ? c.ttsStyle : 0.28,        // a little more warmth/character than pure deadpan
     use_speaker_boost: c.ttsSpeakerBoost != null ? c.ttsSpeakerBoost : true,
-    speed: Math.max(0.7, Math.min(1.2, Number(c.ttsSpeed) || 1.04)),  // deliberate butler pace, marginally brisker
+    speed: Math.max(0.7, Math.min(1.2, Number(c.ttsSpeed) || 0.98)),  // unhurried, paternal gravitas
   };
 }
 
@@ -7634,33 +7635,12 @@ function normalizeForSpeech(input) {
     const d = dollars.replace(/,/g, '');
     return d + (d === '1' ? ' dollar' : ' dollars') + (cents ? ' and ' + cents + ' cents' : '');
   });
-  // 5b. Numeric RANGE with en/em dash → "to" ("xG 1.6–1.1" → "1.6 to 1.1", "2018–2022"). Plain
-  //     hyphens are left alone (scores/records like 2-1 stay as the model wrote them).
-  s = s.replace(/(\d)\s*[–—]\s*(\d)/g, '$1 to $2');
-  // 5c. Decimals → "X point Y" so percentages/ratios are unambiguous ("57.5%" → "57 point 5
-  //     percent"). Runs AFTER currency (which already consumed $5.99) and BEFORE the dot→"dot"
-  //     rule; digit.digit never hits the "dot" rule, only letter-adjacent dots do.
-  s = s.replace(/(\d)\.(\d)/g, '$1 point $2');
-  // 5d. Underscores inside identifiers → spaces so "top_10" reads "top 10" (filenames/vars), never a
-  //     mumbled run-on. Lookahead keeps runs split (a_b_c → a b c).
-  s = s.replace(/([A-Za-z0-9])_(?=[A-Za-z0-9])/g, '$1 ');
-  // 6. In-token dots → "dot" when the next char is a LETTER (filenames/domains/emails:
-  //    "main.js"→"main dot js", "gmail.com"→"gmail dot com", "2008.co"→"2008 dot co", "co.uk"→
-  //    "co dot uk"). Decimals like 3.5 (digit.digit) stay → TTS says "three point five"; and a
-  //    sentence-ending period (followed by space/EOL, not a letter) stays as a natural pause.
-  s = s.replace(/([A-Za-z0-9])\.(?=[A-Za-z])/g, '$1 dot ');
-  // 6b. A LEADING-dot file extension (".csv", ".py" — no preceding token, e.g. after a streaming
-  //     token split) still reads as "dot csv", never a full stop. This is the belt-and-suspenders
-  //     guard so filenames are NEVER voiced with a sentence-ending period again.
-  s = s.replace(/(^|\s)\.([A-Za-z][A-Za-z0-9]{0,4})\b/g, '$1dot $2');
-  // 7. Symbols → words.
-  s = s.replace(/&/g, ' and ').replace(/%/g, ' percent')
-       .replace(/(\S)@(\S)/g, '$1 at $2').replace(/\s@\s/g, ' at ')
-       .replace(/#(\d+)/g, 'number $1').replace(/#/g, ' hash ')
-       .replace(/\s\+\s/g, ' plus ').replace(/(\w)\s*=\s*(\w)/g, '$1 equals $2')
-       .replace(/([A-Za-z])\/([A-Za-z])/g, '$1 slash $2')      // TCP/IP, and/or
-       .replace(/°/g, ' degrees').replace(/\$(?=[A-Za-z])/g, '')
-       .replace(/[~^|<>*$]/g, ' ');                            // leftover markup → space
+  // 5b–7. EXHAUSTIVE symbol / number / punctuation → spoken words. One tested, comprehensive pass
+  //        (lib/speech.speakSymbolsForSpeech): ranges, decimals, comparisons (< > ≤ ≥), math (× ÷ √ ^),
+  //        arrows, minus, scientific units + Greek (Å, Δ, μ, °C…), currencies, unit ratios (kcal/mol),
+  //        underscores, filename/domain dots, slashes, and every leftover markup symbol. Guaranteed by
+  //        scripts/test-speech-punct.js so no symbol is ever voiced ambiguously again.
+  s = speech.speakSymbolsForSpeech(s);
   // 8. Tidy whitespace; keep ., ! ? ; : for natural pausing.
   s = s.replace(/[ \t]{2,}/g, ' ').replace(/\s+([.,!?;:])/g, '$1').trim();
   return s || String(input || '').trim();
@@ -7673,7 +7653,10 @@ function normalizeForSpeech(input) {
 // <break> use destabilizes prosody, so we cap how many we inject. Voice-cadence research:
 // ellipses/dashes = micro-pauses, a beat after an opening discourse marker ("Right, …") reads
 // as natural breathing, and a slightly longer beat between sentences mimics a real speaker.
-const DISCOURSE_LEAD = /^(right|so|well|now|look|listen|honestly|actually|alright|okay|ok|hmm|ah|oh|sure|of course|indeed|very well|certainly)\b[,]?\s+/i;
+// Openers that earn a natural breath-beat. Includes Alfred-register leads ("Now then", "I'm afraid",
+// "If I may", "Very good") so the paternal, measured rhythm lands. "now then" precedes "now" so the
+// longer phrase matches first.
+const DISCOURSE_LEAD = /^(right|so|well|now then|now|look|listen|honestly|actually|alright|okay|ok|hmm|ah|oh|sure|of course|indeed|very well|very good|certainly|quite|i'm afraid|if i may|forgive me|my word)\b[,]?\s+/i;
 function humanizeCadence(input, { breaks = false } = {}) {
   let s = String(input || '');
   if (!s) return s;
