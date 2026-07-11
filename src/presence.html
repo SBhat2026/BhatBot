@@ -64,7 +64,7 @@ let focus = new THREE.Vector3(0, 1, 0), radius = 8;
 function frame(box) {
   box.getCenter(focus);
   const size = box.getSize(new THREE.Vector3());
-  radius = Math.max(size.x, size.z) * 0.95 + size.y * 0.4;
+  radius = Math.max(size.x, size.z) * 0.6 + size.y * 0.4;   // tighter framing so the office fills the view
   camera.near = radius / 100; camera.far = radius * 12; camera.updateProjectionMatrix();
 }
 

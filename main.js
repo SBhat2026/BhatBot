@@ -5948,7 +5948,7 @@ let _userSpokeSinceOpen = false, _briefingOffered = false;
 function offerBriefingOnOpen() {
   try {
     const c = loadConfig();
-    if (c.briefingOfferOnOpen === false) return;            // opt-out
+    if (c.briefingOfferOnOpen !== true) return;             // OPT-IN only — the auto-offer was hijacking real commands (it injects "which briefing?" into the convo and the model answered it instead of the task). Off unless explicitly enabled.
     const delayMs = Math.max(5, Number(c.briefingOfferDelaySec) || 25) * 1000;
     setTimeout(() => {
       if (_userSpokeSinceOpen || _briefingOffered) return;  // he already engaged → don't interrupt
