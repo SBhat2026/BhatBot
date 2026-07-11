@@ -149,8 +149,11 @@
   .stage-panel { display: none; position: absolute; inset: 0; z-index: 24; min-height: 0;
     flex-direction: column; background: var(--bg); animation: slidein .18s ease; }
   .stage-panel.active { display: flex; }
-  /* FLEET tab — 3D presence hero (the-delegation office) above the steerable agent cards */
-  #vanguard-panel { position: relative; }
+  /* FLEET tab — 3D presence hero (the-delegation office) above the steerable agent cards.
+     NOTE: do NOT set position:relative here — .stage-panel is already position:absolute;inset:0
+     (the full-screen overlay that covers the Command center), and that absolute box is itself the
+     positioning context for #fleet-list's overlay. Overriding it to relative collapsed the panel to
+     a strip and let the Command vitals/jobs/feed bleed through. */
   /* Full-bleed office: the 3D presence fills the entire FLEET panel (the hero). */
   #fleet3d { flex: 1 1 auto; min-height: 0; width: 100%; height: 100%; border: 0; display: block; background: #070b12; }
   /* Live agent cards float over the bottom of the office; hidden entirely when no suits are up. */
