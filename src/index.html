@@ -2425,6 +2425,18 @@ document.addEventListener('keydown', (e) => {
 // ("that's all", "we're done", "go to sleep", "stop listening", "dismissed", "goodbye").
 let convoMode = false;
 let ttsIdle = true;            // true once main signals speech has fully drained for the turn
+// TRAILED-OFF continuation: when you stop mid-thought in a listening session, we carry the fragment,
+// ask "Go on, sir?", and stitch the next utterance onto it (capped so it can't loop forever).
+let _voiceCarry = '';         // the pending unfinished fragment awaiting continuation
+let _goOnCount = 0;           // how many times we've already nudged this turn (cap 2, then just act)
+// A dangling connective / preposition / "I want you to…" at the end = an unfinished instruction.
+const _INCOMPLETE_TAIL = /(?:^|\s)(and|but|so|or|to|the|a|an|of|for|with|in|on|at|by|from|that|which|who|whom|because|if|when|while|then|also|plus|as|into|onto|about|like|want you to|going to|need to|have to|trying to|can you|could you|would you|i want|i need|i'?d like|let'?s|we should|please|my|your|its?|it'?s|there'?s|here'?s)\s*[,\-–—]?\s*$/i;
+function looksIncompleteUtterance(t) {
+  const s = String(t || '').trim();
+  if (!s || s.length < 3) return false;
+  if (/[.!?]["')”’]?$/.test(s)) return false;   // ended on terminal punctuation → complete
+  return _INCOMPLETE_TAIL.test(s);
+}
 // End-phrases that close conversation mode. Substring (not anchored) + a length guard below, so
 // "okay, that's all for now, thanks" still ends cleanly while a real query that happens to contain
 // "I'm done with my homework, what next?" (long) does NOT. Mirrors the phone path's VOICE_BYE +
@@ -2441,7 +2453,7 @@ function setConvo(on) {
 // (ElevenLabs/Kokoro via speak() — never the rogue macOS `say`). setConvo(false) FIRST so the
 // onTtsIdle→maybeRearm that fires after the ack sees convo off and does not reopen the mic.
 function endConvo() {
-  setConvo(false);
+  setConvo(false); _voiceCarry = ''; _goOnCount = 0;
   tbar.textContent = '🎧 conversation closed — say "Jarvis" when you need me';
   try { speak('Very good, sir. Say Jarvis when you need me.'); } catch {}
 }
@@ -2843,12 +2855,25 @@ async function onRecStop() {
 const LOCK_RE = /\b(lock in|lock voice|lock the mic|stay listening|keep listening|hold the line)\b/i;
 const UNLOCK_RE = /\b(unlock|stop listening|stand down|dismiss(ed)?)\b/i;
 function submitVoice(text) {
-  const t = (text || '').trim(); if (!t) return;
+  let t = (text || '').trim(); if (!t) return;
   // Voice-lock commands (one-time activation → continuous, no wake word; local only, never blocks Telegram/phone).
   if (t.length <= 40 && LOCK_RE.test(t)) { lockVoice(); return; }
-  if (voiceLocked && t.length <= STOP_MAXLEN && (UNLOCK_RE.test(t) || STOP_RE.test(t))) { unlockVoice(); return; }
+  if (voiceLocked && t.length <= STOP_MAXLEN && (UNLOCK_RE.test(t) || STOP_RE.test(t))) { _voiceCarry = ''; _goOnCount = 0; unlockVoice(); return; }
   // In conversation mode a SHORT stop phrase closes the loop instead of becoming a query.
-  if (convoMode && !voiceLocked && t.length <= STOP_MAXLEN && STOP_RE.test(t)) { endConvo(); return; }
+  if (convoMode && !voiceLocked && t.length <= STOP_MAXLEN && STOP_RE.test(t)) { _voiceCarry = ''; _goOnCount = 0; endConvo(); return; }
+  // Stitch any fragment carried from a prior "Go on, sir?" onto this utterance.
+  if (_voiceCarry) { t = (_voiceCarry + ' ' + t).trim(); _voiceCarry = ''; }
+  // TRAILED-OFF gate: in a listening session, if you stopped mid-thought (dangling "…and I want you
+  // to—"), don't act or discard it — carry the fragment, ask "Go on, sir?", and keep listening so the
+  // next utterance completes it. Capped at 2 nudges, then we act on whatever we have.
+  if ((convoMode || voiceLocked) && !busy && looksIncompleteUtterance(t) && _goOnCount < 2) {
+    _voiceCarry = t; _goOnCount++;
+    addThought('· awaiting the rest…');
+    try { ttsIdle = false; speak(_goOnCount === 1 ? 'Go on, sir?' : 'Yes, sir?').finally(() => { ttsIdle = true; maybeRearm(); }); }
+    catch { ttsIdle = true; maybeRearm(); }
+    return;
+  }
+  _goOnCount = 0;   // completed (or hit the cap) → reset the nudge counter for the next turn
   // CLARITY GATE — discard rambling / thinking-aloud instead of acting on it (heuristic first,
   // cheap model for borderline). Keep listening after a drop so the flow isn't broken.
   const gate = (window.bhatbot.voiceGate && window.bhatbot.voiceGate(t)) || { action: 'ok' };
