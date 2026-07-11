@@ -25,6 +25,7 @@ contextBridge.exposeInMainWorld('bhatbot', {
   applyVoicePreset: (preset) => ipcRenderer.invoke('apply-voice-preset', { preset }),
   onFleetUpdate: (cb) => ipcRenderer.on('fleet-update', (_e, d) => cb(d)),           // C-Fleet — live suit relay
   onPresenceUpdate: (cb) => ipcRenderer.on('presence-update', (_e, d) => cb(d)),     // 3D fleet-presence (FLEET tab iframe)
+  onTurnState: (cb) => ipcRenderer.on('turn-state', (_e, d) => cb(d)),               // T2 — single merged display-state snapshot per turn
   sendFleetFeedback: (id, text) => ipcRenderer.invoke('fleet-feedback', { id, text }),
   sendFleetControl: (id, action) => ipcRenderer.invoke('fleet-control', { id, action }),
   openAgentWindow: (id) => ipcRenderer.invoke('open-agent-window', id),

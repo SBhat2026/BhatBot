@@ -781,6 +781,24 @@
   #progress .pg-logrow.ok .pg-ic { color: var(--accent); }
   #progress .pg-logrow.fail .pg-ic { color: #e0715f; }
 
+  /* T2 — single display-state strip (pinned just above the composer). One source of truth for
+     "what is BhatBot doing right now"; collapses to nothing when idle so it never nags. */
+  #turnstrip { -webkit-app-region: no-drag; display: flex; align-items: center; gap: 9px;
+    margin: 0 2px 6px; padding: 7px 12px; border-radius: 11px; font-size: 12px; color: var(--text-dim);
+    background: color-mix(in srgb, var(--surface) 88%, transparent); border: 1px solid var(--line);
+    max-height: 34px; overflow: hidden; transition: max-height .2s ease, opacity .2s ease, margin .2s ease; }
+  #turnstrip[data-status="idle"] { max-height: 0; opacity: 0; margin: 0 2px; padding: 0 12px; border-color: transparent; }
+  #turnstrip .tsdot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); flex-shrink: 0;
+    animation: tspulse 1.1s ease-in-out infinite; }
+  #turnstrip[data-status="tool"] .tsdot { background: #7fd4e8; }
+  #turnstrip[data-status="done"] .tsdot { background: var(--accent); animation: none; }
+  #turnstrip[data-status="stopped"] .tsdot { background: #d9a441; animation: none; }
+  #turnstrip[data-status="error"] .tsdot { background: #e0715f; animation: none; }
+  #turnstrip .tstext { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text); }
+  #turnstrip .tsplan { font-variant-numeric: tabular-nums; color: var(--text-dim2); flex-shrink: 0; }
+  #turnstrip .tsmodel { font-size: 10.5px; letter-spacing: .04em; text-transform: uppercase; color: var(--text-dim2); flex-shrink: 0; }
+  @keyframes tspulse { 0%,100% { opacity: 1; transform: scale(1); } 50% { opacity: .4; transform: scale(.7); } }
+
   /* SPOKEN-SUMMARY card — the concise VISUAL twin of the spoken digest: headline + scannable key
      points, shown above the full reply so a quick verbal summary is backed by a quick visual one. */
   .spk-summary { -webkit-app-region: no-drag; margin: 6px 0 8px; border: 1px solid var(--accent-dim); border-radius: 13px;
@@ -1036,6 +1054,16 @@
   <div id="transcript"></div>
 
   <div id="attachbar"></div>
+  <!-- T2 — single display-state strip: authoritative, never-stuck turn status driven by the
+       merged `turn-state` snapshot (server-side reducer). Complements the per-turn #progress card;
+       this one guarantees the UI never goes quiet — it shows what's happening right now + a live
+       plan tick, and always resolves (done/idle) so it can't be left spinning. -->
+  <div id="turnstrip" data-status="idle" aria-live="polite">
+    <span class="tsdot"></span>
+    <span class="tstext"></span>
+    <span class="tsplan"></span>
+    <span class="tsmodel"></span>
+  </div>
   <div id="inputbar">
     <textarea id="ta" rows="1" placeholder="Message Bhatbot…  (Enter to send)"></textarea>
     <button class="ibtn" id="attach" title="Attach screenshot / photo / screen recording">📎</button>
@@ -1439,6 +1467,34 @@ window.bhatbot.onToolUpdate((u) => {
   else if (u.type === 'guidance_applied') { rmThinking(); addThought('↳ guidance applied: ' + u.text); addThinking(); actLog('↳ guidance: ' + u.text); }
   else if (u.kind === 'notify') { actLog('🔔 notify: ' + (u.text || ''), u.urgency === 'high' ? 'fail' : ''); }
 });
+
+// ===== T2 — single display-state strip: the authoritative "what is BhatBot doing now" surface =====
+// Driven ONLY by the merged `turn-state` snapshot (server reducer). Because it always resolves to
+// done/idle and always reflects the true state, the UI can never go quiet or leave a spinner stuck.
+const _ts = { seq: -1, collapse: null };
+const _TS_PHASE = { starting: 'Getting started…', recall: 'Recalling context…', planning: 'Planning…', executing: 'Working through the plan…', tool: 'Working…' };
+function renderTurnStrip(s) {
+  const strip = document.getElementById('turnstrip'); if (!strip || !s) return;
+  if (typeof s.seq === 'number') { if (s.seq < _ts.seq) return; _ts.seq = s.seq; }   // drop out-of-order
+  const dot = strip.querySelector('.tsdot'), txt = strip.querySelector('.tstext'),
+        plan = strip.querySelector('.tsplan'), model = strip.querySelector('.tsmodel');
+  if (_ts.collapse) { clearTimeout(_ts.collapse); _ts.collapse = null; }
+  const st = s.status || 'idle';
+  strip.dataset.status = st;
+  const doneN = (s.plan || []).filter((p) => p.done).length, totN = (s.plan || []).length;
+  if (st === 'idle') { txt.textContent = ''; plan.textContent = ''; model.textContent = ''; return; }
+  if (st === 'done')  { txt.textContent = 'Done' + (totN ? ' · ' + totN + (totN === 1 ? ' step' : ' steps') : ''); }
+  else if (st === 'stopped') { txt.textContent = 'Stopped'; }
+  else if (st === 'error')   { txt.textContent = 'Hit an error' + (s.error ? ' · ' + s.error : ''); }
+  else { txt.textContent = s.currentStep || _TS_PHASE[s.phase] || (s.lastText ? s.lastText : 'Working…'); }
+  plan.textContent = (totN && st !== 'done' && st !== 'stopped' && st !== 'error') ? doneN + '/' + totN : '';
+  model.textContent = (st !== 'done' && s.model) ? 'Claude · ' + s.model : '';
+  // Terminal states linger briefly, then the strip collapses so it never nags at idle.
+  if (st === 'done' || st === 'stopped' || st === 'error') {
+    _ts.collapse = setTimeout(() => { strip.dataset.status = 'idle'; txt.textContent = ''; plan.textContent = ''; model.textContent = ''; }, st === 'error' ? 4200 : 2400);
+  }
+}
+window.bhatbot.onTurnState && window.bhatbot.onTurnState(renderTurnStrip);
 // Background job cards (one per delegated agent task) + plain-English relay lines in chat.
 const jobCards = {};
 window.bhatbot.onJobUpdate && window.bhatbot.onJobUpdate((j) => {

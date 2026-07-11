@@ -60,6 +60,7 @@ const google = require('./lib/google');               // Gmail + Calendar + Driv
 const routermodel = require('./lib/routermodel');     // learned text→tier router (shadow → active); degrades to regex
 const bioart = require('./lib/bioart');               // NIH BioArt — public-domain scientific illustrations
 const memmaint = require('./lib/memmaint');           // always-on memory maintenance (decay/dedup + log bounding)
+const { createTurnState } = require('./lib/turnstate'); // T2 — single display-state reducer for a turn (never-quiet snapshot)
 const figures = require('./lib/figures');             // data-accurate matplotlib/seaborn figures
 const logins = require('./lib/logins');               // domain-keyed login profiles (CRED_REF handles)
 const modePrompts = require('./lib/prompts');         // P4  — mode-switching system prompts
@@ -1052,6 +1053,48 @@ function overBudget() { const c = loadConfig(); return !!(c.dailyBudgetUsd && co
 // chooseModel records the decision, finish() fills in latency+cost, reflectOnCorrection flags a
 // correction. routerStats() aggregates; no behavior change yet — this is the measurement layer. ---
 const ROUTER_LOG = path.join(os.homedir(), '.bhatbot', 'router.jsonl');
+
+// T2 — single display-state reducer. EVERY progress emit is folded into one coherent snapshot
+// (feedTurnState below, called from the two send choke points), then a debounced `turn-state`
+// snapshot is pushed to the renderer. Fixes "goes quiet": the strip always reflects the true
+// authoritative state and can never be left stuck spinning (turn_done → done/idle).
+const turnState = createTurnState();
+let _tsTimer = null;
+function pushTurnState(force) {
+  const send = () => {
+    _tsTimer = null;
+    const snap = turnState.snapshot();
+    try { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('turn-state', snap); } catch {}
+    try { if (activityWindow && !activityWindow.isDestroyed()) activityWindow.webContents.send('turn-state', snap); } catch {}
+  };
+  if (force) { if (_tsTimer) { clearTimeout(_tsTimer); _tsTimer = null; } return send(); }
+  if (_tsTimer) return;                       // trailing debounce — coalesce token/thinking bursts
+  _tsTimer = setTimeout(send, 60);
+}
+// Map a raw progress emit ({channel,data}) into a reducer event, then push (forced for the
+// transitions that must be instant: tool boundaries + lifecycle; debounced for token/thinking).
+function feedTurnState(channel, data) {
+  try {
+    if (!data || typeof data !== 'object') return;
+    const ts = Date.now();
+    let force = false;
+    if (channel === 'plan' && Array.isArray(data.steps)) { turnState.reduce({ type: 'plan', steps: data.steps, ts }); force = true; }
+    else if (channel === 'model' && data.model) { turnState.reduce({ type: 'model', model: data.model, ts }); }
+    else if (channel === 'tool-update') {
+      switch (data.type) {
+        case 'plan': if (Array.isArray(data.steps)) { turnState.reduce({ type: 'plan', steps: data.steps, ts }); force = true; } break;
+        case 'tool_start': turnState.reduce({ type: 'tool_start', name: data.name, narrate: data.narrate, ts }); force = true; break;
+        case 'tool_done': turnState.reduce({ type: 'tool_done', name: data.name, ok: data.result ? data.result.success !== false : true, ts }); force = true; break;
+        case 'thinking': turnState.reduce({ type: 'thinking', text: data.text, ts }); break;
+        case 'token': turnState.reduce({ type: 'token', ts }); break;
+        case 'provider_used': turnState.reduce({ type: 'model', model: data.model, provider: data.provider, ts }); break;
+        default: return;   // guidance_applied / notify / etc. — no display-state change
+      }
+    } else return;
+    pushTurnState(force);
+  } catch { /* the reducer must never break a real emit */ }
+}
+
 let _lastModel = null, _lastRouterTask = null;
 let _routerFeatures = null, _routerShadowTier = null;   // learned-router shadow: features + suggestion for this turn's training row
 let _lastIntake = null;                                 // T1/T5 — last intake classification (chat|action|ambiguous)
@@ -4680,6 +4723,7 @@ function sendToAll(chatEvent, channel, data) {
       activityWindow.webContents.send(channel, data);
   } catch {}
   pushActivity(channel, data);
+  feedTurnState(channel, data);   // T2 — fold this emit into the single display-state snapshot
 }
 function sendToActivity(channel, data) {
   // Direct callers (briefing, barge-in, studio/3D progress, MCP/Telegram tasks) — these are NOT
@@ -4687,6 +4731,7 @@ function sendToActivity(channel, data) {
   try { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, data); } catch {}
   try { if (activityWindow && !activityWindow.isDestroyed()) activityWindow.webContents.send(channel, data); } catch {}
   pushActivity(channel, data);
+  feedTurnState(channel, data);   // T2 — fold this emit into the single display-state snapshot
 }
 
 // FLEET (VANGUARD) live registry — id → live card state; the renderer's Vanguard panel mirrors it,
@@ -5039,6 +5084,19 @@ async function agentLoop(history, apiKey, event, opts = {}) {
     // Strip any <speak> tags from the returned text (renderer shows this as the final bubble).
     reflectOnCorrection(history, lastUserText(history), text);   // async, non-blocking
     try { logRouterDecision({ taskType: _lastRouterTask || currentMode, model: _lastModel, ms: Date.now() - _turnT0, usd: +(costToday().usd - _usd0).toFixed(5) }); } catch {}   // #13
+    // T5 — post-turn intake audit: did the classified intake actually get EXECUTED? Ties T1's routing
+    // decision to the observed outcome (tools run, action-verify redos) so "answered without doing the
+    // work" regressions are measurable from router.jsonl, not just felt. Fire-and-forget.
+    try {
+      const wasAction = looksLikeToolTask(userText0);
+      logRouterDecision({
+        kind: 'intake-audit', intake: _lastIntake, executor: 'agent',
+        toolsRan, verifyRedos: verifyCount,
+        actedVerified: wasAction ? (toolsRan > 0 && verifyCount < 2) : true,
+        stopped: agentState === 'stopped',
+        ms: Date.now() - _turnT0, usd: +(costToday().usd - _usd0).toFixed(5),
+      });
+    } catch {}
     // LEARNED ROUTER training row: features of the ask + the tier that was actually used this turn
     // (the label) + what the shadow model predicted. Builds the dataset the learned router trains on,
     // then retrains in the background once enough rows exist. Never blocks the reply.
@@ -5748,27 +5806,38 @@ async function _dispatchTurnInner(history, apiKey, event, opts = {}) {
   const spd = maybeAdjustSpeed(userText);
   if (spd) return { text: spd, history: [...history, { role: 'assistant', content: spd }], _provider: 'local', _model: 'intent' };
   const surface = opts.stream ? 'desktop' : 'headless';
-  // T1 — deterministic front-door router. Fail toward the instrumented agentLoop on ANY action signal;
-  // reserve the tool-less fast path (and the local text-pipeline) strictly for clear 'chat'. This is the
-  // fix for "answered without doing the work" / "didn't take my prompt": a tool-needing turn can no
-  // longer be swallowed by fastReply or mangled by the pipeline.
-  let inToolThread = false;
-  try { inToolThread = /tool_result|tool_use/.test(JSON.stringify(history.slice(-2))); } catch {}
-  const intake = classifyIntake(userText, { looksLikeToolTask, referencesJob: referencesRunningJob, inToolThread });
-  _lastIntake = intake;   // T5 audit
-  let res;
-  if (intake === 'action' || intake === 'ambiguous') {
-    res = await agentLoop(history, apiKey, event, opts);        // tools available + full progress instrumentation
-  } else {                                                       // 'chat' — tool-free small talk / short question
-    if (loadConfig().fastChat !== false) {
-      try { res = await fastReply(history, apiKey, event, opts); }
-      catch (e) { console.warn('[fast] reply failed → agent:', e.message); }
+  // T4 — announce the turn to the UI IMMEDIATELY, before recall / tool-selection / the first model
+  // call (each of which can block for seconds). The status strip shows "working" within a frame
+  // instead of going quiet. turn_done in the finally guarantees the strip never stays stuck.
+  turnState.reduce({ type: 'turn_start', text: userText, ts: Date.now() });
+  pushTurnState(true);
+  let res = null, _turnErr = null;
+  try {
+    // T1 — deterministic front-door router. Fail toward the instrumented agentLoop on ANY action signal;
+    // reserve the tool-less fast path (and the local text-pipeline) strictly for clear 'chat'. This is the
+    // fix for "answered without doing the work" / "didn't take my prompt": a tool-needing turn can no
+    // longer be swallowed by fastReply or mangled by the pipeline.
+    let inToolThread = false;
+    try { inToolThread = /tool_result|tool_use/.test(JSON.stringify(history.slice(-2))); } catch {}
+    const intake = classifyIntake(userText, { looksLikeToolTask, referencesJob: referencesRunningJob, inToolThread });
+    _lastIntake = intake;   // T5 audit
+    if (intake === 'action' || intake === 'ambiguous') {
+      res = await agentLoop(history, apiKey, event, opts);        // tools available + full progress instrumentation
+    } else {                                                       // 'chat' — tool-free small talk / short question
+      if (loadConfig().fastChat !== false) {
+        try { res = await fastReply(history, apiKey, event, opts); }
+        catch (e) { console.warn('[fast] reply failed → agent:', e.message); }
+      }
+      // Pipeline can ONLY ever see 'chat' now (never action/ambiguous → never mangles tool work).
+      if (!res) res = pipelineCfg().enabled ? await runPipeline(history, apiKey, event, opts) : await agentLoop(history, apiKey, event, opts);
     }
-    // Pipeline can ONLY ever see 'chat' now (never action/ambiguous → never mangles tool work).
-    if (!res) res = pipelineCfg().enabled ? await runPipeline(history, apiKey, event, opts) : await agentLoop(history, apiKey, event, opts);
+    if (res && res.text) recordEpisode(userText, res.text, surface);
+    return res;
+  } catch (e) { _turnErr = e; throw e; }
+  finally {
+    turnState.reduce({ type: 'turn_done', stopped: agentState === 'stopped', error: _turnErr ? (_turnErr.message || String(_turnErr)) : '', ts: Date.now() });
+    pushTurnState(true);
   }
-  if (res && res.text) recordEpisode(userText, res.text, surface);
-  return res;
 }
 
 // ---------------------------------------------------------------------------
