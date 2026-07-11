@@ -36,7 +36,8 @@ const ok = (c, m) => { if (c) { pass++; console.log('✅ ' + m); } else { fail++
   // ---- resume context surfaces BOTH specs and artifacts ----
   projects.setActive(slug);
   const ctx = projects.contextBlock();
-  ok(/ACTIVE PROJECT: Iron Man Suit/.test(ctx), 'contextBlock: names the active project');
+  ok(/ACTIVE PROJECT[^\n]*Iron Man Suit/.test(ctx), 'contextBlock: names the active project');
+  ok(/STAY ON THIS PROJECT/.test(ctx), 'contextBlock: carries the stay-focused directive');
   ok(/SPECS —/.test(ctx) && /blue\/silver/.test(ctx), 'contextBlock: folds locked specs into resume context');
   ok(/ARTIFACTS —/.test(ctx) && /studio/.test(ctx) && /index\.html/.test(ctx), 'contextBlock: folds produced artifacts (with paths) into resume context');
 
