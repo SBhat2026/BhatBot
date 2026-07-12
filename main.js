@@ -47,7 +47,7 @@ const agentTeam = require('./lib/orchestrator');        // C — parallel same-t
 const planner = require('./lib/planner');               // B1 — decompose a goal into a task DAG for the team
 const ambient = require('./lib/ambient');              // #18 — opt-in proactive Calendar/Mail awareness (OFF by default)
 const phonemirror = require('./lib/phonemirror');       // iPhone Mirroring glue — open/focus + gesture shortcuts + window geometry for the phone_mirror tool
-const { textHintFromSelector, splitForSpeech, estimateToolCost, stripReasoning, classifySpeech, createSpeechNormalizer, isPromissory, shouldExtendBudget, toolSig, progressLine, classifyIntake } = require('./lib/pure');  // SPLIT_PLAN step 1
+const { textHintFromSelector, splitForSpeech, estimateToolCost, stripReasoning, classifySpeech, createSpeechNormalizer, isPromissory, shouldExtendBudget, toolSig, progressLine, classifyIntake, conversationContinuity } = require('./lib/pure');  // SPLIT_PLAN step 1
 const WebSocket = require('ws');
 const { createTtsWs } = require('./lib/ttsws');   // T1 — continuous ws streaming TTS transport (config.ttsTransport==='ws')
 const speech = require('./lib/speech');                 // human-speech shaping: emoji→spoken-cue/drop + context-aware punctuation
@@ -62,6 +62,8 @@ const bioart = require('./lib/bioart');               // NIH BioArt — public-d
 const memmaint = require('./lib/memmaint');           // always-on memory maintenance (decay/dedup + log bounding)
 const { createTurnState } = require('./lib/turnstate'); // T2 — single display-state reducer for a turn (never-quiet snapshot)
 const brain = require('./lib/brain');                 // SYNAPSE — second-brain hybrid knowledge graph (nodes/edges + Connector)
+const resolve = require('./lib/resolve');             // DaVinci Resolve native bridge (Python scripting API)
+const mcphub = require('./lib/mcphub');               // MCP-client hub — consume external MCP servers as plugins
 const figures = require('./lib/figures');             // data-accurate matplotlib/seaborn figures
 const logins = require('./lib/logins');               // domain-keyed login profiles (CRED_REF handles)
 const modePrompts = require('./lib/prompts');         // P4  — mode-switching system prompts
@@ -1157,7 +1159,13 @@ function referencesRunningJob(text) {
 // finish(); every Claude tool-loop call reads it via activeTools(). null ⇒ full catalog (default,
 // and the graceful fallback when retrieval is off / unavailable / low-confidence).
 let _activeTools = null;
-function activeTools() { return _activeTools || TOOLS; }
+// Base tool set (retrieval-filtered or full) PLUS any live external MCP-plugin tools, so the model
+// can call `mcp__<plugin>__<tool>` the same as a native tool.
+function activeTools() {
+  const base = _activeTools || TOOLS;
+  try { const hub = mcphub.toolSchemas(); if (hub.length) return base.concat(hub); } catch {}
+  return base;
+}
 // W2 — last LLM step's usage, captured right after every Claude call so the per-tool audit entry
 // can be tagged with the model + token cost of the step that invoked it. {model,tin,tout,usd}.
 let _lastUsage = null;
@@ -4165,6 +4173,8 @@ async function executeTool(name, input) {
         else result = { success: false, error: 'Unknown drive action: ' + a };
         break;
       }
+      case 'davinci_resolve':
+        result = await resolve.resolveTool(input); break;
       case 'browser_devtools':
         result = await browserDevtools(input); break;
       case 'bioart': {
@@ -4722,6 +4732,7 @@ async function executeTool(name, input) {
         break;
       }
       default:
+        if (mcphub.isHubTool(name)) { result = await mcphub.callTool(name, input); break; }   // external MCP plugin tool
         result = { success: false, error: `Unknown tool: ${name}` };
     }
   } catch (e) {
@@ -4913,6 +4924,7 @@ function describeAction(name, input = {}) {
       case 'gmail': return input.action === 'search' ? `Searching Gmail: ${s(input.query, 40)}` : input.action === 'draft' ? `Drafting an email${input.to ? ` to ${s(input.to, 30)}` : ''}` : input.action === 'read' ? 'Reading an email' : 'Updating an email';
       case 'calendar': return input.action === 'create' ? `Adding to calendar: ${s(input.summary, 40)}` : input.action === 'list' ? 'Checking the calendar' : input.action === 'delete' ? 'Removing a calendar event' : 'Updating a calendar event';
       case 'drive': return input.action === 'search' ? `Searching Drive: ${s(input.query, 40)}` : input.action === 'read' ? 'Reading a Drive file' : `Saving to Drive: ${s(input.name, 40)}`;
+      case 'davinci_resolve': return input.action === 'render' ? 'Starting a Resolve render' : input.action === 'add_marker' ? 'Adding a timeline marker in Resolve' : input.action === 'open_project' ? `Opening Resolve project: ${s(input.name, 30)}` : input.action === 'switch_page' ? `Switching Resolve to the ${s(input.page, 20)} page` : 'Checking DaVinci Resolve';
       case 'browser_devtools': return input.action === 'network' ? 'Inspecting network traffic' : input.action === 'console' ? 'Reading the console' : input.action === 'metrics' ? 'Measuring page performance' : 'Running a page probe';
       case 'bioart': return input.action === 'search' ? `Searching NIH BioArt: ${s(input.query, 40)}` : `Fetching a BioArt illustration`;
       case 'ask_ai': return 'Consulting a second model';
@@ -5822,9 +5834,10 @@ async function fastReply(history, apiKey, event, opts = {}) {
   sendToAll(event, 'tool-update', { type: 'provider_used', provider: 'anthropic', model: MODEL_SONNET });
   // Cloud fallback: Sonnet (Haiku retired). Learned depth ceiling, capped at 2048 for quick replies.
   const d = sizeTurn(ut, history);           // Phase 3 — learned ceiling + position taper (fast no-tools path)
+  const cont = conversationContinuity(history);   // resolve terse follow-ups against the prior subject
   const r = await anthropicStream({
     model: MODEL_SONNET, max_tokens: Math.min(d.maxTokens, 2048),
-    system: [...systemBlocks(ut), { type: 'text', text: d.directive }],   // cache_control'd static block → cheap + low TTFT
+    system: [...systemBlocks(ut), { type: 'text', text: d.directive + (cont ? '\n\n' + cont : '') }],   // cache_control'd static block → cheap + low TTFT
     messages: capTokens(history)                    // NO tools → faster first token, no tool-decision detour
   }, apiKey, onText);
   logDepthOutcome({ depth: d.depth, maxTokens: Math.min(d.maxTokens, 2048), feats: d.feats, taperFactor: d.taperFactor, source: d.source }, r, 'fast');
@@ -7091,6 +7104,53 @@ function startMemoryMaintenance() {
     },
   });
   console.log(`[memmaint] started (every ${intervalMs / 60000}min): semantic decay/dedup + log bounding`);
+}
+
+// ── SYNAPSE always-on worker ────────────────────────────────────────────────────────────────────
+// Keeps the second brain fresh without any input. FREE re-import (nodes) on a short cycle so new
+// projects/memories/files always show up; the PAID pass (embeddings + rationale + suggestions) runs
+// on a slow cycle, ONLY when the agent is idle and the $1 budget has room. config.synapse:
+//   { worker(default true), hydrateMin(30), connectHours(6), paid(true) }.
+let _synapseTimer = null, _synapseLastConnect = 0;
+function synapseWorkerConfig() {
+  const c = (loadConfig().synapse) || {};
+  return { worker: c.worker !== false, hydrateMin: Math.max(5, c.hydrateMin || 30), connectHours: Math.max(1, c.connectHours || 6), paid: c.paid !== false };
+}
+async function synapseWorkerTick() {
+  const c = synapseWorkerConfig();
+  if (!c.worker) return;
+  try {
+    await synapseHydrate();   // free — no LLM / no embeddings
+    const idle = agentState !== 'running' && agentState !== 'paused';
+    const due = Date.now() - _synapseLastConnect >= c.connectHours * 3600 * 1000;
+    if (c.paid && idle && due && synapseBudgetLeft() > 0.02) {
+      _synapseLastConnect = Date.now();
+      const before = synapseSpent();
+      await synapseConnect();
+      await synapseSuggest();
+      console.log(`[synapse] background pass: +$${(synapseSpent() - before).toFixed(4)} (spent $${synapseSpent().toFixed(3)}/$${synapseBudget().toFixed(2)})`);
+    }
+  } catch (e) { console.warn('[synapse] worker tick failed:', e.message); }
+}
+function startSynapseWorker() {
+  const c = synapseWorkerConfig();
+  if (!c.worker) { console.log('[synapse] worker disabled by config'); return; }
+  if (_synapseTimer) clearInterval(_synapseTimer);
+  _synapseTimer = setInterval(() => { synapseWorkerTick(); }, c.hydrateMin * 60 * 1000);
+  setTimeout(() => { synapseWorkerTick(); }, 20000);   // first pass shortly after boot
+  console.log(`[synapse] worker started (re-import every ${c.hydrateMin}min; paid pass every ${c.connectHours}h when idle, under $${synapseBudget().toFixed(2)})`);
+}
+
+// ── MCP-client hub ──────────────────────────────────────────────────────────────────────────────
+// Spawn every enabled external MCP server from config.mcpPlugins and surface its tools to the agent
+// loop (namespaced mcp__<plugin>__<tool>). Best-effort + async so a slow/broken plugin never blocks boot.
+async function startMcpHub() {
+  const specs = loadConfig().mcpPlugins || [];
+  const enabled = specs.filter((s) => s && s.enabled !== false);
+  if (!enabled.length) { console.log('[mcphub] no external MCP plugins configured'); return; }
+  if (!mcphub.available()) { console.warn('[mcphub] MCP SDK unavailable — plugins skipped'); return; }
+  try { const st = await mcphub.connectAll(enabled, { log: (m) => console.log(m) }); console.log(`[mcphub] ready — ${st.total} tool(s) across ${st.plugins.length} plugin(s)`); }
+  catch (e) { console.warn('[mcphub] connectAll failed:', e.message); }
 }
 
 // Map live background jobs → agent-presence avatars for the 3D presence window.
@@ -9012,6 +9072,8 @@ app.whenReady().then(() => {
     startScheduler();   // proactive recurring/one-off tasks
     startAmbient();     // #18 opt-in ambient awareness (no-op unless config.ambient.enabled)
     startMemoryMaintenance();   // always-on memory upkeep (runs on a timer, independent of the window)
+    startSynapseWorker();       // SYNAPSE second brain — free re-import loop + slow budget-capped paid pass
+    startMcpHub();              // connect external MCP-server plugins (config.mcpPlugins) → tools for the agent
     startPresenceFeed();        // stream live fleet state to the 3D presence window while it's open
     startCacheKeepAlive();   // Task 5 — prompt-cache warm-keeper (default on; keeps first token fast after idle gaps)
     setTimeout(() => { maybeRenderAcks().catch(() => {}); }, 6000);   // pre-render ack clips in the background (instant first audio)
