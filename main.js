@@ -4869,7 +4869,9 @@ async function actionViewShot(caption) {
   if (!actionViewWin || actionViewWin.isDestroyed()) return;
   if (Date.now() - _avLastShot < 1800) return;   // ≥1.8s between captures
   _avLastShot = Date.now();
-  try { const b64 = await captureScreenJpeg(); if (b64) actionView({ shot: b64, shotMime: 'image/jpeg', note: caption || 'live screen' }); } catch {}
+  // captureScreenJpeg returns { image, mime } (or { error } when Screen Recording is denied) —
+  // pass ONLY the base64 string as shot, never the object (that rendered as a broken image).
+  try { const r = await captureScreenJpeg(); if (r && r.image) actionView({ shot: r.image, shotMime: r.mime || 'image/jpeg', note: caption || 'live screen' }); } catch {}
 }
 ipcMain.handle('open-action-view', () => openActionView());
 // Tools that ACTUATE the machine (browser/desktop/screen/shell) — these are what a "watch me work"
@@ -6282,8 +6284,8 @@ async function phoneMirror(input) {
   const action = String(input.action || 'status');
   const withShot = async (base) => {
     try {
-      const b64 = await captureScreenJpeg();
-      if (b64) { base._image = b64; base._imageMime = 'image/jpeg'; }
+      const r = await captureScreenJpeg();
+      if (r && r.image) { base._image = r.image; base._imageMime = r.mime || 'image/jpeg'; }
     } catch {}
     return base;
   };
@@ -6959,7 +6961,18 @@ function startScheduler() {
 // tab renders + prunes it; a light background worker keeps it fresh (the 24/7 job is the cloud brain).
 let _brain = null;
 function synapse() { if (!_brain) { _brain = brain.createBrain({}); } return _brain; }
-function pushSynapse() { try { const g = synapse().graphView(); if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('synapse-update', g); } catch {} }
+function pushSynapse() { try { const g = synapse().graphView(); g.budget = { limit: synapseBudget(), spent: synapseSpent(), left: synapseBudgetLeft() }; if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('synapse-update', g); } catch {} }
+
+// ── SYNAPSE cost governor ─────────────────────────────────────────────────────────────────────────
+// A HARD dollar cap (default $1, config.synapseBudgetUsd) on the paid parts of the brain (embeddings +
+// rationale + suggestions). Spend is a persistent cumulative ledger; once it hits the cap, paid calls
+// are skipped so a POC / always-on worker can never run away. Prices are the 2026 list rates.
+const SY_PRICE = { embed: 0.02 / 1e6, sonnetIn: 3 / 1e6, sonnetOut: 15 / 1e6 };   // USD per token
+const _syTok = (s) => Math.ceil(String(s || '').length / 4);                        // ~4 chars/token estimate
+function synapseBudget() { const v = Number(loadConfig().synapseBudgetUsd); return Number.isFinite(v) && v > 0 ? v : 1; }
+function synapseSpent() { try { return Number(synapse().getMeta('spendUsd')) || 0; } catch { return 0; } }
+function synapseBudgetLeft() { return Math.max(0, synapseBudget() - synapseSpent()); }
+function synapseSpend(usd) { try { const b = synapse(); b.setMeta('spendUsd', (Number(b.getMeta('spendUsd')) || 0) + (Number(usd) || 0)); } catch {} }
 
 // Pull the raw semantic store (records carry their embedding vecs) — so memory nodes reuse embeddings.
 function _semanticRecords() {
@@ -6998,13 +7011,15 @@ async function synapseHydrate({ repos = true, memories = true, notionPages = tru
 }
 // Embed any nodes missing a vector (batched), then run the Connector and add a short LLM rationale
 // to each proposed link before committing it. Cross-project only; pruned pairs are never re-proposed.
-async function synapseConnect({ threshold = 0.8, maxRationale = 12 } = {}) {
+async function synapseConnect({ threshold = 0.8, maxRationale = 8 } = {}) {
   const b = synapse();
   const all = b.nodes().filter((n) => n.status !== 'pruned');
   const need = all.filter((n) => !Array.isArray(n.embedding) || !n.embedding.length);
   for (let i = 0; i < need.length; i += 64) {
+    if (synapseBudgetLeft() <= 0) break;                                            // budget exhausted → stop embedding
     const batch = need.slice(i, i + 64);
-    try { const { vecs } = await semantic.embedBatch(batch.map((n) => (n.label + '. ' + (n.text || '')).slice(0, 2000))); batch.forEach((n, k) => { if (vecs[k]) b.upsertNode({ id: n.id, type: n.type, ref: n.ref, embedding: vecs[k] }, Date.now()); }); }
+    const texts = batch.map((n) => (n.label + '. ' + (n.text || '')).slice(0, 2000));
+    try { const { vecs } = await semantic.embedBatch(texts); synapseSpend(texts.reduce((s, t) => s + _syTok(t), 0) * SY_PRICE.embed); batch.forEach((n, k) => { if (vecs[k]) b.upsertNode({ id: n.id, type: n.type, ref: n.ref, embedding: vecs[k] }, Date.now()); }); }
     catch { break; }   // no embed key / offline → stop; existing links stay
   }
   const existingPairs = new Set(b.edges().map((e) => [e.from, e.to].sort().join('|')));   // includes pruned → never re-propose
@@ -7013,11 +7028,13 @@ async function synapseConnect({ threshold = 0.8, maxRationale = 12 } = {}) {
   cands.sort((a, c) => c.confidence - a.confidence);
   for (let i = 0; i < cands.length; i++) {
     const e = cands[i];
-    if (i < maxRationale) {
+    if (i < maxRationale && synapseBudgetLeft() > 0) {
       try {
         const A = b.getNode(e.from), C = b.getNode(e.to);
-        const r = await anthropicRequest({ model: MODEL_SONNET, max_tokens: 90, system: 'In ONE sentence, say specifically how these two items from DIFFERENT projects are related or could inform each other. If not genuinely related, reply exactly "NONE".', messages: [{ role: 'user', content: `A (${A.type}): ${A.label} — ${(A.text || '').slice(0, 400)}\n\nB (${C.type}): ${C.label} — ${(C.text || '').slice(0, 400)}` }] }, getApiKey());
+        const content = `A (${A.type}): ${A.label} — ${(A.text || '').slice(0, 400)}\n\nB (${C.type}): ${C.label} — ${(C.text || '').slice(0, 400)}`;
+        const r = await anthropicRequest({ model: MODEL_SONNET, max_tokens: 90, system: 'In ONE sentence, say specifically how these two items from DIFFERENT projects are related or could inform each other. If not genuinely related, reply exactly "NONE".', messages: [{ role: 'user', content }] }, getApiKey());
         const txt = (r.content.filter((x) => x.type === 'text').map((x) => x.text).join(' ') || '').trim();
+        synapseSpend(_syTok(content) * SY_PRICE.sonnetIn + _syTok(txt) * SY_PRICE.sonnetOut);
         if (/^none/i.test(txt)) continue;   // the model rejects it → don't add
         e.rationale = txt.slice(0, 300);
       } catch {}
@@ -7026,6 +7043,29 @@ async function synapseConnect({ threshold = 0.8, maxRationale = 12 } = {}) {
   }
   b.save(); pushSynapse();
   return { proposed: cands.length, ...b.stats() };
+}
+
+// From the connected graph, synthesize a few "projects to move ahead on" — grounded in the strongest
+// cross-project links + project recency. ONE budget-gated Claude call; result rides in graph meta.
+async function synapseSuggest() {
+  const b = synapse();
+  if (synapseBudgetLeft() <= 0) return { suggestions: b.getMeta('suggestions') || [], budgetExhausted: true };
+  let projs = [];
+  try { projs = projects.list().map((p) => ({ name: p.name, status: p.status, slug: p.slug })); } catch {}
+  const links = b.edges().filter((e) => e.status !== 'pruned' && e.rationale)
+    .sort((a, c) => (c.confidence || 0) - (a.confidence || 0)).slice(0, 14)
+    .map((e) => { const A = b.getNode(e.from), C = b.getNode(e.to); return A && C ? `• ${A.label} ↔ ${C.label}: ${e.rationale}` : null; }).filter(Boolean);
+  const ctx = `MY PROJECTS:\n${projs.map((p) => '- ' + p.name + (p.status ? ` (${p.status})` : '')).join('\n') || '(none)'}\n\nCROSS-PROJECT CONNECTIONS THE SECOND BRAIN FOUND:\n${links.join('\n') || '(none yet)'}`;
+  const sys = 'You are the second brain surfacing what Siddhant should work on next. From his projects and the connections found, pick 3-5 concrete moves. Reply ONLY a JSON array: [{"project":"<name>","why":"<one grounded sentence, cite a connection if relevant>","next":"<one concrete next step>"}]. No prose outside the JSON.';
+  let suggestions = [];
+  try {
+    const r = await anthropicRequest({ model: MODEL_SONNET, max_tokens: 700, system: sys, messages: [{ role: 'user', content: ctx }] }, getApiKey());
+    const txt = (r.content.filter((x) => x.type === 'text').map((x) => x.text).join(' ') || '').trim();
+    synapseSpend(_syTok(ctx) * SY_PRICE.sonnetIn + _syTok(txt) * SY_PRICE.sonnetOut);
+    const m = txt.match(/\[[\s\S]*\]/); if (m) suggestions = JSON.parse(m[0]);
+  } catch {}
+  if (Array.isArray(suggestions) && suggestions.length) { b.setMeta('suggestions', suggestions.slice(0, 5)); b.setMeta('suggestedAt', Date.now()); b.save(); pushSynapse(); }
+  return { suggestions: b.getMeta('suggestions') || [] };
 }
 
 // config.memoryMaintenance: { enabled(default true), intervalMinutes(default 30), maxEpisodicAgeDays(45) }.
@@ -8622,9 +8662,21 @@ function netBytesNow() {
   } catch { return null; }
 }
 // SYNAPSE second-brain IPC — the SYNAPSE tab views/builds/prunes the knowledge graph.
-ipcMain.handle('synapse-graph', () => { try { return synapse().graphView(); } catch (e) { return { error: e.message }; } });
+ipcMain.handle('synapse-graph', () => { try { const g = synapse().graphView(); g.budget = { limit: synapseBudget(), spent: synapseSpent(), left: synapseBudgetLeft() }; return g; } catch (e) { return { error: e.message }; } });
+// FREE first-open population: import nodes (projects + memories + repos + Notion) if the graph is empty.
+// No embeddings / no LLM → no cost. The paid connect + suggestions happen on explicit Build.
+ipcMain.handle('synapse-ensure', async () => {
+  try { if (synapse().stats().nodes === 0) await synapseHydrate(); const g = synapse().graphView(); g.budget = { limit: synapseBudget(), spent: synapseSpent(), left: synapseBudgetLeft() }; return g; }
+  catch (e) { return { error: e.message }; }
+});
 ipcMain.handle('synapse-build', async () => {
-  try { sendToActivity('tool-update', { type: 'thinking', text: '🧠 building the second brain…' }); await synapseHydrate(); const r = await synapseConnect(); return { ok: true, ...r }; }
+  try {
+    sendToActivity('tool-update', { type: 'thinking', text: '🧠 building the second brain…' });
+    await synapseHydrate();
+    const r = await synapseConnect();
+    const s = await synapseSuggest();
+    return { ok: true, ...r, suggestions: s.suggestions, budget: { limit: synapseBudget(), spent: synapseSpent(), left: synapseBudgetLeft() } };
+  }
   catch (e) { return { error: e.message }; }
 });
 ipcMain.handle('synapse-prune', (_e, { kind, id } = {}) => { try { const ok = synapse().prune(kind, id); synapse().save(); pushSynapse(); return { ok }; } catch (e) { return { error: e.message }; } });

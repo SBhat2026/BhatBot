@@ -188,6 +188,17 @@
   #sy-detail .sy-d-x { float: right; cursor: pointer; color: var(--text-dim2); }
   #sy-detail button { font-size: 10.5px; padding: 2px 9px; border-radius: 6px; border: 1px solid var(--line); background: transparent; color: var(--text-dim); cursor: pointer; }
   #sy-detail button:hover { color: #e0715f; border-color: #e0715f; }
+  /* SYNAPSE — "move ahead on" suggestions (replaces vitals as the panel's takeaway) */
+  #sy-suggest { position: absolute; left: 10px; top: 10px; width: 300px; max-height: 70%; overflow-y: auto; z-index: 3;
+    background: color-mix(in srgb, var(--surface) 93%, transparent); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; font-size: 12px; }
+  #sy-suggest.empty { display: none; }
+  #sy-suggest .sy-sg-h { font-size: 10.5px; letter-spacing: .08em; color: var(--accent); margin-bottom: 7px; display: flex; justify-content: space-between; }
+  #sy-suggest .sy-sg { padding: 7px 0; border-bottom: 1px solid var(--line); }
+  #sy-suggest .sy-sg:last-child { border-bottom: 0; }
+  #sy-suggest .sy-sg-p { font-weight: 600; color: var(--text); }
+  #sy-suggest .sy-sg-w { color: var(--text-dim); line-height: 1.4; margin-top: 2px; }
+  #sy-suggest .sy-sg-n { color: var(--accent-dim); margin-top: 3px; font-size: 11.5px; }
+  #sy-budget { font-size: 10.5px; color: var(--text-dim2); letter-spacing: .03em; }
   /* Health + Manage panels */
   #health-body, #ops-body, #voice-body { flex: 1; min-height: 0; overflow-y: auto; padding: 10px 12px; font-family: var(--font-system); }
   .hl-empty { color: #7a8aa0; padding: 24px 8px; text-align: center; font-size: 13px; }
@@ -1082,6 +1093,7 @@
   <div id="synapse-panel" class="stage-panel">
     <div class="panel-head"><b>✸ SYNAPSE · SECOND BRAIN</b>
       <span class="sy-tools">
+        <span id="sy-budget"></span>
         <span id="sy-stats" class="sy-stats"></span>
         <button id="sy-build" class="sy-btn" title="Import memory + find connections">⟳ Build</button>
         <button id="sy-mode" class="sy-btn" title="Toggle 2D / 3D">3D</button>
@@ -1091,6 +1103,10 @@
     <div id="sy-body">
       <canvas id="sy-canvas"></canvas>
       <div id="sy-3d"></div>
+      <div id="sy-suggest" class="empty">
+        <div class="sy-sg-h"><span>◆ MOVE AHEAD ON</span></div>
+        <div id="sy-suggest-list"></div>
+      </div>
       <div id="sy-inbox">
         <div class="sy-inbox-h">◆ REVIEW QUEUE <span id="sy-inbox-n"></span></div>
         <div id="sy-inbox-list"></div>
@@ -1924,8 +1940,21 @@ window.bhatbot.onStudioReload && window.bhatbot.onStudioReload(() => reloadStudi
     G.nodes = (g.nodes || []).map((n) => { const p = prev[n.id] || {}; const node = { ...n, x: p.x != null ? p.x : (Math.random() * 400 - 200), y: p.y != null ? p.y : (Math.random() * 300 - 150), vx: 0, vy: 0 }; byId[n.id] = node; return node; });
     G.edges = (g.edges || []).filter((e) => byId[e.from] && byId[e.to]);
     const st = document.getElementById('sy-stats'); if (st && g.stats) st.textContent = `${g.stats.nodes} nodes · ${g.stats.edges} links · ${g.stats.proposed} proposed`;
+    const bd = document.getElementById('sy-budget'); if (bd && g.budget) bd.textContent = `$${(g.budget.spent || 0).toFixed(3)} / $${(g.budget.limit || 1).toFixed(2)}`;
     renderInbox(g.edges || []);
+    if (g.meta) renderSuggest(g.meta.suggestions || []);
     if (!running) { running = true; loop(); }
+  }
+  function renderSuggest(list) {
+    const box = document.getElementById('sy-suggest'), ul = document.getElementById('sy-suggest-list');
+    if (!box || !ul) return;
+    if (!list.length) { box.classList.add('empty'); ul.innerHTML = ''; return; }
+    box.classList.remove('empty'); ul.innerHTML = '';
+    for (const s of list.slice(0, 5)) { const d = document.createElement('div'); d.className = 'sy-sg';
+      d.innerHTML = `<div class="sy-sg-p">${esc(s.project || '')}</div>`
+        + (s.why ? `<div class="sy-sg-w">${esc(s.why)}</div>` : '')
+        + (s.next ? `<div class="sy-sg-n">▸ ${esc(s.next)}</div>` : '');
+      ul.appendChild(d); }
   }
   function renderInbox(edges) {
     const list = document.getElementById('sy-inbox-list'), box = document.getElementById('sy-inbox');
@@ -1988,7 +2017,8 @@ window.bhatbot.onStudioReload && window.bhatbot.onStudioReload(() => reloadStudi
   document.getElementById('sy-mode').onclick = () => { panel.classList.toggle('mode3d'); if (panel.classList.contains('mode3d')) init3D(); };
   window.bhatbot.onSynapseUpdate && window.bhatbot.onSynapseUpdate((g) => { ingest(g); if (panel.classList.contains('mode3d')) update3D(); });
   const navBtn = document.querySelector('.navbtn[data-panel="synapse"]');
-  if (navBtn) navBtn.addEventListener('click', () => setTimeout(async () => { size(); ingest(await window.bhatbot.synapseGraph()); }, 60));
+  // On open: ensure the graph is populated (free import if empty) so it's never blank.
+  if (navBtn) navBtn.addEventListener('click', () => setTimeout(async () => { size(); ingest(await (window.bhatbot.synapseEnsure ? window.bhatbot.synapseEnsure() : window.bhatbot.synapseGraph())); }, 60));
   window.addEventListener('resize', () => { if (panel.classList.contains('active')) size(); });
   // ---- 3D toggle (Three.js constellation; reuses 2D positions + a hashed z spread) ----
   let three = null;
@@ -1998,7 +2028,9 @@ window.bhatbot.onStudioReload && window.bhatbot.onStudioReload(() => reloadStudi
       const rn = new THREE.WebGLRenderer({ antialias: true, alpha: true }); rn.setSize(host.clientWidth, host.clientHeight); host.innerHTML = ''; host.appendChild(rn.domElement);
       const sc = new THREE.Scene(); const cam = new THREE.PerspectiveCamera(55, host.clientWidth / host.clientHeight, 0.1, 5000); cam.position.set(0, 0, 640);
       const grp = new THREE.Group(); sc.add(grp); three = { THREE, rn, sc, cam, grp, host, orb: 0 };
-      (function anim() { if (!three) return; three.orb += 0.0018; three.cam.position.x = Math.sin(three.orb) * 640; three.cam.position.z = Math.cos(three.orb) * 640; three.cam.lookAt(0, 0, 0); three.rn.render(three.sc, three.cam); requestAnimationFrame(anim); })();
+      // Slow, continuous rotation for the "cooler" constellation effect: spin the graph group on Y
+      // while the camera drifts on a gentle orbit. Both are slow so it never feels dizzying.
+      (function anim() { if (!three) return; three.orb += 0.0016; three.grp.rotation.y += 0.0022; three.cam.position.x = Math.sin(three.orb) * 660; three.cam.position.z = Math.cos(three.orb) * 660; three.cam.lookAt(0, 0, 0); three.rn.render(three.sc, three.cam); requestAnimationFrame(anim); })();
       update3D();
     } catch (e) { console.warn('synapse 3d unavailable', e); }
   }

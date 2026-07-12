@@ -27,7 +27,8 @@ contextBridge.exposeInMainWorld('bhatbot', {
   onPresenceUpdate: (cb) => ipcRenderer.on('presence-update', (_e, d) => cb(d)),     // 3D fleet-presence (FLEET tab iframe)
   onTurnState: (cb) => ipcRenderer.on('turn-state', (_e, d) => cb(d)),               // T2 — single merged display-state snapshot per turn
   synapseGraph: () => ipcRenderer.invoke('synapse-graph'),                            // SYNAPSE second brain — current graph
-  synapseBuild: () => ipcRenderer.invoke('synapse-build'),                            // hydrate + connect
+  synapseEnsure: () => ipcRenderer.invoke('synapse-ensure'),                          // free import if empty (no cost)
+  synapseBuild: () => ipcRenderer.invoke('synapse-build'),                            // hydrate + connect + suggest ($ budget-gated)
   synapsePrune: (kind, id) => ipcRenderer.invoke('synapse-prune', { kind, id }),      // permanent prune (curation)
   synapseConfirm: (kind, id) => ipcRenderer.invoke('synapse-confirm', { kind, id }),  // promote a proposed link
   onSynapseUpdate: (cb) => ipcRenderer.on('synapse-update', (_e, d) => cb(d)),        // live graph pushes

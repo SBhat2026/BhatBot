@@ -36,13 +36,16 @@
 <body>
   <header><b id="role">🦾 agent</b><span id="status" data-s="">idle</span></header>
   <div id="task"></div>
-  <div id="screen"><img id="shot" alt="agent screen" /><div class="cap">live view</div></div>
+  <div id="screen"><img id="shot" alt="" /><div class="cap">live view</div></div>
   <div id="now">awaiting activity…</div>
   <div id="log"></div>
   <div id="out"></div>
   <script>
     const $ = (s) => document.querySelector(s);
     const roleEl=$('#role'), stEl=$('#status'), taskEl=$('#task'), nowEl=$('#now'), logEl=$('#log'), outEl=$('#out'), screenEl=$('#screen'), shotEl=$('#shot');
+    // Reveal the screen panel ONLY once a shot actually decodes; hide it on any decode error.
+    shotEl.onload = () => { screenEl.style.display='block'; };
+    shotEl.onerror = () => { screenEl.style.display='none'; };
     function addRow(txt) { const r=document.createElement('div'); r.className='row'; const ts=new Date().toLocaleTimeString().replace(/.*?(\d+:\d+:\d+).*/,'$1'); r.innerHTML='<span class="t">'+ts+'</span>'+txt; logEl.appendChild(r); logEl.scrollTop=logEl.scrollHeight; }
     if (window.agentmon) {
       roleEl.textContent = '🦾 ' + window.agentmon.id;
@@ -53,7 +56,9 @@
         if (d.status) { stEl.textContent = d.status; stEl.dataset.s = d.status; }
         if (d.step) { nowEl.textContent = '▸ ' + d.step; addRow('▸ ' + d.step); }
         if (d.note) { nowEl.textContent = d.note; addRow(d.note); }
-        if (d.shot) { screenEl.style.display='block'; shotEl.src = 'data:' + (d.shotMime||'image/jpeg') + ';base64,' + d.shot; }
+        // Only render a real base64 image; a non-string / short payload → keep the panel hidden
+        // (prevents the broken "agent screen" icon when a capture fails or the wrong type is sent).
+        if (typeof d.shot === 'string' && d.shot.length > 100) { shotEl.src = 'data:' + (d.shotMime||'image/jpeg') + ';base64,' + d.shot; }
         if (d.text) outEl.textContent = (d.status==='done'?'✓ ':'') + String(d.text);
       });
     }
