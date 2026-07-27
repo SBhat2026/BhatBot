@@ -68,6 +68,48 @@ ok(!fs.existsSync(rs.STATE_PATH + '.tmp'), 'writeStateNow: no leftover .tmp (ato
 for (let i = 0; i < 250; i++) rs.pushActivity('tool-update', { text: 'evt' + i });
 ok(rs.getActivity(0).events.length === 200, 'activity ring: capped at 200 entries (oldest evicted)');
 
+// ---- trace / span ids ----
+// A TRACE is one agent turn; a SPAN is one tool call inside it. traceId is ambient (set once per turn,
+// auto-stamped onto every event) so a 10-hour run can be reconstructed after the fact; spanId is
+// explicit because concurrent PARALLEL_SAFE tools would otherwise be mis-attributed.
+{
+  ok(rs.currentTrace() === null, 'trace: no ambient trace by default');
+  rs.event('untraced', { k: 1 });
+  ok(rs.recentEvents(5).some((e) => e.kind === 'untraced' && e.traceId === undefined), 'trace: events outside a trace carry no traceId');
+
+  const t1 = rs.startTrace();
+  ok(typeof t1 === 'string' && t1.startsWith('t_'), 'startTrace: returns a t_-prefixed id');
+  ok(rs.currentTrace() === t1, 'startTrace: sets the ambient trace');
+
+  rs.event('turn', { text: 'do the thing' });
+  rs.event('tool', { spanId: rs.newId('s'), name: 'read_file', ms: 12, status: 'ok' });
+  rs.event('tool', { spanId: rs.newId('s'), name: 'run_shell', ms: 900, status: 'error', error: 'boom' });
+
+  const mine = rs.traceEvents(t1);
+  ok(mine.length === 3, 'traceEvents: returns exactly the events recorded under this trace');
+  ok(mine.every((e) => e.traceId === t1), 'event: ambient traceId auto-stamped on every row');
+  ok(mine[0].kind === 'turn' && mine[2].name === 'run_shell', 'traceEvents: preserves chronological order');
+  const spans = mine.filter((e) => e.spanId);
+  ok(spans.length === 2 && spans[0].spanId !== spans[1].spanId, 'newId: each span gets a distinct id');
+  ok(spans.every((e) => e.spanId.startsWith('s_')), 'newId: span ids are s_-prefixed');
+  ok(spans.some((e) => e.status === 'error' && e.error === 'boom'), 'tool span: failures record status + error');
+
+  // An explicit traceId in data must beat the ambient one (how a resumed mission re-parents its work).
+  rs.event('adopted', { traceId: 't_explicit' });
+  ok(rs.recentEvents(5).some((e) => e.kind === 'adopted' && e.traceId === 't_explicit'), 'event: explicit data.traceId overrides the ambient one');
+
+  // Two turns must not share a trace.
+  const t2 = rs.startTrace();
+  ok(t2 !== t1, 'startTrace: a second turn gets a fresh id');
+  rs.event('turn', { text: 'second turn' });
+  ok(rs.traceEvents(t1).length === 3, 'traceEvents: the first trace is unaffected by the second');
+  ok(rs.traceEvents(t2).length === 1, 'traceEvents: the second trace is isolated');
+
+  ok(rs.endTrace() === t2 && rs.currentTrace() === null, 'endTrace: clears the ambient trace and returns it');
+  rs.event('after', {});
+  ok(rs.recentEvents(3).some((e) => e.kind === 'after' && e.traceId === undefined), 'endTrace: later events are untraced again');
+}
+
 try { fs.rmSync(TMP, { recursive: true, force: true }); } catch {}
 console.log(`\n${fail ? '❌' : '✅'} ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

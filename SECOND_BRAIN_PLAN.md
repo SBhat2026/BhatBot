@@ -24,7 +24,9 @@ style autonomous longitudinal research.
 - `lib/memmaint.js` — decay/dedup + a background scheduler (built for the always-on work).
 - Scheduler (30s tick), patrol, self-drive — background-worker plumbing + guardrails.
 - `web_search` / `research` / `browser` tools — the online-gathering hands.
-- `cloud/` — an always-on Claude brain (SQLite/Fly), built + verified, **undeployed** — the 24/7 host.
+- `cloud/` — an always-on Claude brain (SQLite/Fly). **DEPLOYED and live** at `bhatbot-cloud.fly.dev`
+  (verified 2026-07-27: `/health` → 401, i.e. up and auth-gated). Note it runs a port of the *old*
+  `lib/graph.js`, not `lib/brain.js` — there is no SYNAPSE in the cloud yet.
 - D3 (used in the user's Nexus project) + Three.js (the FLEET office) — viz options.
 
 ## The gap (what's new)
@@ -32,7 +34,9 @@ style autonomous longitudinal research.
 2. No **Connector** — nothing proactively proposes cross-project links.
 3. No **Scout** — nothing autonomously pulls relevant web info per project.
 4. No **viz + curation panel** — no way to see/prune the brain.
-5. No **always-on host** — workers only run while the desktop app is open (cloud brain undeployed).
+5. No **always-on host** — workers only run while the desktop app is open. The cloud brain is now
+   deployed, but the SYNAPSE workers still live inside the Electron main process, so they die with
+   the window. **This is still the binding gap.**
 
 ---
 
@@ -101,14 +105,46 @@ A new nav-rail tab. A force-directed graph (nodes by type/importance, edges by c
 ## DECISIONS LOCKED (2026-07-11)
 1. **Viz** → **Both**: D3 2D force-graph as the working/curation view + a Three.js 3D "constellation" toggle for show.
 2. **Scout autonomy** → **Auto-add, prune later**: high-relevance findings auto-join the graph flagged `unreviewed`; Siddhant prunes the bad ones. (Hard daily search budget still applies.)
-3. **Host** → **Deploy the cloud brain now** (Fly), so SYNAPSE is genuinely 24/7 from day one — pulled ahead of the original P5.
+3. **Host** → **Deploy the cloud brain now** (Fly), so SYNAPSE is genuinely 24/7 from day one — pulled ahead of the original P5. *(Cloud deployed ✅ — but see the 2026-07-27 hosting decision below: the deploy alone did not deliver 24/7, because the workers never left the Electron process.)*
 4. **Scope** → **BhatBot memory + ~/repos + Notion**: index project records, local repos, and Notion pages as nodes (denser graph; more ingest + noise to garden).
 
-## Revised sequencing (cloud-first)
-- **D0 — Cloud deploy** *(new first step; needs Fly auth)*: deploy `cloud/` to Fly with the brain secrets so the workers have a 24/7 home. **Dependency:** Siddhant runs `fly auth login` (or provides a Fly API token) + confirms the Fly app/region; the ANTHROPIC/OPENAI keys get set as Fly secrets. I can build everything else while this is pending.
-- **P0 — Substrate**: `lib/brain.js` hybrid node/edge store + importers for semantic/graph/projects **+ a repo indexer (~/repos) + Notion importer**. Runs both local + cloud. Tests.
-- **P1 — Connector + viz**: cross-project edges + the SYNAPSE tab (D3 2D render, 3D toggle).
-- **P2 — Curation**: prune/confirm/inbox + Gardener + learned thresholds.
-- **P3 — Scout**: autonomous web enrichment, auto-add (flagged) + daily budget.
-- **P4 — Learning**: threshold + importance models from curation.
-- **P5 — Sync hardening**: local ↔ cloud ↔ Notion consistency, offline reconciliation.
+## Status (2026-07-27)
+
+| Phase | State | Notes |
+|---|---|---|
+| **D0 — Cloud deploy** | ✅ **DONE** | Live at `bhatbot-cloud.fly.dev`. Runs the old `lib/graph.js`, not SYNAPSE. |
+| **P0 — Substrate** | ✅ done | `lib/brain.js` (211 lines, Electron-free, `scripts/test-brain.js`). Importers: projects, semantic memories, `~` repos, Notion. |
+| **P1 — Connector + viz** | ✅ done | `synapseConnect` (cosine ≥ 0.8 + LLM rationale on the top 8) + the SYNAPSE tab (2D canvas force-graph, 3D toggle). |
+| **P2 — Curation** | ◑ partial | prune/confirm/inbox **shipped**. **Gardener NOT built** (no decay/merge/promote). |
+| **P3 — Scout** | ⬜ not built | No web enrichment at all. |
+| **P4 — Learning** | ⬜ not built | No learned thresholds or importance ranking. |
+| **P5 — Sync** | ⬜ not built | No local ↔ cloud ↔ Notion reconciliation. |
+
+> **⚠️ None of it has ever actually run.** `~/.bhatbot/brain/graph.json` **does not exist**. The
+> "always-on worker" (`main.js:7109-7142`, `config.synapse.worker: true`) lives inside the Electron
+> main process and dies with the window — and the app had not been launched in 15 days. The worker is
+> correct; it has never had a process to run in. See `DAEMON.md`.
+
+## Revised sequencing
+- **D1 — Headless host** *(the real blocker, replaces the old D0)*: extract `main.js:6970-7142` into a
+  pure, DI'd `lib/synapse.js`, add `scripts/synapse-worker.js` (plain node, no electron in its require
+  graph — `brain.js`/`semantic.js`/`projects.js`/`notion.js`/`memmaint.js` are all already
+  Electron-free), and install it as `com.bhatbot.synapse`. Single-instance pidfile so it doesn't
+  double-run alongside the GUI. **Until this lands, every phase below is theoretical.**
+- **P2b — Gardener**: `lib/gardener.js` — decay `confidence *= exp(-ageDays/tau)`, merge near-dupes at
+  cosine > 0.95 (reuse `brain.js`'s `cosine`), promote nodes with ≥N confirmed edges. Daily cadence
+  inside the headless worker.
+- **P3 — Scout**: `lib/scout.js`, autonomous web enrichment, auto-add flagged `unreviewed` + hard
+  daily budget through the existing cost ledger. Pure and file-free by construction — so it is the one
+  worker that could later move to the cloud.
+- **P4 — Learning**: threshold controller off confirm/prune rates in graph meta (a ~15-line
+  proportional controller, not an ML model — that is the whole useful surface here).
+- **P5 — Sync**: push a **pruned** graph view (no embeddings, no file bodies) to the deployed cloud
+  brain after each local pass, so the phone can read it when the Mac is off.
+
+### Hosting decision (2026-07-27): workers stay LOCAL
+`_scanRepos` walks `$HOME` for git repos and reads READMEs + key files; `_semanticRecords` reads the
+local embedding store; `projects.list()` reads `~/.bhatbot/projects`. None of that substrate exists on
+Fly, and replicating it would mean shipping the contents of every repo in the home directory to a
+hosted box — a real exfiltration surface for a $1/month knowledge graph. The cloud gets a **read
+replica**, not the workers. (Scout is the sole exception worth revisiting, since it needs no local files.)

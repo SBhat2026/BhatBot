@@ -174,5 +174,37 @@ ok(Array.isArray(tagCache('nope')) === false, 'cache: non-array → returned as-
   ok(embedded === '<html><body>x</body></html>', 'extractCode: html embedded in prose → sliced to the doc');
 }
 
+// ---- PERSIST / persistenceProfile (turn step-budget profiles) ----
+// The table + its default live at module scope in main.js precisely so they're testable here (they
+// used to be trapped inside the agentLoop closure). Slice from the declaration through the end of
+// persistenceProfile and eval that fragment.
+{
+  const from = main.indexOf('const PERSIST = {');
+  const end = main.indexOf('\n', main.indexOf('function persistenceProfile('));
+  ok(from > 0 && end > from, 'PERSIST: table + persistenceProfile are at module scope in main.js');
+  // eslint-disable-next-line no-new-func
+  const scope = new Function(main.slice(from, end) + '\nreturn { PERSIST, PERSIST_DEFAULT, persistenceProfile };')();
+  const { PERSIST, PERSIST_DEFAULT, persistenceProfile } = scope;
+
+  for (const k of ['normal', 'high', 'relentless']) {
+    const p = PERSIST[k];
+    ok(p && Number.isFinite(p.base) && Number.isFinite(p.hard) && Number.isFinite(p.ext) && typeof p.secondWind === 'boolean',
+      `PERSIST.${k}: numeric base/hard/ext + boolean secondWind`);
+    ok(p.hard >= p.base, `PERSIST.${k}: hard ceiling is not below the base budget`);
+  }
+  ok(PERSIST.normal.hard < PERSIST.high.hard && PERSIST.high.hard < PERSIST.relentless.hard,
+    'PERSIST: ceilings increase normal → high → relentless');
+
+  // The default is what an UNCONFIGURED install gets, and it must grant a second wind: durable
+  // missions assume a stuck turn gets one replan before it parks. This regressed silently before —
+  // the live config had no `persistence` key, so everything ran at normal/60-steps/no-second-wind.
+  ok(PERSIST_DEFAULT === 'high', 'PERSIST_DEFAULT is "high"');
+  ok(persistenceProfile(undefined) === PERSIST.high, 'persistenceProfile: unset config → the high profile');
+  ok(persistenceProfile(undefined).secondWind === true, 'persistenceProfile: unset config → second wind ON');
+  ok(persistenceProfile('nonsense').secondWind === true, 'persistenceProfile: unknown value → falls back to the default');
+  ok(persistenceProfile('normal') === PERSIST.normal, 'persistenceProfile: explicit "normal" is still honoured');
+  ok(persistenceProfile('relentless').hard === 200, 'persistenceProfile: explicit "relentless" → 200-step ceiling');
+}
+
 console.log(`\n${fail === 0 ? '✅' : '❌'} ${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);

@@ -145,6 +145,20 @@ const MODEL_HAIKU = 'claude-haiku-4-5';        // RETIRED from routing — kept 
 const MODEL_OPUS = 'claude-opus-4-8';          // deepest reasoning — reserved for HEAVY tasks (sims, heavy coding+interpretation)
 const MODEL_FABLE = 'claude-fable-5';          // native subagents + high autonomy — opt-in heavy/autonomous tier (config.useFable)
 const MAX_AGENT_ITERATIONS = 20;   // step ceiling; complex tasks need headroom to retry/replan
+// PERSISTENCE — how hard BhatBot pushes to FINISH a complex task before it reports back. Tunable via
+// config.persistence: 'normal', 'high' (DEFAULT), or 'relentless'. Higher = more step headroom, a
+// higher hard ceiling, bigger auto-extend jumps, and a "second wind" replan when it gets stuck.
+// Module-scope (not inside agentLoop) so it is unit-testable — see scripts/test-main-helpers.js.
+const PERSIST = {
+  normal:     { base: 0,  hard: 60,  ext: 15, secondWind: false },
+  high:       { base: 32, hard: 120, ext: 20, secondWind: true },
+  relentless: { base: 48, hard: 200, ext: 25, secondWind: true },
+};
+// DEFAULT is 'high', not 'normal': 'normal' was tuned for a chat turn and dead-ends a long task at 60
+// steps with no second wind. Durable missions assume second wind exists. 'relentless' (200) is too
+// much unattended spend to impose by default.
+const PERSIST_DEFAULT = 'high';
+function persistenceProfile(cfgValue) { return PERSIST[cfgValue] || PERSIST[PERSIST_DEFAULT]; }
 // TIER-2 THROUGHPUT: tools that are READ-ONLY / side-effect-free / order-independent, so when the
 // model fires several in one turn they can run CONCURRENTLY (the higher per-minute cap serves the
 // burst — proven 4×+ in scripts/parallel-bench). Stateful/mutating tools (browser page, run_shell,
@@ -5059,7 +5073,11 @@ async function agentLoop(history, apiKey, event, opts = {}) {
   _userSpokeSinceOpen = true;     // Feat-1: the user engaged → don't pop the idle briefing offer
   try { _lastUserText = lastUserText(history) || _lastUserText; } catch {}
   markActivity();   // Task 5 — mark the burst so the cache keep-alive stays warm between turns
-  try { rstate.event('turn', { text: String(_lastUserText).slice(0, 160) }); } catch {}
+  // TRACE: one id for this whole turn. Every rstate.event() below is auto-stamped with it (ambient),
+  // so a long run can be reconstructed after the fact with rstate.traceEvents(id). A resumed mission
+  // passes its own id in so the resume shares the trace of the original attempt.
+  const _traceId = opts.traceId ? rstate.setTrace(opts.traceId) : rstate.startTrace();
+  try { rstate.event('turn', { text: String(_lastUserText).slice(0, 160), resumed: !!opts.traceId }); } catch {}
   const _turnT0 = Date.now(); const _usd0 = costToday().usd;   // router telemetry (#13)
   pendingGuidance = [];          // fresh per task
   const usedGuidance = [];       // collected for the post-task "learn this?" prompt
@@ -5189,14 +5207,13 @@ async function agentLoop(history, apiKey, event, opts = {}) {
       }
     } catch {}
     if (stream) { const stopped = agentState === 'stopped' || /^⏹/.test(String(text || '')); actionView({ status: stopped ? 'stopped' : 'done', step: stopped ? 'Stopped.' : 'Finished.', text: clean.slice(0, 400) }); }
-    return { text: clean, history, _streamed: stream };
+    // Close the trace LAST, after every event above has been stamped with it.
+    try { rstate.event('turn-end', { steps: iterations, ms: Date.now() - _turnT0, usd: +(costToday().usd - _usd0).toFixed(5) }); rstate.endTrace(); } catch {}
+    return { text: clean, history, _streamed: stream, traceId: _traceId };
   };
 
-  // PERSISTENCE — how hard BhatBot pushes to FINISH a complex task before it reports back. Tunable via
-  // config.persistence: 'normal' (default), 'high', or 'relentless'. Higher = more step headroom, a
-  // higher hard ceiling, bigger auto-extend jumps, and a "second wind" replan when it gets stuck.
-  const PERSIST = { normal: { base: 0, hard: 60, ext: 15, secondWind: false }, high: { base: 32, hard: 120, ext: 20, secondWind: true }, relentless: { base: 48, hard: 200, ext: 25, secondWind: true } };
-  const pcfg = PERSIST[loadConfig().persistence] || PERSIST.normal;
+  // PERSISTENCE profile for this turn (table + default live at module scope, near MAX_AGENT_ITERATIONS).
+  const pcfg = persistenceProfile(loadConfig().persistence);
   // Step budget: headroom for complex tasks that diagnose + retry across several approaches.
   // Configurable (agentMaxSteps); never below the default so a stale low value can't throttle.
   let maxIters = Math.max(Number(loadConfig().agentMaxSteps) || 0, MAX_AGENT_ITERATIONS, pcfg.base);
@@ -5284,9 +5301,19 @@ async function agentLoop(history, apiKey, event, opts = {}) {
         sendToAll(event, 'tool-update', { type: 'tool_done', name: block.name, result: r });
         return { type: 'tool_result', tool_use_id: block.id, content: JSON.stringify(r), is_error: true };
       }
+      // SPAN: one tool execution. Explicit (not ambient) because a PARALLEL_SAFE burst runs these
+      // concurrently — an ambient span would be mis-attributed the moment two interleave.
+      const _spanId = rstate.newId('s'); const _spanT0 = Date.now();
       let result;
       try { result = await executeTool(block.name, block.input); }
       catch (e) { result = { success: false, error: 'tool threw: ' + (e && e.message || String(e)) }; }
+      try {
+        rstate.event('tool', {
+          spanId: _spanId, name: block.name, step: iterations + 1, ms: Date.now() - _spanT0,
+          status: result && result.success === false ? 'error' : 'ok',
+          error: result && result.success === false ? String(result.error || '').slice(0, 200) : undefined,
+        });
+      } catch {}
       // Jarvis HUD: surface visuals inline in chat — generated images / design renders /
       // explicit screenshots as holo-cards, and 3D outputs as an in-chat spinning model.
       const showImage = result._image && (['generate_image', 'make_figure', 'simulate', 'sci_compute', 'studio_write', 'ui_inspect', 'screen_parse', 'vision_click', 'molecule', 'maps', 'phone_mirror'].includes(block.name)
