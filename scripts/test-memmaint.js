@@ -44,5 +44,36 @@ const after = fs.readFileSync(tmp, 'utf8').trim().split('\n');
 ok(t.trimmed === 70 && after.length === 30 && after[after.length - 1] === 'line99', 'trimLog: keeps last N lines');
 fs.unlinkSync(tmp);
 
+
+// ---- pruneRunDirs (deploy_drones leaves a run dir behind on every call, forever) ----
+{
+  const fs2 = require('fs'), os2 = require('os'), path2 = require('path');
+  const { pruneRunDirs } = require('../lib/memmaint');
+  const D = fs2.mkdtempSync(path2.join(os2.tmpdir(), 'bb-rundirs-'));
+  const NOW = 1_700_000_000_000;
+  const mk = (name, ageDays) => {
+    const p = path2.join(D, name);
+    fs2.mkdirSync(p, { recursive: true });
+    fs2.writeFileSync(path2.join(p, 'blackboard.jsonl'), 'x');
+    const t = new Date(NOW - ageDays * 864e5);
+    fs2.utimesSync(p, t, t);
+    return p;
+  };
+  mk('run-old', 30);
+  mk('run-recent', 2);
+  mk('keepme', 30);            // not a run dir — must never be touched
+  fs2.writeFileSync(path2.join(D, 'run-afile'), 'not a directory');
+
+  const r = pruneRunDirs(D, { maxAgeDays: 14, now: NOW });
+  ok(r.removed.includes('run-old'), 'pruneRunDirs: removes a run dir past the age cutoff');
+  ok(!r.removed.includes('run-recent'), 'pruneRunDirs: keeps a recent run dir (an in-flight run is never touched)');
+  ok(!r.removed.includes('keepme'), 'pruneRunDirs: only touches dirs matching the prefix');
+  ok(fs2.existsSync(path2.join(D, 'keepme')), 'pruneRunDirs: the unrelated dir survives on disk');
+  ok(fs2.existsSync(path2.join(D, 'run-afile')), 'pruneRunDirs: a FILE named like a run dir is left alone');
+  ok(!fs2.existsSync(path2.join(D, 'run-old')), 'pruneRunDirs: the pruned dir is really gone');
+  ok(pruneRunDirs('/no/such/dir', {}).removed.length === 0, 'pruneRunDirs: a missing dir → no-op, no throw');
+  try { fs2.rmSync(D, { recursive: true, force: true }); } catch {}
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

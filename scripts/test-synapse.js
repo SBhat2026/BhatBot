@@ -226,6 +226,24 @@ function mk(dirName, extra = {}) {
   }
   ok(tok('') === 0 && tok('abcd') === 1 && tok('a'.repeat(400)) === 100, 'tok: ~4 chars per token');
 
+
+  // ---- gardener wiring: the cycle must do UPKEEP, not just re-import ----
+  {
+    const s = mk('garden', { embedBatch, llm, isIdle: () => true });
+    const r = await s.tick();
+    ok(r.gardened && r.gardened.applied, 'tick: runs a gardening pass (free — the Connector only ever adds)');
+    const r2 = await s.tick();
+    ok(!r2.gardened, 'tick: gardening is on its own daily cadence, not every tick');
+    ok((await s.tick({ force: true })).gardened, 'tick: force runs gardening immediately');
+
+    // The learned threshold must feed back into the Connector, or "P4 learning" is decorative.
+    ok(s.connectThreshold() === 0.8, 'connectThreshold: defaults to 0.8');
+    s.brain.setMeta('connectThreshold', 0.88);
+    ok(s.connectThreshold() === 0.88, 'connectThreshold: reads the value the Gardener learned');
+    s.brain.setMeta('connectThreshold', 'garbage');
+    ok(s.connectThreshold() === 0.8, 'connectThreshold: a corrupt learned value falls back to the default');
+  }
+
   // ---- Electron-free, which is the entire reason this module was extracted ----
   {
     const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'synapse.js'), 'utf8');

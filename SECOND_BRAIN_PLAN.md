@@ -116,9 +116,9 @@ A new nav-rail tab. A force-directed graph (nodes by type/importance, edges by c
 | **D0 — Cloud deploy** | ✅ **DONE** | Live at `bhatbot-cloud.fly.dev`. Runs the old `lib/graph.js`, not SYNAPSE. |
 | **P0 — Substrate** | ✅ done | `lib/brain.js` (211 lines, Electron-free, `scripts/test-brain.js`). Importers: projects, semantic memories, `~` repos, Notion. |
 | **P1 — Connector + viz** | ✅ done | `synapseConnect` (cosine ≥ 0.8 + LLM rationale on the top 8) + the SYNAPSE tab (2D canvas force-graph, 3D toggle). |
-| **P2 — Curation** | ◑ partial | prune/confirm/inbox **shipped**. **Gardener NOT built** (no decay/merge/promote) — this is the next real gap. |
+| **P2 — Curation** | ✅ done | prune/confirm/inbox + **`lib/gardener.js`** (decay / merge+rewire / promote), running daily in the headless worker. |
 | **P3 — Scout** | ⬜ not built | No web enrichment at all. |
-| **P4 — Learning** | ⬜ not built | No learned thresholds or importance ranking. |
+| **P4 — Learning** | ◑ partial | Learned connect threshold + importance ranking, both in the Gardener. Better rationales still TODO. |
 | **P5 — Sync** | ⬜ not built | No local ↔ cloud ↔ Notion reconciliation. |
 
 > **✅ It runs now.** For most of this project's life `~/.bhatbot/brain/graph.json` **did not exist** —
@@ -134,14 +134,18 @@ A new nav-rail tab. A force-directed graph (nodes by type/importance, edges by c
   `scripts/synapse-worker.js` (plain node, no electron in its require graph — asserted by a test that
   spawns it) + `lib/pidlock.js` so it never double-runs alongside the GUI, installed as
   `com.bhatbot.synapse`. *Every phase below was theoretical until this landed.*
-- **P2b — Gardener**: `lib/gardener.js` — decay `confidence *= exp(-ageDays/tau)`, merge near-dupes at
-  cosine > 0.95 (reuse `brain.js`'s `cosine`), promote nodes with ≥N confirmed edges. Daily cadence
-  inside the headless worker.
+- **P2b — Gardener** ✅ **DONE (2026-07-27)**: `lib/gardener.js` — half-life decay on *unconfirmed*
+  edges only, near-duplicate merge that **rewires** the dropped node's edges (a naive merge silently
+  orphans them), importance promotion, and a clamped proportional controller over the confirm/prune
+  ratio that feeds `connectThreshold` back into the Connector. Runs daily inside the headless worker.
+  Note: the controller judges **only** `createdBy: 'connector'` edges — structural `part-of` imports
+  are born `confirmed` and nobody curates them, so counting them reads as 100% approval on an
+  unreviewed graph and walks the bar down (observed live: 30 import edges moved it 0.80 → 0.78).
 - **P3 — Scout**: `lib/scout.js`, autonomous web enrichment, auto-add flagged `unreviewed` + hard
   daily budget through the existing cost ledger. Pure and file-free by construction — so it is the one
   worker that could later move to the cloud.
-- **P4 — Learning**: threshold controller off confirm/prune rates in graph meta (a ~15-line
-  proportional controller, not an ML model — that is the whole useful surface here).
+- **P4 — Learning** ◑ mostly done in the Gardener; what remains is better *rationales*, not more
+  learning machinery.
 - **P5 — Sync**: push a **pruned** graph view (no embeddings, no file bodies) to the deployed cloud
   brain after each local pass, so the phone can read it when the Mac is off.
 

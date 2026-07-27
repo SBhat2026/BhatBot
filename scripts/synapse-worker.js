@@ -171,7 +171,14 @@ function printStatus() {
           maxLogLines: mc.maxLogLines || 20000,
           trimLogs: [path.join(os.homedir(), '.bhatbot', 'router.jsonl'), path.join(os.homedir(), '.bhatbot', 'logs', 'app.log')],
           semanticMaintain: () => { try { return semantic.maintain({ maxEpisodicAgeDays: mc.maxEpisodicAgeDays || 45 }); } catch (e) { return { error: e.message }; } },
-          onReport: (r) => { const s = r.semantic || {}; if (s.decayed || s.merged) log(`memmaint: semantic ${s.before}→${s.after} (decayed ${s.decayed}, merged ${s.merged})`); },
+          // Every deploy_drones call mints a run dir and nothing ever removed them.
+          pruneDirs: [{ dir: path.join(os.homedir(), '.bhatbot', 'drones'), prefix: 'run-', maxAgeDays: mc.maxRunDirAgeDays || 14 }],
+          onReport: (r) => {
+            const s = r.semantic || {};
+            if (s.decayed || s.merged) log(`memmaint: semantic ${s.before}→${s.after} (decayed ${s.decayed}, merged ${s.merged})`);
+            const dropped = (r.dirs || []).reduce((n, d) => n + ((d.removed || []).length), 0);
+            if (dropped) log(`memmaint: removed ${dropped} aged-out run director${dropped === 1 ? 'y' : 'ies'}`);
+          },
         },
       });
       log(`memmaint started (every ${Math.max(5, mc.intervalMinutes || 30)}min)`);
