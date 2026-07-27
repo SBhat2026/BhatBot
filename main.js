@@ -47,7 +47,7 @@ const agentTeam = require('./lib/orchestrator');        // C — parallel same-t
 const planner = require('./lib/planner');               // B1 — decompose a goal into a task DAG for the team
 const ambient = require('./lib/ambient');              // #18 — opt-in proactive Calendar/Mail awareness (OFF by default)
 const phonemirror = require('./lib/phonemirror');       // iPhone Mirroring glue — open/focus + gesture shortcuts + window geometry for the phone_mirror tool
-const { textHintFromSelector, splitForSpeech, estimateToolCost, stripReasoning, classifySpeech, createSpeechNormalizer, isPromissory, shouldExtendBudget, toolSig, progressLine, classifyIntake, conversationContinuity } = require('./lib/pure');  // SPLIT_PLAN step 1
+const { textHintFromSelector, splitForSpeech, estimateToolCost, stripReasoning, classifySpeech, createSpeechNormalizer, isPromissory, shouldExtendBudget, toolSig, detectLoop, progressLine, classifyIntake, conversationContinuity } = require('./lib/pure');  // SPLIT_PLAN step 1
 const WebSocket = require('ws');
 const { createTtsWs } = require('./lib/ttsws');   // T1 — continuous ws streaming TTS transport (config.ttsTransport==='ws')
 const speech = require('./lib/speech');                 // human-speech shaping: emoji→spoken-cue/drop + context-aware punctuation
@@ -69,6 +69,13 @@ const logins = require('./lib/logins');               // domain-keyed login prof
 const modePrompts = require('./lib/prompts');         // P4  — mode-switching system prompts
 const jobsBus = require('./lib/jobs');                // P5  — background job bus (task cards + spoken relay + steering)
 const scheduler = require('./lib/scheduler');         // proactive scheduler (recurring/one-off autonomous tasks)
+const { createMissions } = require('./lib/mission');   // durable missions — work that outlives one turn (journal/park/resume)
+const missions = createMissions({ log: (t) => console.log(t) });
+// The mission owned by the turn currently in flight. agentLoop is serial (agentState guards it), so a
+// single module-level pointer is accurate — and it's what lets the mission_plan TOOL reach the mission
+// without threading a handle through executeTool's signature. Same main-owns-state accessor pattern
+// the rest of this file uses. Always null between turns.
+let _activeMission = null;
 const simulate = require('./lib/simulate');           // physics/chem/math simulation sandbox (scipy/sympy/rdkit/openmm/pyscf…)
 const selfheal = require('./lib/selfheal');           // autonomous self-healing (DISABLED by default; verify-gated self_fix loop)
 const selfdrive = require('./lib/selfdrive');         // Phase 6 — ON-DEMAND self-improvement governor (reflect→pipeline→implement→verify; never pushes)
@@ -158,6 +165,9 @@ const PERSIST = {
 // steps with no second wind. Durable missions assume second wind exists. 'relentless' (200) is too
 // much unattended spend to impose by default.
 const PERSIST_DEFAULT = 'high';
+// A turn that finishes in fewer steps than this had nothing worth resuming — its mission is discarded
+// in finish() so ordinary short turns don't litter ~/.bhatbot/missions.
+const MISSION_MIN_STEPS = 4;
 function persistenceProfile(cfgValue) { return PERSIST[cfgValue] || PERSIST[PERSIST_DEFAULT]; }
 // TIER-2 THROUGHPUT: tools that are READ-ONLY / side-effect-free / order-independent, so when the
 // model fires several in one turn they can run CONCURRENTLY (the higher per-minute cap serves the
@@ -1251,7 +1261,7 @@ function budgetOk(model, needIn, needOut) {
 function ratePct(model) { try { const b = rateBudget(model); return Math.max(0, Math.min(100, Math.round((b.inFree / (b.inSafe || 1)) * 100))); } catch { return null; } }
 function emitRateStatus(p) { try { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('rate-status', p); } catch {} }
 async function waitForBudget(model, needIn, needOut = 0, maxWaitMs = 75000) {
-  const start = Date.now(); let announced = false;
+  const start = Date.now(); let announced = false, lastTick = 0;
   const clear = () => { if (announced) emitRateStatus({ state: 'clear' }); };
   while (Date.now() - start < maxWaitMs) {
     if (budgetOk(model, needIn, needOut)) { clear(); return true; }
@@ -1261,6 +1271,15 @@ async function waitForBudget(model, needIn, needOut = 0, maxWaitMs = 75000) {
       sendToActivity('tool-update', { type: 'thinking', text: `⏳ pacing for the ${model.replace(/^claude-/, '')} rate limit — continuing in a moment (${which} needed)` });
       emitRateStatus({ state: 'pacing', model, pct: ratePct(model) });   // subtle titlebar chip in the main window
       announced = true;
+      lastTick = Date.now();
+    } else if (Date.now() - lastTick > 12000) {
+      // A single line at t=0 followed by up to 75s of silence is indistinguishable from a hang —
+      // which is what it looked like during long paced runs. Keep a countdown alive so the wait
+      // reads as deliberate pacing, and re-emit the chip in case the window opened mid-wait.
+      const waited = Math.round((Date.now() - start) / 1000);
+      sendToActivity('tool-update', { type: 'thinking', text: `⏳ still pacing — ${waited}s waited, ${Math.max(0, Math.round((maxWaitMs - (Date.now() - start)) / 1000))}s before I give up and retrim` });
+      emitRateStatus({ state: 'pacing', model, pct: ratePct(model) });
+      lastTick = Date.now();
     }
     await sleep(3000);
   }
@@ -4294,6 +4313,33 @@ async function executeTool(name, input) {
         result = { success: false, error: 'unknown subagent action: ' + act };
         break;
       }
+      // MISSION PLAN — the model's durable todo list. Externalizing the plan is what keeps a long run
+      // from re-planning in circles (the canonical AutoGPT failure): it survives context trimming and
+      // is fed back automatically by the mission anchor after every trim.
+      case 'mission_plan': {
+        const m = _activeMission;
+        if (!m) { result = { success: true, note: 'No mission is active (this turn is too short to need a durable plan) — just do the task.', plan: [] }; break; }
+        const act = input.action || 'read';
+        if (act === 'set') {
+          if (!Array.isArray(input.items) || !input.items.length) { result = { success: false, error: 'items required — an ordered array of short step strings' }; break; }
+          const items = m.plan.set(input.items.slice(0, 40));
+          sendToActivity('tool-update', { type: 'thinking', text: `📋 plan set — ${items.length} steps` });
+          result = { success: true, plan: items.map((p, i) => ({ index: i, ...p })) };
+          break;
+        }
+        if (act === 'mark') {
+          const upd = m.plan.mark(input.index, input.status, input.note);
+          if (!upd) { result = { success: false, error: `could not mark step ${input.index} as "${input.status}" — check the index against action:"read" and use one of todo/doing/done/blocked` }; break; }
+          const d = m.plan.digest();
+          sendToActivity('tool-update', { type: 'thinking', text: `📋 ${input.status}: ${upd.text} (${d.done}/${d.total})` });
+          result = { success: true, marked: upd, progress: `${d.done}/${d.total}` };
+          break;
+        }
+        const items = m.plan.read();
+        const d = m.plan.digest();
+        result = { success: true, missionId: m.id, progress: `${d.done}/${d.total}`, plan: items.map((p, i) => ({ index: i, ...p })) };
+        break;
+      }
       case 'agent_team': {
         const act = input.action;
         if (act === 'ensemble') {
@@ -5082,8 +5128,31 @@ async function agentLoop(history, apiKey, event, opts = {}) {
   pendingGuidance = [];          // fresh per task
   const usedGuidance = [];       // collected for the post-task "learn this?" prompt
   let iterations = 0;
+  // ── MISSION (seam S1) ───────────────────────────────────────────────────────────────────────────
+  // A durable sidecar for this turn: goal stored verbatim, every tool journaled, parkable + resumable.
+  // Opened only for ACTION-shaped asks (a chat reply has nothing to resume), and discarded in finish()
+  // if the turn ends quickly — ordinary two-step turns must not litter the disk. See lib/mission.js.
+  const _missionGoal = lastUserText(history) || _lastUserText || '';
+  let _mission = null, _replay = null;
+  try {
+    if (opts.missionId) {
+      _mission = missions.attach(opts.missionId);
+      // Only a RESUMED mission gets a replay cache — a fresh one has nothing to replay.
+      if (_mission && loadConfig().missionReplay !== false) {
+        _replay = _mission.replay();
+        if (_replay.size) sendToActivity('tool-update', { type: 'thinking', text: `↩️ resuming ${_mission.id} — ${_replay.size} prior read-only step(s) can be replayed` });
+      }
+    } else if (loadConfig().missions !== false && looksLikeToolTask(_missionGoal)) {
+      _mission = missions.open({ goal: _missionGoal, traceId: _traceId, budgetUsd: Number(loadConfig().missionBudgetUsd) || 5 });
+    }
+    _activeMission = _mission;   // expose it to the mission_plan tool for the duration of this turn
+  } catch (e) { console.warn('[mission] open failed (continuing without one):', e.message); }
+
   history = validateHistory(history);            // heal any corruption before it compounds
   history = await trimHistory(history, apiKey);
+  // Seam S2 (entry): trimHistory summarizes the HEAD of history — which is exactly where the original
+  // request lives. Re-anchor immediately so a long/resumed run never loses the goal it was given.
+  if (_mission) history = [...history, { role: 'user', content: _mission.anchor({ resumed: !!opts.missionId }) }];
 
   // P4 — select the operating mode for this task: the local router's classification when
   // the pipeline escalated to us, else the zero-cost regex classifier on the task text.
@@ -5207,9 +5276,22 @@ async function agentLoop(history, apiKey, event, opts = {}) {
       }
     } catch {}
     if (stream) { const stopped = agentState === 'stopped' || /^⏹/.test(String(text || '')); actionView({ status: stopped ? 'stopped' : 'done', step: stopped ? 'Stopped.' : 'Finished.', text: clean.slice(0, 400) }); }
+    // MISSION (seam S1, close half). finish() is the single funnel for EVERY exit path, so this is the
+    // one place a mission can be closed correctly. A mission already parked (rate abort, step budget)
+    // must stay parked — closing it here would strand the work it was holding for resume.
+    try {
+      if (_mission) {
+        _mission.spend(costToday().usd - _usd0);
+        const st = (_mission.meta || {}).status;
+        if (st === 'parked') { /* deliberately left parked — the scheduler tick owns it now */ }
+        else if (iterations < MISSION_MIN_STEPS && agentState !== 'stopped') _mission.discard();   // ordinary short turn → no litter
+        else { _mission.saveHistory(history); _mission.close(agentState === 'stopped' ? 'failed' : 'done', agentState === 'stopped' ? 'stopped by user' : ''); }
+      }
+    } catch (e) { console.warn('[mission] close failed:', e.message); }
+    finally { _activeMission = null; }
     // Close the trace LAST, after every event above has been stamped with it.
     try { rstate.event('turn-end', { steps: iterations, ms: Date.now() - _turnT0, usd: +(costToday().usd - _usd0).toFixed(5) }); rstate.endTrace(); } catch {}
-    return { text: clean, history, _streamed: stream, traceId: _traceId };
+    return { text: clean, history, _streamed: stream, traceId: _traceId, missionId: _mission ? _mission.id : null };
   };
 
   // PERSISTENCE profile for this turn (table + default live at module scope, near MAX_AGENT_ITERATIONS).
@@ -5217,6 +5299,14 @@ async function agentLoop(history, apiKey, event, opts = {}) {
   // Step budget: headroom for complex tasks that diagnose + retry across several approaches.
   // Configurable (agentMaxSteps); never below the default so a stale low value can't throttle.
   let maxIters = Math.max(Number(loadConfig().agentMaxSteps) || 0, MAX_AGENT_ITERATIONS, pcfg.base);
+  // A RESUMED mission has already demonstrated it needs more room than a fresh turn — it parked once
+  // precisely because it ran out. Starting it back at the same budget guarantees it parks again in the
+  // same place, burning a resume for nothing. Grow the base with each attempt, capped so a genuinely
+  // stuck mission still hits the durable resume/spend ceilings rather than ratcheting forever.
+  if (_mission) {
+    const _resumes = Number((_mission.meta || {}).resumeCount) || 0;
+    if (_resumes > 0) maxIters += Math.min(_resumes * 10, 40);
+  }
   // Auto-extend (Siddhant's choice): keep going past the budget while genuinely productive, up to a
   // HARD ceiling that bounds worst-case spend even if the agent loops. Unproductive = consecutive
   // iterations with no NOVEL tool signature (stuck/repeating) → stop extending.
@@ -5225,6 +5315,7 @@ async function agentLoop(history, apiKey, event, opts = {}) {
   const userText0 = lastUserText(history);            // the original request, for the action-verify judge
   let toolsRan = 0, unproductive = 0, verifyCount = 0; const toolNamesRan = []; const seenSigs = [];
   let consecFail = 0, failNudgedAt = -1, _secondWind = false, _lastNarrateTs = Date.now();   // persistence: failure-retry ladder + one-time stuck replan + text-heartbeat clock
+  let _loopNudged = false;   // loop breaker fires at most once per turn (so the nudge can't become the loop)
   const toolTrace = []; const _readPrefix = []; let _prefixOpen = true;   // procedural memory: this turn's ordered step-series + its leading read-only run (auto-runnable ahead of the model next time)
   if (stream) ttsLastAudioTs = Date.now();            // measure the progress-heartbeat silence from turn start
   while (iterations < maxIters) {
@@ -5237,7 +5328,20 @@ async function agentLoop(history, apiKey, event, opts = {}) {
     try {
       response = await callModel(history, apiKey, iterations === 0, onText);
     } catch (e) {
-      if (e && e.rateBudget) { history = []; return finish(e.message); }  // notify + reset for next task
+      // RATE ABORT (seam S4). This used to be `history = []` — a pacing failure threw away the entire
+      // conversation, including hours of work, over a transient per-minute cap. The rate path above
+      // (callModel) already tries Ollama, cross-provider offload, waitForBudget pacing, and a harder
+      // capTokens retrim before it ever throws, so reaching here means "genuinely over the cap right
+      // now", not "this work is worthless". Park it if we can; otherwise shrink, never obliterate.
+      if (e && e.rateBudget) {
+        if (_mission) {
+          _mission.park('rate-budget: ' + e.message, history);
+          try { rstate.event('mission-park', { missionId: _mission.id, reason: 'rate-budget', steps: iterations }); } catch {}
+          return finish(e.message + `\n\n(Parked as ${_mission.id} — I'll pick this back up automatically once the rate window drains.)`);
+        }
+        history = capTokens(history, 6000);   // keep the goal + recent tail; drop the bulk
+        return finish(e.message);
+      }
       throw e;
     }
     sendToActivity('model', { model: response._model });
@@ -5304,16 +5408,39 @@ async function agentLoop(history, apiKey, event, opts = {}) {
       // SPAN: one tool execution. Explicit (not ambient) because a PARALLEL_SAFE burst runs these
       // concurrently — an ambient span would be mis-attributed the moment two interleave.
       const _spanId = rstate.newId('s'); const _spanT0 = Date.now();
+      // MEMOIZED REPLAY: on a RESUMED mission, a read-only step that already succeeded with the same
+      // (tool, args) signature returns its cached digest instead of re-running — so picking a run back
+      // up doesn't re-crawl the web or re-read the same files. Gated on PARALLEL_SAFE, which is
+      // already the curated no-side-effect set: run_shell / write_file / edit_file are NEVER replayed.
+      // The cache goes cold at the first divergence — once the agent does something new, the rest of
+      // the old journal is no longer a faithful replay of this run.
+      if (_replay && _replay.active) {
+        if (PARALLEL_SAFE.has(block.name)) {
+          const hit = _replay.get(block.name, block.input);
+          if (hit) {
+            const cached = { success: true, _replayed: true, step: hit.seq, result: hit.head, truncated: hit.bytes > (hit.head || '').length };
+            sendToAll(event, 'tool-update', { type: 'tool_done', name: block.name, result: cached });
+            return { type: 'tool_result', tool_use_id: block.id, content: `[replayed from step ${hit.seq} of this mission — identical call already succeeded]\n` + hit.head };
+          }
+          _replay.diverge();   // a NEW read → the cached prefix no longer matches this run
+        } else {
+          _replay.diverge();   // any side-effecting tool ends the replay window outright
+        }
+      }
       let result;
       try { result = await executeTool(block.name, block.input); }
       catch (e) { result = { success: false, error: 'tool threw: ' + (e && e.message || String(e)) }; }
+      const _spanMs = Date.now() - _spanT0;
+      const _spanStatus = result && result.success === false ? 'error' : 'ok';
       try {
         rstate.event('tool', {
-          spanId: _spanId, name: block.name, step: iterations + 1, ms: Date.now() - _spanT0,
-          status: result && result.success === false ? 'error' : 'ok',
-          error: result && result.success === false ? String(result.error || '').slice(0, 200) : undefined,
+          spanId: _spanId, name: block.name, step: iterations + 1, ms: _spanMs, status: _spanStatus,
+          error: _spanStatus === 'error' ? String(result.error || '').slice(0, 200) : undefined,
         });
       } catch {}
+      // MISSION (seam S3): journal the step. Only a DIGEST of the result is stored — the journal has
+      // to stay small enough to read back in full on resume, and results can be megabytes of page text.
+      try { if (_mission) _mission.step({ name: block.name, input: block.input, result, ms: _spanMs, spanId: _spanId, status: _spanStatus }); } catch {}
       // Jarvis HUD: surface visuals inline in chat — generated images / design renders /
       // explicit screenshots as holo-cards, and 3D outputs as an in-chat spinning model.
       const showImage = result._image && (['generate_image', 'make_figure', 'simulate', 'sci_compute', 'studio_write', 'ui_inspect', 'screen_parse', 'vision_click', 'molecule', 'maps', 'phone_mirror'].includes(block.name)
@@ -5403,6 +5530,20 @@ async function agentLoop(history, apiKey, event, opts = {}) {
     const novel = sigs.some((s) => !seenSigs.includes(s));
     for (const s of sigs) seenSigs.push(s); while (seenSigs.length > 12) seenSigs.shift();
     unproductive = novel ? 0 : unproductive + 1;
+    // LOOP BREAKER: `unproductive` above only ever ENDS the turn, and by then the budget is spent.
+    // This catches the tighter, more damaging pattern — the SAME (tool, args) call landing over and
+    // over — early enough to REDIRECT rather than just cut off. Fires once per turn so the nudge
+    // can't itself become the loop. Keyed on the exact signature, so a retry with genuinely changed
+    // arguments is left alone; that's problem-solving, not thrashing.
+    if (!_loopNudged && loadConfig().loopBreaker !== false) {
+      const _loop = detectLoop(seenSigs);
+      if (_loop) {
+        _loopNudged = true;
+        history = [...history, { role: 'user', content: `[LOOP DETECTED — you have called ${_loop.name} with identical arguments ${_loop.count} times in the last ${_loop.window} steps. It is not going to start working. Do NOT call it that way again. Either (a) change the arguments meaningfully, (b) reach the same goal a different way, or (c) if you are genuinely blocked, say so now: what you tried, and the one thing you need. Re-read the goal before your next action.]` }];
+        sendToAll(event, 'tool-update', { type: 'thinking', text: `🔁 loop detected — ${_loop.name} ×${_loop.count}; forcing a different approach` });
+        try { rstate.event('loop-detected', { tool: _loop.name, count: _loop.count }); } catch {}
+      }
+    }
     // Spoken progress heartbeat: a long turn with no audio for a while gets a brief tool-aware "still
     // working" line so tier-1-paced multi-tool turns never sit in dead air (Siddhant accepts the cost).
     if (stream && ttsSeq != null && loadConfig().spokenProgress !== false && loadConfig().ttsEnabled !== false) {
@@ -5432,6 +5573,10 @@ async function agentLoop(history, apiKey, event, opts = {}) {
       const before = history.length;
       history = await trimHistory(history, apiKey);
       if (history.length < before) sendToActivity('tool-update', { type: 'thinking', text: `🗜 context summarized mid-loop (${before}→${history.length} msgs) to stay within the window` });
+      // MISSION (seam S2, mid-loop): the trim just summarized the head — where the original request
+      // lives. Put the goal, the open plan, and the last few steps back at the TAIL, where attention
+      // actually lands. Without this, the longer a run goes the more surely it forgets its own task.
+      if (_mission) history = [...history, { role: 'user', content: _mission.anchor({ step: iterations + 1, maxSteps: maxIters }) }];
     }
     iterations++;
     // AUTO-EXTEND (Siddhant's choice): about to hit the budget but still doing new work → raise it,
@@ -5456,12 +5601,23 @@ async function agentLoop(history, apiKey, event, opts = {}) {
   // Budget exhausted — don't dead-end. One final tool-less turn so the user gets a concrete
   // progress report + the next action instead of a bare "max iterations" stub.
   history = [...history, { role: 'user', content: '[You have reached the step budget for this turn. Do NOT call any more tools. In one or two short sentences (spoken) plus a brief on-screen list, tell me concretely: what you accomplished, what remains, and the single next action to finish it.]' }];
+  // MISSION (seam S5): the summary is good UX, but it used to be the END — a long task that ran out
+  // of steps was simply over. Park it instead, so the scheduler tick picks it back up (bounded by the
+  // durable resume/spend/age caps in mission.json) and the work actually continues.
+  let _parkedNote = '';
+  try {
+    if (_mission && loadConfig().missionAutoContinue !== false) {
+      _mission.park('step-budget: exhausted ' + maxIters + ' steps', history);
+      try { rstate.event('mission-park', { missionId: _mission.id, reason: 'step-budget', steps: iterations }); } catch {}
+      _parkedNote = `\n\n(Parked as ${_mission.id} — I'll continue this automatically.)`;
+    }
+  } catch (e) { console.warn('[mission] park-on-budget failed:', e.message); }
   try {
     const r = await callModel(history, apiKey, false, onText);
     history = [...history, { role: 'assistant', content: r.content }];
     const text = r.content.filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim();
-    return finish(text || '⚠ Reached the step budget for this turn — partial progress above.');
-  } catch { return finish('⚠ Reached the step budget for this turn.'); }
+    return finish((text || '⚠ Reached the step budget for this turn — partial progress above.') + _parkedNote);
+  } catch { return finish('⚠ Reached the step budget for this turn.' + _parkedNote); }
 }
 
 // ===========================================================================
@@ -7168,6 +7324,21 @@ function startSynapseWorker() {
   console.log(`[synapse] worker started (re-import every ${c.hydrateMin}min; paid pass every ${c.connectHours}h when idle, under $${synapseBudget().toFixed(2)})`);
 }
 
+// CRASH RECOVERY. A mission left in `running` by a crash, a force-quit, or a power loss has no live
+// process behind it — nothing else can leave one in that state. Park those at boot so the normal
+// resume path adopts them. Before this existed, work in flight when the app died was simply gone.
+function reapOrphanMissions() {
+  try {
+    const reaped = missions.reapOrphans({ staleMs: 5 * 60 * 1000 });
+    if (reaped.length) {
+      console.log(`[mission] adopted ${reaped.length} mission(s) orphaned by a previous process: ${reaped.join(', ')}`);
+      rstate.event('mission-reap', { count: reaped.length, ids: reaped });
+    }
+    const parked = missions.list({ status: 'parked' });
+    if (parked.length) console.log(`[mission] ${parked.length} parked mission(s) awaiting resume`);
+  } catch (e) { console.warn('[mission] orphan reap failed:', e.message); }
+}
+
 // ── MCP-client hub ──────────────────────────────────────────────────────────────────────────────
 // Spawn every enabled external MCP server from config.mcpPlugins and surface its tools to the agent
 // loop (namespaced mcp__<plugin>__<tool>). Best-effort + async so a slow/broken plugin never blocks boot.
@@ -7205,6 +7376,9 @@ function startPresenceFeed() {
 async function tickScheduler() {
   if (schedulerBusy) return;                       // SERIAL: never run two scheduled tasks at once
   if (agentState !== 'idle') return;               // PRECEDENCE: yield to a live foreground turn; retry next tick
+  // MISSIONS ride the SAME tick, under the same two guards: never concurrent, always yields to the
+  // user. A parked mission continues before a scheduled task because it is work already in flight.
+  try { if (await tickMissions()) return; } catch (e) { console.warn('[mission] tick failed:', e.message); }
   let due = [];
   try { due = scheduler.due(Date.now()); } catch { return; }
   if (!due.length) return;
@@ -7235,6 +7409,78 @@ async function runScheduledTask(s) {
     try { telegramNotify('⚠️ Scheduled task "' + s.title + '" failed: ' + e.message); } catch {}
   } finally {
     scheduler.markRan(s.id, Date.now());   // advance/disable AFTER running so a crash mid-run retries next tick
+  }
+}
+
+// ── MISSION CONTINUITY ────────────────────────────────────────────────────────────────────────────
+// The piece that turns "durable" into "continuous". A mission parks when it runs out of steps, gets
+// paced out by the rate limiter, or its process dies; this picks it back up — bounded by caps that
+// live in mission.json, so a crash-loop cannot reset them (that is the whole difference between
+// resumable and runaway). Serial, idle-gated, and it always yields to the user.
+function missionCaps() {
+  const c = loadConfig();
+  return {
+    maxResumes: Number(c.missionMaxResumes) || 20,
+    maxSpendUsd: Number(c.missionBudgetUsd) || 5,
+    maxAgeHours: Number(c.missionMaxAgeHours) || 24,
+  };
+}
+let _missionRunning = false;
+async function tickMissions() {
+  if (_missionRunning) return false;
+  if (loadConfig().missionAutoContinue === false) return false;
+  let verdict;
+  try { verdict = missions.dueForResume(missionCaps()); } catch { return false; }
+
+  // Retire anything past a cap FIRST, so it stops being considered every 30s.
+  for (const x of verdict.expired) {
+    try {
+      const m = missions.attach(x.id);
+      if (!m) continue;
+      m.abandon(x.reason);
+      rstate.event('mission-abandon', { missionId: x.id, reason: x.reason });
+      sendToActivity('tool-update', { type: 'thinking', text: `🛑 mission ${x.id} abandoned — ${x.reason}` });
+      telegramNotify(`🛑 Mission abandoned (${x.reason}):\n${(m.meta || {}).goal || ''}`.slice(0, 500));
+    } catch {}
+  }
+
+  const next = verdict.ready[0];   // SERIAL: one at a time, oldest-updated first
+  if (!next) return false;
+  _missionRunning = true;
+  try { await resumeMission(next.id); } catch (e) { console.error('[mission] resume failed:', next.id, e.message); }
+  finally { _missionRunning = false; }
+  return true;
+}
+
+// Resume one parked mission. Deliberately mirrors runScheduledTask: same headless event shim, same
+// announce/notify treatment — a resumed mission IS a proactive run, nobody is watching the screen.
+async function resumeMission(id) {
+  const m = missions.resume(id);
+  if (!m) return null;
+  const meta = m.meta || {};
+  const attempt = meta.resumeCount || 1;
+  sendToActivity('tool-update', { type: 'thinking', text: `↩️ resuming mission ${id} (attempt ${attempt + 1}) — ${String(meta.goal).slice(0, 120)}` });
+  rstate.event('mission-resume', { missionId: id, attempt, reason: meta.lastError });
+  try {
+    // Restore the conversation the park saved. If it's gone (or was never saved), fall back to the
+    // goal alone — the anchor carries the plan and the journal, so a bare restart still knows the job.
+    let history = m.history();
+    if (!Array.isArray(history) || !history.length) history = [{ role: 'user', content: meta.goal }];
+    history = [...history, { role: 'user', content: m.anchorResume() }];
+    const res = await agentLoop(history, getApiKey(), { sender: { send() {} } }, { missionId: id, traceId: meta.traceId || undefined });
+    const text = (res && res.text) || 'done';
+    const after = (missions.attach(id) || {}).meta || {};
+    // Only announce a genuine ending. A mission that parked again is mid-flight — narrating every
+    // hop of an hours-long run would be noise, and the tick will just pick it up again.
+    if (after.status !== 'parked') {
+      try { telegramNotify(`✅ Mission complete:\n${String(meta.goal).slice(0, 200)}\n\n${text.slice(0, 600)}`); } catch {}
+      sendToActivity('tool-update', { type: 'thinking', text: `✅ mission ${id} → ${text.slice(0, 200)}` });
+    }
+    return res;
+  } catch (e) {
+    console.error('[mission] resume errored:', id, e.message);
+    try { missions.attach(id).park('resume error: ' + e.message); } catch {}
+    return null;
   }
 }
 
@@ -9096,7 +9342,8 @@ app.whenReady().then(() => {
     startTelegramBridge();
     // Feat-1: clock-scheduled auto morning briefing removed — briefings are on demand now. (scheduleBriefing()
     // remains available; re-enable by calling it if you ever want the timed brief back.)
-    startScheduler();   // proactive recurring/one-off tasks
+    reapOrphanMissions();   // adopt missions orphaned by a crash/quit BEFORE the scheduler starts ticking
+    startScheduler();   // proactive recurring/one-off tasks (also drives mission resume — tickMissions)
     startAmbient();     // #18 opt-in ambient awareness (no-op unless config.ambient.enabled)
     startMemoryMaintenance();   // always-on memory upkeep (runs on a timer, independent of the window)
     startSynapseWorker();       // SYNAPSE second brain — free re-import loop + slow budget-capped paid pass

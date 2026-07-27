@@ -159,11 +159,152 @@ function logs(args) {
   });
 }
 
+// ── missions ─────────────────────────────────────────────────────────────────────────────────────
+// Reads ~/.bhatbot/missions straight off disk — no IPC, so it works with the app CLOSED. That matters:
+// the times you most want to know what's parked are exactly the times nothing is running.
+function missionStore() { return require('../lib/mission').createMissions({}); }
+const AGE = (ms) => {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return s + 's';
+  if (s < 3600) return Math.round(s / 60) + 'm';
+  if (s < 86400) return Math.round(s / 3600) + 'h';
+  return Math.round(s / 86400) + 'd';
+};
+const STATUS_COLOR = { running: C.cyan, parked: C.yellow, done: C.green, failed: C.red, abandoned: C.dim };
+
+function missions(args) {
+  const M = missionStore();
+  const sub = args[0] || 'list';
+
+  if (sub === 'list') {
+    const all = M.list();
+    if (!all.length) return console.log(C.dim('(no missions — ~/.bhatbot/missions is empty)'));
+    for (const m of all) {
+      const col = STATUS_COLOR[m.status] || C.dim;
+      const bits = [`${m.stepsUsed || 0} steps`, `$${(m.spendUsd || 0).toFixed(2)}`];
+      if (m.resumeCount) bits.push(`${m.resumeCount} resume${m.resumeCount > 1 ? 's' : ''}`);
+      console.log(`${col(m.status.padEnd(9))} ${C.bold(m.id)} ${C.dim(AGE(Date.now() - (m.updatedAt || 0)) + ' ago')}  ${C.dim(bits.join(' · '))}`);
+      console.log(`  ${String(m.goal || '').replace(/\s+/g, ' ').slice(0, 150)}`);
+      if (m.status === 'parked' && m.lastError) console.log(`  ${C.yellow('parked:')} ${C.dim(m.lastError.slice(0, 140))}`);
+    }
+    const parked = all.filter((m) => m.status === 'parked').length;
+    if (parked) console.log(C.dim(`\n${parked} parked — the app resumes these automatically on its 30s tick (needs BhatBot running).`));
+    return;
+  }
+
+  const id = args[1];
+  if (!id) { console.error('✗ usage: bhatctl missions <show|resume|abandon> <id>'); process.exit(2); }
+  const m = M.attach(id);
+  if (!m) { console.error(C.red('✗ no mission ' + id)); process.exit(1); }
+
+  if (sub === 'show') {
+    const meta = m.meta;
+    console.log(C.bold('GOAL  ') + meta.goal);
+    console.log(C.bold('STATE ') + (STATUS_COLOR[meta.status] || C.dim)(meta.status)
+      + C.dim(`  ${meta.stepsUsed || 0} steps · $${(meta.spendUsd || 0).toFixed(2)} of $${meta.budgetUsd ?? '—'} · ${meta.resumeCount || 0} resumes · ${AGE(Date.now() - meta.createdAt)} old`));
+    if (meta.lastError) console.log(C.bold('WHY   ') + C.yellow(meta.lastError));
+    if (meta.traceId) console.log(C.bold('TRACE ') + C.dim(meta.traceId));
+    const plan = m.plan.read();
+    if (plan.length) {
+      console.log(C.bold('\nPLAN'));
+      for (const p of plan) console.log(`  [${{ todo: ' ', doing: '~', done: 'x', blocked: '!' }[p.status]}] ${p.status === 'done' ? C.dim(p.text) : p.text}${p.note ? C.dim('  — ' + p.note) : ''}`);
+    }
+    const j = m.journal();
+    if (j.length) {
+      console.log(C.bold(`\nJOURNAL (last 15 of ${j.length})`));
+      for (const r of j.slice(-15)) {
+        console.log(`  ${C.dim(String(r.seq).padStart(3))} ${(r.status === 'error' ? C.red : C.cyan)(r.name.padEnd(16))} ${C.dim((r.ms || 0) + 'ms')}  ${String(r.head || '').replace(/\s+/g, ' ').slice(0, 90)}`);
+      }
+    }
+    console.log(C.dim('\ndir: ' + m.dir));
+    return;
+  }
+
+  if (sub === 'resume') {
+    // Flip it to parked + clear the backoff so the running app's next tick adopts it. We deliberately
+    // don't run the agent here — this CLI has no Electron, no vault, and no tools.
+    m.park('manual resume requested via bhatctl');
+    console.log(`✓ ${id} queued — the running app will pick it up on its next tick (within ~30s).`);
+    console.log(C.dim('  (If BhatBot is not running, start it — missions only resume inside the app.)'));
+    return;
+  }
+  if (sub === 'abandon') { m.abandon('abandoned via bhatctl'); return console.log(`✓ ${id} abandoned.`); }
+  console.error('✗ unknown: bhatctl missions ' + sub);
+  process.exit(2);
+}
+
+// ── doctor ───────────────────────────────────────────────────────────────────────────────────────
+// One command that answers "is any of this actually running?" — the question that went unasked while
+// two LaunchAgents sat dead for weeks and the second brain never wrote a single node.
+async function doctor() {
+  const { execSync } = require('child_process');
+  const HOME = os.homedir();
+  const line = (label, good, detail) => console.log(`${good === null ? C.yellow('⚠') : good ? C.green('✅') : C.red('❌')} ${label.padEnd(22)} ${C.dim(detail)}`);
+
+  console.log(C.bold('\nLAUNCH AGENTS'));
+  let agents = '';
+  try { agents = execSync('launchctl list', { encoding: 'utf8' }); } catch {}
+  const rows = agents.split('\n').filter((l) => /bhatbot|siddhant\.bhat/i.test(l));
+  if (!rows.length) line('bhatbot agents', null, 'none loaded — nothing runs unless the app is open');
+  for (const r of rows) {
+    const [pid, status, label] = r.trim().split(/\s+/);
+    line(label, status === '0', `pid=${pid} last-exit=${status}${status !== '0' ? '  ← FAILING' : ''}`);
+  }
+
+  console.log(C.bold('\nSTATE'));
+  const statePath = path.join(HOME, '.bhatbot', 'state.json');
+  try {
+    const st = fs.statSync(statePath);
+    const age = Date.now() - st.mtimeMs;
+    line('state.json', age < 60000, `updated ${AGE(age)} ago` + (age > 60000 ? '  ← app is not running' : ''));
+  } catch { line('state.json', false, 'missing — the app has never run, or never got far enough to write it'); }
+
+  console.log(C.bold('\nSECOND BRAIN'));
+  const graphPath = path.join(HOME, '.bhatbot', 'brain', 'graph.json');
+  try {
+    const g = JSON.parse(fs.readFileSync(graphPath, 'utf8'));
+    const age = Date.now() - fs.statSync(graphPath).mtimeMs;
+    const n = Object.keys(g.nodes || {}).length, e = Object.keys(g.edges || {}).length;
+    line('brain/graph.json', age < 2 * 3600 * 1000, `${n} nodes · ${e} edges · updated ${AGE(age)} ago`);
+    line('synapse spend', true, `$${Number((g.meta || {}).spendUsd || 0).toFixed(3)} of the daily cap`);
+  } catch { line('brain/graph.json', false, 'MISSING — the SYNAPSE worker has never produced a graph'); }
+
+  console.log(C.bold('\nMISSIONS'));
+  try {
+    const all = missionStore().list();
+    const by = (s) => all.filter((m) => m.status === s).length;
+    line('missions', true, all.length ? `${all.length} total · ${by('running')} running · ${by('parked')} parked · ${by('abandoned')} abandoned` : 'none yet');
+    for (const m of all.filter((x) => x.status === 'parked')) console.log(C.dim(`     ${m.id} — ${String(m.goal).slice(0, 80)}`));
+  } catch (e) { line('missions', false, e.message); }
+
+  console.log(C.bold('\nCLOUD'));
+  const c = cfg();
+  if (!c.cloudUrl) line('cloud', null, 'no cloudUrl configured');
+  else {
+    try {
+      const r = await fetch(c.cloudUrl.replace(/\/+$/, '') + '/health', { signal: AbortSignal.timeout(6000) });
+      line('cloud', r.status === 401 || r.ok, `${c.cloudUrl} → HTTP ${r.status}${r.status === 401 ? ' (up, auth-gated)' : ''}`);
+    } catch (e) { line('cloud', false, `${c.cloudUrl} unreachable — ${e.message}`); }
+  }
+
+  console.log(C.bold('\nRECENT ERRORS'));
+  try {
+    const evs = fs.readFileSync(path.join(HOME, '.bhatbot', 'logs', 'events.jsonl'), 'utf8')
+      .trim().split('\n').map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean)
+      .filter((e) => e.kind === 'error' || e.status === 'error').slice(-5);
+    if (!evs.length) console.log(C.dim('  (none in the recent event log)'));
+    for (const e of evs) console.log(`  ${C.dim(e.ts)} ${C.red(e.kind)} ${String(e.error || e.msg || e.name || '').slice(0, 100)}`);
+  } catch { console.log(C.dim('  (no events.jsonl yet)')); }
+  console.log('');
+}
+
 (async () => {
   const argv = process.argv.slice(2);
   const cmd = argv[0];
   if (cmd === 'logs') return logs(argv.slice(1));
   if (cmd === 'health') return health();
+  if (cmd === 'doctor') return doctor();
+  if (cmd === 'missions' || cmd === 'mission') return missions(argv.slice(1));
   if (cmd === 'wc') return send(['world cup', (argv[1] || 'report')]);
   // default: treat all args as a prompt to send
   return send(argv);

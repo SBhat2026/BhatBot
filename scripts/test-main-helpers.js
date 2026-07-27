@@ -206,5 +206,41 @@ ok(Array.isArray(tagCache('nope')) === false, 'cache: non-array → returned as-
   ok(persistenceProfile('relentless').hard === 200, 'persistenceProfile: explicit "relentless" → 200-step ceiling');
 }
 
+// ---- detectLoop (the AutoGPT failure mode) ----
+// The canonical autonomous-agent failure is not "runs too long", it's repeating ONE call that will
+// never start working. Must fire on identical repeats and stay silent on legitimate retries.
+{
+  const { detectLoop, toolSig } = require('../lib/pure');
+  const sig = (n, i) => toolSig(n, i);
+
+  ok(detectLoop([]) === null, 'detectLoop: empty history → null');
+  ok(detectLoop([sig('read_file', { p: 'a' }), sig('read_file', { p: 'b' }), sig('web_search', { q: 'x' })]) === null,
+    'detectLoop: all-distinct calls → null');
+
+  const spin = Array.from({ length: 3 }, () => sig('run_shell', { cmd: 'npm test' }));
+  const hit = detectLoop(spin);
+  ok(hit && hit.count === 3 && hit.name === 'run_shell', 'detectLoop: 3 identical calls → detected, with the tool name');
+
+  ok(detectLoop([sig('run_shell', { cmd: 'x' }), sig('run_shell', { cmd: 'x' })]) === null,
+    'detectLoop: 2 identical calls → below threshold, no false alarm');
+
+  // A retry with CHANGED arguments is problem-solving, not thrashing — it must never trip.
+  ok(detectLoop([sig('read_file', { p: 'a' }), sig('read_file', { p: 'b' }), sig('read_file', { p: 'c' })]) === null,
+    'detectLoop: same tool, DIFFERENT args → not a loop (that is legitimate retrying)');
+
+  // Only the recent window counts, so an early repeat that the agent has since moved past is forgiven.
+  const old = [...spin, ...Array.from({ length: 8 }, (_, i) => sig('read_file', { p: i }))];
+  ok(detectLoop(old) === null, 'detectLoop: repeats that fell out of the window are forgiven');
+
+  // Interleaving must not hide a loop — the offender is still 3 of the last 8.
+  const interleaved = [sig('a', 1), sig('run_shell', { cmd: 'x' }), sig('b', 2), sig('run_shell', { cmd: 'x' }), sig('c', 3), sig('run_shell', { cmd: 'x' })];
+  const iHit = detectLoop(interleaved);
+  ok(iHit && iHit.name === 'run_shell' && iHit.count === 3, 'detectLoop: catches an interleaved loop (3 of the last 8)');
+
+  ok(detectLoop(spin, { threshold: 4 }) === null, 'detectLoop: threshold is tunable');
+  ok(detectLoop([sig('x', 1), sig('x', 1)], { threshold: 2 }).count === 2, 'detectLoop: a lower threshold fires earlier');
+  ok(detectLoop(Array.from({ length: 20 }, () => sig('x', 1))).window <= 8, 'detectLoop: only inspects the recent window');
+}
+
 console.log(`\n${fail === 0 ? '✅' : '❌'} ${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);
