@@ -62,6 +62,13 @@ const bioart = require('./lib/bioart');               // NIH BioArt — public-d
 const memmaint = require('./lib/memmaint');           // always-on memory maintenance (decay/dedup + log bounding)
 const { createTurnState } = require('./lib/turnstate'); // T2 — single display-state reducer for a turn (never-quiet snapshot)
 const brain = require('./lib/brain');                 // SYNAPSE — second-brain hybrid knowledge graph (nodes/edges + Connector)
+const { createSynapse } = require('./lib/synapse');    // SYNAPSE engine (hydrate/connect/suggest) — pure + DI so it also runs headless
+const pidlock = require('./lib/pidlock');             // single-instance locks (the app and the headless worker share one graph + one budget)
+const SYNAPSE_LOCK = 'synapse-worker';
+const WORKER_PIDFILE = pidlock.pidfilePath(SYNAPSE_LOCK);
+// True while the headless daemon owns the SYNAPSE cycle. Checked per tick, not cached, so starting or
+// stopping the daemon takes effect without restarting the app.
+function headlessWorkerAlive() { try { return pidlock.alive(SYNAPSE_LOCK); } catch { return false; } }
 const resolve = require('./lib/resolve');             // DaVinci Resolve native bridge (Python scripting API)
 const mcphub = require('./lib/mcphub');               // MCP-client hub — consume external MCP servers as plugins
 const figures = require('./lib/figures');             // data-accurate matplotlib/seaborn figures
@@ -7150,119 +7157,40 @@ function startScheduler() {
 // Always-on memory maintenance: periodic decay/dedup of the semantic store + per-workspace compaction
 // + bounding of runaway OPERATIONAL logs (never the training datasets). Runs on a timer in the main
 // process, so it keeps memory healthy whether or not the window is open — and 24/7 under the daemon.
-// ── SYNAPSE — the second brain ────────────────────────────────────────────────────────────────────
-// Hybrid knowledge graph over BhatBot's memory (lib/brain.js). hydrate = import nodes from projects +
-// semantic memories + the user's repos (summaries + key files) + Notion. connect = embed the nodes and
-// let the Connector propose cross-project links, each with an LLM "why related" rationale. The SYNAPSE
-// tab renders + prunes it; a light background worker keeps it fresh (the 24/7 job is the cloud brain).
-let _brain = null;
-function synapse() { if (!_brain) { _brain = brain.createBrain({}); } return _brain; }
-function pushSynapse() { try { const g = synapse().graphView(); g.budget = { limit: synapseBudget(), spent: synapseSpent(), left: synapseBudgetLeft() }; if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('synapse-update', g); } catch {} }
-
-// ── SYNAPSE cost governor ─────────────────────────────────────────────────────────────────────────
-// A HARD dollar cap (default $1, config.synapseBudgetUsd) on the paid parts of the brain (embeddings +
-// rationale + suggestions). Spend is a persistent cumulative ledger; once it hits the cap, paid calls
-// are skipped so a POC / always-on worker can never run away. Prices are the 2026 list rates.
-const SY_PRICE = { embed: 0.02 / 1e6, sonnetIn: 3 / 1e6, sonnetOut: 15 / 1e6 };   // USD per token
-const _syTok = (s) => Math.ceil(String(s || '').length / 4);                        // ~4 chars/token estimate
-function synapseBudget() { const v = Number(loadConfig().synapseBudgetUsd); return Number.isFinite(v) && v > 0 ? v : 1; }
-function synapseSpent() { try { return Number(synapse().getMeta('spendUsd')) || 0; } catch { return 0; } }
-function synapseBudgetLeft() { return Math.max(0, synapseBudget() - synapseSpent()); }
-function synapseSpend(usd) { try { const b = synapse(); b.setMeta('spendUsd', (Number(b.getMeta('spendUsd')) || 0) + (Number(usd) || 0)); } catch {} }
-
-// Pull the raw semantic store (records carry their embedding vecs) — so memory nodes reuse embeddings.
-function _semanticRecords() {
-  try { const s = JSON.parse(fs.readFileSync(semantic.STORE_PATH, 'utf8')); return (s.records || []).filter((r) => r && r.text); } catch { return []; }
-}
-// Discover the user's git repos directly under $HOME (top-level project dirs) at the chosen depth.
-function _scanRepos({ max = 40, keyFileCap = 12 } = {}) {
-  const home = os.homedir(); const out = [];
-  let dirs = []; try { dirs = fs.readdirSync(home, { withFileTypes: true }).filter((d) => d.isDirectory() && !d.name.startsWith('.')).map((d) => d.name); } catch { return out; }
-  for (const name of dirs) {
-    if (out.length >= max) break;
-    const root = path.join(home, name);
-    try { if (!fs.existsSync(path.join(root, '.git'))) continue; } catch { continue; }   // git repos only
-    // README (the summary) + the key files (READMEs/docs/entrypoints only — not every file).
-    let readme = '';
-    for (const rn of ['README.md', 'readme.md', 'Readme.md']) { try { readme = fs.readFileSync(path.join(root, rn), 'utf8').slice(0, 6000); break; } catch {} }
-    let all = []; try { all = fs.readdirSync(root).filter((f) => { try { return fs.statSync(path.join(root, f)).isFile(); } catch { return false; } }); } catch {}
-    try { const s = fs.readdirSync(path.join(root, 'src')).map((f) => 'src/' + f); all = all.concat(s); } catch {}
-    const key = brain.keyFilesFor(all, keyFileCap);
-    const files = [];
-    for (const rel of key) { try { files.push({ path: rel, text: fs.readFileSync(path.join(root, rel), 'utf8').slice(0, 4000) }); } catch {} }
-    out.push({ name, path: root, readme, files });
+// ── SYNAPSE — the second brain ───────────────────────────────────────────────────────────
+// The engine now lives in lib/synapse.js (pure + DI, no Electron) so it also runs in a HEADLESS
+// worker — scripts/synapse-worker.js. That move is the whole point: this code was correct but had
+// never produced a single node, because it only ran while an Electron window was open.
+// main.js keeps just the wiring: the Electron-shaped dependencies, and the IPC surface for the tab.
+let _synapse = null;
+function synapse() {
+  if (!_synapse) {
+    _synapse = createSynapse({
+      deps: {
+        embedBatch: (texts) => semantic.embedBatch(texts),
+        // The GUI already owns a rate-paced, router-aware Claude client — use it here rather than
+        // opening a second uncounted channel. The headless worker injects lib/llm.js instead.
+        llm: async ({ system, content, maxTokens }) => {
+          const r = await anthropicRequest({ model: MODEL_SONNET, max_tokens: maxTokens || 256, system, messages: [{ role: 'user', content }] }, getApiKey());
+          return (r.content || []).filter((x) => x.type === 'text').map((x) => x.text).join(' ');
+        },
+        listProjects: () => projects.list(),
+        getProject: (slug) => projects.get(slug),
+        notionPages: notion.listPages ? (o) => notion.listPages(o) : null,
+        semanticStorePath: semantic.STORE_PATH,
+        loadConfig,
+        log: (m) => console.log(m),
+        onUpdate: (g) => { try { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('synapse-update', g); } catch {} },
+        isIdle: () => agentState !== 'running' && agentState !== 'paused',
+      },
+    });
   }
-  return out;
+  return _synapse;
 }
-async function synapseHydrate({ repos = true, memories = true, notionPages = true } = {}) {
-  const b = synapse(); const ts = Date.now(); let added = 0;
-  const push = (n) => { if (n) { b.upsertNode(n, ts); added++; } };
-  const pushBundle = (bundle) => { for (const n of (bundle.nodes || [])) push(n); for (const e of (bundle.edges || [])) b.upsertEdge(e, ts); };
-  try { for (const p of projects.list()) push(brain.projectNode(projects.get(p.slug))); } catch {}                    // BhatBot projects
-  if (memories) { const recs = _semanticRecords(); recs.slice(0, 600).forEach((m, i) => push(brain.memoryNode(m, i))); } // semantic memories (+ vecs)
-  if (repos) { for (const r of _scanRepos()) pushBundle(brain.repoNodes(r)); }                                        // ~/repos (summary + key files)
-  if (notionPages) { try { const pages = notion.listPages ? await notion.listPages({ limit: 60 }) : []; for (const pg of (pages || [])) pushBundle(brain.notionNodes(pg)); } catch {} }
-  b.save(); pushSynapse();
-  return b.stats();
-}
-// Embed any nodes missing a vector (batched), then run the Connector and add a short LLM rationale
-// to each proposed link before committing it. Cross-project only; pruned pairs are never re-proposed.
-async function synapseConnect({ threshold = 0.8, maxRationale = 8 } = {}) {
-  const b = synapse();
-  const all = b.nodes().filter((n) => n.status !== 'pruned');
-  const need = all.filter((n) => !Array.isArray(n.embedding) || !n.embedding.length);
-  for (let i = 0; i < need.length; i += 64) {
-    if (synapseBudgetLeft() <= 0) break;                                            // budget exhausted → stop embedding
-    const batch = need.slice(i, i + 64);
-    const texts = batch.map((n) => (n.label + '. ' + (n.text || '')).slice(0, 2000));
-    try { const { vecs } = await semantic.embedBatch(texts); synapseSpend(texts.reduce((s, t) => s + _syTok(t), 0) * SY_PRICE.embed); batch.forEach((n, k) => { if (vecs[k]) b.upsertNode({ id: n.id, type: n.type, ref: n.ref, embedding: vecs[k] }, Date.now()); }); }
-    catch { break; }   // no embed key / offline → stop; existing links stay
-  }
-  const existingPairs = new Set(b.edges().map((e) => [e.from, e.to].sort().join('|')));   // includes pruned → never re-propose
-  const cands = brain.proposeConnections(b.nodes(), { threshold, maxPerNode: 3, existingPairs });
-  // Rationale for the strongest few (cheap; the rest commit without prose and get one lazily on view).
-  cands.sort((a, c) => c.confidence - a.confidence);
-  for (let i = 0; i < cands.length; i++) {
-    const e = cands[i];
-    if (i < maxRationale && synapseBudgetLeft() > 0) {
-      try {
-        const A = b.getNode(e.from), C = b.getNode(e.to);
-        const content = `A (${A.type}): ${A.label} — ${(A.text || '').slice(0, 400)}\n\nB (${C.type}): ${C.label} — ${(C.text || '').slice(0, 400)}`;
-        const r = await anthropicRequest({ model: MODEL_SONNET, max_tokens: 90, system: 'In ONE sentence, say specifically how these two items from DIFFERENT projects are related or could inform each other. If not genuinely related, reply exactly "NONE".', messages: [{ role: 'user', content }] }, getApiKey());
-        const txt = (r.content.filter((x) => x.type === 'text').map((x) => x.text).join(' ') || '').trim();
-        synapseSpend(_syTok(content) * SY_PRICE.sonnetIn + _syTok(txt) * SY_PRICE.sonnetOut);
-        if (/^none/i.test(txt)) continue;   // the model rejects it → don't add
-        e.rationale = txt.slice(0, 300);
-      } catch {}
-    }
-    b.upsertEdge(e, Date.now());
-  }
-  b.save(); pushSynapse();
-  return { proposed: cands.length, ...b.stats() };
-}
-
-// From the connected graph, synthesize a few "projects to move ahead on" — grounded in the strongest
-// cross-project links + project recency. ONE budget-gated Claude call; result rides in graph meta.
-async function synapseSuggest() {
-  const b = synapse();
-  if (synapseBudgetLeft() <= 0) return { suggestions: b.getMeta('suggestions') || [], budgetExhausted: true };
-  let projs = [];
-  try { projs = projects.list().map((p) => ({ name: p.name, status: p.status, slug: p.slug })); } catch {}
-  const links = b.edges().filter((e) => e.status !== 'pruned' && e.rationale)
-    .sort((a, c) => (c.confidence || 0) - (a.confidence || 0)).slice(0, 14)
-    .map((e) => { const A = b.getNode(e.from), C = b.getNode(e.to); return A && C ? `• ${A.label} ↔ ${C.label}: ${e.rationale}` : null; }).filter(Boolean);
-  const ctx = `MY PROJECTS:\n${projs.map((p) => '- ' + p.name + (p.status ? ` (${p.status})` : '')).join('\n') || '(none)'}\n\nCROSS-PROJECT CONNECTIONS THE SECOND BRAIN FOUND:\n${links.join('\n') || '(none yet)'}`;
-  const sys = 'You are the second brain surfacing what Siddhant should work on next. From his projects and the connections found, pick 3-5 concrete moves. Reply ONLY a JSON array: [{"project":"<name>","why":"<one grounded sentence, cite a connection if relevant>","next":"<one concrete next step>"}]. No prose outside the JSON.';
-  let suggestions = [];
-  try {
-    const r = await anthropicRequest({ model: MODEL_SONNET, max_tokens: 700, system: sys, messages: [{ role: 'user', content: ctx }] }, getApiKey());
-    const txt = (r.content.filter((x) => x.type === 'text').map((x) => x.text).join(' ') || '').trim();
-    synapseSpend(_syTok(ctx) * SY_PRICE.sonnetIn + _syTok(txt) * SY_PRICE.sonnetOut);
-    const m = txt.match(/\[[\s\S]*\]/); if (m) suggestions = JSON.parse(m[0]);
-  } catch {}
-  if (Array.isArray(suggestions) && suggestions.length) { b.setMeta('suggestions', suggestions.slice(0, 5)); b.setMeta('suggestedAt', Date.now()); b.save(); pushSynapse(); }
-  return { suggestions: b.getMeta('suggestions') || [] };
-}
+function pushSynapse() { try { synapse().graphView(); } catch {} }
+const synapseHydrate = (o) => synapse().hydrate(o);
+const synapseConnect = (o) => synapse().connect(o);
+const synapseSuggest = () => synapse().suggest();
 
 // config.memoryMaintenance: { enabled(default true), intervalMinutes(default 30), maxEpisodicAgeDays(45) }.
 function startMemoryMaintenance() {
@@ -7289,39 +7217,27 @@ function startMemoryMaintenance() {
   console.log(`[memmaint] started (every ${intervalMs / 60000}min): semantic decay/dedup + log bounding`);
 }
 
-// ── SYNAPSE always-on worker ────────────────────────────────────────────────────────────────────
-// Keeps the second brain fresh without any input. FREE re-import (nodes) on a short cycle so new
-// projects/memories/files always show up; the PAID pass (embeddings + rationale + suggestions) runs
-// on a slow cycle, ONLY when the agent is idle and the $1 budget has room. config.synapse:
-//   { worker(default true), hydrateMin(30), connectHours(6), paid(true) }.
-let _synapseTimer = null, _synapseLastConnect = 0;
-function synapseWorkerConfig() {
-  const c = (loadConfig().synapse) || {};
-  return { worker: c.worker !== false, hydrateMin: Math.max(5, c.hydrateMin || 30), connectHours: Math.max(1, c.connectHours || 6), paid: c.paid !== false };
-}
+// ── SYNAPSE worker (in-app) ────────────────────────────────────────────────────────────
+// The cycle itself is lib/synapse.js tick(). This is only the timer — and it DEFERS to the headless
+// worker (scripts/synapse-worker.js) when that is running, so the two never double-import or
+// double-spend against the same $1 ledger. The headless one is authoritative because it survives
+// this window closing; see DAEMON.md.
+let _synapseTimer = null;
+function synapseWorkerConfig() { return synapse().workerConfig(); }
 async function synapseWorkerTick() {
-  const c = synapseWorkerConfig();
-  if (!c.worker) return;
-  try {
-    await synapseHydrate();   // free — no LLM / no embeddings
-    const idle = agentState !== 'running' && agentState !== 'paused';
-    const due = Date.now() - _synapseLastConnect >= c.connectHours * 3600 * 1000;
-    if (c.paid && idle && due && synapseBudgetLeft() > 0.02) {
-      _synapseLastConnect = Date.now();
-      const before = synapseSpent();
-      await synapseConnect();
-      await synapseSuggest();
-      console.log(`[synapse] background pass: +$${(synapseSpent() - before).toFixed(4)} (spent $${synapseSpent().toFixed(3)}/$${synapseBudget().toFixed(2)})`);
-    }
-  } catch (e) { console.warn('[synapse] worker tick failed:', e.message); }
+  if (headlessWorkerAlive()) return;   // the daemon owns the cycle right now
+  try { await synapse().tick(); } catch (e) { console.warn('[synapse] worker tick failed:', e.message); }
 }
 function startSynapseWorker() {
   const c = synapseWorkerConfig();
   if (!c.worker) { console.log('[synapse] worker disabled by config'); return; }
   if (_synapseTimer) clearInterval(_synapseTimer);
+  if (headlessWorkerAlive()) {
+    console.log('[synapse] headless worker is running (' + WORKER_PIDFILE + ') — in-app timer stands down');
+  }
   _synapseTimer = setInterval(() => { synapseWorkerTick(); }, c.hydrateMin * 60 * 1000);
   setTimeout(() => { synapseWorkerTick(); }, 20000);   // first pass shortly after boot
-  console.log(`[synapse] worker started (re-import every ${c.hydrateMin}min; paid pass every ${c.connectHours}h when idle, under $${synapseBudget().toFixed(2)})`);
+  console.log(`[synapse] worker started (re-import every ${c.hydrateMin}min; paid pass every ${c.connectHours}h when idle, under $${synapse().budget().limit.toFixed(2)})`);
 }
 
 // CRASH RECOVERY. A mission left in `running` by a crash, a force-quit, or a power loss has no live
@@ -8995,25 +8911,26 @@ function netBytesNow() {
   } catch { return null; }
 }
 // SYNAPSE second-brain IPC — the SYNAPSE tab views/builds/prunes the knowledge graph.
-ipcMain.handle('synapse-graph', () => { try { const g = synapse().graphView(); g.budget = { limit: synapseBudget(), spent: synapseSpent(), left: synapseBudgetLeft() }; return g; } catch (e) { return { error: e.message }; } });
-// FREE first-open population: import nodes (projects + memories + repos + Notion) if the graph is empty.
-// No embeddings / no LLM → no cost. The paid connect + suggestions happen on explicit Build.
+// graphView() already carries the budget, so these are now thin pass-throughs to lib/synapse.js.
+ipcMain.handle('synapse-graph', () => { try { return synapse().graphView(); } catch (e) { return { error: e.message }; } });
+// FREE first-open population: import nodes (projects + memories + repos + Notion) if the graph is
+// empty. No embeddings / no LLM → no cost. The paid connect + suggestions happen on explicit Build.
 ipcMain.handle('synapse-ensure', async () => {
-  try { if (synapse().stats().nodes === 0) await synapseHydrate(); const g = synapse().graphView(); g.budget = { limit: synapseBudget(), spent: synapseSpent(), left: synapseBudgetLeft() }; return g; }
+  try { if (synapse().stats().nodes === 0) await synapse().hydrate(); return synapse().graphView(); }
   catch (e) { return { error: e.message }; }
 });
 ipcMain.handle('synapse-build', async () => {
   try {
     sendToActivity('tool-update', { type: 'thinking', text: '🧠 building the second brain…' });
-    await synapseHydrate();
-    const r = await synapseConnect();
-    const s = await synapseSuggest();
-    return { ok: true, ...r, suggestions: s.suggestions, budget: { limit: synapseBudget(), spent: synapseSpent(), left: synapseBudgetLeft() } };
+    await synapse().hydrate();
+    const r = await synapse().connect();
+    const s = await synapse().suggest();
+    return { ok: true, ...r, suggestions: s.suggestions, budget: synapse().budget() };
   }
   catch (e) { return { error: e.message }; }
 });
-ipcMain.handle('synapse-prune', (_e, { kind, id } = {}) => { try { const ok = synapse().prune(kind, id); synapse().save(); pushSynapse(); return { ok }; } catch (e) { return { error: e.message }; } });
-ipcMain.handle('synapse-confirm', (_e, { kind, id } = {}) => { try { const ok = synapse().confirm(kind, id); synapse().save(); pushSynapse(); return { ok }; } catch (e) { return { error: e.message }; } });
+ipcMain.handle('synapse-prune', (_e, { kind, id } = {}) => { try { return { ok: synapse().prune(kind, id) }; } catch (e) { return { error: e.message }; } });
+ipcMain.handle('synapse-confirm', (_e, { kind, id } = {}) => { try { return { ok: synapse().confirm(kind, id) }; } catch (e) { return { error: e.message }; } });
 
 ipcMain.handle('get-vitals', () => {
   const cores = os.cpus().length || 1;

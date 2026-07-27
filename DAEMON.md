@@ -9,24 +9,34 @@ is on) **plus** the cloud brain (24/7 presence for when the Mac is off). Built i
 
 ## Status (2026-07-27)
 
-> ### ⚠️ Read this first — "always-on" is not yet true locally
+> ### ✅ The second brain now has a real always-on host
 >
-> `scripts/install-daemon.js` sets `ProgramArguments = [node_modules/.bin/electron, REPO]`. **The
-> "daemon" is the Electron GUI app**, not a headless brain. There is no headless entrypoint in this
-> repo today. Consequences, all verified 2026-07-27:
+> **What was wrong (verified 2026-07-27):** `scripts/install-daemon.js`'s `install()` sets
+> `ProgramArguments = [node_modules/.bin/electron, REPO]` — the "daemon" was the **GUI app**. So
+> memory maintenance, the scheduler tick, and the SYNAPSE worker all lived in the Electron main
+> process and died with the window. `com.bhatbot.agent` was never installed, and the two LaunchAgents
+> that *were* loaded had both been failing for weeks (`com.siddhant.bhatbot` exit 127 — `npm` under
+> launchd's minimal PATH; `com.siddhant.bhatbot.briefing` exit 1). The proof was unambiguous:
+> `~/.bhatbot/brain/` did not exist. The SYNAPSE worker shipped in `d2b035e` had never produced a
+> single node, because it had never had a process to run in.
 >
-> - Memory maintenance, the 30s scheduler tick, and the SYNAPSE worker all live in the Electron main
->   process and **die when the window closes**. The claim below that memory upkeep "runs 24/7" is only
->   true while the app is open.
-> - `com.bhatbot.agent` was **never installed**. The two LaunchAgents that were actually loaded were
->   both failing (`com.siddhant.bhatbot` exit 127 — `npm` under launchd's minimal PATH;
->   `com.siddhant.bhatbot.briefing` exit 1). Both have been removed; the briefing is now a
->   `lib/scheduler.js` entry instead of a parallel script.
-> - Proof of the gap: `~/.bhatbot/brain/` **does not exist**. The SYNAPSE worker shipped in `d2b035e`
->   has never produced a graph, because it has never had a process to run in.
+> **What fixed it:** `scripts/synapse-worker.js` — a plain node process with **no electron anywhere in
+> its require graph** (`scripts/test-synapse-worker.js` spawns it and asserts this, so it stays true).
+> Installed as `com.bhatbot.synapse` via `npm run worker:install`. It runs the SYNAPSE cycle *and*
+> memory maintenance, holds a pidfile lock so the GUI stands down rather than double-spending the same
+> $1 budget, and survives the window closing.
 >
-> The fix is a real headless worker (`scripts/synapse-worker.js` + a `com.bhatbot.synapse`
-> LaunchAgent). Until that lands, treat everything below as "runs while the app is open."
+> **Credentials caveat:** `config.json` holds `CRED_REF_*` vault handles that only Electron's
+> `safeStorage` can decrypt, so a headless process usually cannot get an API key. This is fine by
+> design — the **free** hydrate pass (projects + memories + repos + Notion) needs no key and is the
+> bulk of the value. To enable the paid pass (embeddings + link rationales), put the keys in the login
+> Keychain, which `lib/llm.js` reads via the `security` CLI:
+> ```sh
+> security add-generic-password -s bhatbot-anthropic -a bhatbot -w "sk-ant-…"
+> security add-generic-password -s bhatbot-openai    -a bhatbot -w "sk-…"
+> ```
+> The worker says loudly at startup when it is degraded — a worker that quietly does half its job is
+> the exact failure mode this whole exercise was about.
 
 ### ✅ Landed — always-on memory maintenance
 - `lib/memmaint.js` — pure `planMaintenance` (decay stale episodics, merge near-duplicates) + a
@@ -54,11 +64,22 @@ is on) **plus** the cloud brain (24/7 presence for when the Mac is off). Built i
 - Caveat: `cloud/src/graph.js` is a port of the **old** `lib/graph.js`, not of `lib/brain.js` — there
   is no SYNAPSE in the cloud yet.
 
+### ✅ Landed — the headless SYNAPSE worker
+- `scripts/synapse-worker.js` — plain node, no electron in its require graph. Runs the SYNAPSE cycle
+  (free hydrate every `hydrateMin`, budget-capped paid pass every `connectHours`) plus `memmaint`.
+- `lib/synapse.js` — the engine, extracted from `main.js` and fully DI'd so it runs in both hosts.
+- `lib/pidlock.js` — single-instance lock. The GUI checks it per tick and stands down while the
+  daemon holds it, so the two never double-import or double-charge the shared $1 ledger. Liveness is
+  verified with `kill(pid, 0)`, so a stale pidfile from a SIGKILL is reclaimed rather than deadlocking
+  the worker out forever.
+- Install: `npm run worker:install` · status: `npm run worker:status` · one cycle: `npm run worker:once`.
+- Verified live: `launchctl print gui/$UID/com.bhatbot.synapse` → `state = running`, and
+  `~/.bhatbot/brain/graph.json` exists for the first time (195 nodes / 30 edges, $0 spent).
+
 ### ⏭️ Next steps (not yet built)
-1. **A real headless worker** — `scripts/synapse-worker.js` (plain node, no electron in its require
-   graph) running the SYNAPSE tick + `memmaint` + the scheduler tick, installed as
-   `com.bhatbot.synapse` via `install-daemon.js --worker`. Absolute `process.execPath`, never `npm`
-   (that is exactly what made the old agent exit 127). **This is what makes "always-on" true.**
+1. **Schedules in the worker** — the worker currently *reports* overdue schedules but cannot run them
+   (no tools, no vault), so a daily job still needs the app to open. Either give the worker a
+   restricted execution path or have it wake the app.
 2. **Background/tray mode** — a menubar tray + a `--background` launch flag so the app runs hidden
    (no window) and the window becomes just one view you summon. Needs: `Tray`, `window-all-closed`
    → hide-not-quit, `app.dock.hide()` under the flag. (GUI-lifecycle change; verify interactively.)

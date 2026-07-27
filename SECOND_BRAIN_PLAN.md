@@ -34,9 +34,10 @@ style autonomous longitudinal research.
 2. No **Connector** — nothing proactively proposes cross-project links.
 3. No **Scout** — nothing autonomously pulls relevant web info per project.
 4. No **viz + curation panel** — no way to see/prune the brain.
-5. No **always-on host** — workers only run while the desktop app is open. The cloud brain is now
-   deployed, but the SYNAPSE workers still live inside the Electron main process, so they die with
-   the window. **This is still the binding gap.**
+5. ~~No **always-on host**~~ — **CLOSED 2026-07-27.** This was the binding gap for the whole project:
+   the workers lived inside the Electron main process and died with the window, so the brain had
+   literally never been built. Now `lib/synapse.js` (pure + DI) runs in `scripts/synapse-worker.js`,
+   a plain node LaunchAgent (`com.bhatbot.synapse`) that survives the window closing.
 
 ---
 
@@ -115,22 +116,24 @@ A new nav-rail tab. A force-directed graph (nodes by type/importance, edges by c
 | **D0 — Cloud deploy** | ✅ **DONE** | Live at `bhatbot-cloud.fly.dev`. Runs the old `lib/graph.js`, not SYNAPSE. |
 | **P0 — Substrate** | ✅ done | `lib/brain.js` (211 lines, Electron-free, `scripts/test-brain.js`). Importers: projects, semantic memories, `~` repos, Notion. |
 | **P1 — Connector + viz** | ✅ done | `synapseConnect` (cosine ≥ 0.8 + LLM rationale on the top 8) + the SYNAPSE tab (2D canvas force-graph, 3D toggle). |
-| **P2 — Curation** | ◑ partial | prune/confirm/inbox **shipped**. **Gardener NOT built** (no decay/merge/promote). |
+| **P2 — Curation** | ◑ partial | prune/confirm/inbox **shipped**. **Gardener NOT built** (no decay/merge/promote) — this is the next real gap. |
 | **P3 — Scout** | ⬜ not built | No web enrichment at all. |
 | **P4 — Learning** | ⬜ not built | No learned thresholds or importance ranking. |
 | **P5 — Sync** | ⬜ not built | No local ↔ cloud ↔ Notion reconciliation. |
 
-> **⚠️ None of it has ever actually run.** `~/.bhatbot/brain/graph.json` **does not exist**. The
-> "always-on worker" (`main.js:7109-7142`, `config.synapse.worker: true`) lives inside the Electron
-> main process and dies with the window — and the app had not been launched in 15 days. The worker is
-> correct; it has never had a process to run in. See `DAEMON.md`.
+> **✅ It runs now.** For most of this project's life `~/.bhatbot/brain/graph.json` **did not exist** —
+> the "always-on worker" lived inside the Electron main process and died with the window, and the app
+> had gone 15 days without launching. The worker was correct; it had never had a process to run in.
+> Fixed 2026-07-27: the engine moved to `lib/synapse.js` (pure + DI) and now runs in
+> `scripts/synapse-worker.js`, a plain node process installed as the `com.bhatbot.synapse`
+> LaunchAgent. First real graph: **195 nodes / 30 edges, $0 spent** — the free pass needs no API key.
+> See `DAEMON.md`.
 
 ## Revised sequencing
-- **D1 — Headless host** *(the real blocker, replaces the old D0)*: extract `main.js:6970-7142` into a
-  pure, DI'd `lib/synapse.js`, add `scripts/synapse-worker.js` (plain node, no electron in its require
-  graph — `brain.js`/`semantic.js`/`projects.js`/`notion.js`/`memmaint.js` are all already
-  Electron-free), and install it as `com.bhatbot.synapse`. Single-instance pidfile so it doesn't
-  double-run alongside the GUI. **Until this lands, every phase below is theoretical.**
+- **D1 — Headless host** ✅ **DONE (2026-07-27)**: `lib/synapse.js` (pure + DI) +
+  `scripts/synapse-worker.js` (plain node, no electron in its require graph — asserted by a test that
+  spawns it) + `lib/pidlock.js` so it never double-runs alongside the GUI, installed as
+  `com.bhatbot.synapse`. *Every phase below was theoretical until this landed.*
 - **P2b — Gardener**: `lib/gardener.js` — decay `confidence *= exp(-ageDays/tau)`, merge near-dupes at
   cosine > 0.95 (reuse `brain.js`'s `cosine`), promote nodes with ≥N confirmed edges. Daily cadence
   inside the headless worker.

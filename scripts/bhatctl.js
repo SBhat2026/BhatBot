@@ -252,12 +252,17 @@ async function doctor() {
   }
 
   console.log(C.bold('\nSTATE'));
+  // Both the GUI and the headless worker write state.json, so a stale file means BOTH are down —
+  // which is the thing actually worth flagging, not "the window is closed".
   const statePath = path.join(HOME, '.bhatbot', 'state.json');
+  const workerUp = (() => { try { return require('../lib/pidlock').alive('synapse-worker'); } catch { return false; } })();
   try {
     const st = fs.statSync(statePath);
     const age = Date.now() - st.mtimeMs;
-    line('state.json', age < 60000, `updated ${AGE(age)} ago` + (age > 60000 ? '  ← app is not running' : ''));
-  } catch { line('state.json', false, 'missing — the app has never run, or never got far enough to write it'); }
+    const fresh = age < 60 * 60 * 1000;
+    line('state.json', fresh || workerUp, `updated ${AGE(age)} ago` + (!fresh && !workerUp ? '  ← nothing has run in a while' : ''));
+  } catch { line('state.json', false, 'missing — nothing has ever run far enough to write it'); }
+  line('synapse worker', workerUp, workerUp ? 'headless worker holds the lock (survives the window closing)' : 'not running — `npm run worker:install` to make the brain always-on');
 
   console.log(C.bold('\nSECOND BRAIN'));
   const graphPath = path.join(HOME, '.bhatbot', 'brain', 'graph.json');
