@@ -39,6 +39,7 @@ const scheduler = require(path.join(ROOT, 'lib', 'scheduler'));
 const rstate = require(path.join(ROOT, 'lib', 'runtime-state'));
 const pidlock = require(path.join(ROOT, 'lib', 'pidlock'));
 const llm = require(path.join(ROOT, 'lib', 'llm'));
+const miniagent = require(path.join(ROOT, 'lib', 'miniagent'));
 const { createSynapse } = require(path.join(ROOT, 'lib', 'synapse'));
 
 const LOCK = 'synapse-worker';
@@ -99,6 +100,7 @@ async function runCycle(synapse, { force = false } = {}) {
     const out = await synapse.tick({ force });
     const st = synapse.stats();
     const b = synapse.budget();
+    await pushCloudReplica(synapse);
     log(`cycle done in ${Math.round((Date.now() - t0) / 1000)}s — ${st.nodes} nodes / ${st.edges} edges · $${b.spent.toFixed(3)} of $${b.limit.toFixed(2)}${out.paidSkipped ? ` · paid pass skipped (${out.paidSkipped})` : ''}`);
     rstate.event('synapse-tick', { nodes: st.nodes, edges: st.edges, spendUsd: +b.spent.toFixed(4), ms: Date.now() - t0, paidSkipped: out.paidSkipped || null });
     return out;
@@ -110,14 +112,114 @@ async function runCycle(synapse, { force = false } = {}) {
 }
 
 // Schedules were in the same boat as SYNAPSE: persisted to disk, but only ever fired by a timer
-// inside the GUI. Run them here too so a daily job actually happens on a day nobody opens the app.
-// NOTE: this worker cannot run an agent turn (no tools, no vault), so it only surfaces what is due —
-// the app executes them. Without this, an overdue schedule is invisible until someone looks.
-function reportDueSchedules() {
+// inside the GUI, so a daily job simply did not happen on a day nobody opened the window. Now the
+// worker RUNS them, through lib/miniagent.js — a read-only tool-loop (search / fetch / read).
+//
+// A task that needs something this process cannot do (Mail.app, sending anything, the shell, the
+// vault) calls defer_to_app, and we deliberately do NOT markRan — the schedule stays due so the full
+// agent runs it properly on next launch. Producing a half-answer that quietly omits the part it
+// couldn't reach would be worse than waiting, so deferral is a first-class outcome, not a failure.
+const RESULTS_DIR = path.join(os.homedir(), '.bhatbot', 'schedule-results');
+
+function writeResult(s, payload) {
   try {
-    const due = scheduler.due(Date.now());
-    if (due.length) log(`⏰ ${due.length} schedule(s) overdue — the app runs these when it next opens: ` + due.map((s) => s.title).join(', '));
-  } catch {}
+    fs.mkdirSync(RESULTS_DIR, { recursive: true });
+    const f = path.join(RESULTS_DIR, `${s.id}-${Date.now()}.json`);
+    const tmp = f + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify({ id: s.id, title: s.title, at: new Date().toISOString(), unread: true, ...payload }, null, 2));
+    fs.renameSync(tmp, f);
+    return f;
+  } catch (e) { log('could not write schedule result: ' + e.message); return null; }
+}
+
+// Telegram is how an unattended result actually reaches him. The bot token is vaulted like everything
+// else, so this only works if a copy is in the login Keychain — optional, and silent when absent.
+async function telegramPush(text) {
+  const token = llm.keychainRead('bhatbot-telegram');
+  const chat = llm.keychainRead('bhatbot-telegram-chat');
+  if (!token || !chat) return false;
+  try {
+    const r = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ chat_id: chat, text: text.slice(0, 3500) }),
+      signal: AbortSignal.timeout(15000),
+    });
+    return r.ok;
+  } catch { return false; }
+}
+
+
+// ── CLOUD READ REPLICA (opt-in) ───────────────────────────────────────────────────────────────────
+// The workers stay local — hydrating needs the repos, the semantic store and ~/.bhatbot/projects, and
+// shipping those to a hosted box would be a real exfiltration surface for a $1/month graph. What CAN
+// travel is a pruned VIEW: labels, edges and rationales, with embeddings and file bodies stripped, so
+// the phone can read the brain when the Mac is off.
+//
+// OFF unless config.synapseCloudReplica === true AND a token is reachable. The cloud token is vaulted
+// like everything else, so it needs a Keychain copy under `bhatbot-cloud`.
+async function pushCloudReplica(synapse) {
+  const cfg = loadConfig();
+  if (cfg.synapseCloudReplica !== true) return;
+  const url = String(cfg.cloudUrl || '').replace(/\/+$/, '');
+  const token = llm.keychainRead('bhatbot-cloud');
+  if (!url || !token) { log('[replica] enabled but no cloudUrl / no `bhatbot-cloud` Keychain token — skipping'); return; }
+  try {
+    const g = synapse.graphView();
+    const body = JSON.stringify({
+      nodes: (g.nodes || []).map(({ embedding, ...n }) => n),   // strip vectors before they ever leave
+      edges: g.edges || [], stats: g.stats || null, meta: { suggestions: (g.meta || {}).suggestions || [] },
+    });
+    const r = await fetch(`${url}/api/${token}/brain`, {
+      method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer ' + token },
+      body, signal: AbortSignal.timeout(30000),
+    });
+    if (r.ok) { const j = await r.json().catch(() => ({})); log(`[replica] pushed ${j.nodes || '?'} nodes / ${j.edges || '?'} edges to the cloud`); }
+    else log(`[replica] push failed: HTTP ${r.status}`);
+  } catch (e) { log('[replica] push failed: ' + e.message); }
+}
+
+let _schedulesRunning = false;
+async function runDueSchedules() {
+  if (_schedulesRunning) return;
+  let due = [];
+  try { due = scheduler.due(Date.now()); } catch { return; }
+  if (!due.length) return;
+
+  if (!llm.hasKey('anthropic')) {
+    log(`⏰ ${due.length} schedule(s) due but no Anthropic key is reachable — leaving them for the app: ` + due.map((s) => s.title).join(', '));
+    return;
+  }
+
+  _schedulesRunning = true;
+  try {
+    for (const s of due) {
+      log(`⏰ running "${s.title}"`);
+      const t0 = Date.now();
+      const prompt = `[Scheduled task "${s.title}"] ${s.prompt}\n\nThis is an unattended background run — nobody is watching. Do the task, then reply with a short, concrete summary.`;
+      let r;
+      try { r = await miniagent.run(prompt, { config: loadConfig(), log }); }
+      catch (e) { r = { error: String(e.message) }; }
+
+      if (r.deferred) {
+        // Leave it DUE on purpose. markRan here would silently swallow the occurrence.
+        log(`⏰ "${s.title}" deferred — needs ${r.needs}; leaving it due for the desktop app`);
+        writeResult(s, { status: 'deferred', needs: r.needs, partial: r.partial || null });
+        continue;
+      }
+      if (r.error || !r.text) {
+        log(`⏰ "${s.title}" failed: ${r.error || 'no output'} — leaving it due to retry`);
+        writeResult(s, { status: 'failed', error: r.error || 'no output' });
+        continue;
+      }
+
+      const file = writeResult(s, { status: 'ok', text: r.text, steps: r.steps, toolsUsed: r.toolsUsed, ms: Date.now() - t0, truncated: !!r.truncated });
+      scheduler.markRan(s.id, Date.now());   // only on genuine success
+      rstate.event('schedule-run', { id: s.id, title: s.title, ms: Date.now() - t0, steps: r.steps, host: 'worker' });
+      log(`⏰ "${s.title}" done in ${Math.round((Date.now() - t0) / 1000)}s (${r.steps} steps)`);
+      if (s.notify !== false) { if (await telegramPush(`⏰ ${s.title}\n\n${r.text}`)) log('   → pushed to Telegram'); }
+      if (file) log('   → ' + file);
+    }
+  } finally { _schedulesRunning = false; }
 }
 
 function printStatus() {
@@ -156,7 +258,7 @@ function printStatus() {
 
   if (ONCE) {
     await runCycle(synapse, { force: FORCE });
-    reportDueSchedules();
+    await runDueSchedules();
     pidlock.release(LOCK);
     return;
   }
@@ -186,8 +288,8 @@ function printStatus() {
   } catch (e) { log('memmaint failed to start: ' + e.message); }
 
   await runCycle(synapse);
-  reportDueSchedules();
-  setInterval(() => { runCycle(synapse); reportDueSchedules(); }, c.hydrateMin * 60 * 1000);
+  await runDueSchedules();
+  setInterval(() => { runCycle(synapse).then(runDueSchedules); }, c.hydrateMin * 60 * 1000);
 
   // Nothing else holds the loop open — the interval does. Keep the process from exiting silently.
   process.stdin.resume();

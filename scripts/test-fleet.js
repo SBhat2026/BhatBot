@@ -66,6 +66,74 @@ const ok = (c, m) => { if (c) { pass++; console.log('✅ ' + m); } else { fail++
   }
 
   fs.rmSync(dir, { recursive: true, force: true });
-  console.log(`\n${fail ? '❌' : '✅'} ${pass} passed, ${fail} failed`);
+  
+// ---- B4: run persistence (a fleet's whole output used to vanish with the return value) ----
+{
+  const os2 = require('os'), path2 = require('path'), fs2 = require('fs');
+  const { listRuns, readRun, FLEET_HARD_CAP, DRONE_ROSTER_DEFAULT } = require('../lib/fleet');
+  const RUNS = fs2.mkdtempSync(path2.join(os2.tmpdir(), 'bb-runs-'));
+  const wsDir = path2.join(RUNS, 'run-12345');
+
+  const specs = [
+    { id: 'd1', persona: { name: 'SCOUT' }, _task: { goal: 'look around' } },
+    { id: 'd2', persona: { name: 'SMITH' }, _task: { goal: 'build it' } },
+  ];
+  const out = await runFleet(specs, {
+    agentRun: async (ctx) => { ctx.onStep({ text: 'working' }); return { summary: 'did ' + ctx.persona.name, spend: { usd: 0.02, turns: 1 } }; },
+  }, { wsDir, mission: 'test the persistence', envelopeUsd: 5 });
+
+  ok(out.runFile && fs2.existsSync(out.runFile), 'B4: runFleet writes run.json into the workspace');
+  ok(!fs2.existsSync(out.runFile + '.tmp'), 'B4: atomic write leaves no .tmp behind');
+  const rec = JSON.parse(fs2.readFileSync(out.runFile, 'utf8'));
+  ok(rec.mission === 'test the persistence', 'B4: the mission is recorded');
+  ok(rec.results.length === 2 && rec.results[0].summary.startsWith('did '), 'B4: per-drone results are recorded');
+  ok(rec.launched === 2 && typeof rec.totalSpend === 'number', 'B4: launch count + spend recorded');
+  ok(typeof rec.ms === 'number' && rec.startedAt && rec.endedAt, 'B4: timings recorded');
+  ok(rec.specs.every((x) => !('tools' in x)), 'B4: only persona/role/goal persisted — never tool grants or prompts');
+
+  const listed = listRuns({ dir: RUNS });
+  ok(listed.length === 1 && listed[0].id === 'run-12345', 'B4: listRuns finds it off disk (works with the app closed)');
+  ok(readRun('run-12345', { dir: RUNS }).mission === 'test the persistence', 'B4: readRun round-trips');
+  ok(readRun('run-nope', { dir: RUNS }) === null, 'B4: readRun on a missing id → null, no throw');
+
+  // A run that died before persisting must not break the listing.
+  fs2.mkdirSync(path2.join(RUNS, 'run-broken'), { recursive: true });
+  ok(listRuns({ dir: RUNS }).length === 1, 'B4: a run with no run.json is skipped, not fatal');
+  ok(listRuns({ dir: '/no/such/dir' }).length === 0, 'B4: a missing runs dir → [], no throw');
+
+  // Persistence must never be load-bearing: an unwritable wsDir cannot fail the fleet.
+  const out2 = await runFleet([specs[0]], { agentRun: async (c) => { c.onStep({}); return { summary: 'ok' }; } },
+    { wsDir: '/proc/definitely-not-writable/nope', mission: 'm' });
+  ok(out2.results.length === 1, 'B4: an unwritable workspace does not fail the run');
+
+  // B6: the two ceilings are named and exported so they cannot be confused again.
+  ok(FLEET_HARD_CAP === 24, 'B6: FLEET_HARD_CAP (concurrency ceiling) exported');
+  ok(DRONE_ROSTER_DEFAULT === 6, 'B6: DRONE_ROSTER_DEFAULT (per-mission roster) exported');
+  ok(FLEET_HARD_CAP !== DRONE_ROSTER_DEFAULT, 'B6: they are genuinely different numbers with different jobs');
+  const mainSrc = fs2.readFileSync(path2.join(__dirname, '..', 'main.js'), 'utf8');
+  ok(/FLEET_HARD_CAP/.test(mainSrc) && !/const FLEET_CAP = 24/.test(mainSrc), 'B6: main.js imports the cap instead of redeclaring 24');
+
+  try { fs2.rmSync(RUNS, { recursive: true, force: true }); } catch {}
+}
+
+// ---- B5: synthesis/integration failures are reported, not swallowed ----
+{
+  const orch = require('../lib/orchestrator');
+  const deps = {
+    models: { sonnet: 's' }, apiKey: 'k',
+    anthropicRequest: async () => { throw new Error('model exploded'); },
+    runAgent: async () => ({ text: 'a take' }),
+  };
+  const posts = [];
+  const board = { post: (e) => posts.push(e), fleetStatusBlock: () => '', read: () => [], heartbeat: () => {}, lastPost: () => null };
+
+  const r = await orch.ensemble('do a thing', { ...deps, makeBoard: () => board }, { roles: [{ name: 'a', persona: 'p' }, { name: 'b', persona: 'p' }] });
+  ok(r.synthesisError && /exploded/.test(r.synthesisError), 'B5: ensemble reports WHY synthesis failed');
+  ok(r.synthesized === false, 'B5: ensemble flags that the result is unsynthesized');
+  ok(r.result && r.result.length > 0, 'B5: it still falls back to the concatenated takes (behaviour unchanged)');
+  ok(posts.some((p) => /synthesis failed/.test(p.text)), 'B5: the failure is posted to the shared board');
+}
+
+console.log(`\n${fail ? '❌' : '✅'} ${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })().catch((e) => { console.error('crashed:', e); process.exit(1); });

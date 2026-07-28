@@ -732,6 +732,46 @@
   @keyframes ratepulse { 0%,100% { opacity: .62 } 50% { opacity: 1 } }
 
   /* Interactive option picker (ask_options) — a checkbox card centered over the stage */
+
+  /* ---------------- CALL — the physical interface for the Twilio voice line ---------------- */
+  #call-scrim { position: fixed; inset: 0; z-index: 92; background: rgba(4,8,12,.42);
+    -webkit-backdrop-filter: blur(3px); backdrop-filter: blur(3px); -webkit-app-region: no-drag; animation: scrimIn .16s ease; }
+  #call-card {
+    position: fixed; z-index: 93; left: 50%; top: 50%; transform: translate(-50%,-50%);
+    width: min(460px, 88vw); max-height: 78vh; display: flex; flex-direction: column; -webkit-app-region: no-drag;
+    background: color-mix(in srgb, var(--surface) 96%, transparent); border: 1px solid var(--accent-dim);
+    border-radius: 16px; padding: 18px 18px 14px; box-shadow: 0 30px 80px -24px rgba(0,0,0,.8);
+    animation: optIn .18s cubic-bezier(.4,0,.2,1);
+  }
+  #call-card .cl-q { font-size: 17px; font-weight: 600; color: var(--text); margin-bottom: 2px; }
+  #call-card .cl-sub { font-size: 12px; color: var(--text-dim2); margin-bottom: 13px; }
+  #call-card .cl-me {
+    display: flex; align-items: center; gap: 11px; width: 100%; text-align: left; cursor: pointer; font: inherit;
+    background: rgba(127,212,232,.08); border: 1px solid var(--accent-dim); border-radius: 12px;
+    padding: 12px 14px; color: var(--text); margin-bottom: 12px; transition: .12s;
+  }
+  #call-card .cl-me:hover { border-color: var(--accent); background: rgba(127,212,232,.15); }
+  #call-card .cl-me .cl-ico { font-size: 17px; }
+  #call-search {
+    width: 100%; background: rgba(0,0,0,.25); border: 1px solid var(--line); border-radius: 10px;
+    padding: 10px 12px; color: var(--text); font: inherit; font-size: 14px; margin-bottom: 10px; outline: none;
+  }
+  #call-search:focus { border-color: var(--accent-dim); }
+  #call-list { overflow-y: auto; flex: 1; min-height: 60px; margin: 0 -4px; padding: 0 4px; }
+  #call-list .cl-item {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%; text-align: left;
+    cursor: pointer; font: inherit; background: transparent; border: 1px solid transparent; border-bottom: 1px solid var(--line);
+    padding: 10px 10px; color: var(--text); transition: .1s; border-radius: 8px;
+  }
+  #call-list .cl-item:hover, #call-list .cl-item.sel { border-color: var(--accent-dim); background: rgba(127,212,232,.08); }
+  #call-list .cl-name { font-size: 14px; }
+  #call-list .cl-num { font-size: 11.5px; color: var(--text-dim2); font-variant-numeric: tabular-nums; }
+  #call-card .cl-foot { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 11px; padding-top: 10px; border-top: 1px solid var(--line); }
+  #call-card .cl-status { font-size: 12px; color: var(--text-dim2); flex: 1; }
+  #call-card .cl-status.err { color: #ff8a80; }
+  #call-card .cl-status.ok { color: var(--accent); }
+  #call-card .cl-x { cursor: pointer; color: var(--text-dim); font-size: 12px; padding: 4px 11px; border: 1px solid var(--line); border-radius: 7px; background: transparent; font: inherit; }
+  #call-card .cl-x:hover { border-color: var(--accent); color: var(--accent); }
   #opt-scrim { position: fixed; inset: 0; z-index: 90; background: rgba(4,8,12,.42);
     -webkit-backdrop-filter: blur(3px); backdrop-filter: blur(3px); -webkit-app-region: no-drag; animation: scrimIn .16s ease; }
   #opt-card {
@@ -936,6 +976,7 @@
       <button class="navbtn" data-panel="code"     title="Code — embedded Claude Code terminal (⌘5)"><span class="g">⌗</span>CODE</button>
       <button class="navbtn" data-panel="synapse"  title="Synapse — the second brain (⌘6)"><span class="g">✸</span>SYNAPSE</button>
       <div class="rl-foot">
+        <button class="navbtn" id="callbtn" title="Call — ring your phone, or have BhatBot call a contact (⌘⇧C)"><span class="g">📞</span>CALL</button>
         <button class="navbtn" data-panel="voice"    title="Voice — tune JARVIS (⌘8)"><span class="g">🎚</span>VOICE</button>
         <button class="navbtn" data-panel="settings" title="Settings — API key & config (⌘9)"><span class="g">⚙</span>SETTINGS</button>
         <div class="rl-meta">
@@ -3279,6 +3320,105 @@ window.bhatbot.onHudCommand && window.bhatbot.onHudCommand((c) => {
 });
 
 ta.focus();
+
+// ---------------- CALL — physical interface for the Twilio voice line ----------------
+// Two-way voice was fully wired but could only ever be STARTED by the agent deciding to. This is the
+// button. "Call me" rings Siddhant's own phone; picking a contact has BhatBot ring them instead.
+(() => {
+  const scrim = document.getElementById('call-scrim');
+  const card  = document.getElementById('call-card');
+  const input = document.getElementById('call-search');
+  const list  = document.getElementById('call-list');
+  const stat  = document.getElementById('call-status');
+  const meBtn = document.getElementById('call-me');
+  if (!card) return;
+
+  let rows = [], sel = 0, busy = false;
+
+  const setStatus = (msg, kind) => { stat.textContent = msg || ''; stat.className = 'cl-status' + (kind ? ' ' + kind : ''); };
+  const pretty = (n) => {
+    const d = String(n || '').replace(/\D+/g, '');
+    if (d.length === 11 && d[0] === '1') return `(${d.slice(1,4)}) ${d.slice(4,7)}-${d.slice(7)}`;
+    if (d.length === 10) return `(${d.slice(0,3)}) ${d.slice(3,6)}-${d.slice(6)}`;
+    return n;
+  };
+
+  function render() {
+    list.innerHTML = '';
+    if (!rows.length) {
+      list.innerHTML = '<div style="padding:14px 4px;font-size:12.5px;color:var(--text-dim2)">No matching contacts.</div>';
+      return;
+    }
+    rows.forEach((c, i) => {
+      const b = document.createElement('button');
+      b.className = 'cl-item' + (i === sel ? ' sel' : '');
+      b.innerHTML = `<span class="cl-name"></span><span class="cl-num"></span>`;
+      b.querySelector('.cl-name').textContent = c.name;
+      b.querySelector('.cl-num').textContent = pretty(c.phones[0]);
+      b.addEventListener('click', () => place(c.phones[0], c.name));
+      b.addEventListener('mouseenter', () => { sel = i; [...list.children].forEach((el, j) => el.classList.toggle('sel', j === i)); });
+      list.appendChild(b);
+    });
+  }
+
+  let searchSeq = 0;
+  async function search(q) {
+    const mine = ++searchSeq;
+    try {
+      const r = await window.bhatbot.contactsSearch(q, 30);
+      if (mine !== searchSeq) return;                       // a newer keystroke already won
+      rows = (r && r.contacts) || []; sel = 0; render();
+      if (!q && r && r.total) setStatus(`${r.total} contacts`);
+    } catch { setStatus('could not read contacts', 'err'); }
+  }
+
+  async function place(to, name) {
+    if (busy) return;
+    busy = true;
+    setStatus(`Calling ${name || pretty(to)}…`);
+    try {
+      const r = await window.bhatbot.placeCall({ to, name });
+      if (r && r.ok) {
+        setStatus(`Ringing ${name || pretty(to)}${r.twoWay ? '' : ' (announcement only — no public host)'}`, 'ok');
+        setTimeout(close, 1600);
+      } else {
+        setStatus((r && r.error) || 'call failed', 'err');
+      }
+    } catch (e) { setStatus(String(e.message || e), 'err'); }
+    finally { busy = false; }
+  }
+
+  function open() {
+    scrim.style.display = 'block'; card.style.display = 'flex';
+    input.value = ''; setStatus(''); rows = []; sel = 0;
+    search('');
+    setTimeout(() => input.focus(), 40);
+    // Show the number "Call me" will actually dial, so it's never a mystery what the button does.
+    window.bhatbot.getVoiceConfig?.().then((v) => {
+      const n = v && (v.myPhone || v.phone);
+      document.getElementById('call-mynum').textContent = n ? pretty(n) : 'set myPhone in Settings';
+    }).catch(() => {});
+  }
+  function close() { scrim.style.display = 'none'; card.style.display = 'none'; }
+
+  document.getElementById('callbtn')?.addEventListener('click', open);
+  document.getElementById('call-close').addEventListener('click', close);
+  scrim.addEventListener('click', close);
+  meBtn.addEventListener('click', () => place(null, null));
+
+  let t = null;
+  input.addEventListener('input', () => { clearTimeout(t); t = setTimeout(() => search(input.value.trim()), 130); });
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowDown') { e.preventDefault(); sel = Math.min(sel + 1, rows.length - 1); render(); list.children[sel]?.scrollIntoView({ block: 'nearest' }); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); sel = Math.max(sel - 1, 0); render(); list.children[sel]?.scrollIntoView({ block: 'nearest' }); }
+    else if (e.key === 'Enter' && rows[sel]) { e.preventDefault(); place(rows[sel].phones[0], rows[sel].name); }
+    else if (e.key === 'Escape') { e.preventDefault(); close(); }
+  });
+  document.addEventListener('keydown', (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.shiftKey && (e.key === 'c' || e.key === 'C')) { e.preventDefault(); card.style.display === 'flex' ? close() : open(); }
+    else if (e.key === 'Escape' && card.style.display === 'flex') close();
+  });
+})();
 </script>
 
 <!-- Embedded Claude Code terminal (xterm + pty over IPC) -->
@@ -3394,6 +3534,20 @@ window.holoSpin = function (mount, model) {
     }
   } catch (e) { mount.textContent = 'preview failed: ' + e.message; }
 };
+
+
 </script>
+
+  <!-- CALL — ring Siddhant's own phone, or have BhatBot call someone in his address book.
+       The Twilio conversation webhook is the same either way, so both are real two-way calls. -->
+  <div id="call-scrim" style="display:none"></div>
+  <div id="call-card" style="display:none" role="dialog" aria-modal="true" aria-label="Place a call">
+    <div class="cl-q">📞 Place a call</div>
+    <div class="cl-sub">BhatBot rings the phone and talks in its own voice.</div>
+    <button class="cl-me" id="call-me"><span class="cl-ico">⚛</span><span><b>Call me</b><br><span class="cl-num" id="call-mynum"></span></span></button>
+    <input id="call-search" type="text" placeholder="Search contacts…" autocomplete="off" spellcheck="false">
+    <div id="call-list"></div>
+    <div class="cl-foot"><div class="cl-status" id="call-status"></div><button class="cl-x" id="call-close">Close</button></div>
+  </div>
 </body>
 </html>

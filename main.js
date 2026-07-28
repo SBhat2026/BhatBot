@@ -118,7 +118,7 @@ function finalizeSpokenRow(nextUserText) {
 const vanguard = require('./lib/vanguard');           // Phase 1 — unified VANGUARD fleet codename roster (OVERMIND/FORGE/ORACLE/…)
 const { createAdmission } = require('./lib/admission'); // Phase 1 — budget-aware fleet admission controller (convoy fix)
 const blackboard = require('./lib/blackboard');        // FORGE — shared cross-agent state (T5)
-const { runFleet } = require('./lib/fleet');           // FORGE — drone fleet supervisor (D1)
+const { runFleet, listRuns: listFleetRuns, readRun: readFleetRun, FLEET_HARD_CAP, DRONE_ROSTER_DEFAULT } = require('./lib/fleet');           // FORGE — drone fleet supervisor (D1)
 const scholar = require('./lib/integrations/scholar');  // FORGE — scholarly adapters (arXiv/Semantic Scholar)
 const scicompute = require('./lib/scicompute');         // quant/numerics/stats/MPS-torch compute pack (sci_compute)
 const dockerPack = require('./lib/integrations/docker'); // container isolation lane (container_run)
@@ -1369,7 +1369,9 @@ const admission = createAdmission({
 });
 // Live fleet width = how many ~4k-output suits the current OTPM budget can carry (clamped [3,12]).
 // Replaces the old hardcoded parallel caps; the per-request admission reservation does the fine pacing.
-const FLEET_CAP = 24;   // Phase 5: static upper bound (always-plugged desktop); admission paces against live OTPM below this
+// CONCURRENCY ceiling (not the per-mission roster — that's DRONE_ROSTER_DEFAULT). Both live in
+// lib/fleet.js so the two numbers can't drift apart or be mistaken for each other again.
+const FLEET_CAP = FLEET_HARD_CAP;   // admission paces against live OTPM below this
 function fleetWidth(model = MODEL_SONNET, perAgentOut = 4096) {
   try { return admission.width(model, perAgentOut, { min: 3, max: FLEET_CAP }); } catch { return 3; }
 }
@@ -3480,12 +3482,16 @@ async function designDroneFleet(mission, cap = 6) {
 }
 
 // Merge the drones' result envelopes into one recommendation (the synthesize:true step).
+// Returns { text, error } — NEVER a bare null. A swallowed failure here used to be invisible: the
+// caller silently fell back to concatenating raw drone reports, so a broken synthesis looked exactly
+// like a fleet that had nothing to synthesize.
 async function synthesizeDroneResults(mission, results) {
   const body = results.map((r) => `## ${r.persona} [${r.status}]\n${r.summary}`).join('\n\n').slice(0, 8000);
   try {
     const r = await anthropicRequest({ model: MODEL_SONNET, max_tokens: 1200, system: 'Synthesize these drone reports into one clear recommendation for Siddhant. Resolve disagreements explicitly. Be concise.', messages: [{ role: 'user', content: `Mission: ${mission}\n\n${body}` }] }, getApiKey());
-    return (r.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim();
-  } catch (e) { return null; }
+    const text = (r.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim();
+    return text ? { text, error: null } : { text: null, error: 'synthesis returned no text' };
+  } catch (e) { return { text: null, error: String((e && e.message) || e).slice(0, 300) }; }
 }
 
 // Lean summary model call for project memory (#24) — minimal system so it's cheap.
@@ -4401,7 +4407,7 @@ async function executeTool(name, input) {
         // relay. Explicit `drones` or an orchestrator-designed fleet from `mission`.
         const mission = String(input.mission || (Array.isArray(input.drones) && input.drones.map((d) => d.goal).filter(Boolean).join('; ')) || '').trim();
         if (!mission && !(Array.isArray(input.drones) && input.drones.length)) { result = { success: false, error: 'mission or drones[] required' }; break; }
-        const hardCap = Math.max(1, Math.min(input.hardCap || 6, FLEET_CAP));
+        const hardCap = Math.max(1, Math.min(input.hardCap || DRONE_ROSTER_DEFAULT, FLEET_CAP));
         const wsDir = path.join(os.homedir(), '.bhatbot', 'drones', 'run-' + Date.now());
         try { fs.mkdirSync(wsDir, { recursive: true }); } catch {}
         const board = blackboard.createBlackboard({ dir: wsDir });
@@ -4432,17 +4438,25 @@ async function executeTool(name, input) {
             { wsDir, mission, hardCap, envelopeUsd: input.budgetUsd || 2, staleMs: input.staleMs || 90000, nudgeGraceMs: 15000, taskFor: (d) => taskMap[d.id] || { goal: mission } });
         } catch (e) { try { fleetDone(); } catch {}; result = { success: false, error: 'fleet error: ' + e.message }; break; }
         try { fleetDone(); } catch {}
-        let synthesis = null;
+        let synthesis = null, synthesisError = null;
         if (input.synthesize !== false && out.results.some((r) => r.status === 'ok' || r.status === 'partial')) {
-          synthesis = await synthesizeDroneResults(mission, out.results);
+          const syn = await synthesizeDroneResults(mission, out.results);
+          synthesis = syn.text; synthesisError = syn.error;
+          // A failed synthesis silently degraded to "here are the raw reports", which is
+          // indistinguishable from a fleet that had nothing to combine. Say it out loud instead.
+          if (synthesisError) {
+            sendToActivity('tool-update', { type: 'thinking', text: `⚠ synthesis failed (${synthesisError}) — showing the raw drone reports` });
+            try { rstate.event('error', { kind: 'synthesis', scope: 'deploy_drones', message: synthesisError }); } catch {}
+            try { board.post({ agent: 'FLEET', kind: 'need', text: 'synthesis failed: ' + synthesisError }); } catch {}
+          }
         }
         sendToActivity('tool-update', { type: 'thinking', text: `🛩 fleet back: ${out.launched} launched, ${out.reaped} reaped, $${out.totalSpend.toFixed(3)}` });
         try { speakDesktop(`<speak>The fleet's back — summary on screen.</speak>`); } catch {}
         result = {
-          success: true, mission, board_file: board.file,
+          success: true, mission, board_file: board.file, run_file: out.runFile || null,
           drones: out.results.map((r) => ({ persona: r.persona, status: r.status, summary: r.summary, spend: r.spend, reaped: !!r.reaped })),
           totalSpend: out.totalSpend, launched: out.launched, reaped: out.reaped, envelopeExceeded: out.envelopeExceeded,
-          synthesis,
+          synthesis, synthesisError,
         };
         break;
       }
@@ -6446,9 +6460,13 @@ function endVoiceCall(callSid) { if (callSid) voiceCalls.delete(callSid); }
 // Place an actual outbound phone call via Twilio. Reserved for urgency:'call'. If the
 // public funnel host is reachable, the call becomes a two-way JARVIS-voice conversation
 // (webhook-driven, his own TTS). Without a host it degrades to a one-shot spoken message.
-async function twilioCall(message) {
+// `to` defaults to Siddhant's own phone (every existing caller relies on that). Passing an explicit
+// number is what lets the call button ring someone in his contacts instead — the conversation webhook
+// is identical either way, so a call to a third party is still a real two-way JARVIS conversation.
+async function twilioCall(message, { to, name } = {}) {
   const c = loadConfig();
-  if (!c.twilioSid || !c.twilioToken || !c.twilioFrom || !c.myPhone) {
+  const target = to || c.myPhone;
+  if (!c.twilioSid || !c.twilioToken || !c.twilioFrom || !target) {
     return { sent: false, error: 'Twilio not configured (twilioSid/twilioToken/twilioFrom/myPhone)' };
   }
   let twilio;
@@ -6464,17 +6482,17 @@ async function twilioCall(message) {
       // voicemail instead of gathering. Humans resolve in ~3-5s and get the conversation.
       const url = `https://${host}/voice/${c.mcpToken}/incoming?msg=${encodeURIComponent(greeting)}`;
       const call = await client.calls.create({
-        url, method: 'POST', to: c.myPhone, from: c.twilioFrom,
+        url, method: 'POST', to: target, from: c.twilioFrom,
         machineDetection: 'DetectMessageEnd', machineDetectionTimeout: 30,
         statusCallback: `https://${host}/voice/${c.mcpToken}/status`, statusCallbackEvent: ['completed']
       });
-      return { sent: true, via: 'twilio-conversation', sid: call.sid };
+      return { sent: true, via: 'twilio-conversation', sid: call.sid, to: target, name: name || null };
     }
     // Fallback: one-shot announcement (no public host to host the conversation webhook).
     const safe = greeting.replace(/[<>&]/g, ' ');
     const twiml = '<Response><Say voice="Google.en-US-Neural2-D">' + safe + '</Say></Response>';
-    const call = await client.calls.create({ twiml, to: c.myPhone, from: c.twilioFrom });
-    return { sent: true, via: 'twilio', sid: call.sid };
+    const call = await client.calls.create({ twiml, to: target, from: c.twilioFrom });
+    return { sent: true, via: 'twilio', sid: call.sid, to: target, name: name || null };
   } catch (e) { return { sent: false, error: e.message }; }
 }
 
@@ -8910,6 +8928,67 @@ function netBytesNow() {
     return { rx, tx, t: Date.now() };
   } catch { return null; }
 }
+// ── CALL IPC — the physical interface for the Twilio voice line ──────────────────────────────────
+// Two-way Twilio voice was fully wired but had no way to START a call except the agent deciding to
+// on its own. These back the call button: search the address book, then ring Siddhant or a contact.
+const CONTACTS_PATH = path.join(os.homedir(), '.bhatbot', 'contacts.json');
+
+// Digits-only comparison — the address book mixes +1XXXXXXXXXX, (XXX) XXX-XXXX and bare 10-digit.
+const digitsOf = (s) => String(s || '').replace(/\D+/g, '');
+function loadContacts() {
+  try {
+    const raw = JSON.parse(fs.readFileSync(CONTACTS_PATH, 'utf8'));
+    return (raw.contacts || []).filter((c) => c && c.name && (c.phones || []).length);
+  } catch { return []; }
+}
+// Rank by HOW the query matches: exact name > name prefix > word start > substring. A numeric query
+// also matches on digits, so pasting a number finds whose it is.
+function searchContacts(q, limit = 20) {
+  const all = loadContacts();
+  const query = String(q || '').trim().toLowerCase();
+  if (!query) return all.slice(0, limit).map((c) => ({ name: c.name, phones: c.phones }));
+  const qd = digitsOf(query);
+  const scored = [];
+  for (const c of all) {
+    const name = String(c.name).toLowerCase();
+    let score = 0;
+    if (name === query) score = 100;
+    else if (name.startsWith(query)) score = 80;
+    else if (name.split(/\s+/).some((w) => w.startsWith(query))) score = 60;
+    else if (name.includes(query)) score = 40;
+    if (qd.length >= 3 && (c.phones || []).some((p) => digitsOf(p).includes(qd))) score = Math.max(score, 70);
+    if (score) scored.push({ score, name: c.name, phones: c.phones });
+  }
+  return scored.sort((a, b) => b.score - a.score || a.name.localeCompare(b.name)).slice(0, limit)
+    .map(({ score, ...c }) => c);
+}
+
+ipcMain.handle('contacts-search', (_e, { query, limit } = {}) => {
+  try { return { ok: true, contacts: searchContacts(query, Math.min(Number(limit) || 20, 50)), total: loadContacts().length }; }
+  catch (e) { return { ok: false, error: e.message }; }
+});
+
+// Ring a phone. `to` omitted → Siddhant's own number (the "call me" case).
+ipcMain.handle('place-call', async (_e, { to, name, message } = {}) => {
+  const c = loadConfig();
+  const target = to || c.myPhone;
+  if (!target) return { ok: false, error: 'No number — set myPhone in Settings, or pick a contact.' };
+  // Guard a mistyped/garbled number before it reaches the dialer.
+  if (digitsOf(target).length < 7) return { ok: false, error: 'That does not look like a phone number: ' + target };
+  const isSelf = digitsOf(target) === digitsOf(c.myPhone || '');
+  const greeting = String(message || '').trim() || (isSelf
+    ? 'Good day, sir. You rang — what can I do for you?'
+    : `Hello${name ? ', ' + String(name).split(/\s+/)[0] : ''}. This is BhatBot, calling on behalf of Siddhant. How can I help?`);
+  sendToActivity('tool-update', { type: 'thinking', text: `📞 calling ${name || target}…` });
+  try {
+    const r = await twilioCall(greeting, { to: target, name });
+    if (!r.sent) { sendToActivity('tool-update', { type: 'thinking', text: `📞 call failed: ${r.error}` }); return { ok: false, error: r.error }; }
+    try { rstate.event('call', { to: target, name: name || null, via: r.via, sid: r.sid, self: isSelf }); } catch {}
+    sendToActivity('tool-update', { type: 'thinking', text: `📞 ringing ${name || target} (${r.via === 'twilio-conversation' ? 'two-way' : 'announcement only'})` });
+    return { ok: true, ...r, twoWay: r.via === 'twilio-conversation' };
+  } catch (e) { return { ok: false, error: e.message }; }
+});
+
 // SYNAPSE second-brain IPC — the SYNAPSE tab views/builds/prunes the knowledge graph.
 // graphView() already carries the budget, so these are now thin pass-throughs to lib/synapse.js.
 ipcMain.handle('synapse-graph', () => { try { return synapse().graphView(); } catch (e) { return { error: e.message }; } });

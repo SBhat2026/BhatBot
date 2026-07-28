@@ -6,6 +6,9 @@ contextBridge.exposeInMainWorld('bhatbot', {
   getApiKey: () => ipcRenderer.invoke('get-api-key'),
   saveApiKey: (key) => ipcRenderer.invoke('save-api-key', key),
   chat: (payload) => ipcRenderer.invoke('chat', payload),
+  // Call button — search the address book, then ring Siddhant or a contact over the Twilio line.
+  contactsSearch: (query, limit) => ipcRenderer.invoke('contacts-search', { query, limit }),
+  placeCall: (opts) => ipcRenderer.invoke('place-call', opts || {}),
   hideWindow: () => ipcRenderer.invoke('hide-window'),
   minimizeWindow: () => ipcRenderer.invoke('minimize-window'),
   pickDirectory: () => ipcRenderer.invoke('pick-directory'),

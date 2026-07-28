@@ -40,6 +40,40 @@ const noStore = (res) => res.set('Cache-Control', 'no-store');
 // ---- health (token-gated) -----------------------------------------------------
 app.get('/health', guard, (_q, s) => s.json({ ok: true, name: 'bhatbot-cloud', mac: relay.macStatus(), cost: db.costToday() }));
 
+// ---- SYNAPSE read replica -----------------------------------------------------
+// The second brain's WORKERS stay on the Mac: hydrating needs the local repos, the semantic store and
+// ~/.bhatbot/projects, none of which exist here — and replicating them would mean shipping the
+// contents of every repo in his home directory to a hosted box. So the cloud gets a READ REPLICA:
+// the local worker POSTs a pruned graph view (labels + edges + rationales; NO embeddings, NO file
+// bodies) after a successful pass, and the phone reads it here when the Mac is off.
+//
+// Stored as a single JSON blob on the volume rather than in SQLite: it is a whole-snapshot replace,
+// never a query target, and this keeps the schema untouched.
+const BRAIN_FILE = path.join(process.env.DATA_DIR || '/data', 'brain-replica.json');
+const BRAIN_MAX_BYTES = 8 * 1024 * 1024;
+
+app.post('/api/:token/brain', guard, express.json({ limit: '10mb' }), (req, res) => {
+  try {
+    const g = req.body || {};
+    if (!g || !Array.isArray(g.nodes)) return res.status(400).json({ error: 'expected { nodes: [], edges: [] }' });
+    // Defence in depth: the sender already strips these, but a replica must never become a copy of
+    // his private file contents or a place embeddings accumulate.
+    const nodes = g.nodes.map(({ embedding, ...n }) => ({ ...n, text: String(n.text || '').slice(0, 300) }));
+    const body = JSON.stringify({ nodes, edges: g.edges || [], stats: g.stats || null, meta: g.meta || null, at: Date.now() });
+    if (body.length > BRAIN_MAX_BYTES) return res.status(413).json({ error: 'replica too large' });
+    fs.mkdirSync(path.dirname(BRAIN_FILE), { recursive: true });
+    fs.writeFileSync(BRAIN_FILE + '.tmp', body);
+    fs.renameSync(BRAIN_FILE + '.tmp', BRAIN_FILE);   // atomic — a phone never reads a half-written graph
+    res.json({ ok: true, nodes: nodes.length, edges: (g.edges || []).length, bytes: body.length });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/:token/brain', guard, (_q, res) => {
+  noStore(res);
+  try { res.type('json').send(fs.readFileSync(BRAIN_FILE, 'utf8')); }
+  catch { res.json({ nodes: [], edges: [], at: null, note: 'no replica yet — the Mac worker pushes one after each successful pass' }); }
+});
+
 // ---- chat → the agent loop ----------------------------------------------------
 app.post('/api/:token/chat', guard, async (req, res) => {
   try {

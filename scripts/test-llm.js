@@ -64,8 +64,10 @@ const errRes = (status, retryAfter) => ({
 
 (async () => {
   // No key at all → a clear, actionable error rather than a doomed request.
+  // Inject an empty keychain + config: whether THIS machine's login Keychain holds a real key must
+  // not decide whether the test passes.
   try {
-    await llm.anthropicRequest({ messages: [] }, { apiKey: '', fetchImpl: async () => okRes({ content: [] }) });
+    await llm.anthropicRequest({ messages: [] }, { apiKey: '', keychain: noKeychain, config: {}, fetchImpl: async () => okRes({ content: [] }) });
     ok(false, 'anthropicRequest: missing key should throw');
   } catch (e) {
     ok(/no Anthropic key/.test(e.message), 'anthropicRequest: no key → a clear error naming the cause');

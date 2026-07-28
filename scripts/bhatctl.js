@@ -233,6 +233,46 @@ function missions(args) {
   process.exit(2);
 }
 
+// ── fleet runs ───────────────────────────────────────────────────────────────────────────────────
+// Reads the run.json each deploy_drones call now leaves in its workspace. Off disk, so it works with
+// the app closed — before this, a fleet's entire output vanished when the panel scrolled away.
+function fleet(args) {
+  const { listRuns, readRun } = require('../lib/fleet');
+  const sub = args[0] || 'list';
+
+  if (sub === 'list') {
+    const runs = listRuns({});
+    if (!runs.length) return console.log(C.dim('(no fleet runs recorded yet)'));
+    for (const r of runs) {
+      const failed = (r.results || []).filter((x) => x.status === 'failed').length;
+      const bits = [`${r.launched} launched`, `$${(r.totalSpend || 0).toFixed(3)}`];
+      if (r.reaped) bits.push(C.yellow(`${r.reaped} reaped`));
+      if (failed) bits.push(C.red(`${failed} failed`));
+      if (r.envelopeExceeded) bits.push(C.yellow('envelope hit'));
+      console.log(`${C.bold(r.id)} ${C.dim(AGE(Date.now() - (r.startedAt || 0)) + ' ago · ' + Math.round((r.ms || 0) / 1000) + 's')}  ${bits.join(' · ')}`);
+      if (r.mission) console.log(`  ${String(r.mission).replace(/\s+/g, ' ').slice(0, 150)}`);
+    }
+    return;
+  }
+
+  if (sub === 'show') {
+    const r = readRun(args[1] || '');
+    if (!r) { console.error(C.red('✗ no such run — try: bhatctl fleet list')); process.exit(1); }
+    console.log(C.bold('MISSION ') + (r.mission || '(none)'));
+    console.log(C.bold('RUN     ') + r.id + C.dim(`  ${r.launched} launched · ${r.reaped} reaped · $${(r.totalSpend || 0).toFixed(3)} of $${r.envelopeUsd} · ${Math.round((r.ms || 0) / 1000)}s`));
+    if (r.envelopeExceeded) console.log(C.yellow('        budget envelope was hit — some drones never launched'));
+    for (const d of r.results || []) {
+      const col = d.status === 'ok' ? C.green : d.status === 'failed' ? C.red : C.yellow;
+      console.log(`\n${col('● ' + (d.persona || '?'))} ${C.dim('[' + d.status + (d.reaped ? ', reaped' : '') + ']')} ${C.dim(d.spend ? '$' + Number(d.spend.usd || 0).toFixed(4) : '')}`);
+      console.log('  ' + String(d.summary || '').replace(/\n/g, '\n  ').slice(0, 1500));
+    }
+    console.log(C.dim('\nboard: ' + r.board));
+    return;
+  }
+  console.error('✗ usage: bhatctl fleet <list|show <runId>>');
+  process.exit(2);
+}
+
 // ── doctor ───────────────────────────────────────────────────────────────────────────────────────
 // One command that answers "is any of this actually running?" — the question that went unasked while
 // two LaunchAgents sat dead for weeks and the second brain never wrote a single node.
@@ -310,6 +350,7 @@ async function doctor() {
   if (cmd === 'health') return health();
   if (cmd === 'doctor') return doctor();
   if (cmd === 'missions' || cmd === 'mission') return missions(argv.slice(1));
+  if (cmd === 'fleet') return fleet(argv.slice(1));
   if (cmd === 'wc') return send(['world cup', (argv[1] || 'report')]);
   // default: treat all args as a prompt to send
   return send(argv);
