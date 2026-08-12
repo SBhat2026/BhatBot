@@ -74,8 +74,21 @@ const mcphub = require('./lib/mcphub');               // MCP-client hub — cons
 const figures = require('./lib/figures');             // data-accurate matplotlib/seaborn figures
 const logins = require('./lib/logins');               // domain-keyed login profiles (CRED_REF handles)
 const modePrompts = require('./lib/prompts');         // P4  — mode-switching system prompts
-const jobsBus = require('./lib/jobs');                // P5  — background job bus (task cards + spoken relay + steering)
+const jobsBus = require('./lib/jobs');                // P5  — background job bus (task cards + spoken relay + steering) — B1: now durable
 const scheduler = require('./lib/scheduler');         // proactive scheduler (recurring/one-off autonomous tasks)
+// ── Pass B/C (endurance) ────────────────────────────────────────────────────────────────────────
+// B2 — ONE lock every background tick respects. dispatchTurn already serializes turns, but the six
+// background timers (scheduler 30s, patrol 5m, self-heal 15m, health 15m+, ambient 30m, synapse)
+// fired straight through it into the same module-level globals (agentState, currentMode,
+// _activeTools, ttsStream*). That was the contention class behind intermittent long-run weirdness.
+const { createAgentLock } = require('./lib/agentlock');
+const agentLock = createAgentLock({ log: (m) => console.log(m) });
+// B4 — thermal/memory governor. Replaces the one-bit `shouldSpareWatts` gate with a shed ladder
+// sized for the real machine (MacBook Air M4, fanless, 16GB per `sysctl hw.memsize`).
+const { createGovernor } = require('./lib/governor');
+// C1 — live-heal lane: in-run recovery for expired tokens / hung browsers / rate limits. The deep
+// lane (lib/selfheal.js) requires idle:true, so it can never fire during the runs that need it most.
+const { createLiveHealth } = require('./lib/livehealth');
 const { createMissions } = require('./lib/mission');   // durable missions — work that outlives one turn (journal/park/resume)
 const missions = createMissions({ log: (t) => console.log(t) });
 // The mission owned by the turn currently in flight. agentLoop is serial (agentState guards it), so a
@@ -242,6 +255,48 @@ function powerSaverOn() {
 // True when we should AVOID heavy local compute (on battery + saver enabled).
 function shouldSpareWatts() { return powerSaverOn() && onBatteryPower(); }
 
+// ── B4 — thermal + memory governor ───────────────────────────────────────────────────────────────
+// `shouldSpareWatts` above is one bit, and on this machine it is the wrong bit: the constraint that
+// actually ends long runs on a FANLESS M4 Air is heat and unified-memory pressure, not wall power.
+//
+// Probe notes (both learned the hard way, both encoded as tests):
+//   • os.freemem() is useless on macOS — it reported 0.4GB free on a 16GB machine that
+//     `memory_pressure -Q` simultaneously called 48% free. Unified memory + compression make the raw
+//     free-page count meaningless. We shell out to `memory_pressure` instead, cached.
+//   • `pmset -g therm` prints "No thermal warning level has been recorded" on a healthy machine.
+//     Absence is UNKNOWN, not nominal — and unknown must never shed, or a cool Mac sheds forever.
+//     Electron's powerMonitor.getCurrentThermalState() is the primary source; pmset is the fallback.
+let _memFreePct = null, _memProbeAt = 0, _memProbing = false;
+function readMemFreePct() {
+  // Async refresh, sync read: the governor is polled from hot paths and must never block on a spawn.
+  const now = Date.now();
+  if (!_memProbing && now - _memProbeAt > 15000) {
+    _memProbing = true; _memProbeAt = now;
+    try {
+      require('child_process').execFile('memory_pressure', ['-Q'], { timeout: 4000 }, (err, out) => {
+        _memProbing = false;
+        if (err) return;
+        const m = /free percentage:\s*(\d+)/i.exec(String(out || ''));
+        if (m) _memFreePct = Number(m[1]);
+      });
+    } catch { _memProbing = false; }
+  }
+  return _memFreePct;
+}
+const governor = createGovernor({
+  readThermal: () => {
+    try { if (powerMonitor.getCurrentThermalState) return powerMonitor.getCurrentThermalState(); } catch {}
+    return null;
+  },
+  readMemFreePct,
+  onBattery: onBatteryPower,
+  powerSaver: powerSaverOn,
+  log: (m) => console.log(m),
+});
+// Heavy local compute is gated by BOTH the legacy battery bit and the governor, so the existing
+// power-saver behaviour is preserved exactly while the thermal/memory ladder is added on top.
+function shouldSpareCompute() { governor.poll(); return shouldSpareWatts() || !governor.allowLocalModel(); }
+
 let mainWindow = null;
 let activityWindow = null;
 let agentState = 'idle'; // 'running' | 'paused' | 'stopped'
@@ -291,6 +346,11 @@ function observing() { return Date.now() < observeUntil; }
 let screenWatchUntil = 0;
 let screenWatchTimer = null;
 let screenWatchTick = null;
+// B3 — bounded. This was the one buffer with no cap and no periodic flush: it only ever reset at
+// session START, so an all-day screen-watch grew it without limit (one entry per tick, forever).
+// Keeping the most recent N is also the right SEMANTICS — `review` wants what was just seen, and an
+// 8-hour tail would blow the context window anyway.
+const SCREEN_WATCH_MAX = 300;
 let screenWatchBuffer = [];
 function watchingScreen() { return Date.now() < screenWatchUntil; }
 const OBSERVER_SCRIPT = `(() => {
@@ -1312,7 +1372,12 @@ function cheapLocalModel() { const c = loadConfig(); return c.cheapModel || c.lo
 // SINGLE VOICE: Claude everywhere by default. The local gemma tier is now OPT-IN (useLocalCheap:true)
 // — it produced a different, lower-quality "voice" (drift, leaked JSON, "feeling reports") that
 // clashed with Claude's. One model = one consistent voice. Every caller already falls back to Claude.
-function cheapEnabled() { return loadConfig().useLocalCheap === true; }
+// B4 — the FIRST rung of the shed ladder. Local inference is both the largest heat source on a
+// fanless Air and the most substitutable work in the system: every caller below already falls back
+// to Sonnet, so shedding it costs money rather than correctness. Under thermal/memory pressure we
+// therefore stop using the local slot entirely rather than let it throttle the whole machine.
+// (Wave 2 replaces the Sonnet fallback with the cheaper hosted judge slot.)
+function cheapEnabled() { return loadConfig().useLocalCheap === true && !shouldSpareCompute(); }
 // One tool-less completion for internal utilities (summaries, session notes, reflection, briefs).
 // Returns { text, via }. Local-first (free), Sonnet cloud fallback.
 async function cheapText(system, userText, { maxTokens = 512 } = {}) {
@@ -2705,6 +2770,7 @@ async function screenObserve(input) {
       const f = await describeScreenFrame();
       if (f.text) {
         screenWatchBuffer.push({ t: new Date().toLocaleTimeString(), text: f.text });
+        if (screenWatchBuffer.length > SCREEN_WATCH_MAX) screenWatchBuffer.splice(0, screenWatchBuffer.length - SCREEN_WATCH_MAX);
         sendToActivity('tool-update', { type: 'thinking', text: `🖥️ ${f.text}` });
       }
     };
@@ -2954,6 +3020,60 @@ async function smartLogin(input) {
 // menu/UI) and Automation (per-app) permission — granted to Bhatbot.app once.
 // ---------------------------------------------------------------------------
 const { systemControl } = require('./tools/system')({ spawn, osa, osaErr, EXEC_PATH });
+// ── C1 — the LIVE self-heal lane ────────────────────────────────────────────────────────────────
+// Every remedy here fixes the WORLD, never this repo: no git, no code edits, no frozen-zone reach.
+// The deep lane (lib/selfheal.js) still owns anything that touches source, and still requires idle.
+//
+// Placed here because the browser remedy needs main's own `browser`/`page`/`browserContext` lets —
+// the same single-source-of-truth the tools/browser.js closures reach through.
+const liveHealth = createLiveHealth({
+  log: (m) => console.log(m),
+  record: (e) => { try { rstate.event('livehealth', e); } catch {} },
+  remedies: {
+    // A hung/crashed Playwright page is the #1 killer of long browser runs. Closing and nulling the
+    // handles makes the NEXT ensureBrowser() launch a clean one — which is why this is idempotent.
+    browser: async () => {
+      try { await (browserContext || browser)?.close(); } catch {}
+      browser = null; page = null; browserContext = null; browserLaunching = null;
+      return true;
+    },
+    // Ollama evicts models under memory pressure — exactly what happens on a 16GB Air mid-run.
+    // ollamaReady() re-probes and reloads; if it can't, we report honestly rather than loop.
+    model: async () => { try { return await ollamaReady(); } catch { return false; } },
+    // OAuth: googleapis refreshes access tokens itself from the stored refresh token, so a re-probe
+    // is the remedy. If the REFRESH token itself is dead, this correctly returns false and the
+    // blocker report tells Siddhant to run `npm run google:auth`.
+    auth: async () => {
+      try {
+        const google = require('./lib/google');
+        if (!google.isConfigured()) return false;
+        await google.gmailSearch('in:inbox', { limit: 1 });   // cheapest call that forces a refresh
+        return true;
+      } catch { return false; }
+    },
+    // The bridge already auto-reconnects with backoff; the remedy is to let that happen and confirm.
+    bridge: async () => {
+      try {
+        if (_cloudBridge && _cloudBridge.connected && _cloudBridge.connected()) return true;
+        startCloudBridge();
+        await new Promise((r) => setTimeout(r, 2000));
+        return !!(_cloudBridge && _cloudBridge.connected && _cloudBridge.connected());
+      } catch { return false; }
+    },
+    // Transient network: the backoff already happened in the lane; just confirm we're reachable
+    // again rather than blindly declaring success.
+    network: async () => {
+      try {
+        const c = new AbortController();
+        const t = setTimeout(() => c.abort(), 5000);
+        await fetch('https://api.anthropic.com/v1/models', { method: 'HEAD', signal: c.signal }).catch(() => {});
+        clearTimeout(t);
+        return true;
+      } catch { return false; }
+    },
+  },
+});
+
 // Browser tools (browserAction + browserWorkflow) extracted to tools/browser.js (SPLIT_PLAN step 6).
 // page/browser/context + ensureBrowser stay HERE (the single source of truth); the module reaches
 // them only via these accessor/reset closures — which reassign main's own `let`s — so state can't
@@ -4605,9 +4725,13 @@ async function executeTool(name, input) {
         // Wattage gate: the semantics:true caption pass loads a heavy ML model (~60s, hot GPU).
         // On battery (power-saver on) force it off — detection still works, just no icon captions.
         let spIn = input;
-        if (input.semantics && shouldSpareWatts()) {
+        // B4 — also shed under thermal/memory pressure, not just on battery. On the fanless Air the
+        // caption pass is the single hottest thing BhatBot runs; holding it during a long session is
+        // what turns a sustained run into a throttled one.
+        if (input.semantics && (shouldSpareWatts() || !governor.allowHeavyVision())) {
           spIn = { ...input, semantics: false };
-          sendToActivity('tool-update', { type: 'thinking', text: '🔋 on battery — skipping the slow icon-caption pass (semantics off) to save power' });
+          const why = shouldSpareWatts() ? '🔋 on battery' : `🌡️ ${governor.describe()}`;
+          sendToActivity('tool-update', { type: 'thinking', text: `${why} — skipping the slow icon-caption pass (semantics off)` });
         }
         result = await screenParse(spIn); break;
       }
@@ -5175,6 +5299,10 @@ async function agentLoop(history, apiKey, event, opts = {}) {
   // request lives. Re-anchor immediately so a long/resumed run never loses the goal it was given.
   if (_mission) history = [...history, { role: 'user', content: _mission.anchor({ resumed: !!opts.missionId }) }];
 
+  // C1 — reset the live-heal budget for this turn. Bounded PER TURN, not per process: a long session
+  // must not inherit an exhausted healer from an earlier failure hours ago.
+  try { liveHealth.beginTurn(); } catch {}
+
   // P4 — select the operating mode for this task: the local router's classification when
   // the pipeline escalated to us, else the zero-cost regex classifier on the task text.
   currentMode = opts.suggestedMode || modePrompts.classifyMode(lastUserText(history));
@@ -5523,6 +5651,31 @@ async function agentLoop(history, apiKey, event, opts = {}) {
     const batchErr = toolResults.filter((r) => r && r.is_error).length;
     const batchTools = toolResults.filter((r) => r && r.type === 'tool_result').length;
     if (batchTools > 0 && batchErr === batchTools) consecFail++; else if (batchErr === 0) consecFail = 0;
+
+    // ── C1 — LIVE HEAL, before the "change approach" nudge below ─────────────────────────────────
+    // The persistence ladder's advice ("try a DIFFERENT approach or tool") is right for a wrong plan
+    // and WRONG for a broken environment. If the browser died, the token expired, or we got a 429,
+    // switching tools accomplishes nothing — the fix is to repair the environment and retry the SAME
+    // call. So the healer runs first and, when it recovers, suppresses the change-approach nudge for
+    // this iteration and tells the model to simply retry.
+    let _healed = null;
+    if (batchTools > 0 && batchErr === batchTools) {
+      const firstErr = toolResults.find((r) => r && r.is_error);
+      const errText = firstErr ? (typeof firstErr.content === 'string' ? firstErr.content : JSON.stringify(firstErr.content || '')) : '';
+      const cls = liveHealth.classify(new Error(errText), { tool: toolNamesRan[toolNamesRan.length - 1] });
+      if (cls !== 'unknown') {
+        sendToAll(event, 'tool-update', { type: 'thinking', text: `🩺 ${cls} failure — attempting in-run recovery` });
+        _healed = await liveHealth.heal(new Error(errText), { tool: toolNamesRan[toolNamesRan.length - 1] });
+        if (_healed.recovered) {
+          consecFail = 0;                       // the environment was at fault, not the plan
+          failNudgedAt = iterations;            // suppress the change-approach nudge this iteration
+          toolResults.unshift({ type: 'text', text: `[RECOVERED — a transient ${cls} failure was repaired automatically (${_healed.action}). Retry the SAME call you just made; do not change your approach.]` });
+          sendToAll(event, 'tool-update', { type: 'thinking', text: `🩺 recovered from ${cls} — retrying` });
+          if (maxIters - iterations < 3) maxIters = Math.min(HARD_CEILING, maxIters + EXTEND_STEP);
+        }
+      }
+    }
+
     if (consecFail >= 2 && failNudgedAt !== iterations) {
       failNudgedAt = iterations;
       const rung = consecFail >= 4 ? 'You have failed the SAME way several times. Step back completely: question your assumptions, re-read the goal, and switch to a fundamentally different method (a different tool, a different path, or gather more information first).'
@@ -5631,6 +5784,20 @@ async function agentLoop(history, apiKey, event, opts = {}) {
       _mission.park('step-budget: exhausted ' + maxIters + ' steps', history);
       try { rstate.event('mission-park', { missionId: _mission.id, reason: 'step-budget', steps: iterations }); } catch {}
       _parkedNote = `\n\n(Parked as ${_mission.id} — I'll continue this automatically.)`;
+      // C3 — escalate WELL. If the live lane burned attempts this turn, the step budget probably went
+      // on fighting the environment, not on the task. Say exactly what was tried and what's needed
+      // (a credential, a permission) instead of a bare "ran out of steps".
+      try {
+        const _lh = liveHealth.stats();
+        if (_lh.total > 0) {
+          const blocker = liveHealth.blockerReport({ goal: _missionGoal, step: iterations });
+          if (blocker) {
+            _parkedNote += '\n\n' + blocker;
+            try { _mission.park('blocked: ' + Object.keys(_lh.byClass).join(','), history); } catch {}
+            try { rstate.event('mission-blocked', { missionId: _mission.id, classes: Object.keys(_lh.byClass), attempts: _lh.total }); } catch {}
+          }
+        }
+      } catch (e) { console.warn('[livehealth] blocker report failed:', e.message); }
     }
   } catch (e) { console.warn('[mission] park-on-budget failed:', e.message); }
   try {
@@ -6069,7 +6236,12 @@ function recordEpisode(userText, replyText, surface) {
 
 let _turnChain = Promise.resolve();
 function dispatchTurn(history, apiKey, event, opts = {}) {
-  const job = () => _dispatchTurnInner(history, apiKey, event, opts);
+  // B2 — a turn now also HOLDS the shared agent lock for its duration, which is what makes the
+  // background ticks' tryRun() actually see a busy agent and skip. The _turnChain below still
+  // serializes turns against each other (unchanged); the lock adds the missing edge between turns
+  // and timers. agentLock.run is re-entrant, so a turn dispatched FROM a background tick (the
+  // scheduler's whole purpose) passes straight through instead of deadlocking on its own holder.
+  const job = () => agentLock.run('turn', () => _dispatchTurnInner(history, apiKey, event, opts));
   const p = _turnChain.then(job, job);     // run regardless of how the previous turn settled
   _turnChain = p.then(() => {}, () => {});  // never let a rejection break the chain
   return p;
@@ -6774,6 +6946,28 @@ No website checks, no git status, no task lists. Flag anything truly urgent with
 // BhatBot act on its own: reminders, recurring checks, "do X every morning / in 30 min".
 // ---------------------------------------------------------------------------
 let schedulerTimer = null, schedulerRunning = new Set(), schedulerBusy = false;
+
+// ── B2/B4 — the one wrapper every background tick goes through ──────────────────────────────────
+// Before this, six timers fired independently into the same module-level globals that dispatchTurn
+// carefully serializes. `tickScheduler` guarded with `if (agentState !== 'idle') return`, which is a
+// CHECK, not a lock — a turn can start one instruction after it passes, and two background ticks
+// could still overlap each other.
+//
+// Policy is SKIP, never queue. A periodic tick that waits behind a 40-minute run is worse than one
+// that skips: its premise is stale by the time it lands, and every deferred tick fires at once when
+// the lock drops — a thundering herd on the machine that was already busy. The next tick is seconds
+// to minutes away, so skipping costs nothing and keeps the system calm under load.
+function bgTick(name, fn) {
+  return async () => {
+    try {
+      governor.poll();
+      if (!governor.allowBackgroundTick(name)) return;   // thermal/memory critical → defer proactive work
+      const r = await agentLock.tryRun(name, fn);
+      if (r && r.error) console.warn(`[${name}] tick failed:`, r.error.message);
+    } catch (e) { console.warn(`[${name}] tick wrapper failed:`, e && e.message); }
+  };
+}
+
 // Ambient awareness (#18): opt-in proactive monitoring of Calendar/Mail. OFF unless
 // config.ambient.enabled — never schedules otherwise, so no permission prompts. Surfaces only
 // NEW, deduped, redacted, non-quiet-hours signals via the existing out-of-band channels.
@@ -6784,18 +6978,16 @@ function startAmbient() {
     const cfg = ambient.loadConfig();
     const everyMs = Math.max(5, Number(cfg.intervalMin) || 30) * 60 * 1000;
     if (_ambientTimer) clearInterval(_ambientTimer);
-    const tick = async () => {
-      try {
-        if (shouldSpareWatts()) return;                 // on battery + power-saver → skip background poll
-        const res = await ambient.scan();
-        if (!res || res.skipped || !res.signals || !res.signals.length) return;
-        const brief = ambient.digest(res.signals);
-        if (!brief) return;
-        try { telegramNotify('🛰 ' + brief); } catch {}
-        try { sendToActivity('tool-update', { type: 'thinking', text: '🛰 ambient: ' + brief.replace(/\n/g, ' ').slice(0, 200) }); } catch {}
-        ambient.markSurfaced(res.signals);
-      } catch (e) { console.error('[ambient] tick failed:', e.message); }
-    };
+    const tick = bgTick('ambient', async () => {
+      if (shouldSpareWatts()) return;                 // on battery + power-saver → skip background poll
+      const res = await ambient.scan();
+      if (!res || res.skipped || !res.signals || !res.signals.length) return;
+      const brief = ambient.digest(res.signals);
+      if (!brief) return;
+      try { telegramNotify('🛰 ' + brief); } catch {}
+      try { sendToActivity('tool-update', { type: 'thinking', text: '🛰 ambient: ' + brief.replace(/\n/g, ' ').slice(0, 200) }); } catch {}
+      ambient.markSurfaced(res.signals);
+    });
     _ambientTimer = setInterval(tick, everyMs);
     setTimeout(tick, 15000);   // first pass once perms/window settle
     console.log('[ambient] started (every ' + (everyMs / 60000) + 'm)');
@@ -6860,7 +7052,7 @@ async function selfHealTick() {
 function startSelfHeal() {
   if (!selfheal.enabled(loadConfig)) { console.log('[self-heal] disabled (config.selfHeal.enabled !== true)'); return; }
   if (_selfHealTimer) return;
-  _selfHealTimer = setInterval(selfHealTick, 15 * 60 * 1000);   // scan + at most one fix every 15m
+  _selfHealTimer = setInterval(bgTick('selfheal', selfHealTick), 15 * 60 * 1000);   // scan + at most one fix every 15m (B2: lock-guarded)
   console.log('[self-heal] enabled — watching for mistakes (15m cycle, 1 fix at a time, never pushes)');
   setTimeout(selfHealTick, 60 * 1000);
 }
@@ -7092,7 +7284,7 @@ function startHealthMonitor() {
   if (!cfg.enabled) { console.log('[health] monitor disabled (config.health.enabled=false)'); return; }
   if (!garmin.available()) { console.log('[health] Garmin not set up — run scripts/garmin-setup.sh to enable the biometrics monitor'); return; }
   if (_healthTimer) return;
-  _healthTimer = setInterval(healthTick, Math.max(15, cfg.syncEveryMin) * 60 * 1000);
+  _healthTimer = setInterval(bgTick('health', healthTick), Math.max(15, cfg.syncEveryMin) * 60 * 1000);   // B2: lock-guarded
   console.log(`[health] proactive monitor on — syncing every ${cfg.syncEveryMin}m, alerting on notable trends`);
   setTimeout(healthTick, 60 * 1000);
 }
@@ -7167,9 +7359,9 @@ process.on('unhandledRejection', (e) => {
 
 function startScheduler() {
   if (schedulerTimer) return;
-  schedulerTimer = setInterval(tickScheduler, 30000);
+  schedulerTimer = setInterval(bgTick('scheduler', tickScheduler), 30000);   // B2: lock-guarded
   console.log('[scheduler] started (30s tick), ' + scheduler.list().length + ' schedule(s) loaded');
-  setTimeout(tickScheduler, 4000);   // catch anything already overdue shortly after boot
+  setTimeout(bgTick('scheduler', tickScheduler), 4000);   // catch anything already overdue shortly after boot
 }
 
 // Always-on memory maintenance: periodic decay/dedup of the semantic store + per-workspace compaction
@@ -7253,8 +7445,8 @@ function startSynapseWorker() {
   if (headlessWorkerAlive()) {
     console.log('[synapse] headless worker is running (' + WORKER_PIDFILE + ') — in-app timer stands down');
   }
-  _synapseTimer = setInterval(() => { synapseWorkerTick(); }, c.hydrateMin * 60 * 1000);
-  setTimeout(() => { synapseWorkerTick(); }, 20000);   // first pass shortly after boot
+  _synapseTimer = setInterval(bgTick('synapse', synapseWorkerTick), c.hydrateMin * 60 * 1000);   // B2: lock-guarded
+  setTimeout(bgTick('synapse', synapseWorkerTick), 20000);   // first pass shortly after boot
   console.log(`[synapse] worker started (re-import every ${c.hydrateMin}min; paid pass every ${c.connectHours}h when idle, under $${synapse().budget().limit.toFixed(2)})`);
 }
 
@@ -8531,12 +8723,20 @@ function armAckWatchdog(seq, ms = 2500) {
 // debrief-quality notes. See the voice-first product vision.
 // ---------------------------------------------------------------------------
 let sessionSpoken = [];          // meaningful spoken lines this session
+// B3 — bounded. sessionSpoken grew until a briefing flushed it; if no briefing was ever requested
+// (the default now — briefings are on demand), it grew for the life of the process. Only the recent
+// tail is ever read (buildMemoryBlock takes slice(-6)), so a cap costs nothing.
+const SESSION_SPOKEN_MAX = 400;
 let sessionSilenceTimer = null;
 let sessionGenerating = false;
 const SESSION_SILENCE_MS = 30000;
 function recordSpoken(text) {
   const t = String(text || '').trim();
-  if (t && t.length > 1) { sessionSpoken.push(t); _spk.words += countWords(t); noteActivity(); }
+  if (t && t.length > 1) {
+    sessionSpoken.push(t);
+    if (sessionSpoken.length > SESSION_SPOKEN_MAX) sessionSpoken.splice(0, sessionSpoken.length - SESSION_SPOKEN_MAX);
+    _spk.words += countWords(t); noteActivity();
+  }
 }
 function noteActivity() {
   // Reset the 30s silence → end-session timer on any spoken/user activity.
@@ -9338,6 +9538,16 @@ app.whenReady().then(() => {
     startTelegramBridge();
     // Feat-1: clock-scheduled auto morning briefing removed — briefings are on demand now. (scheduleBriefing()
     // remains available; re-enable by calling it if you ever want the timed brief back.)
+    // B1 — reload the durable job bus BEFORE anything creates a job, so the id sequence continues
+    // past reloaded ids and in-flight work from the last process returns as `interrupted` instead of
+    // vanishing. Pairs with reapOrphanMissions(): missions made TURNS durable, jobs were the hole.
+    try {
+      const orphanJobs = jobsBus.hydrate();
+      if (orphanJobs.length) {
+        console.log(`[jobs] ${orphanJobs.length} job(s) interrupted by the last shutdown: ` + orphanJobs.map((j) => j.name).join(', '));
+        try { rstate.event('jobs-interrupted', { count: orphanJobs.length, names: orphanJobs.map((j) => j.name).slice(0, 8) }); } catch {}
+      }
+    } catch (e) { console.warn('[jobs] hydrate failed:', e.message); }
     reapOrphanMissions();   // adopt missions orphaned by a crash/quit BEFORE the scheduler starts ticking
     startScheduler();   // proactive recurring/one-off tasks (also drives mission resume — tickMissions)
     startAmbient();     // #18 opt-in ambient awareness (no-op unless config.ambient.enabled)
@@ -9357,8 +9567,35 @@ app.whenReady().then(() => {
         selfHeal: (() => { try { return selfheal.status(loadConfig); } catch { return {}; } })(),
       }),
       jobs: () => { try { return jobsBus.active(); } catch { return []; } },
+      // B3/B4 — endurance telemetry. Heap drift and background-tick starvation are both INVISIBLE
+      // failure modes: the app doesn't crash, it just gets slower and quietly stops doing proactive
+      // work. Putting both in the live snapshot makes an 8-hour run inspectable while it's running.
+      endurance: () => {
+        try {
+          const mu = process.memoryUsage();
+          const lk = agentLock.stats();
+          return {
+            heapMb: Math.round(mu.heapUsed / 1048576),
+            rssMb: Math.round(mu.rss / 1048576),
+            uptimeMin: Math.round(process.uptime() / 60),
+            governor: governor.describe(),
+            lockHolder: lk.held ? lk.held.name : null,
+            bgSkipped: lk.totalSkipped,
+            lockTimeouts: lk.timeouts,
+          };
+        } catch { return {}; }
+      },
     });
     rstate.startSnapshotLoop(5000);
+    // Periodic heap line so slow drift shows up in the log during a run, not only in a postmortem.
+    const _endTimer = setInterval(() => {
+      try {
+        const mu = process.memoryUsage();
+        const lk = agentLock.stats();
+        console.log(`[endurance] heap ${Math.round(mu.heapUsed / 1048576)}MB · rss ${Math.round(mu.rss / 1048576)}MB · up ${Math.round(process.uptime() / 60)}m · ${governor.describe()} · bg-skips ${lk.totalSkipped}`);
+      } catch {}
+    }, 30 * 60 * 1000);
+    if (_endTimer.unref) _endTimer.unref();
     enableProactiveDefaults();   // Feat-2: turn on self-heal + ambient patrol by default (Siddhant asked for it)
     startSelfHeal();    // autonomous self-healing (verify-gated, auto-revert, never pushes)
     // Phase 6 self-drive is ON-DEMAND — intentionally NOT auto-started here. It runs only when Siddhant
