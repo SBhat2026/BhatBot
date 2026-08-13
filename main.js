@@ -3,6 +3,16 @@
 const { app, BrowserWindow, globalShortcut, ipcMain, shell, dialog, screen, webContents, systemPreferences, desktopCapturer, powerMonitor } = require('electron');
 // Electron/Chromium blocks audio autoplay after async calls → desktop TTS was silent.
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
+// ── ONE VAULT IDENTITY, dev and packaged ─────────────────────────────────────────────────────────
+// macOS safeStorage derives its Keychain item from app.getName(). In dev that is package.json's
+// `name` ("bhatbot"); in a packaged build it is electron-builder's productName ("Bhatbot"). Those
+// are DIFFERENT Keychain services, so a packaged build cannot decrypt a vault written in dev — it
+// boots with every credential unreadable and goes dark ("No ANTHROPIC_API_KEY") while the secrets
+// sit intact in a keychain entry it has stopped asking for. The keychain confirms the split:
+// `bhatbot Safe Storage` exists; `Bhatbot Safe Storage` does not.
+// Pinning the name makes both builds address the same vault. Safe: nothing here stores state under
+// app.getPath('userData') — it all lives in ~/.bhatbot.
+try { app.setName('bhatbot'); } catch {}
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -7098,6 +7108,7 @@ const { createFileSense } = require('./lib/filesense');
 let _fileSense = null;
 function fileSense() { if (!_fileSense) _fileSense = createFileSense({ log: (m) => console.log(m) }); return _fileSense; }
 
+const { createWeaver } = require('./lib/weaver');
 const { createTriageRun } = require('./lib/triagerun');
 let _triageRun = null;
 function triageRunner() {
@@ -7605,6 +7616,51 @@ async function synapseWorkerTick() {
   if (headlessWorkerAlive()) return;   // the daemon owns the cycle right now
   try { await synapse().tick(); } catch (e) { console.warn('[synapse] worker tick failed:', e.message); }
 }
+// ── THE WEAVER — the always-on connection loop (second brain) ────────────────────────────────────
+// Siddhant asked for a background process that runs "constantly while open", finding connections and
+// raising suggestions. synapse.connect() is a batch and cannot do that (see lib/weaver.js); the
+// Weaver drives the same work in bounded slices so the UI can watch links appear as they are made.
+//
+// WHILE OPEN is enforced literally: the loop only ticks when a window exists. It also rides the same
+// governor and agent lock as every other background tick, so it can never win a race against the
+// user or cook a fanless laptop.
+let _weaver = null, _weaverTimer = null;
+function weaver() {
+  if (!_weaver) {
+    _weaver = createWeaver({
+      synapse: synapse(),
+      governor,
+      isIdle: () => agentState !== 'running' && agentState !== 'paused',
+      log: (m) => console.log(m),
+      config: (loadConfig().weaver || {}),
+      onEvent: (e) => {
+        // Live feed → the SYNAPSE + PROJECTS panels. Fire-and-forget; a closed window is not an error.
+        try { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('weaver-event', e); } catch {}
+        if (e.kind === 'link') console.log(`[weaver] link: ${e.fromLabel} ↔ ${e.toLabel} (${e.confidence})`);
+        if (e.kind === 'suggest') console.log(`[weaver] ${(e.items || []).length} suggestion(s)`);
+      },
+    });
+  }
+  return _weaver;
+}
+
+function startWeaver() {
+  const cfg = loadConfig().weaver || {};
+  if (cfg.enabled === false) { console.log('[weaver] disabled by config'); return; }
+  if (_weaverTimer) clearInterval(_weaverTimer);
+  const everyMs = Math.max(5, Number(cfg.everySec) || 12) * 1000;
+  const tick = bgTick('weaver', async () => {
+    // "while open" — no window, no weaving. The headless worker owns the graph when the GUI is shut.
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    await weaver().tick();
+  });
+  weaver().start();
+  _weaverTimer = setInterval(tick, everyMs);
+  setTimeout(tick, 8000);
+  console.log(`[weaver] started — a slice every ${everyMs / 1000}s while a window is open`);
+}
+function stopWeaver() { if (_weaverTimer) { clearInterval(_weaverTimer); _weaverTimer = null; } if (_weaver) _weaver.stop(); }
+
 function startSynapseWorker() {
   const c = synapseWorkerConfig();
   if (!c.worker) { console.log('[synapse] worker disabled by config'); return; }
@@ -7934,6 +7990,27 @@ function startWakeHelper() {
 // ---------------------------------------------------------------------------
 ipcMain.handle('get-api-key', () => getApiKey());
 ipcMain.handle('save-api-key', (_e, key) => { saveConfig({ apiKey: key }); return true; });
+// The OpenAI key powers embeddings (the second brain), Whisper STT and one TTS path. It had no UI,
+// so a rotated key could only be fixed by hand-editing config.json — and a dead key degrades
+// SILENTLY (embedBatch returns {skipped:true}), which is how the knowledge graph quietly froze.
+// saveConfig auto-vaults it, and syncResolvedSecretsToEnv re-bridges it for the pure libs.
+ipcMain.handle('save-openai-key', (_e, key) => {
+  saveConfig({ openaiKey: String(key || '').trim() });
+  try { delete process.env.OPENAI_API_KEY; syncResolvedSecretsToEnv(); } catch {}
+  return true;
+});
+// Live check: is the key actually accepted? "Attached" and "working" are different questions, and
+// only the second one matters.
+ipcMain.handle('check-openai-key', async () => {
+  try {
+    const r = await semantic.embedBatch(['bhatbot key check']);
+    if (r && r.vecs && r.vecs[0]) return { ok: true, via: r.model || 'openai', local: !!r.local, fellBackFrom: r.fellBackFrom || null, dims: r.vecs[0].length };
+    return { ok: false, error: r && (r.error || (r.skipped ? 'no key configured' : 'unknown')) };
+  } catch (e) { return { ok: false, error: e.message }; }
+});
+// Which panel the app opens on. Siddhant wants SYNAPSE as an alternative home to the arc reactor.
+ipcMain.handle('get-home-panel', () => { try { return loadConfig().homePanel || 'chat'; } catch { return 'chat'; } });
+ipcMain.handle('set-home-panel', (_e, id) => { saveConfig({ homePanel: String(id || 'chat') }); return true; });
 ipcMain.handle('get-context-path', () => resolveContextPath());
 ipcMain.handle('get-memory-path', () => MEMORY_PATH);
 // Nexus + Studio are now in-window webview panels; the renderer switches to them. We just
@@ -9473,6 +9550,10 @@ ipcMain.handle('synapse-open-file', async (_e, { path: p, reveal = false } = {})
 
 // Re-run the free hydrate (projects + memories + repos + deep file index). No embeddings, no LLM,
 // so this is always safe to press — unlike Build, which spends.
+ipcMain.handle('weaver-status', () => { try { return weaver().status(); } catch (e) { return { error: e.message }; } });
+ipcMain.handle('weaver-toggle', (_e, on) => {
+  try { if (on) startWeaver(); else stopWeaver(); return weaver().status(); } catch (e) { return { error: e.message }; }
+});
 ipcMain.handle('synapse-reindex', async () => {
   try {
     sendToActivity('tool-update', { type: 'thinking', text: '🗂 re-indexing your files…' });
@@ -9843,6 +9924,7 @@ app.whenReady().then(() => {
     startTriage();      // Phase A — proactive mail triage (no-op unless config.triage.enabled)
     startMemoryMaintenance();   // always-on memory upkeep (runs on a timer, independent of the window)
     startSynapseWorker();       // SYNAPSE second brain — free re-import loop + slow budget-capped paid pass
+    startWeaver();              // always-on connection weaving while a window is open
     startMcpHub();              // connect external MCP-server plugins (config.mcpPlugins) → tools for the agent
     startPresenceFeed();        // stream live fleet state to the 3D presence window while it's open
     startCacheKeepAlive();   // Task 5 — prompt-cache warm-keeper (default on; keeps first token fast after idle gaps)

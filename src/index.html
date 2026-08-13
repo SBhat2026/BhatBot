@@ -204,6 +204,9 @@
   /* SYNAPSE — second-brain graph tab */
   #synapse-panel .sy-tools { display: flex; align-items: center; gap: 8px; margin-left: auto; margin-right: 12px; }
   #synapse-panel .sy-stats { font-size: 11px; color: var(--text-dim2); letter-spacing: .04em; }
+  #synapse-panel .sy-weave { color: var(--text-dim2); opacity: .55; transition: opacity .2s, color .2s; max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #synapse-panel .sy-weave.live { color: var(--accent); opacity: 1; }
+
   #synapse-panel .sy-btn { background: var(--surface); border: 1px solid var(--line); color: var(--text-dim); border-radius: 7px; padding: 4px 10px; font-size: 11.5px; cursor: pointer; }
   #synapse-panel .sy-btn:hover { color: var(--text); border-color: var(--accent-dim); }
   #sy-body { position: relative; flex: 1; min-height: 0; }
@@ -1162,6 +1165,28 @@
         <button id="set-key-save" class="set-btn">Save</button>
       </div>
       <div id="set-key-msg" class="set-msg"></div>
+
+      <div class="set-sec" style="margin-top:22px">OpenAI API key</div>
+      <div class="set-hint">Powers the second brain's embeddings, Whisper speech-to-text, and one TTS path. A dead key degrades <b>silently</b> — the knowledge graph simply stops growing — so this shows whether it actually works, not just whether it is set. If it fails, embeddings fall back to a local model automatically.</div>
+      <div id="set-oai-status" class="set-status">checking…</div>
+      <div class="set-row">
+        <input id="set-oai-input" class="set-input" type="password" placeholder="sk-proj-… (paste key, then Save)" autocomplete="off" spellcheck="false" />
+        <button id="set-oai-save" class="set-btn">Save</button>
+        <button id="set-oai-test" class="set-btn">Test</button>
+      </div>
+      <div id="set-oai-msg" class="set-msg"></div>
+
+      <div class="set-sec" style="margin-top:22px">Home view</div>
+      <div class="set-hint">Which view BhatBot opens on.</div>
+      <div class="set-row">
+        <select id="set-home" class="set-input">
+          <option value="chat">Command — the arc reactor</option>
+          <option value="synapse">Synapse — the second brain</option>
+          <option value="projects">Projects</option>
+          <option value="vanguard">Fleet</option>
+        </select>
+      </div>
+      <div id="set-home-msg" class="set-msg"></div>
     </div>
   </div>
 
@@ -1177,6 +1202,7 @@
       <span class="sy-tools">
         <span id="sy-budget"></span>
         <span id="sy-stats" class="sy-stats"></span>
+        <span id="sy-weave" class="sy-stats sy-weave"></span>
         <button id="sy-build" class="sy-btn" title="Import memory + find connections">⟳ Build</button>
         <button id="sy-mode" class="sy-btn" title="Toggle 2D / 3D">3D</button>
       </span>
@@ -1929,6 +1955,42 @@ function applyStageVisibility() {
   $('#vstage').style.display = showStage ? 'flex' : 'none';
   $('#chat').style.display = (onChat && !showStage) ? 'flex' : 'none';
 }
+// OpenAI key: SET is not the same question as WORKS. `Test` runs a real embedding call and reports
+// which backend answered, so a silently-dead key is visible instead of inferred.
+async function initOpenAiSettings() {
+  const status = document.getElementById('set-oai-status');
+  const msg = document.getElementById('set-oai-msg');
+  const input = document.getElementById('set-oai-input');
+  if (!status || !input) return;
+  const render = (r) => {
+    if (!r) { status.textContent = 'unknown'; return; }
+    if (r.ok && !r.local) status.textContent = `✓ working — ${r.via} (${r.dims}d)`;
+    else if (r.ok && r.local) status.textContent = `⚠ OpenAI key not working (${r.fellBackFrom || 'unusable'}) — using local ${r.via} (${r.dims}d)`;
+    else status.textContent = `✗ ${r.error || 'not working'}`;
+  };
+  const check = async () => { status.textContent = 'checking…'; try { render(await window.bhatbot.checkOpenaiKey()); } catch { status.textContent = 'check failed'; } };
+  document.getElementById('set-oai-test').onclick = check;
+  document.getElementById('set-oai-save').onclick = async () => {
+    const v = input.value.trim();
+    if (!v) { msg.textContent = 'Paste a key first.'; return; }
+    msg.textContent = 'saving…';
+    try { await window.bhatbot.saveOpenaiKey(v); input.value = ''; msg.textContent = 'Saved to the vault. Testing…'; await check(); msg.textContent = 'Saved.'; }
+    catch (e) { msg.textContent = 'Save failed: ' + e.message; }
+  };
+  check();
+}
+
+async function initHomeSetting() {
+  const sel = document.getElementById('set-home');
+  const msg = document.getElementById('set-home-msg');
+  if (!sel) return;
+  try { sel.value = await window.bhatbot.getHomePanel(); } catch {}
+  sel.onchange = async () => {
+    try { await window.bhatbot.setHomePanel(sel.value); msg.textContent = `Opens on ${sel.options[sel.selectedIndex].text.split('—')[0].trim()} from now on.`; }
+    catch (e) { msg.textContent = 'Could not save: ' + e.message; }
+  };
+}
+
 function showPanel(id) {
   if (id === 'command') id = 'chat';   // hud_control speaks tab names; 'chat' is the historical home id
   curPanel = id;
@@ -1950,6 +2012,8 @@ function showPanel(id) {
 
 // Settings — API key entry (vaulted via save-api-key). The one in-app place to fix an invalid key.
 async function initSettings() {
+  initOpenAiSettings();
+  initHomeSetting();
   const status = document.getElementById('set-key-status');
   const msg = document.getElementById('set-key-msg');
   const input = document.getElementById('set-key-input');
@@ -1987,6 +2051,14 @@ document.querySelectorAll('#rail .navbtn').forEach((b) =>
   b.addEventListener('click', () => { const id = b.dataset.panel; showPanel(curPanel === id && id !== 'chat' ? 'chat' : id); })
 );
 document.querySelectorAll('.panel-back').forEach((b) => b.addEventListener('click', () => showPanel('chat')));
+// HOME VIEW. The arc reactor is no longer the only front door — SYNAPSE (or Projects, or Fleet) can
+// be what BhatBot opens on. Applied after first paint so the chosen panel's own init runs normally.
+(async () => {
+  try {
+    const home = await window.bhatbot.getHomePanel();
+    if (home && home !== 'chat') setTimeout(() => showPanel(home), 120);
+  } catch {}
+})();
 // ⌘/Ctrl shortcuts mirror the rail order (toggle closed if already open).
 const RAIL_KEYS = { '1': 'chat', '2': 'vanguard', '3': 'health', '4': 'manage', '5': 'code', '6': 'synapse', '7': 'projects', '8': 'voice', '9': 'settings' };
 document.addEventListener('keydown', (e) => {
@@ -2036,6 +2108,7 @@ window.bhatbot.onStudioReload && window.bhatbot.onStudioReload(() => reloadStudi
   function ingest(g) {
     if (!g || g.error) return;
     const prev = {}; for (const n of G.nodes) prev[n.id] = n; byId = {};
+    reheat(0.5);   // graph changed → nudge the layout, don't restart it
     G.nodes = (g.nodes || []).map((n) => { const p = prev[n.id] || {}; const node = { ...n, x: p.x != null ? p.x : (Math.random() * 400 - 200), y: p.y != null ? p.y : (Math.random() * 300 - 150), vx: 0, vy: 0 }; byId[n.id] = node; return node; });
     G.edges = (g.edges || []).filter((e) => byId[e.from] && byId[e.to]);
     const st = document.getElementById('sy-stats'); if (st && g.stats) st.textContent = `${g.stats.nodes} nodes · ${g.stats.edges} links · ${g.stats.proposed} proposed`;
@@ -2071,13 +2144,70 @@ window.bhatbot.onStudioReload && window.bhatbot.onStudioReload(() => reloadStudi
       list.appendChild(row);
     }
   }
+  // ── LAYOUT ──────────────────────────────────────────────────────────────────────────────────────
+  // The old sim had two fatal properties at real scale:
+  //   • O(N²) repulsion with a hard `if (N.length > 400) return` bail — so past 400 nodes it did not
+  //     simulate AT ALL and every node stayed at its random spawn point. With the deep file index
+  //     (~1,700 nodes) that is the entire graph frozen as noise with long edges crossing it.
+  //   • no cooling: every frame re-injected energy, so even a small graph never settled. That is the
+  //     jitter Siddhant asked to fix.
+  // This version uses a spatial hash (repulsion only against nearby cells → O(N·k)) and simulated
+  // annealing (alpha decays to zero → the graph SETTLES and then stops consuming frames entirely,
+  // which also matters on a fanless laptop). New links from the Weaver `reheat()` it gently instead
+  // of restarting the layout, so connections appear as a nudge rather than an explosion.
+  let alpha = 1;                       // simulation energy, decays to 0
+  const ALPHA_MIN = 0.004, ALPHA_DECAY = 0.985, CELL = 60, MAX_V = 12;
+  function reheat(amount = 0.35) { alpha = Math.min(1, alpha + amount); }
+  function settled() { return alpha <= ALPHA_MIN; }
+
   function tick() {
-    const N = G.nodes; if (N.length > 400) return;   // cap the n^2 sim; huge graphs freeze positions
-    for (let i = 0; i < N.length; i++) { const a = N[i]; a.vx *= 0.9; a.vy *= 0.9;
-      for (let j = i + 1; j < N.length; j++) { const b = N[j]; let dx = a.x - b.x, dy = a.y - b.y; const d2 = dx * dx + dy * dy + 0.01; const f = 1400 / d2, d = Math.sqrt(d2); dx /= d; dy /= d; a.vx += dx * f; a.vy += dy * f; b.vx -= dx * f; b.vy -= dy * f; }
-      a.vx += -a.x * 0.008; a.vy += -a.y * 0.008; }
-    for (const e of G.edges) { const a = byId[e.from], b = byId[e.to]; if (!a || !b) continue; let dx = b.x - a.x, dy = b.y - a.y; const d = Math.sqrt(dx * dx + dy * dy) || 1, f = (d - 70) * 0.02; dx /= d; dy /= d; a.vx += dx * f; a.vy += dy * f; b.vx -= dx * f; b.vy -= dy * f; }
-    for (const a of N) { if (a === dragNode) continue; a.x += a.vx; a.y += a.vy; }
+    const N = G.nodes;
+    if (!N.length || settled()) return;               // settled → no work, no heat, no jitter
+    alpha = Math.max(ALPHA_MIN, alpha * ALPHA_DECAY);
+
+    // Spatial hash: only test pairs in neighbouring cells. This is what makes thousands of nodes
+    // viable, and it is why the >400 bail can be deleted rather than raised.
+    const grid = new Map();
+    const key = (x, y) => ((x / CELL) | 0) + ':' + ((y / CELL) | 0);
+    for (const n of N) {
+      const k = key(n.x, n.y);
+      let c = grid.get(k); if (!c) { c = []; grid.set(k, c); }
+      c.push(n);
+    }
+    for (const a of N) {
+      a.vx *= 0.82; a.vy *= 0.82;                     // friction
+      const cx = (a.x / CELL) | 0, cy = (a.y / CELL) | 0;
+      for (let gx = cx - 1; gx <= cx + 1; gx++) {
+        for (let gy = cy - 1; gy <= cy + 1; gy++) {
+          const cell = grid.get(gx + ':' + gy); if (!cell) continue;
+          for (const b of cell) {
+            if (a === b) continue;
+            let dx = a.x - b.x, dy = a.y - b.y;
+            const d2 = dx * dx + dy * dy + 0.01;
+            if (d2 > CELL * CELL * 4) continue;        // out of influence
+            const f = (900 / d2) * alpha, d = Math.sqrt(d2);
+            a.vx += (dx / d) * f; a.vy += (dy / d) * f;
+          }
+        }
+      }
+      a.vx += -a.x * 0.006 * alpha; a.vy += -a.y * 0.006 * alpha;   // gentle centering
+    }
+    for (const e of G.edges) {
+      const a = byId[e.from], b = byId[e.to]; if (!a || !b) continue;
+      let dx = b.x - a.x, dy = b.y - a.y;
+      const d = Math.sqrt(dx * dx + dy * dy) || 1;
+      const f = (d - 70) * 0.02 * alpha;
+      dx /= d; dy /= d;
+      a.vx += dx * f; a.vy += dy * f; b.vx -= dx * f; b.vy -= dy * f;
+    }
+    for (const a of N) {
+      if (a === dragNode) continue;
+      // Clamp: an unclamped spring at high alpha is what flings a node off-screen and draws those
+      // very long crossing edges.
+      if (a.vx > MAX_V) a.vx = MAX_V; else if (a.vx < -MAX_V) a.vx = -MAX_V;
+      if (a.vy > MAX_V) a.vy = MAX_V; else if (a.vy < -MAX_V) a.vy = -MAX_V;
+      a.x += a.vx; a.y += a.vy;
+    }
   }
   function draw() {
     ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
@@ -2085,6 +2215,10 @@ window.bhatbot.onStudioReload && window.bhatbot.onStudioReload(() => reloadStudi
     ctx.save(); ctx.translate(w / 2 + view.x, h / 2 + view.y); ctx.scale(view.k, view.k);
     for (const e of G.edges) { const a = byId[e.from], b = byId[e.to]; if (!a || !b) continue;
       ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y);
+      // A link the Weaver just made glows for a few seconds, then joins the rest.
+      const fl = window._syFlash && window._syFlash.get(e.id);
+      const age = fl ? (Date.now() - fl) / 3000 : 2;
+      if (age < 1) { ctx.strokeStyle = `rgba(150,235,255,${(1 - age) * 0.95 + 0.3})`; ctx.lineWidth = (2.6 - age * 1.2) / view.k; ctx.stroke(); ctx.setLineDash([]); continue; }
       ctx.strokeStyle = e.status === 'confirmed' ? 'rgba(127,212,232,.5)' : 'rgba(150,160,175,.2)';
       ctx.lineWidth = (e.status === 'confirmed' ? 1.4 : 0.8) / view.k; if (e.status === 'proposed') ctx.setLineDash([3, 3]); ctx.stroke(); ctx.setLineDash([]); }
     for (const n of G.nodes) { const r = 4 + (n.importance || 1) * 1.5; ctx.beginPath(); ctx.arc(n.x, n.y, r, 0, 6.283);
@@ -2115,6 +2249,24 @@ window.bhatbot.onStudioReload && window.bhatbot.onStudioReload(() => reloadStudi
   bBtn.onclick = async () => { bBtn.textContent = 'building…'; bBtn.disabled = true; try { await window.bhatbot.synapseBuild(); } catch {} bBtn.textContent = '⟳ Build'; bBtn.disabled = false; };
   document.getElementById('sy-mode').onclick = () => { panel.classList.toggle('mode3d'); if (panel.classList.contains('mode3d')) init3D(); };
   window.bhatbot.onSynapseUpdate && window.bhatbot.onSynapseUpdate((g) => { ingest(g); if (panel.classList.contains('mode3d')) update3D(); });
+  // ── THE WEAVER'S LIVE FEED ───────────────────────────────────────────────────────────────────────
+  // Connections are found continuously in the background; this is where you watch it happen. A new
+  // link REHEATS the layout slightly rather than re-running it, so the graph nudges into its new
+  // shape instead of exploding — the difference between "alive" and "unstable".
+  const _flash = new Map();                       // edgeId → ts, for the brief highlight on arrival
+  window.bhatbot.onWeaverEvent && window.bhatbot.onWeaverEvent((e) => {
+    if (e.kind === 'link') { _flash.set(e.id, Date.now()); reheat(0.25); }
+    if (e.kind === 'explain' || e.kind === 'suggest') reheat(0.1);
+    const chip = document.getElementById('sy-weave');
+    if (chip) {
+      if (e.kind === 'phase') chip.textContent = '◇ ' + e.phase;
+      else if (e.kind === 'link') chip.textContent = `◆ linked ${String(e.fromLabel || '').slice(0, 22)} ↔ ${String(e.toLabel || '').slice(0, 22)}`;
+      else if (e.kind === 'suggest') chip.textContent = `◆ ${(e.items || []).length} new suggestion(s)`;
+      chip.classList.add('live');
+      clearTimeout(chip._t); chip._t = setTimeout(() => chip.classList.remove('live'), 4000);
+    }
+  });
+  window._syFlash = _flash;
   const navBtn = document.querySelector('.navbtn[data-panel="synapse"]');
   // On open: ensure the graph is populated (free import if empty) so it's never blank.
   if (navBtn) navBtn.addEventListener('click', () => setTimeout(async () => { size(); ingest(await (window.bhatbot.synapseEnsure ? window.bhatbot.synapseEnsure() : window.bhatbot.synapseGraph())); }, 60));

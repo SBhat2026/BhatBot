@@ -5,6 +5,10 @@ const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('bhatbot', {
   getApiKey: () => ipcRenderer.invoke('get-api-key'),
   saveApiKey: (key) => ipcRenderer.invoke('save-api-key', key),
+  saveOpenaiKey: (key) => ipcRenderer.invoke('save-openai-key', key),
+  checkOpenaiKey: () => ipcRenderer.invoke('check-openai-key'),
+  getHomePanel: () => ipcRenderer.invoke('get-home-panel'),
+  setHomePanel: (id) => ipcRenderer.invoke('set-home-panel', id),
   chat: (payload) => ipcRenderer.invoke('chat', payload),
   // Call button — search the address book, then ring Siddhant or a contact over the Twilio line.
   contactsSearch: (query, limit) => ipcRenderer.invoke('contacts-search', { query, limit }),
@@ -39,6 +43,10 @@ contextBridge.exposeInMainWorld('bhatbot', {
   synapseProjects: () => ipcRenderer.invoke('synapse-projects'),
   synapseOpenFile: (path, reveal) => ipcRenderer.invoke('synapse-open-file', { path, reveal }),
   synapseReindex: () => ipcRenderer.invoke('synapse-reindex'),                        // FREE re-hydrate (no $)
+  // The Weaver — the always-on connection loop. `onWeaverEvent` is the live feed the graph animates.
+  weaverStatus: () => ipcRenderer.invoke('weaver-status'),
+  weaverToggle: (on) => ipcRenderer.invoke('weaver-toggle', on),
+  onWeaverEvent: (cb) => ipcRenderer.on('weaver-event', (_e, d) => cb(d)),
   sendFleetFeedback: (id, text) => ipcRenderer.invoke('fleet-feedback', { id, text }),
   sendFleetControl: (id, action) => ipcRenderer.invoke('fleet-control', { id, action }),
   openAgentWindow: (id) => ipcRenderer.invoke('open-agent-window', id),
