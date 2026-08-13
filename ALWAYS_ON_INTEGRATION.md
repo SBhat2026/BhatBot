@@ -32,9 +32,15 @@ Two defects were found by the tests during this pass and fixed:
 1. **Governor first-poll throttle** — `lastSample = 0` meant the very first `poll()` was throttled away, so the governor ran on a null sample until its first window elapsed.
 2. **Scheduler→dispatchTurn deadlock** — `tickScheduler` holds the lock *and* calls the agent, which also takes it. A plain mutex would have wedged the entire app on the most routine path in the system. Fixed with `AsyncLocalStorage` re-entrancy (a boolean would not survive `await` boundaries).
 
-**Wave 2 — local tier.** Glimmer T0 bake-off → T1 three-slot config. Phase A depends on the `triage` slot existing.
+**Wave 2 — local tier. ❌ SKIPPED (Siddhant, 2026-08-13).** Glimmer 30B can't run on a 16GB fanless Air, so the three-slot config buys nothing here. Phase A shipped without a `triage` model slot: the deterministic ladder resolves everything, and `ambiguous` simply means "surface it, touch nothing". Revisit only if a hosted judge slot is wanted for cost reasons.
 
-**Wave 3 — proactive mail.** A1 signals → A2 triage → A3 ledger → A4 propose-only tick → A5 backlog dry run. One week in `propose` before `act`.
+**Wave 3 — proactive mail. ✅ SHIPPED.** `lib/{signals,triage,triage-table,triagerun,actionlog}.js` + `triage_mail` tool + `scripts/triage-backlog.js`. Acts on NEW `noise` only; backlog stays dry-run. 45 assertions.
+- ⚠️ **BLOCKED ON RE-AUTH:** the Google refresh token is expired (`invalid_grant`). Run `npm run google:auth`. Triage no-ops until then and says so once.
+- Two pre-existing bugs fixed en route: `lib/google.js` never resolved `CRED_REF` handles (every Gmail call had been failing `invalid_client` while `isConfigured()` returned true), and macOS safeStorage keys off the app NAME (a script run as `electron foo.js` reads the wrong Keychain item).
+
+**Wave 3b — second brain. ✅ SHIPPED.** `lib/fileindex.js` deep file index (20,132 candidates → 1,719 indexed, ~$0.009 to embed) + PROJECTS tab (⌘7). 49 file nodes → 1,684.
+
+**Wave 3c — file_tools. ✅ SHIPPED.** `lib/filetools.js` (16/19 ops local via sips/ffmpeg/pypdf/PIL) + `lib/filesense.js` learned upload gate. thetoolbus.ai is behind bot protection (403 to any scripted request) so it is opened in the browser, never scraped.
 
 **Wave 4 — deep autonomy.** C2 backtracking (on mission checkpoints), D tool authoring, E memory consolidation.
 
