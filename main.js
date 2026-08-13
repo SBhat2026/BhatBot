@@ -4327,6 +4327,38 @@ async function executeTool(name, input) {
         else result = { success: false, error: 'Unknown gmail action: ' + a };
         break;
       }
+      // FILE TOOLS — the local utility belt (prompted by thetoolbus.ai, but done on-device).
+      // Everything here runs through sips/ffmpeg/pypdf/PIL, so nothing is uploaded and it works
+      // offline. The upload gate in lib/filesense.js only comes into play for the few ops that would
+      // need a third party, and those are reported rather than silently performed.
+      case 'file_tools': {
+        const filetools = require('./lib/filetools');
+        if (input.action === 'capabilities') {
+          const caps = await filetools.capabilities({ refresh: true });
+          const avail = [], missing = [];
+          for (const op of Object.keys(filetools.OPS)) {
+            const a = await filetools.opAvailable(op);
+            (a.ok ? avail : missing).push(a.ok ? op : `${op} (needs ${a.missing})`);
+          }
+          result = { success: true, capabilities: caps, available: avail, unavailable: missing };
+          break;
+        }
+        if (input.action !== 'run') { result = { success: false, error: 'file_tools: action must be capabilities or run' }; break; }
+        const r = await filetools.execute(String(input.op || ''), input);
+        // If the op needs a third party, surface the ToolBus page AND how sensitive the file is, so
+        // Siddhant is never asked to upload something without being told what it is.
+        if (!r.success && r.toolbusUrl) {
+          try {
+            const sense = fileSense().classify(input.path || (input.paths || [])[0] || '');
+            r.sensitivity = { level: sense.level, needsConfirm: sense.needsConfirm, why: sense.reasons[0] };
+            r.note = sense.needsConfirm
+              ? `This file looks ${sense.level} (${sense.reasons[0]}). I have NOT uploaded it. Install the local tool above, or open the ToolBus page yourself if you're happy to send it.`
+              : 'Install the local tool above, or use the ToolBus page (it would upload this file).';
+          } catch {}
+        }
+        result = r;
+        break;
+      }
       // Phase A3 — the human-facing half of the ledger. This is what makes "act with undo" real:
       // Siddhant can say "undo what you archived this morning" and get his exact prior state back.
       case 'triage_mail': {
@@ -7061,6 +7093,11 @@ let _triageWarned = false;   // warn once about unusable Google creds, not every
 
 // The decision loop itself lives in lib/triagerun.js (pure + DI) so it is testable without Electron
 // and reusable by the headless worker — main.js keeps only the timer, config, and surfacing.
+// The upload gate. Lazily constructed so a plain require of main.js doesn't touch the decisions log.
+const { createFileSense } = require('./lib/filesense');
+let _fileSense = null;
+function fileSense() { if (!_fileSense) _fileSense = createFileSense({ log: (m) => console.log(m) }); return _fileSense; }
+
 const { createTriageRun } = require('./lib/triagerun');
 let _triageRun = null;
 function triageRunner() {
