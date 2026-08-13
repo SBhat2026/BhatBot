@@ -1,10 +1,10 @@
 # BhatBot — real-app benchmark
 
-_Measured 2026-08-13T21:44:05.624Z against the installed build (not simulated)._
+_Measured 2026-08-13T22:07:15.692Z against the installed build (not simulated)._
 
 ```json
 {
-  "ts": "2026-08-13T21:44:05.624Z",
+  "ts": "2026-08-13T22:07:15.692Z",
   "sections": {
     "intake": {
       "total": 16,
@@ -89,7 +89,7 @@ _Measured 2026-08-13T21:44:05.624Z against the installed build (not simulated)._
     },
     "graph": {
       "nodes": 1928,
-      "edges": 6390,
+      "edges": 6395,
       "types": {
         "project": 63,
         "memory": 153,
@@ -100,21 +100,21 @@ _Measured 2026-08-13T21:44:05.624Z against the installed build (not simulated)._
       "dims": {
         "768": 1928
       },
-      "relatesTo": 562,
-      "crossProject": 562,
+      "relatesTo": 565,
+      "crossProject": 565,
       "withinProject": 0,
       "crossProjectPct": 100,
-      "explained": 1,
-      "explainedPct": 0.2,
-      "spendUsd": 0.40527224
+      "explained": 27,
+      "explainedPct": 4.8,
+      "spendUsd": 0.45859123999999996
     },
     "endurance": {
       "heapMb": 52,
-      "rssMb": 75,
-      "uptimeMin": 1,
-      "governor": "level=warm · thermal=fair · mem=20% free",
+      "rssMb": 174,
+      "uptimeMin": 2,
+      "governor": "level=nominal · thermal=nominal · mem=61% free",
       "lockHolder": "weaver",
-      "bgSkipped": 1,
+      "bgSkipped": 3,
       "lockTimeouts": 0,
       "agent": "idle",
       "jobsActive": 0
@@ -122,8 +122,8 @@ _Measured 2026-08-13T21:44:05.624Z against the installed build (not simulated)._
     "throughput": {
       "batch": 24,
       "ok": 24,
-      "ms": 347,
-      "perNodeMs": 14.5,
+      "ms": 397,
+      "perNodeMs": 16.5,
       "model": "nomic-embed-text",
       "local": true,
       "fellBackFrom": null,

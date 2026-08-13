@@ -913,6 +913,17 @@
   #progress .pg-logrow.ok .pg-ic { color: var(--accent); }
   #progress .pg-logrow.fail .pg-ic { color: #e0715f; }
 
+  /* Slash-command autocomplete — anchored above the composer, keyboard-first. */
+  #cmdpop { position: fixed; left: 16px; right: 16px; bottom: 92px; z-index: 40;
+    background: color-mix(in srgb, var(--surface) 96%, transparent); border: 1px solid var(--line);
+    border-radius: 10px; padding: 5px; max-height: 320px; overflow-y: auto; box-shadow: 0 10px 34px rgba(0,0,0,.45); }
+  #cmdpop.hidden { display: none; }
+  #cmdpop .cmd { padding: 6px 9px; border-radius: 7px; cursor: pointer; display: flex; gap: 10px; align-items: baseline; }
+  #cmdpop .cmd.sel { background: color-mix(in srgb, var(--accent) 16%, transparent); }
+  #cmdpop .cmd .n { color: var(--text); font-size: 12.5px; white-space: nowrap; }
+  #cmdpop .cmd .a { color: var(--text-dim2); font-size: 11px; white-space: nowrap; }
+  #cmdpop .cmd .d { color: var(--text-dim); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #cmdpop .cmd .tag { margin-left: auto; font-size: 10px; color: var(--text-dim2); }
   /* T2 — single display-state strip (pinned just above the composer). One source of truth for
      "what is BhatBot doing right now"; collapses to nothing when idle so it never nags. */
   #turnstrip { -webkit-app-region: no-drag; display: flex; align-items: center; gap: 9px;
@@ -1265,6 +1276,7 @@
     <span class="tsplan"></span>
     <span class="tsmodel"></span>
   </div>
+  <div id="cmdpop" class="hidden"></div>
   <div id="inputbar">
     <textarea id="ta" rows="1" placeholder="Message Bhatbot…  (Enter to send)"></textarea>
     <button class="ibtn" id="attach" title="Attach screenshot / photo / screen recording">📎</button>
@@ -2293,6 +2305,60 @@ window.bhatbot.onStudioReload && window.bhatbot.onStudioReload(() => reloadStudi
       const g = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(a[0], a[1], a[2]), new THREE.Vector3(b[0], b[1], b[2])]);
       grp.add(new THREE.Line(g, new THREE.LineBasicMaterial({ color: 0x3a4a5a, transparent: true, opacity: e.status === 'confirmed' ? 0.5 : 0.2 }))); }
   }
+})();
+
+// ── SLASH-COMMAND AUTOCOMPLETE ──────────────────────────────────────────────────────────────────
+// Opens when the composer starts with "/" at the very beginning of the text. Execution happens in
+// the MAIN process at the front door of the turn — this is only discovery, so a broken renderer can
+// never make a command unavailable, it just makes it undiscoverable.
+(function cmdPalette() {
+  const ta = document.getElementById('ta');
+  const pop = document.getElementById('cmdpop');
+  if (!ta || !pop) return;
+  let items = [], sel = 0, open = false;
+
+  const esc = (t) => String(t == null ? '' : t).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  function hide() { open = false; pop.classList.add('hidden'); pop.innerHTML = ''; }
+  function render() {
+    if (!items.length) return hide();
+    open = true; pop.classList.remove('hidden');
+    pop.innerHTML = items.map((c, i) => `
+      <div class="cmd${i === sel ? ' sel' : ''}" data-i="${i}">
+        <span class="n">/${esc(c.name)}</span>
+        <span class="a">${esc(c.args || '')}</span>
+        <span class="d">${esc(c.description || '')}</span>
+        <span class="tag">${c.builtin ? '' : 'custom'}</span>
+      </div>`).join('');
+    pop.querySelectorAll('.cmd').forEach((el) => {
+      el.onmousedown = (e) => { e.preventDefault(); accept(items[+el.dataset.i]); };
+    });
+    const s = pop.querySelector('.cmd.sel'); if (s) s.scrollIntoView({ block: 'nearest' });
+  }
+  function accept(c) {
+    if (!c) return hide();
+    // Builtins that take arguments keep the cursor on the same line so the next token can be typed.
+    ta.value = '/' + c.name + (c.args ? ' ' : '');
+    hide();
+    ta.focus();
+    ta.dispatchEvent(new Event('input'));
+  }
+  async function refresh() {
+    const v = ta.value;
+    if (!v.startsWith('/') || /\s/.test(v.split(/\s/)[0].slice(1)) || v.includes('\n')) return hide();
+    const firstTok = v.split(/\s/)[0];
+    if (v.length > firstTok.length) return hide();       // arguments started — get out of the way
+    try { items = await window.bhatbot.commandsMatch(firstTok); } catch { items = []; }
+    sel = 0; render();
+  }
+  ta.addEventListener('input', refresh);
+  ta.addEventListener('blur', () => setTimeout(hide, 120));
+  ta.addEventListener('keydown', (e) => {
+    if (!open) return;
+    if (e.key === 'ArrowDown') { e.preventDefault(); sel = (sel + 1) % items.length; render(); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); sel = (sel - 1 + items.length) % items.length; render(); }
+    else if (e.key === 'Tab' || (e.key === 'Enter' && items.length)) { e.preventDefault(); e.stopPropagation(); accept(items[sel]); }
+    else if (e.key === 'Escape') { e.preventDefault(); hide(); }
+  }, true);   // capture: beat the composer's own Enter-to-send handler
 })();
 
 // ── PROJECTS TAB (⌘7) ───────────────────────────────────────────────────────────────────────────

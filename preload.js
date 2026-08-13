@@ -44,6 +44,10 @@ contextBridge.exposeInMainWorld('bhatbot', {
   synapseOpenFile: (path, reveal) => ipcRenderer.invoke('synapse-open-file', { path, reveal }),
   synapseReindex: () => ipcRenderer.invoke('synapse-reindex'),                        // FREE re-hydrate (no $)
   // The Weaver — the always-on connection loop. `onWeaverEvent` is the live feed the graph animates.
+  // Slash commands — the renderer only needs the registry for autocomplete; execution happens in
+  // the main process at the front door of the turn.
+  commandsList: () => ipcRenderer.invoke('commands-list'),
+  commandsMatch: (prefix) => ipcRenderer.invoke('commands-match', prefix),
   weaverStatus: () => ipcRenderer.invoke('weaver-status'),
   weaverToggle: (on) => ipcRenderer.invoke('weaver-toggle', on),
   onWeaverEvent: (cb) => ipcRenderer.on('weaver-event', (_e, d) => cb(d)),

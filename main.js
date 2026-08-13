@@ -3309,6 +3309,25 @@ async function runProjectDetached(projectId, w, cfg, input) {
       maxTasks: input.max_tasks || 12, concurrency: fleetWidth(),   // Phase 1 — live budget-driven width (was hardcoded 3)
       shouldStop: () => jobsBus.isCancelled(projectId),
       getGuidance: () => jobsBus.takeGuidance(projectId),
+      // ── PER-AGENT ADDRESSING (/agent <id> <msg>) ────────────────────────────────────────────────
+      // The orchestrator has always passed the suit's own id to drainFeedback — main.js just never
+      // supplied the function, so every note went on the PROJECT job and was broadcast into every
+      // subsequent task. That is why steering "wasn't interactive": the transport existed, the
+      // ADDRESSING didn't. Each agent now drains its OWN queue plus anything addressed to the whole
+      // project, and the orchestrator folds it in before that agent's next model call — so a
+      // directed message lands within one step instead of at a batch boundary.
+      drainFeedback: (suitId) => {
+        const mine = [];
+        try {
+          const jid = taskJobs.get(suitId);
+          if (jid) mine.push(...jobsBus.takeGuidance(jid));
+          else {
+            const j = jobsBus.list().find((x) => x.agent === suitId && x.parent === projectId);
+            if (j) mine.push(...jobsBus.takeGuidance(j.id));
+          }
+        } catch {}
+        return mine;
+      },
       onTask: (t, phase, extra) => {
         const jid = jobFor(t);   // 'queued' phase just materializes the card
         if (phase === 'start') jobsBus.update(jid, { status: 'running', progress: 0.05, note: 'agent started' });
@@ -5218,9 +5237,33 @@ function describeAction(name, input = {}) {
   } catch { return `Working on ${String(name || 'the task').replace(/_/g, ' ')}`; }
 }
 function fleetDrainFeedback(id) {
+  const out = [];
   const a = fleetAgents.get(id);
-  if (!a || !a.feedback || !a.feedback.length) return [];
-  return a.feedback.splice(0);
+  if (a && a.feedback && a.feedback.length) out.push(...a.feedback.splice(0));
+  // ALSO drain anything addressed to this agent's durable job. There are two feedback channels in
+  // this codebase — the in-RAM fleetAgents map (Vanguard panel) and the persistent job-bus guidance
+  // queue — and an agent should not care which one Siddhant's message arrived through.
+  try {
+    const j = jobsBus.list().find((x) => x.agent === id || x.id === id);
+    if (j) out.push(...jobsBus.takeGuidance(j.id));
+  } catch {}
+  return out;
+}
+
+// ONE delivery point for "/agent <id> <message>", so a directed note reaches the agent whichever
+// subsystem is running it: a fleet suit (in-RAM), a delegated orchestrator task (job bus), or both.
+// Returns { ok, via[] } so the command can tell Siddhant honestly where it landed.
+function deliverToAgent(id, text) {
+  const via = [];
+  try {
+    const a = fleetAgents.get(id);
+    if (a) { (a.feedback = a.feedback || []).push(text); via.push('fleet'); }
+  } catch {}
+  try {
+    let j = jobsBus.get(id) || jobsBus.list().find((x) => x.agent === id);
+    if (j && jobsBus.ACTIVE.includes(j.status) && jobsBus.addGuidance(j.id, text)) via.push('job:' + j.id);
+  } catch {}
+  return { ok: via.length > 0, via };
 }
 // Seed the Vanguard panel with a set of agents + surface it (used by fleet, plan_and_run, ensemble, test_app).
 function fleetSeed(agents) {
@@ -6312,6 +6355,91 @@ function recordEpisode(userText, replyText, surface) {
   } catch {}
 }
 
+// ── SLASH COMMAND EXECUTION ──────────────────────────────────────────────────────────────────────
+// Returns { reply } for a builtin (answered directly, no model), { prompt } for a custom command
+// (expanded and sent down the normal turn path), or null if the command is unknown.
+//
+// Builtins live here rather than in lib/commands.js because they read LIVE state — the job bus, the
+// fleet, the tool schema. The registry declares; main executes.
+async function runSlashCommand(cmd) {
+  const c = commands.get(cmd.name);
+  if (!c) return { reply: `No command /${cmd.name}. Try /help.` };
+  if (c.custom) return { prompt: commands.expand(c, cmd.args) };
+
+  switch (cmd.name) {
+    case 'help':
+      return { reply: commands.help(cmd.argv[0]) };
+
+    case 'agents': {
+      const active = jobsBus.active();
+      const all = jobsBus.list();
+      const interrupted = jobsBus.interrupted();
+      // Fleet suits live in their own in-RAM map and may have no job entry — list them too, or
+      // /agents would report "nothing running" while the Vanguard panel shows four working suits.
+      const suits = [...fleetAgents.values()].filter((a) => a.status && !['done', 'failed', 'stopped'].includes(a.status));
+      if (!active.length && !interrupted.length && !suits.length) return { reply: 'No agents running. ' + (all.length ? `${all.length} finished job(s) in this session.` : '') };
+      const line = (j) => {
+        const age = Math.round((Date.now() - j.createdAt) / 1000);
+        const dur = age > 90 ? Math.round(age / 60) + 'm' : age + 's';
+        return `  ${j.id}  ${j.kind === 'project' ? '▣' : '▸'} ${j.name.slice(0, 54)}\n      ${j.status} · ${Math.round((j.progress || 0) * 100)}% · ${dur}${j.note ? ' · ' + String(j.note).slice(0, 60) : ''}${j.pendingGuidance ? ` · ${j.pendingGuidance} queued note(s)` : ''}`;
+      };
+      let out = active.length ? `LIVE AGENTS (${active.length})\n` + active.map(line).join('\n') : '';
+      if (suits.length) out += (out ? '\n\n' : '') + `FLEET SUITS (${suits.length})\n` + suits.map((a) => `  ${a.id}  ▸ ${String(a.task || a.role || '').slice(0, 54)}\n      ${a.status}${a.step ? ' · ' + String(a.step).slice(0, 60) : ''}`).join('\n');
+      if (!out) out = 'No agents running.';
+      if (interrupted.length) out += `\n\nINTERRUPTED BY A RESTART (${interrupted.length})\n` + interrupted.map(line).join('\n');
+      out += '\n\nSteer one with:  /agent <id> <message>';
+      return { reply: out };
+    }
+
+    case 'agent': {
+      const id = cmd.argv[0];
+      const msg = cmd.args.slice(String(id || '').length).trim();
+      if (!id) return { reply: 'Usage: /agent <id> <message>\nRun /agents to see the ids.' };
+      if (!msg) return { reply: `Usage: /agent ${id} <message> — say what you want that agent to do differently.` };
+      // Accept a job id (job_003) OR a suit/task id (suit-2), since /agents shows job ids but the
+      // orchestrator addresses suits by their own id.
+      const d = deliverToAgent(id, msg);
+      if (!d.ok) {
+        const job = jobsBus.get(id) || jobsBus.list().find((j) => j.agent === id);
+        if (job) return { reply: `${job.id} is ${job.status} — it can no longer take direction.` };
+        return { reply: `No live agent "${id}". Run /agents to see what is running.` };
+      }
+      try { rstate.event('agent-directed', { agent: id, via: d.via, chars: msg.length }); } catch {}
+      return { reply: `→ ${id} will get this on its next step (via ${d.via.join(' + ')}):\n   "${msg}"` };
+    }
+
+    case 'new-command': {
+      const name = cmd.argv[0];
+      const what = cmd.args.slice(String(name || '').length).trim();
+      if (!name || !what) return { reply: 'Usage: /new-command <name> <what it should do>\ne.g.  /new-command standup summarize what I did yesterday across my projects' };
+      const existing = commands.get(name);
+      if (existing) return { reply: `/${name} already exists${existing.builtin ? ' (builtin)' : ''}. Pick another name.` };
+
+      // ── D1: DISCOVERY BEFORE AUTHORING ──────────────────────────────────────────────────────────
+      // Most "I need a tool" is a RETRIEVAL failure, not a capability gap. Search the 81 existing
+      // tools first and say so, rather than writing code to duplicate something already present.
+      const schema = TOOLS;
+      const words = what.toLowerCase().match(/[a-z]{4,}/g) || [];
+      const scored = schema.map((t) => {
+        const hay = (t.name + ' ' + t.description).toLowerCase();
+        return { name: t.name, score: words.reduce((n, w) => n + (hay.includes(w) ? 1 : 0), 0) };
+      }).filter((x) => x.score > 0).sort((a, b) => b.score - a.score).slice(0, 3);
+
+      const r = commands.save(name, { description: what.slice(0, 120), body: what });
+      if (!r.ok) return { reply: '✗ ' + r.error };
+      let reply = `✓ /${name} created — ${r.file}\n   It runs this prompt (with $ARGUMENTS substituted):\n   "${what}"`;
+      if (scored.length) {
+        reply += `\n\n   Note: BhatBot already has tool${scored.length > 1 ? 's' : ''} that may cover this — `
+          + scored.map((x) => x.name).join(', ') + `.\n   A command is a saved PROMPT, so /${name} will use those tools rather than replace them.`;
+      }
+      reply += `\n\n   Edit it any time: ${r.file}`;
+      return { reply };
+    }
+    default:
+      return { reply: `/${cmd.name} is declared but not implemented.` };
+  }
+}
+
 let _turnChain = Promise.resolve();
 function dispatchTurn(history, apiKey, event, opts = {}) {
   // B2 — a turn now also HOLDS the shared agent lock for its duration, which is what makes the
@@ -6328,7 +6456,7 @@ function dispatchTurn(history, apiKey, event, opts = {}) {
 // Single entry point every chat surface (desktop, phone, MCP, Telegram) routes through.
 // quickRoute first (free); only fall to the LLM router/pipeline when genuinely unsure.
 async function _dispatchTurnInner(history, apiKey, event, opts = {}) {
-  const userText = lastUserText(history);
+  let userText = lastUserText(history);   // a slash command may rewrite this (custom commands expand to a prompt)
   // Live speaking-speed intent — handled inline (no tool/agent hop) so the spoken confirmation
   // itself plays at the freshly-saved speed.
   const spd = maybeAdjustSpeed(userText);
@@ -6346,6 +6474,25 @@ async function _dispatchTurnInner(history, apiKey, event, opts = {}) {
     // reserve the tool-less fast path (and the local text-pipeline) strictly for clear 'chat'. This is the
     // fix for "answered without doing the work" / "didn't take my prompt": a tool-needing turn can no
     // longer be swallowed by fastReply or mangled by the pipeline.
+    // ── SLASH COMMANDS — parsed BEFORE intake ────────────────────────────────────────────────────
+    // Same reasoning as the intake router itself: "/agents" is a short, question-shaped string, so
+    // classifyIntake hands it to a model, which then talks ABOUT the fleet instead of listing it.
+    // A command is a deterministic instruction from Siddhant; it must not be subject to routing.
+    const _cmd = commands.parse(userText);
+    if (_cmd.isCommand) {
+      const r = await runSlashCommand(_cmd);
+      if (r && r.reply != null) {                  // builtin answered directly
+        const out = { text: r.reply, history: [...history, { role: 'assistant', content: r.reply }], _provider: 'local', _model: 'command' };
+        try { sendToAll(event, 'tool-update', { type: 'thinking', text: '/' + _cmd.name }); } catch {}
+        return out;
+      }
+      if (r && r.prompt) {
+        // A custom command is a SAVED PROMPT, so it continues down the normal path and gets the full
+        // tool loop, risk gating and instrumentation. It gains no capability by being a command.
+        userText = r.prompt;
+        history = [...history.slice(0, -1), { role: 'user', content: r.prompt }];
+      }
+    }
     let inToolThread = false;
     try { inToolThread = /tool_result|tool_use/.test(JSON.stringify(history.slice(-2))); } catch {}
     const intake = classifyIntake(userText, { looksLikeToolTask, referencesJob: referencesRunningJob, inToolThread });
@@ -7108,6 +7255,8 @@ const { createFileSense } = require('./lib/filesense');
 let _fileSense = null;
 function fileSense() { if (!_fileSense) _fileSense = createFileSense({ log: (m) => console.log(m) }); return _fileSense; }
 
+const { createCommands } = require('./lib/commands');
+const commands = createCommands({ log: (m) => console.log(m) });
 const { createWeaver } = require('./lib/weaver');
 const { createTriageRun } = require('./lib/triagerun');
 let _triageRun = null;
@@ -9550,6 +9699,8 @@ ipcMain.handle('synapse-open-file', async (_e, { path: p, reveal = false } = {})
 
 // Re-run the free hydrate (projects + memories + repos + deep file index). No embeddings, no LLM,
 // so this is always safe to press — unlike Build, which spends.
+ipcMain.handle('commands-list', () => { try { return commands.list(); } catch { return []; } });
+ipcMain.handle('commands-match', (_e, prefix) => { try { return commands.match(prefix); } catch { return []; } });
 ipcMain.handle('weaver-status', () => { try { return weaver().status(); } catch (e) { return { error: e.message }; } });
 ipcMain.handle('weaver-toggle', (_e, on) => {
   try { if (on) startWeaver(); else stopWeaver(); return weaver().status(); } catch (e) { return { error: e.message }; }
