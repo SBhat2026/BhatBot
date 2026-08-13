@@ -507,6 +507,11 @@ function loadConfig() {
     return resolved;
   } catch { return loadConfigRaw(); }
 }
+// lib/google.js reads config.json DIRECTLY, so it never saw through the CRED_REF handles the vault
+// stores clientSecret/refreshToken as — every Gmail/Calendar/Drive call failed `invalid_client`
+// while isConfigured() still reported true (a non-empty handle looks like a credential). loadConfig
+// already resolves refs; hand it over. Registered here, immediately after loadConfig exists.
+try { google.setConfigResolver(loadConfig); } catch {}
 function saveConfig(patch) {
   // WRITE-TIME guard (Phase 4 #1): a plaintext credential must never land on disk. When the app's
   // safeStorage is up we AUTO-VAULT it (replace with a CRED_REF); otherwise the write is REJECTED
@@ -4322,6 +4327,37 @@ async function executeTool(name, input) {
         else result = { success: false, error: 'Unknown gmail action: ' + a };
         break;
       }
+      // Phase A3 — the human-facing half of the ledger. This is what makes "act with undo" real:
+      // Siddhant can say "undo what you archived this morning" and get his exact prior state back.
+      case 'triage_mail': {
+        const a = input.action;
+        if (a === 'recent') {
+          const rows = actionLog.recent({ limit: input.limit || 30, since: input.since });
+          result = { success: true, count: rows.length, entries: rows.map((r) => ({ id: r.id, ts: r.ts, from: r.from, subject: r.subject, class: r.class, rule: r.rule, action: r.action, undone: r.undone })) };
+        } else if (a === 'stats') {
+          result = { success: true, ...actionLog.stats({ since: input.since }) };
+        } else if (a === 'undo') {
+          result = await actionLog.undo(input.id);
+        } else if (a === 'undo_all') {
+          result = await actionLog.undoAll({ since: input.since });
+        } else if (a === 'run') {
+          await triageTick();
+          result = { success: true, result: 'Ran one triage pass. Use `stats` to see what it did.' };
+        } else if (a === 'pin') {
+          // A rescue is a permanent correction: this sender is never auto-archived again.
+          const addr = String(input.sender || '').toLowerCase().trim();
+          if (!addr) result = { success: false, error: 'pin needs a sender address' };
+          else {
+            const cur = loadConfig().triage || {};
+            const pins = new Set(cur.neverArchive || []);
+            pins.add(addr);
+            saveConfig({ triage: { ...cur, neverArchive: [...pins] } });
+            try { require('./lib/triage-table').NEVER_ARCHIVE.add(addr); } catch {}
+            result = { success: true, result: `${addr} will never be auto-archived again.`, pinned: [...pins] };
+          }
+        } else result = { success: false, error: 'Unknown triage_mail action: ' + a };
+        break;
+      }
       case 'calendar': {
         const a = input.action;
         if (a === 'list') result = await google.calendarList(input);
@@ -6994,6 +7030,100 @@ function startAmbient() {
   } catch (e) { console.error('[ambient] start failed:', e.message); }
 }
 
+// ═══ PHASE A — PROACTIVE MAIL TRIAGE ═════════════════════════════════════════════════════════════
+// Ambient could SEE mail but never ACT on it: its whole output path was scan → digest → notify.
+// Meanwhile lib/google.js had the full action surface (label/archive/mark-read over OAuth) exposed
+// only as REACTIVE tools that nothing called on its own. This tick joins them.
+//
+// Ships acting on NEW `noise` only. urgent/important are never touched in any mode; the ~4,100-thread
+// backlog is deliberately NOT handled here (scripts/triage-backlog.js, dry-run, awaits sign-off).
+const { createActionLog } = require('./lib/actionlog');
+const actionLog = createActionLog({
+  dir: path.join(os.homedir(), '.bhatbot'),
+  gmailLabel: (id, opts) => require('./lib/google').gmailLabel(id, opts),
+  log: (m) => console.log(m),
+});
+
+function triageCfg() {
+  const c = loadConfig().triage || {};
+  return {
+    enabled: c.enabled === true,
+    mode: c.mode === 'act' ? 'act' : 'propose',
+    minConfidence: Number(c.minConfidence) || 0.85,
+    autoArchiveClasses: c.autoArchiveClasses || ['noise'],
+    intervalMin: Math.max(5, Number(c.intervalMin) || 20),
+    lookback: c.lookback || '1d',
+    maxPerTick: Math.max(1, Number(c.maxPerTick) || 60),
+  };
+}
+
+let _triageWarned = false;   // warn once about unusable Google creds, not every tick
+
+// The decision loop itself lives in lib/triagerun.js (pure + DI) so it is testable without Electron
+// and reusable by the headless worker — main.js keeps only the timer, config, and surfacing.
+const { createTriageRun } = require('./lib/triagerun');
+let _triageRun = null;
+function triageRunner() {
+  if (!_triageRun) _triageRun = createTriageRun({ google, actionLog, config: triageCfg(), log: (m) => console.log(m) });
+  return _triageRun;
+}
+
+let _triageTimer = null;
+async function triageTick() {
+  const cfg = triageCfg();
+  if (!cfg.enabled) return;
+  if (!google.isConfigured()) {
+    // An unresolved CRED_REF or a dead refresh token both land here. Say which, once — a silent
+    // no-op is how this integration stayed broken without anyone noticing.
+    const un = google.unresolvedRefs ? google.unresolvedRefs() : [];
+    if (!_triageWarned) {
+      _triageWarned = true;
+      console.warn('[triage] Google not usable: ' + (un.length ? 'unresolved credential refs ' + un.join(',') : 'not configured') + ' — run `npm run google:auth`');
+    }
+    return;
+  }
+  const r = await triageRunner().runOnce(triageCfg());
+  const { urgent, acted, proposed } = r;
+  if (r.errors.length) {
+    console.warn('[triage] errors:', r.errors.slice(0, 3).join(' | '));
+    // A dead refresh token is exactly the class C1 was built to surface rather than swallow.
+    if (r.errors.some((e) => /invalid_grant/.test(e))) {
+      try { telegramNotify('BhatBot: Gmail access expired — run `npm run google:auth` to restore mail triage.'); } catch {}
+    }
+  }
+
+  // Surface: urgent immediately (that is the whole point of the class), the rest as a quiet count.
+  // patrol.js's relay-on-change discipline — silence stays the signal that things are fine.
+  for (const u of urgent.slice(0, 5)) {
+    const line = `🔴 ${u.sig.from}: ${u.sig.subject}`;
+    try { telegramNotify('BhatBot — needs you: ' + line); } catch {}
+    try { sendToActivity('tool-update', { type: 'thinking', text: line }); } catch {}
+  }
+  if (acted.length || proposed.length) {
+    const bits = [acted.length ? `${acted.length} archived` : '', proposed.length ? `${proposed.length} proposed` : ''].filter(Boolean).join(', ');
+    console.log(`[triage] ${bits}${urgent.length ? `, ${urgent.length} urgent` : ''}`);
+    try { sendToActivity('tool-update', { type: 'thinking', text: `📬 triage: ${bits}` }); } catch {}
+  }
+}
+
+function startTriage() {
+  const cfg = triageCfg();
+  // Rehydrate the never-archive pins Siddhant has accumulated. These are permanent corrections —
+  // a sender he rescued once must never be auto-archived again, across restarts.
+  try {
+    const pins = (loadConfig().triage || {}).neverArchive || [];
+    const table = require('./lib/triage-table');
+    for (const p of pins) table.NEVER_ARCHIVE.add(String(p).toLowerCase());
+    if (pins.length) console.log(`[triage] ${pins.length} never-archive pin(s) restored`);
+  } catch {}
+  if (!cfg.enabled) { console.log('[triage] disabled (config.triage.enabled)'); return; }
+  if (_triageTimer) clearInterval(_triageTimer);
+  const tick = bgTick('triage', triageTick);      // B2: same lock + governor as every other tick
+  _triageTimer = setInterval(tick, cfg.intervalMin * 60 * 1000);
+  setTimeout(tick, 25000);
+  console.log(`[triage] started — mode=${cfg.mode}, every ${cfg.intervalMin}m, archiving ${cfg.autoArchiveClasses.join('/')} above ${cfg.minConfidence}`);
+}
+
 // --- Autonomous self-healing (#self_heal) — DISABLED unless config.selfHeal.enabled. ----------
 // Wires the policy engine (lib/selfheal) to the real fixer (selfFix / Claude Code), git, notify,
 // and the idle/clean-tree probes. Runs ONLY while the agent is idle; one fix at a time.
@@ -9551,6 +9681,7 @@ app.whenReady().then(() => {
     reapOrphanMissions();   // adopt missions orphaned by a crash/quit BEFORE the scheduler starts ticking
     startScheduler();   // proactive recurring/one-off tasks (also drives mission resume — tickMissions)
     startAmbient();     // #18 opt-in ambient awareness (no-op unless config.ambient.enabled)
+    startTriage();      // Phase A — proactive mail triage (no-op unless config.triage.enabled)
     startMemoryMaintenance();   // always-on memory upkeep (runs on a timer, independent of the window)
     startSynapseWorker();       // SYNAPSE second brain — free re-import loop + slow budget-capped paid pass
     startMcpHub();              // connect external MCP-server plugins (config.mcpPlugins) → tools for the agent
