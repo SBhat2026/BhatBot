@@ -103,7 +103,8 @@
     "test:triagetick": "node scripts/test-triage-tick.js",
     "test:filetools": "node scripts/test-filetools.js",
     "google:auth:node": "node scripts/google-auth.js",
-    "test:weaver": "node scripts/test-weaver.js"
+    "test:weaver": "node scripts/test-weaver.js",
+    "bench:app": "node scripts/bench-app.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
