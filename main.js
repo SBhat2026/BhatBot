@@ -9322,6 +9322,128 @@ ipcMain.handle('place-call', async (_e, { to, name, message } = {}) => {
 // SYNAPSE second-brain IPC — the SYNAPSE tab views/builds/prunes the knowledge graph.
 // graphView() already carries the budget, so these are now thin pass-throughs to lib/synapse.js.
 ipcMain.handle('synapse-graph', () => { try { return synapse().graphView(); } catch (e) { return { error: e.message }; } });
+
+// ── PROJECTS VIEW ────────────────────────────────────────────────────────────────────────────────
+// The same graph the SYNAPSE canvas draws, folded into the shape a person actually reads: one entry
+// per project, its files, and its cross-project connections with the "why related" rationale. The
+// force-graph is for exploring; this answers "what is in this project, and what does it touch?" —
+// a question the canvas makes you squint at.
+//
+// The fold happens HERE, in the main process, not in the renderer: the graph is ~1,700 nodes, and
+// shipping all of it over IPC on every tab click and grouping it on the UI thread is exactly how a
+// panel becomes janky. The renderer receives a finished, sorted structure.
+ipcMain.handle('synapse-projects', () => {
+  try {
+    const g = synapse().graphView();
+    const nodes = Object.values(g.nodes || {});
+    const edges = Object.values(g.edges || {});
+    const byId = new Map(nodes.map((n) => [n.id, n]));
+
+    const projects = new Map();
+    for (const n of nodes) {
+      if (n.type !== 'project' || n.status === 'pruned') continue;
+      projects.set(n.id, {
+        id: n.id, label: n.label, ref: n.ref, text: String(n.text || '').slice(0, 600),
+        source: (n.meta && n.meta.source) || 'curated',
+        files: [], memories: [], connections: [], fileCount: 0,
+      });
+    }
+
+    // part-of → membership, and the node→project map the connection pass needs.
+    const projectOf = new Map();
+    for (const e of edges) {
+      if (e.type !== 'part-of' || e.status === 'pruned') continue;
+      const a = byId.get(e.from), b = byId.get(e.to);
+      if (!a || !b) continue;
+      const projNode = projects.has(b.id) ? b : projects.has(a.id) ? a : null;
+      if (!projNode) continue;
+      const child = projNode === b ? a : b;
+      if (child.type === 'project') continue;
+      projectOf.set(child.id, projNode.id);
+      const proj = projects.get(projNode.id);
+      if (child.type === 'file') {
+        proj.fileCount++;
+        if (proj.files.length < 400) {
+          proj.files.push({
+            id: child.id, name: child.label, rel: child.ref,
+            path: (child.meta && child.meta.path) || child.ref,
+            ext: (child.meta && child.meta.ext) || '',
+            size: (child.meta && child.meta.size) || 0,
+            mtime: (child.meta && child.meta.mtime) || 0,
+          });
+        }
+      } else if (child.type === 'memory' && proj.memories.length < 60) {
+        proj.memories.push({ id: child.id, label: child.label });
+      }
+    }
+    for (const p of projects.keys()) projectOf.set(p, p);
+
+    // Cross-project connections. Resolved to PROJECT level rather than node level: a link between
+    // two files is really a link between the projects that own them, and that is the claim worth
+    // showing. Edges within one project are structure, not insight, so they're dropped.
+    const seen = new Set();
+    for (const e of edges) {
+      if (e.type === 'part-of' || e.status === 'pruned') continue;
+      const pa = projectOf.get(e.from), pb = projectOf.get(e.to);
+      if (!pa || !pb || pa === pb) continue;
+      const key = [pa, pb].sort().join('|') + ':' + (e.rationale || e.id);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const conf = Number(e.confidence) || 0;
+      const link = (from, to) => {
+        const p = projects.get(from);
+        if (!p || p.connections.length >= 40) return;
+        p.connections.push({
+          to, toLabel: (projects.get(to) || {}).label || to,
+          confidence: conf, rationale: e.rationale || '', status: e.status || 'proposed', edgeId: e.id,
+          viaFrom: (byId.get(e.from) || {}).label || '', viaTo: (byId.get(e.to) || {}).label || '',
+        });
+      };
+      link(pa, pb); link(pb, pa);
+    }
+
+    const list = [...projects.values()]
+      .filter((p) => p.fileCount || p.connections.length || p.memories.length)
+      .map((p) => {
+        p.files.sort((a, b) => b.mtime - a.mtime);          // most recently touched first
+        p.connections.sort((a, b) => b.confidence - a.confidence);
+        return p;
+      })
+      // Rank by substance: a project with real cross-links outranks one that is merely large.
+      .sort((a, b) => (b.fileCount + b.connections.length * 5) - (a.fileCount + a.connections.length * 5));
+
+    return {
+      projects: list,
+      totals: {
+        projects: list.length,
+        files: list.reduce((n, p) => n + p.fileCount, 0),
+        connections: Math.round(list.reduce((n, p) => n + p.connections.length, 0) / 2),
+        nodes: nodes.length, edges: edges.length,
+      },
+      budget: g.budget || null,
+    };
+  } catch (e) { return { error: e.message, projects: [] }; }
+});
+
+// Open a file from the Projects tab in the default app, or reveal it in Finder.
+ipcMain.handle('synapse-open-file', async (_e, { path: p, reveal = false } = {}) => {
+  try {
+    if (!p) return { error: 'no path' };
+    if (reveal) shell.showItemInFolder(p); else await shell.openPath(p);
+    return { ok: true };
+  } catch (e) { return { error: e.message }; }
+});
+
+// Re-run the free hydrate (projects + memories + repos + deep file index). No embeddings, no LLM,
+// so this is always safe to press — unlike Build, which spends.
+ipcMain.handle('synapse-reindex', async () => {
+  try {
+    sendToActivity('tool-update', { type: 'thinking', text: '🗂 re-indexing your files…' });
+    const r = await synapse().hydrate();
+    return { ok: true, ...r };
+  } catch (e) { return { error: e.message }; }
+});
+
 // FREE first-open population: import nodes (projects + memories + repos + Notion) if the graph is
 // empty. No embeddings / no LLM → no cost. The paid connect + suggestions happen on explicit Build.
 ipcMain.handle('synapse-ensure', async () => {

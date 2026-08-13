@@ -35,6 +35,10 @@ contextBridge.exposeInMainWorld('bhatbot', {
   synapsePrune: (kind, id) => ipcRenderer.invoke('synapse-prune', { kind, id }),      // permanent prune (curation)
   synapseConfirm: (kind, id) => ipcRenderer.invoke('synapse-confirm', { kind, id }),  // promote a proposed link
   onSynapseUpdate: (cb) => ipcRenderer.on('synapse-update', (_e, d) => cb(d)),        // live graph pushes
+  // PROJECTS tab (⌘7) — the same graph folded per-project in the main process (see synapse-projects).
+  synapseProjects: () => ipcRenderer.invoke('synapse-projects'),
+  synapseOpenFile: (path, reveal) => ipcRenderer.invoke('synapse-open-file', { path, reveal }),
+  synapseReindex: () => ipcRenderer.invoke('synapse-reindex'),                        // FREE re-hydrate (no $)
   sendFleetFeedback: (id, text) => ipcRenderer.invoke('fleet-feedback', { id, text }),
   sendFleetControl: (id, action) => ipcRenderer.invoke('fleet-control', { id, action }),
   openAgentWindow: (id) => ipcRenderer.invoke('open-agent-window', id),
