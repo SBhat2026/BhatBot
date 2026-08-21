@@ -27,6 +27,47 @@ for (const f of files) {
 if (bad) { console.error(`\n${bad} file(s) failed to parse`); process.exit(1); }
 console.log(`✓ ${files.length} JS files parse cleanly`);
 
+// INLINE RENDERER SCRIPTS. The walk above only sees .js, so src/index.html — 266KB, and the entire
+// UI — had NO syntax check at all: a stray brace in an inline <script> bricks every panel at load
+// with nothing but a console error, and `npm run verify` stayed green. The renderers are where most
+// of the recent churn is (the SYNAPSE and FLEET 3D views), so this is exactly the file that needs it.
+//
+// Each block is checked in the right mode: `type="module"` blocks parse as ESM (they use top-level
+// import/await), everything else as a script. importmap/JSON blocks are data, not code — skipped.
+{
+  const SRC = path.join(ROOT, 'src');
+  const os = require('os');
+  let htmlFiles = [];
+  try { htmlFiles = fs.readdirSync(SRC).filter((f) => f.endsWith('.html')).map((f) => path.join(SRC, f)); } catch {}
+  let blocks = 0, htmlBad = 0;
+  for (const f of htmlFiles) {
+    const html = fs.readFileSync(f, 'utf8');
+    const re = /<script([^>]*)>([\s\S]*?)<\/script>/gi;
+    let m, i = 0;
+    while ((m = re.exec(html))) {
+      const attrs = m[1] || '', code = m[2];
+      i++;
+      if (/\bsrc\s*=/.test(attrs)) continue;                                  // external file
+      if (/type\s*=\s*["'](importmap|application\/json|text\/template)/i.test(attrs)) continue;
+      if (!code.trim()) continue;
+      const isModule = /type\s*=\s*["']module["']/i.test(attrs);
+      // Line-align the temp file so a reported line number maps back to the .html directly.
+      const line = html.slice(0, m.index).split('\n').length;
+      const tmp = path.join(os.tmpdir(), `vs-${path.basename(f)}-${i}.${isModule ? 'mjs' : 'js'}`);
+      fs.writeFileSync(tmp, '\n'.repeat(line - 1) + code);
+      blocks++;
+      try { execFileSync(process.execPath, ['--check', tmp], { stdio: ['ignore', 'ignore', 'pipe'] }); }
+      catch (e) {
+        htmlBad++;
+        console.error('✗ ' + path.relative(ROOT, f) + ` (inline <script> #${i}, starts at line ${line})\n` +
+          String((e.stderr || e.message || '')).split('\n').slice(0, 4).join('\n'));
+      } finally { try { fs.unlinkSync(tmp); } catch {} }
+    }
+  }
+  if (htmlBad) { console.error(`\n${htmlBad} inline script(s) failed to parse`); process.exit(1); }
+  console.log(`✓ ${blocks} inline <script> blocks across ${htmlFiles.length} renderer(s) parse cleanly`);
+}
+
 // EXPORT-CONTRACT check (added after the lib/prompts.js name-collision regression that broke every
 // agent turn — runtime-only, so --check missed it). For modules main.js destructures at require-time,
 // a missing export = a runtime crash node --check can't see. Assert the critical exports actually exist.

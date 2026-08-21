@@ -2304,10 +2304,35 @@ window.bhatbot.onStudioReload && window.bhatbot.onStudioReload(() => reloadStudi
     try { const THREE = await import('./vendor/three/three.module.js'); const host = document.getElementById('sy-3d');
       const rn = new THREE.WebGLRenderer({ antialias: true, alpha: true }); rn.setSize(host.clientWidth, host.clientHeight); host.innerHTML = ''; host.appendChild(rn.domElement);
       const sc = new THREE.Scene(); const cam = new THREE.PerspectiveCamera(55, host.clientWidth / host.clientHeight, 0.1, 5000); cam.position.set(0, 0, 640);
-      const grp = new THREE.Group(); sc.add(grp); three = { THREE, rn, sc, cam, grp, host, orb: 0 };
-      // Slow, continuous rotation for the "cooler" constellation effect: spin the graph group on Y
-      // while the camera drifts on a gentle orbit. Both are slow so it never feels dizzying.
-      (function anim() { if (!three) return; three.orb += 0.0016; three.grp.rotation.y += 0.0022; three.cam.position.x = Math.sin(three.orb) * 660; three.cam.position.z = Math.cos(three.orb) * 660; three.cam.lookAt(0, 0, 0); three.rn.render(three.sc, three.cam); requestAnimationFrame(anim); })();
+      const grp = new THREE.Group(); sc.add(grp);
+      three = { THREE, rn, sc, cam, grp, host, orb: 0, elev: 0, drag: null };
+      rn.domElement.style.cursor = 'grab';
+
+      // ---- hold-and-drag to turn the constellation; slow drift when you let go -------------------
+      // The camera orbit and the group's Y-spin were both pure functions of frame count, so the
+      // graph was a screensaver: you could see a cluster you wanted to inspect and had no way to
+      // bring it round. Both are now paused while a pointer is held, and the drag writes the same
+      // azimuth/elevation the idle drift advances — so releasing resumes from where you stopped
+      // rather than jumping back to where the timeline says it should be.
+      const RADIUS = 660, MAX_ELEV = 1.25;
+      const onDown = (ev) => { if (ev.button) return; three.drag = { id: ev.pointerId, x: ev.clientX, y: ev.clientY };
+        try { rn.domElement.setPointerCapture(ev.pointerId); } catch {} rn.domElement.style.cursor = 'grabbing'; };
+      const onMove = (ev) => { const d = three && three.drag; if (!d || ev.pointerId !== d.id) return;
+        const dx = ev.clientX - d.x, dy = ev.clientY - d.y; d.x = ev.clientX; d.y = ev.clientY;
+        three.orb -= (dx / Math.max(1, host.clientWidth)) * Math.PI * 2.2;
+        three.elev = Math.max(-MAX_ELEV, Math.min(MAX_ELEV, three.elev + (dy / Math.max(1, host.clientHeight)) * Math.PI * 1.1)); };
+      const onUp = (ev) => { const d = three && three.drag; if (!d || (ev && ev.pointerId !== d.id)) return;
+        try { rn.domElement.releasePointerCapture(d.id); } catch {} three.drag = null; rn.domElement.style.cursor = 'grab'; };
+      rn.domElement.addEventListener('pointerdown', onDown);
+      rn.domElement.addEventListener('pointermove', onMove);
+      rn.domElement.addEventListener('pointerup', onUp);
+      rn.domElement.addEventListener('pointercancel', onUp);
+
+      (function anim() { if (!three) return;
+        if (!three.drag) { three.orb += 0.0016; three.grp.rotation.y += 0.0022; }   // held = frozen, so you can actually look at it
+        const h = Math.cos(three.elev) * RADIUS;
+        three.cam.position.set(Math.sin(three.orb) * h, Math.sin(three.elev) * RADIUS, Math.cos(three.orb) * h);
+        three.cam.lookAt(0, 0, 0); three.rn.render(three.sc, three.cam); requestAnimationFrame(anim); })();
       update3D();
     } catch (e) { console.warn('synapse 3d unavailable', e); }
   }

@@ -2,6 +2,11 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
+<!-- All assets are vendored locally (./vendor/3dmol), so this view needs no network at all.
+     connect-src 'none' means a molecule name or PDB text that came from the web cannot be turned
+     into an outbound request from inside this window. -->
+<meta http-equiv="Content-Security-Policy"
+  content="default-src 'self' file:; script-src 'self' 'unsafe-inline' file: 'wasm-unsafe-eval'; worker-src 'self' blob:; style-src 'self' 'unsafe-inline' file:; img-src 'self' file: data: blob:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none';" />
 <title>Bhatbot Molecule Viewer</title>
 <style>
   :root { --accent:#00c8ff; --bg:#0a0f17; }

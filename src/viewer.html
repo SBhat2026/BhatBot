@@ -2,6 +2,9 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
+<!-- Vendored three.js + local STL/GLB only; no network. -->
+<meta http-equiv="Content-Security-Policy"
+  content="default-src 'self' file:; script-src 'self' 'unsafe-inline' file: 'wasm-unsafe-eval'; worker-src 'self' blob:; style-src 'self' 'unsafe-inline' file:; img-src 'self' file: data: blob:; connect-src 'self' file: data: blob:; object-src 'none'; base-uri 'none'; form-action 'none';" />
 <title>Bhatbot 3D Viewer</title>
 <style>
   :root { --accent:#00c8ff; --bg:#0a0f17; }

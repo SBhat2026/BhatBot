@@ -2,6 +2,12 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
+<!-- This view renders LIVE agent state (task strings, tool names) that can contain text BhatBot read
+     from the web or a file. It is loaded over file:// with contextIsolation, but it had no CSP at
+     all: `connect-src 'none'` means a crafted task string can never be turned into an exfil beacon,
+     and everything the scene needs (three.js, the GLBs, the draco wasm) is vendored locally. -->
+<meta http-equiv="Content-Security-Policy"
+  content="default-src 'self' file:; script-src 'self' 'unsafe-inline' file: 'wasm-unsafe-eval'; worker-src 'self' blob:; style-src 'self' 'unsafe-inline' file:; img-src 'self' file: data: blob:; connect-src 'self' file: data: blob:; object-src 'none'; base-uri 'none'; form-action 'none';" />
 <title>BhatBot — Presence</title>
 <style>
   :root { --accent:#5ad1ff; }
@@ -51,7 +57,7 @@
     <div><span class="dot" style="background:#f2c14e"></span>thinking</div>
     <div><span class="dot" style="background:#5ad1ff"></span>working</div>
     <div><span class="dot" style="background:#59e39b"></span>done</div>
-    <div style="margin-top:6px;color:#5a7688;">hover to read · click to steer</div>
+    <div style="margin-top:6px;color:#5a7688;">hover to read · click to steer · drag to look</div>
   </div>
 
 <script type="importmap">
@@ -107,6 +113,44 @@ const rim = new THREE.PointLight(0x4a7bd6, 0.7, 80); rim.position.set(-8, 5, -8)
 // actually fits the room's bounding sphere in BOTH axes, so the whole office is visible whatever
 // shape the panel is — and re-solve on resize.
 let focus = new THREE.Vector3(0, 1, 0), radius = 8, fitR = 6;
+
+// ---- camera control: hold-and-drag to look around, slow orbit otherwise --------------------------
+// The camera used to be a pure function of elapsed time (`orb = t * 0.12`), which made it beautiful
+// and completely unusable: you could not turn to see an agent the far wall was hiding, and any
+// attempt to grab the room did nothing. Azimuth/elevation are now STATE. Dragging writes to them;
+// when nothing is held, azimuth keeps advancing at the same rate it always did — so releasing the
+// mouse resumes the drift from wherever you left it instead of snapping back to the timeline.
+const AUTOSPIN = 0.12;                                     // rad/s — unchanged from the old `t * 0.12`
+const MIN_ELEV = THREE.MathUtils.degToRad(6);              // below this you are looking through the floor
+const MAX_ELEV = THREE.MathUtils.degToRad(78);             // above it the room flattens into a plan view
+const DRAG_SLOP = 4;                                       // px before a press becomes a drag, not a click
+let azimuth = 0, elevation = THREE.MathUtils.degToRad(32); // 32° was the fixed elevation before
+let drag = null;                                           // { id, x, y, moved } while a pointer is held
+
+function beginDrag(ev) {
+  if (ev.button != null && ev.button !== 0) return;        // left button only; right-click stays free
+  drag = { id: ev.pointerId, x: ev.clientX, y: ev.clientY, moved: 0 };
+  try { renderer.domElement.setPointerCapture(ev.pointerId); } catch {}
+  renderer.domElement.style.cursor = 'grabbing';
+}
+function moveDrag(ev) {
+  if (!drag || ev.pointerId !== drag.id) return false;
+  const dx = ev.clientX - drag.x, dy = ev.clientY - drag.y;
+  drag.x = ev.clientX; drag.y = ev.clientY;
+  drag.moved += Math.abs(dx) + Math.abs(dy);
+  // Scale by viewport so a drag across the panel turns the room by the same amount at any size.
+  azimuth -= (dx / Math.max(1, innerWidth)) * Math.PI * 2.2;
+  elevation = Math.min(MAX_ELEV, Math.max(MIN_ELEV, elevation + (dy / Math.max(1, innerHeight)) * Math.PI * 1.1));
+  return true;
+}
+function endDrag(ev) {
+  if (!drag || (ev && ev.pointerId !== drag.id)) return 0;
+  const moved = drag.moved;
+  try { renderer.domElement.releasePointerCapture(drag.id); } catch {}
+  drag = null;
+  renderer.domElement.style.cursor = 'default';
+  return moved;                                            // caller uses this to tell a click from a drag
+}
 function solveRadius() {
   const vFov = THREE.MathUtils.degToRad(camera.fov);
   const hFov = 2 * Math.atan(Math.tan(vFov / 2) * camera.aspect);
@@ -417,9 +461,13 @@ const ago = (ts) => {
   const s = Math.max(0, Math.round((Date.now() - ts) / 1000));
   return s < 60 ? s + 's' : s < 3600 ? Math.floor(s / 60) + 'm ' + (s % 60) + 's' : Math.floor(s / 3600) + 'h ' + Math.floor((s % 3600) / 60) + 'm';
 };
+renderer.domElement.addEventListener('pointerdown', beginDrag);
 renderer.domElement.addEventListener('pointermove', (ev) => {
+  // While the mouse is held the room is being turned, not inspected: swallow the hover card so it
+  // doesn't flicker across every agent the cursor sweeps past mid-drag.
+  if (moveDrag(ev)) { card.classList.remove('on'); return; }
   const a = pickAgent(ev);
-  renderer.domElement.style.cursor = (a && a.steerable) ? 'pointer' : a ? 'help' : 'default';
+  renderer.domElement.style.cursor = (a && a.steerable) ? 'pointer' : a ? 'help' : 'grab';
   if (!a) { card.classList.remove('on'); return; }
   hcDot.style.background = STATE_CSS[a.state] || STATE_CSS.idle;
   hcName.textContent = a.name;
@@ -433,7 +481,13 @@ renderer.domElement.addEventListener('pointermove', (ev) => {
   card.classList.add('on');
 });
 renderer.domElement.addEventListener('pointerleave', () => card.classList.remove('on'));
+// pointerup fires before click, so `_dragMoved` is already correct when the click handler reads it.
+let _dragMoved = 0;
+renderer.domElement.addEventListener('pointerup', (ev) => { _dragMoved = endDrag(ev); });
+renderer.domElement.addEventListener('pointercancel', (ev) => { _dragMoved = endDrag(ev); });
 renderer.domElement.addEventListener('click', (ev) => {
+  // A drag that happens to end over an agent is not a request to steer that agent.
+  if (_dragMoved > DRAG_SLOP) { _dragMoved = 0; return; }
   const a = pickAgent(ev);
   if (!a) return;
   const detail = { type:'agent-click', id:a.id, name:a.name, state:a.state, steerable:a.steerable, task:a.task };
@@ -452,6 +506,7 @@ window.addEventListener('message', (e) => { if (e.data && e.data.type === 'prese
 // plus what it's doing. Read-only — it exposes no way to mutate the scene, and the app never calls
 // it. Without this a visual test has to blind-probe the canvas for a character, which is flaky the
 // moment the framing or the seating layout changes.
+window.__cameraProbe = () => ({ azimuth, elevation, radius, dragging: !!drag });
 window.__presenceProbe = () => [...agents.values()].map((a) => {
   const v = a.group.position.clone();
   v.y += charTargetH * 0.6;
@@ -545,12 +600,13 @@ const _tmp = new THREE.Vector3();
   now = now || performance.now();
   const t = (now - clockT0) / 1000, dt = Math.min(0.05, (now - prev) / 1000); prev = now;
 
-  // Slow cinematic orbit at a fixed elevation. Spherical (not cylindrical) so the TOTAL camera
-  // distance stays exactly `radius` — the value solveRadius() proved fits the room — instead of
-  // drifting further out as the height term is added on top.
-  const orb = t * 0.12, elev = THREE.MathUtils.degToRad(32);
-  const horiz = Math.cos(elev) * radius;
-  camera.position.set(focus.x + Math.sin(orb) * horiz, focus.y + Math.sin(elev) * radius, focus.z + Math.cos(orb) * horiz);
+  // Slow cinematic orbit, now around USER-OWNED azimuth/elevation. Advancing azimuth only while
+  // nothing is held is the whole trick: drag to aim, let go and the drift picks up from there.
+  // Spherical (not cylindrical) so the TOTAL camera distance stays exactly `radius` — the value
+  // solveRadius() proved fits the room — instead of drifting further out as height is added on top.
+  if (!drag) azimuth += AUTOSPIN * dt;
+  const horiz = Math.cos(elevation) * radius;
+  camera.position.set(focus.x + Math.sin(azimuth) * horiz, focus.y + Math.sin(elevation) * radius, focus.z + Math.cos(azimuth) * horiz);
   camera.lookAt(focus.x, focus.y, focus.z);
 
   for (const [, a] of agents) {

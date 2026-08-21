@@ -57,7 +57,7 @@ const agentTeam = require('./lib/orchestrator');        // C — parallel same-t
 const planner = require('./lib/planner');               // B1 — decompose a goal into a task DAG for the team
 const ambient = require('./lib/ambient');              // #18 — opt-in proactive Calendar/Mail awareness (OFF by default)
 const phonemirror = require('./lib/phonemirror');       // iPhone Mirroring glue — open/focus + gesture shortcuts + window geometry for the phone_mirror tool
-const { textHintFromSelector, splitForSpeech, estimateToolCost, stripReasoning, classifySpeech, createSpeechNormalizer, isPromissory, shouldExtendBudget, toolSig, detectLoop, progressLine, classifyIntake, conversationContinuity } = require('./lib/pure');  // SPLIT_PLAN step 1
+const { splitForSpeech, estimateToolCost, stripReasoning, classifySpeech, createSpeechNormalizer, isPromissory, shouldExtendBudget, toolSig, detectLoop, progressLine, classifyIntake, conversationContinuity } = require('./lib/pure');  // SPLIT_PLAN step 1
 const WebSocket = require('ws');
 const { createTtsWs } = require('./lib/ttsws');   // T1 — continuous ws streaming TTS transport (config.ttsTransport==='ws')
 const speech = require('./lib/speech');                 // human-speech shaping: emoji→spoken-cue/drop + context-aware punctuation
@@ -66,6 +66,7 @@ const reasoning = require('./lib/reasoning');          // adaptive thinking / ef
 const projects = require('./lib/projects');            // #24 — project memory + living auto-summary
 const visualInspect = require('./lib/inspect');
 const security = require('./lib/security');          // P0.4 — injection sanitizer + daily audit
+const redactor = require('./lib/redact');            // OUTBOUND secret redaction (tool results, logs)
 const notion = require('./lib/notion');               // P3  — Notion long-term memory (degrades gracefully)
 const google = require('./lib/google');               // Gmail + Calendar + Drive (one OAuth2, degrades gracefully)
 const routermodel = require('./lib/routermodel');     // learned text→tier router (shadow → active); degrades to regex
@@ -82,6 +83,8 @@ const WORKER_PIDFILE = pidlock.pidfilePath(SYNAPSE_LOCK);
 function headlessWorkerAlive() { try { return pidlock.alive(SYNAPSE_LOCK); } catch { return false; } }
 const resolve = require('./lib/resolve');             // DaVinci Resolve native bridge (Python scripting API)
 const mcphub = require('./lib/mcphub');               // MCP-client hub — consume external MCP servers as plugins
+const connectors = require('./lib/connectors');       // hosted MCP connectors (Seedance …) — registry + host pinning
+const visualbuild = require('./lib/visualbuild');     // Seedance generate→poll→artifact (visual building)
 const figures = require('./lib/figures');             // data-accurate matplotlib/seaborn figures
 const logins = require('./lib/logins');               // domain-keyed login profiles (CRED_REF handles)
 const modePrompts = require('./lib/prompts');         // P4  — mode-switching system prompts
@@ -142,7 +145,7 @@ function finalizeSpokenRow(nextUserText) {
 const vanguard = require('./lib/vanguard');           // Phase 1 — unified VANGUARD fleet codename roster (OVERMIND/FORGE/ORACLE/…)
 const { createAdmission } = require('./lib/admission'); // Phase 1 — budget-aware fleet admission controller (convoy fix)
 const blackboard = require('./lib/blackboard');        // FORGE — shared cross-agent state (T5)
-const { runFleet, listRuns: listFleetRuns, readRun: readFleetRun, FLEET_HARD_CAP, DRONE_ROSTER_DEFAULT } = require('./lib/fleet');           // FORGE — drone fleet supervisor (D1)
+const { runFleet, FLEET_HARD_CAP, DRONE_ROSTER_DEFAULT } = require('./lib/fleet');           // FORGE — drone fleet supervisor (D1)
 const scholar = require('./lib/integrations/scholar');  // FORGE — scholarly adapters (arXiv/Semantic Scholar)
 const scicompute = require('./lib/scicompute');         // quant/numerics/stats/MPS-torch compute pack (sci_compute)
 const dockerPack = require('./lib/integrations/docker'); // container isolation lane (container_run)
@@ -160,6 +163,11 @@ const { AUDIT_PATH, auditLog, readAudit } = makeAudit({ isRemote, estimateToolCo
 // Tee all console output to ~/.bhatbot/logs/app.log so the terminal CLI (scripts/bhatctl.js)
 // and headless tests can watch the real agent's logs + errors without a UI attached. Size-capped
 // (truncates at ~5MB) so it can't grow unbounded. Best-effort — never let logging break the app.
+//
+// REDACTED at the tee. This file is plaintext on disk, it is the documented way to recover the MCP
+// token, and — the part that matters — the agent can `read_file` it and hand the contents straight
+// to the API. Anything a stack trace or a debug line ever printed lived here forever. Redacting at
+// the write is the one place that covers every current and future console.log without auditing them.
 const LOG_PATH = path.join(os.homedir(), '.bhatbot', 'logs', 'app.log');
 try {
   fs.mkdirSync(path.dirname(LOG_PATH), { recursive: true });
@@ -168,9 +176,9 @@ try {
   const _tee = (orig, level) => (...args) => {
     try {
       const line = args.map((a) => typeof a === 'string' ? a : (() => { try { return JSON.stringify(a); } catch { return String(a); } })()).join(' ');
-      _logStream.write(`${new Date().toISOString()} [${level}] ${line}\n`);
+      _logStream.write(`${new Date().toISOString()} [${level}] ${redactor.redact(line)}\n`);
     } catch {}
-    try { orig(...args); } catch {}
+    try { orig(...args); } catch {}   // the terminal still gets the unredacted line — it is the user's own screen
   };
   console.log = _tee(console.log.bind(console), 'log');
   console.warn = _tee(console.warn.bind(console), 'warn');
@@ -514,7 +522,21 @@ function loadConfig() {
     const st = fs.statSync(CONFIG_PATH);
     if (_cfgCache && st.mtimeMs === _cfgRawMtime) return _cfgCache;
     const resolved = credentials.resolveRefs(loadConfigRaw());
-    _cfgCache = resolved; _cfgRawMtime = st.mtimeMs;
+    // NEVER CACHE AN UNRESOLVED CONFIG.
+    //
+    // safeStorage only becomes available once Electron is ready, but loadConfig() is called from
+    // module scope long before that. resolveRefs() fails soft — an un-decryptable CRED_REF is
+    // returned as the handle string — so an early call cached a config where every vaulted secret
+    // was still `CRED_REF_…`, keyed to config.json's mtime. Since nothing rewrites config.json on a
+    // normal boot, that poisoned entry was then served for the ENTIRE session: the cloud bridge
+    // dialled fly.dev presenting the literal handle as its token (401 on every reconnect, forever),
+    // and any other vaulted credential read after boot was equally dead. Same failure family as the
+    // google.js desync noted above, but caused by call ORDER rather than by bypassing loadConfig.
+    //
+    // The cache is the optimization; correctness is not negotiable for it. If any handle survived,
+    // skip the cache and re-resolve next time — which costs a decrypt per call only during the brief
+    // pre-ready window, and nothing at all afterwards.
+    if (!credentials.hasRef(resolved)) { _cfgCache = resolved; _cfgRawMtime = st.mtimeMs; }
     return resolved;
   } catch { return loadConfigRaw(); }
 }
@@ -589,6 +611,71 @@ function syncResolvedSecretsToEnv() {
     if (n) console.log('[config] bridged ' + n + ' secret(s) to env for pure libs (semantic recall)');
   } catch (e) { console.warn('[config] syncResolvedSecretsToEnv failed:', e.message); }
 }
+
+// VAULT HEALTH — say out loud, once at boot, whether the vault actually opened.
+//
+// Every failure mode here is SILENT by construction: credentials.resolveRefs() fails soft, returning
+// the `CRED_REF_…` handle string when it cannot decrypt. A non-empty handle looks exactly like a
+// present credential to every `if (cfg.someKey)` check in the app, so the symptom is never "no
+// credential" — it is a remote service rejecting a token that is literally the string
+// "CRED_REF_CLOUDTOKEN_…", surfacing as an unexplained 401/404 far from the cause. That is how the
+// Telegram bridge and the cloud bridge both ended up in permanent retry loops.
+//
+// safeStorage encrypts under the ELECTRON APP NAME, so a vault written by one name cannot be read by
+// another — `electron .` is "bhatbot" (package.json name) while a packaged build is "Bhatbot"
+// (build.productName). That mismatch silently kills all 42 entries, which is worth one loud line.
+// True when `value` is a CRED_REF handle that never resolved — i.e. a string that LOOKS like a
+// credential to every `if (cfg.token)` check but is guaranteed to be rejected by whatever it is sent
+// to. Callers use it to refuse to dial at all, so the failure is reported once, here, instead of as a
+// permanent retry loop somewhere downstream.
+function unusableSecret(field, value) {
+  if (!String(value || '').startsWith('CRED_REF')) return false;
+  console.warn(`[vault] ${field} did not decrypt — not connecting with a CRED_REF handle. See the [vault] boot report.`);
+  return true;
+}
+
+function vaultHealth() {
+  try {
+    const raw = loadConfigRaw();
+    const refs = VAULT_FIELDS.filter((f) => String(raw[f] || '').startsWith('CRED_REF'));
+    if (!refs.length) return { ok: 0, dead: 0, note: 'no vaulted fields' };
+    const resolved = loadConfig();
+    const dead = refs.filter((f) => String(resolved[f] || '').startsWith('CRED_REF'));
+    if (dead.length) {
+      console.error(`[vault] ⚠ ${dead.length}/${refs.length} secret(s) DID NOT DECRYPT: ${dead.join(', ')}`);
+      console.error(`[vault]   app name is "${app.getName()}" — the vault is only readable by the name that wrote it.`);
+      console.error('[vault]   Anything using these is sending the CRED_REF handle as its credential (→ silent 401/404).');
+    } else {
+      console.log(`[vault] ${refs.length} secret(s) resolved`);
+    }
+    // A dead env key SHADOWS a good vaulted one: getApiKey() prefers process.env.
+    if (process.env.ANTHROPIC_API_KEY && resolved.apiKey && process.env.ANTHROPIC_API_KEY !== resolved.apiKey) {
+      console.warn('[vault] note: process.env.ANTHROPIC_API_KEY differs from the vaulted apiKey and TAKES PRECEDENCE (getApiKey reads env first)');
+    }
+    return { ok: refs.length - dead.length, dead: dead.length, fields: dead };
+  } catch (e) { console.warn('[vault] health check failed:', e.message); return { error: e.message }; }
+}
+
+// Tell the redactor which literal strings are secrets on THIS machine. Exact-value matching is what
+// makes outbound redaction precise: no shape rule can know the AceData token or the MCP token, and
+// no shape rule can avoid eating a git SHA. Read live (loadConfig is mtime-cached, and the matcher
+// only recompiles when the value set actually changes) so a key rotated at runtime is covered.
+const ENV_SECRET_KEYS = ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY', 'BHATBOT_MCP_TOKEN', 'GOOGLE_CLIENT_SECRET', 'GOOGLE_REFRESH_TOKEN', 'ACEDATACLOUD_API_TOKEN'];
+redactor.setSecretProvider(() => {
+  const out = [];
+  try {
+    const c = loadConfig();
+    for (const f of VAULT_FIELDS) if (c[f]) out.push(String(c[f]));
+    for (const f of ['mcpToken', 'twilioSid', 'spotifyClientId', 'nytApiKey', 'braveKey', 'tavilyKey', 'serperKey', 'acedataToken']) if (c[f]) out.push(String(c[f]));
+    if (c.maps && c.maps.googleKey) out.push(String(c.maps.googleKey));
+    for (const p of (c.mcpPlugins || [])) {                       // connector bearer tokens
+      if (p && p.auth && p.auth.token) out.push(String(p.auth.token));
+      for (const v of Object.values((p && p.env) || {})) if (v) out.push(String(v));
+    }
+  } catch {}
+  for (const k of ENV_SECRET_KEYS) if (process.env[k]) out.push(String(process.env[k]));
+  return out;
+});
 
 const today = () => new Date().toISOString().slice(0, 10);
 
@@ -665,16 +752,16 @@ const { STATIC_PROMPT } = require('./lib/static-prompt');   // modePrompts stays
 
 // Defensive: never let API keys / app passwords reach the model context, even if
 // one accidentally lands in memory.md or CLAUDE.md. Secrets live in config.json only.
+//
+// Now delegates to lib/redact.js, which also FIXES a live false-positive here: the old last rule
+// ("any 40+ char alphanumeric run containing both a letter and a digit") matched every git SHA and
+// every content hash. `commit cf05ff6a1b2c3d4e5f60718293a4b5c6d7e8f901` reached the model as
+// `commit [REDACTED_TOKEN]`, so BhatBot could not read a commit id out of its own memory.md. The
+// replacement matches the machine's ACTUAL secret values plus vendor-prefixed shapes — strictly
+// more secrets caught, and no collateral damage to hashes.
 function redactSecrets(s) {
   if (!s) return s;
-  return s
-    .replace(/sk-(?:ant-|proj-)?[A-Za-z0-9_\-]{20,}/g, '[REDACTED_KEY]')
-    .replace(/AIza[0-9A-Za-z_\-]{20,}/g, '[REDACTED_KEY]')
-    .replace(/\bgsk_[A-Za-z0-9]{20,}/g, '[REDACTED_KEY]')
-    .replace(/\br8_[A-Za-z0-9]{20,}/g, '[REDACTED_KEY]')                     // Replicate
-    .replace(/\bxox[bps]-[A-Za-z0-9-]{10,}/g, '[REDACTED_KEY]')              // Slack
-    .replace(/\b([a-z]{4}\s){3}[a-z]{4}\b/gi, '[REDACTED_APP_PW]')           // gmail app-pw shape
-    .replace(/\b(?=[A-Za-z0-9_\-]{40,}\b)(?=[A-Za-z0-9_\-]*[A-Za-z])(?=[A-Za-z0-9_\-]*[0-9])[A-Za-z0-9_\-]+/g, '[REDACTED_TOKEN]');
+  return redactor.redact(s);
 }
 
 // Static, stable part of the system prompt → goes in the CACHED block (cheap repeat reads).
@@ -2171,7 +2258,7 @@ async function trimHistory(history, apiKey, budget = contextTrimBudget()) {
 // ---------------------------------------------------------------------------
 const VISION_MAX_DIM = 1568;
 const imgBlock = (data, mt) => ({ type: 'image', source: { type: 'base64', media_type: mt, data } });
-const { IMG_EXT, VID_EXT, TEXT_EXT, classifyExt } = require('./lib/attach');  // pure file-type routing (drag-drop / attach)
+const { classifyExt } = require('./lib/attach');  // pure file-type routing (drag-drop / attach)
 
 function sipsToJpeg(src) {
   const out = path.join(os.tmpdir(), `bb-img-${Date.now()}-${Math.random().toString(36).slice(2)}.jpg`);
@@ -3540,6 +3627,59 @@ const generateImage = (input) => creation.generateImage(input);
 const generate3D = (input) => creation.generate3D(input);
 const makePrintable = (input) => creation.makePrintable(input);
 
+// --- VISUAL BUILD (Seedance connector) ----------------------------------------------------------
+// lib/visualbuild.js owns the async generate→poll protocol (pure, testable); this owns the IO:
+// download the artifact, pull a poster frame so the result appears IN the conversation instead of as
+// a bare link, and keep it on disk so it can be reused as a later shot's reference image.
+const MEDIA_DIR = path.join(os.homedir(), '.bhatbot', 'media');
+async function visualBuild(input = {}) {
+  if (!String(input.prompt || '').trim()) return { success: false, error: 'prompt required — describe the shot you want' };
+  const connected = mcphub.status().plugins.some((p) => p.name === visualbuild.PLUGIN);
+  if (!connected) {
+    const d = connectors.describe(loadConfig()).find((c) => c.name === visualbuild.PLUGIN) || {};
+    return { success: false, error: !d.authenticated
+      ? `Seedance is not authenticated. Get a token at ${d.docs} and set ACEDATACLOUD_API_TOKEN (or config.acedataToken), then enable the connector.`
+      : 'Seedance connector is enabled but not connected — check the boot log for [mcphub].' };
+  }
+  sendToActivity('tool-update', { type: 'thinking', text: '🎬 generating — this takes a minute or two' });
+  const out = await visualbuild.generate(input, {
+    callTool: (n, i) => mcphub.callTool(n, i),
+    sleep,
+    log: (m) => console.log(m),
+  }, { timeoutMs: Math.min(Number(input.timeout_ms) || 300000, 600000) });
+  if (!out.ok) return { success: false, error: out.error || 'generation failed', state: out.state, taskId: out.taskId };
+
+  // Persist + poster-frame. Both best-effort: a working video URL is still a success if ffmpeg is
+  // missing or the download 403s on an expiring signed link.
+  let file = null, poster = null;
+  try {
+    fs.mkdirSync(MEDIA_DIR, { recursive: true });
+    const res = await fetch(out.videoUrl, { signal: AbortSignal.timeout(120000) });
+    if (res.ok) {
+      file = path.join(MEDIA_DIR, `visual-${Date.now()}.mp4`);
+      fs.writeFileSync(file, Buffer.from(await res.arrayBuffer()));
+    }
+  } catch (e) { console.warn('[visual] download failed:', e.message); }
+  try {
+    if (file) {
+      const jpg = file.replace(/\.mp4$/, '.jpg');
+      await new Promise((r) => {
+        const p = spawn('ffmpeg', ['-nostdin', '-loglevel', 'error', '-i', file, '-frames:v', '1', '-q:v', '4', '-y', jpg],
+          { env: { ...process.env, PATH: EXEC_PATH } });
+        p.on('close', r); p.on('error', r);
+      });
+      if (fs.existsSync(jpg)) poster = fs.readFileSync(jpg).toString('base64');
+    }
+  } catch {}
+  if (file && input.open !== false) { try { shell.openPath(file); } catch {} }
+  return {
+    success: true, url: out.videoUrl, path: file, taskId: out.taskId,
+    seconds: Math.round(out.ms / 1000), polls: out.polls,
+    note: `Video ready in ${Math.round(out.ms / 1000)}s${file ? ' → ' + file : ' (kept remote — download failed)'}.`,
+    _image: poster || undefined, _imageMime: poster ? 'image/jpeg' : undefined,
+  };
+}
+
 // --- Molecule / protein 3D viewer (3Dmol.js interactive + RDKit + PyMOL stills) ---
 const SIM_PY = path.join(os.homedir(), '.bhatbot', 'sim-venv', 'bin', 'python');
 const PYMOL_BIN = '/opt/homebrew/bin/pymol';
@@ -4072,13 +4212,27 @@ function expandPath(p) {
 // instead of a raw fs error, so the model explains why instead of improvising a run_shell find.
 // NOTE: config.json is deliberately NOT guarded — it holds only CRED_REF_* handles (secrets were
 // migrated to the vault), so it's safe + useful to read.
+// Paths read_file refuses outright. Deliberately NARROW: it covers only files that ARE a credential,
+// where even the structure is the secret and there is no useful redacted view. Everything else that
+// merely CONTAINS secrets — .env files, config.json, shell rc files — stays readable, because the
+// outbound redactor blanks the values on the way out. That is the better workflow answer: the agent
+// gets to see that OPENAI_API_KEY is set without ever learning what it is, instead of hitting a wall.
 function isSecretPath(fp) {
   try {
     const p = path.resolve(fp);
-    const bb = path.join(os.homedir(), '.bhatbot');
-    if (p === path.join(bb, 'credentials.json')) return true;
+    const home = os.homedir();
+    const bb = path.join(home, '.bhatbot');
+    const under = (dir) => p === dir || p.startsWith(dir + path.sep);
+    if (p === path.join(bb, 'credentials.json')) return true;      // the vault itself
     if (p === path.join(bb, 'browser-profile.json')) return true;
-    if (p === path.join(bb, 'browser-profile-dir') || p.startsWith(path.join(bb, 'browser-profile-dir') + path.sep)) return true;
+    if (under(path.join(bb, 'browser-profile-dir'))) return true;  // live cookies / session tokens
+    if (under(path.join(home, '.ssh'))) return true;               // private keys + known_hosts
+    if (under(path.join(home, '.gnupg'))) return true;
+    if (under(path.join(home, '.aws'))) return true;
+    if (under(path.join(home, 'Library', 'Keychains'))) return true;
+    if (p === path.join(home, '.netrc') || p === path.join(home, '.fly-token')) return true;
+    if (/\.(pem|p12|pfx|keystore|jks)$/i.test(p)) return true;     // key material, not text
+    if (/(^|\/)id_(rsa|ed25519|ecdsa|dsa)$/.test(p)) return true;  // a private key outside ~/.ssh
     return false;
   } catch { return false; }
 }
@@ -4961,6 +5115,19 @@ async function executeTool(name, input) {
       }
       case 'generate_image':
         result = await generateImage(input); break;
+      case 'visual_build':
+        result = await visualBuild(input || {}); break;
+      case 'connectors': {
+        const cfg = loadConfig();
+        if (input && input.action === 'enable') {
+          saveConfig(connectors.enablePatch(cfg, input.name, input.token));
+          await startMcpHub();
+          result = { success: true, connectors: connectors.describe(loadConfig()), live: mcphub.status().plugins };
+        } else {
+          result = { success: true, connectors: connectors.describe(cfg), live: mcphub.status().plugins };
+        }
+        break;
+      }
       case 'generate_3d': {
         result = await generate3D(input);
         break;
@@ -5134,6 +5301,22 @@ async function executeTool(name, input) {
       else if (name === 'web_search' && typeof result.result === 'string') result.result = security.sanitizeExternalContent(result.result, 'web-search');
     }
   } catch {}
+  // OUTBOUND — the mirror of the block above, and the half that was missing. Everything returned
+  // here is about to be serialized into a tool_result and POSTed to api.anthropic.com. `printenv`,
+  // a .env in some other repo, an Authorization header inside a stack trace: all of it went over the
+  // wire verbatim. This is the ONE choke point every tool passes through, including MCP plugin
+  // output, so redacting here needs no per-tool allowlist and cannot be bypassed by a new tool.
+  try {
+    if (result && typeof result === 'object') {
+      let hits = null;
+      redactor.redactDeep(result, { onHit: (label) => { (hits = hits || []).push(label); } });
+      if (hits) {
+        const kinds = [...new Set(hits)].join(',');
+        security.auditEvent('redact-outbound', { tool: name, count: hits.length, kinds });
+        console.warn(`[redact] ${hits.length} secret(s) stripped from ${name} result before send (${kinds})`);
+      }
+    }
+  } catch {}
   // Populate the shared read-cache on a successful read; a write invalidates any stale cached read of
   // that path so a read-after-write in the same batch never sees old bytes.
   try {
@@ -5292,6 +5475,8 @@ function describeAction(name, input = {}) {
       case 'vision_click': return `Clicking ${s(input.expect || input.query || 'an element')}`;
       case 'phone_mirror': return `Phone: ${s(input.action)}`;
       case 'generate_image': return `Generating an image of “${s(input.prompt || input.query)}”`;
+      case 'visual_build': return `Building a video: “${s(input.prompt)}”`;
+      case 'connectors': return input.action === 'enable' ? `Enabling the ${s(input.name, 24)} connector` : 'Checking connectors';
       case 'generate_3d': case 'make_printable': return 'Building a 3D model';
       case 'simulate': case 'sci_compute': return 'Running a computation';
       case 'studio_write': return 'Rendering the 3D scene';
@@ -5790,7 +5975,7 @@ async function agentLoop(history, apiKey, event, opts = {}) {
       try { if (_mission) _mission.step({ name: block.name, input: block.input, result, ms: _spanMs, spanId: _spanId, status: _spanStatus }); } catch {}
       // Jarvis HUD: surface visuals inline in chat — generated images / design renders /
       // explicit screenshots as holo-cards, and 3D outputs as an in-chat spinning model.
-      const showImage = result._image && (['generate_image', 'make_figure', 'simulate', 'sci_compute', 'studio_write', 'ui_inspect', 'screen_parse', 'vision_click', 'molecule', 'maps', 'phone_mirror'].includes(block.name)
+      const showImage = result._image && (['generate_image', 'visual_build', 'make_figure', 'simulate', 'sci_compute', 'studio_write', 'ui_inspect', 'screen_parse', 'vision_click', 'molecule', 'maps', 'phone_mirror'].includes(block.name)
         || (block.name === 'browser' && block.input && block.input.action === 'screenshot'));
       const model3d = (block.name === 'generate_3d' || block.name === 'make_printable') && result.success && result.path ? result.path : undefined;
       sendToAll(event, 'tool-update', {
@@ -6673,6 +6858,9 @@ function startCloudBridge() {
   try {
     const c = loadConfig();
     if (!c.cloudUrl || !c.cloudToken) return;
+    // An unresolved handle is NOT a credential. Dialling with it produced an endless 401 reconnect
+    // loop against a public host, with a log line that blamed the cloud rather than the vault.
+    if (unusableSecret('cloudToken', c.cloudToken)) return;
     // Keep the Mac reachable so the phone can always wake/use it: prevent system sleep while
     // bridged. `caffeinate -s` only holds sleep off on AC power (so it won't drain on battery),
     // which means "keep it plugged in → phone can always reach it." Disable: cloudKeepAwake:false.
@@ -6765,6 +6953,7 @@ const telegramHistories = new Map();
 function startTelegramBridge() {
   const cfg = loadConfig();
   if (!cfg.telegramToken) { console.log('[telegram] no token — bridge dormant'); return; }
+  if (unusableSecret('telegramToken', cfg.telegramToken)) return;   // a handle would poll 404 forever
   let TelegramBot;
   try { TelegramBot = require('node-telegram-bot-api'); }
   catch { console.warn('[telegram] node-telegram-bot-api not installed'); return; }
@@ -6811,7 +7000,25 @@ function startTelegramBridge() {
       telegramBot.sendMessage(chatId, reply, { parse_mode: 'Markdown' }).catch(() => telegramBot.sendMessage(chatId, reply));
     } catch (e) { telegramBot.sendMessage(chatId, `⚠ Error: ${e.message}`); }
   });
-  telegramBot.on('polling_error', (e) => console.warn('[telegram] polling:', e.message));
+  // Polling errors were logged unconditionally, once per retry. A REVOKED/typo'd token answers 404
+  // to getUpdates roughly every 400ms and will never start working, so the bridge sat in a retry
+  // loop writing ~2.5 lines/second forever: 76% of a fresh boot log was this one message, and the
+  // 5MB cap rolled within hours — taking every real signal (including [redact] warnings) with it.
+  // A 401/404 is a permanent verdict on the credential, not a transient network blip, so stop
+  // polling and say so once. Everything else still logs, but rate-limited to one line a minute.
+  let _tgErrs = 0, _tgLastLog = 0;
+  telegramBot.on('polling_error', (e) => {
+    const msg = String((e && e.message) || e);
+    if (/\b(401|404)\b|Unauthorized/i.test(msg)) {
+      if (_tgErrs++) return;                       // report the first one only
+      console.warn('[telegram] token rejected (' + msg.slice(0, 80) + ') — stopping the bridge; fix telegramToken and restart');
+      try { telegramBot.stopPolling(); } catch {}
+      return;
+    }
+    if (Date.now() - _tgLastLog < 60000) return;
+    _tgLastLog = Date.now();
+    console.warn('[telegram] polling:', msg);
+  });
 }
 function telegramNotify(text) {
   try {
@@ -7918,11 +8125,15 @@ function reapOrphanMissions() {
 // Spawn every enabled external MCP server from config.mcpPlugins and surface its tools to the agent
 // loop (namespaced mcp__<plugin>__<tool>). Best-effort + async so a slow/broken plugin never blocks boot.
 async function startMcpHub() {
-  const specs = loadConfig().mcpPlugins || [];
-  const enabled = specs.filter((s) => s && s.enabled !== false);
-  if (!enabled.length) { console.log('[mcphub] no external MCP plugins configured'); return; }
-  if (!mcphub.available()) { console.warn('[mcphub] MCP SDK unavailable — plugins skipped'); return; }
-  try { const st = await mcphub.connectAll(enabled, { log: (m) => console.log(m) }); console.log(`[mcphub] ready — ${st.total} tool(s) across ${st.plugins.length} plugin(s)`); }
+  // Specs now go through lib/connectors.js, which fills a registered connector's url/transport/auth
+  // from code (so config only has to say `{name:'seedance'}`) and pins its host before we dial it.
+  let specs = [], skipped = [];
+  try { ({ specs, skipped } = connectors.resolveSpecs(loadConfig())); }
+  catch (e) { console.warn('[mcphub] connector resolve failed:', e.message); }
+  for (const s of skipped) console.warn(`[mcphub] '${s.name}' skipped — ${s.reason}`);
+  if (!specs.length) { console.log('[mcphub] no external MCP connectors configured'); return; }
+  if (!mcphub.available()) { console.warn('[mcphub] MCP SDK unavailable — connectors skipped'); return; }
+  try { const st = await mcphub.connectAll(specs, { log: (m) => console.log(m) }); console.log(`[mcphub] ready — ${st.total} tool(s) across ${st.plugins.length} connector(s)`); }
   catch (e) { console.warn('[mcphub] connectAll failed:', e.message); }
 }
 
@@ -9766,6 +9977,11 @@ ipcMain.handle('synapse-projects', () => {
       projects.set(n.id, {
         id: n.id, label: n.label, ref: n.ref, text: String(n.text || '').slice(0, 600),
         source: (n.meta && n.meta.source) || 'curated',
+        // Written by synapse's recencyPass (lib/recency.js) from file mtimes + BhatBot's own tool
+        // ledger. This is what makes the tab answer "what am I working on" instead of "what is big".
+        activity: Number((n.meta && n.meta.activity) || 0),
+        lastTouched: Number((n.meta && n.meta.lastTouched) || 0),
+        recentFiles: (n.meta && n.meta.recentFiles) || [],
         files: [], memories: [], connections: [], fileCount: 0,
       });
     }
@@ -9830,8 +10046,15 @@ ipcMain.handle('synapse-projects', () => {
         p.connections.sort((a, b) => b.confidence - a.confidence);
         return p;
       })
-      // Rank by substance: a project with real cross-links outranks one that is merely large.
-      .sort((a, b) => (b.fileCount + b.connections.length * 5) - (a.fileCount + a.connections.length * 5));
+      // RANK BY RECENCY FIRST, substance second. This used to sort purely on
+      // `fileCount + connections*5`, which is a measure of SIZE — so a large repo last opened in
+      // April permanently outranked whatever was worked on this morning, and the tab could not tell
+      // you what you are actually on. `activity` is the recency-weighted score recencyPass computes
+      // from file mtimes plus BhatBot's own read/write ledger; substance stays as the tie-break so a
+      // project with no measurable activity still orders sensibly rather than arbitrarily.
+      .sort((a, b) => (b.activity - a.activity)
+        || (b.lastTouched - a.lastTouched)
+        || ((b.fileCount + b.connections.length * 5) - (a.fileCount + a.connections.length * 5)));
 
     return {
       projects: list,
@@ -10195,6 +10418,7 @@ app.whenReady().then(() => {
     migrateSecretsToVault();   // Phase 4 #1 — vault any plaintext secrets BEFORE anything (cloud bridge, MCP) reads them
     reconcileVaultRefs();      // self-heal: re-point config.json at vaulted secrets if it lost them
     syncResolvedSecretsToEnv();// bridge vaulted secrets → process.env so pure libs (semantic embeddings) get the REAL key, not the CRED_REF handle (a vaulted openaiKey had silently 401'd all recall)
+    vaultHealth();             // say out loud whether the vault actually opened — every failure here is otherwise silent
     createWindow();
     mainWindow.show();
     if (!globalShortcut.register(HOTKEY, toggleWindow)) console.warn('Hotkey failed — may be claimed by another app.');

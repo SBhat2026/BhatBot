@@ -135,6 +135,25 @@ const roster = (n) => Array.from({ length: n }, (_, i) => ({
   if (hoverOn.on) await shot('04-hover-card.png', 150);
   await shot('05-after-click.png', 300);
 
+  // --- hold-and-drag orbit -----------------------------------------------------------------------
+  // Three claims: a drag TURNS the room, it does NOT fire an agent-click, and letting go resumes the
+  // idle drift from where the drag ended (rather than snapping back to a time-derived angle).
+  const camBefore = await fr.evaluate(() => window.__cameraProbe());
+  const clicksBefore = (await page.evaluate(() => window.__clicks)).length;
+  const box = await (await page.$('#f')).boundingBox();
+  const cx = Math.round(box.x + box.width / 2), cy = Math.round(box.y + box.height / 2);
+  await page.mouse.move(cx, cy);
+  await page.mouse.down();
+  for (let i = 1; i <= 6; i++) await page.mouse.move(cx + i * 30, cy + i * 5);
+  const camHeld = await fr.evaluate(() => window.__cameraProbe());
+  await page.mouse.up();
+  await page.waitForTimeout(60);
+  const camReleased = await fr.evaluate(() => window.__cameraProbe());
+  await page.waitForTimeout(700);
+  const camDrift = await fr.evaluate(() => window.__cameraProbe());
+  const clicksAfter = (await page.evaluate(() => window.__clicks)).length;
+  await shot('06-after-drag.png', 200);
+
   const tally = await fr.evaluate(() => document.getElementById('tally').textContent);
   await browser.close(); server.close();
 
@@ -163,8 +182,20 @@ const roster = (n) => Array.from({ length: n }, (_, i) => ({
   console.log('agent-click →', JSON.stringify(clicked));
   if (!(clicked && clicked.length && clicked[0].id)) fails.push('click produced no id (the original dashboard bug)');
 
+  const dAz = Math.abs(camHeld.azimuth - camBefore.azimuth);
+  console.log(`\ndrag: azimuth ${camBefore.azimuth.toFixed(3)} → ${camHeld.azimuth.toFixed(3)} (Δ${dAz.toFixed(3)}), elevation ${camBefore.elevation.toFixed(3)} → ${camHeld.elevation.toFixed(3)}`);
+  console.log(`      released ${camReleased.azimuth.toFixed(3)} → drifted ${camDrift.azimuth.toFixed(3)}; extra clicks: ${clicksAfter - clicksBefore}`);
+  if (!camHeld.dragging) fails.push('pointerdown did not put the camera into drag mode');
+  if (dAz < 0.15) fails.push(`dragging barely moved the camera (Δazimuth ${dAz.toFixed(3)})`);
+  if (Math.abs(camHeld.elevation - camBefore.elevation) < 0.02) fails.push('vertical drag did not change elevation');
+  if (camDrift.dragging) fails.push('camera still in drag mode after pointerup');
+  // Resume must CONTINUE from the released angle, not jump back to t*0.12.
+  if (!(camDrift.azimuth > camReleased.azimuth)) fails.push('idle spin did not resume after the drag');
+  if (Math.abs(camDrift.azimuth - camReleased.azimuth) > 0.6) fails.push('camera jumped instead of resuming smoothly from the drag');
+  if (clicksAfter > clicksBefore) fails.push('a drag fired an agent-click (drag/click not disambiguated)');
+
   if (errors.length) { console.log('\nconsole/network errors:'); errors.slice(0, 12).forEach((e) => console.log('   ', e)); fails.push(errors.length + ' console/network error(s)'); }
   console.log('\nshots →', OUT);
   if (fails.length) { console.log('\n❌ ' + fails.length + ' failure(s):'); fails.forEach((f) => console.log('   ✗ ' + f)); process.exit(1); }
-  console.log('\n✅ presence scene verified: placement, per-state clips, hover read-out, and click-with-id all correct');
+  console.log('\n✅ presence scene verified: placement, per-state clips, hover read-out, click-with-id and drag-to-orbit all correct');
 })();
