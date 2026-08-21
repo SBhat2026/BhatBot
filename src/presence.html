@@ -15,22 +15,43 @@
   #legend { position:fixed; left:16px; bottom:12px; font-size:10.5px; letter-spacing:.06em; color:#6f93a6; line-height:1.85; }
   .dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:7px; vertical-align:middle; }
   #loading { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; color:#4a6376; font-size:12px; letter-spacing:.2em; text-transform:uppercase; }
-  #hoverlabel { position:fixed; z-index:20; pointer-events:none; opacity:0; transform:translate(-50%,-100%); transition:opacity .12s;
-    background:rgba(10,16,22,.92); border:1px solid #23303c; color:#cfe4ee; font-size:11px; letter-spacing:.04em;
-    padding:4px 9px; border-radius:7px; white-space:nowrap; }
+  /* Empty-room notice: shown when the roster is genuinely empty. This REPLACES the old fake demo
+     roster, which was indistinguishable from real agents and disabled all interaction. */
+  #empty { position:fixed; left:0; right:0; bottom:34%; text-align:center; pointer-events:none;
+    color:#4e6b7d; font-size:11.5px; letter-spacing:.14em; text-transform:uppercase; opacity:0; transition:opacity .4s; }
+  #empty.on { opacity:1; }
+
+  /* Hover card — the "what is this one actually working on" read-out. */
+  #hovercard { position:fixed; z-index:20; pointer-events:none; opacity:0; transform:translate(-50%,-100%) translateY(-10px);
+    transition:opacity .12s; background:rgba(9,14,20,.95); border:1px solid #24323e; border-radius:9px;
+    padding:9px 12px; min-width:190px; max-width:330px; box-shadow:0 10px 34px rgba(0,0,0,.55); }
+  #hovercard.on { opacity:1; }
+  #hc-top { display:flex; align-items:center; gap:8px; margin-bottom:2px; }
+  #hc-name { font-size:12.5px; color:#dceff8; font-weight:600; letter-spacing:.02em; }
+  #hc-status { margin-left:auto; font-size:9.5px; text-transform:uppercase; letter-spacing:.12em; color:#7fa8bd; }
+  #hc-task { font-size:11px; color:#9fbccd; line-height:1.45; margin-top:4px; }
+  #hc-step { font-size:10.5px; color:#7c9db0; line-height:1.4; margin-top:4px; font-style:italic;
+    border-left:2px solid #2a3a47; padding-left:7px; }
+  #hc-foot { margin-top:6px; font-size:9.5px; letter-spacing:.1em; text-transform:uppercase; color:#5c7b8d; }
 </style>
 </head>
 <body>
   <div id="stage"></div>
   <div id="loading">Loading the room…</div>
-  <div id="hoverlabel"></div>
+  <div id="empty">No agents deployed — the office is idle</div>
+  <div id="hovercard">
+    <div id="hc-top"><span class="dot" id="hc-dot"></span><span id="hc-name"></span><span id="hc-status"></span></div>
+    <div id="hc-task"></div>
+    <div id="hc-step"></div>
+    <div id="hc-foot"></div>
+  </div>
   <div id="hud"><span>BhatBot · <b>Fleet Presence</b></span><span id="tally">—</span></div>
   <div id="legend">
     <div><span class="dot" style="background:#3a4a5a"></span>idle</div>
     <div><span class="dot" style="background:#f2c14e"></span>thinking</div>
     <div><span class="dot" style="background:#5ad1ff"></span>working</div>
     <div><span class="dot" style="background:#59e39b"></span>done</div>
-    <div style="margin-top:6px;color:#5a7688;">click an agent to check in</div>
+    <div style="margin-top:6px;color:#5a7688;">hover to read · click to steer</div>
   </div>
 
 <script type="importmap">
@@ -46,8 +67,23 @@ import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
 import { clone as skeletonClone } from 'three/addons/utils/SkeletonUtils.js';
 
 const STATE_COLOR = { idle:0x3a4a5a, thinking:0xf2c14e, working:0x5ad1ff, done:0x59e39b, error:0xff6b6b };
-const stage = document.getElementById('stage');
+const STATE_CSS   = { idle:'#3a4a5a', thinking:'#f2c14e', working:'#5ad1ff', done:'#59e39b', error:'#ff6b6b' };
 
+// state → which kind of POI this agent belongs at, and the clip it plays once seated/standing there.
+// The office asset NAMES its anchors `poi-<clip>-<n>` (poi-sit_work-3, poi-idle-spawn-2, …), i.e. the
+// artist encoded the animation into the layout. The old renderer ignored all of it and scattered a
+// 4x3 grid inside the bounding box, which is why characters stood inside desks and walls.
+const STATE_POI = {
+  working:  { kind:'sit_work', clip:'Sit_Work' },
+  thinking: { kind:'sit_idle', clip:'Sit_Idle' },
+  idle:     { kind:'idle',     clip:'Idle' },
+  done:     { kind:'idle',     clip:'Idle' },
+  error:    { kind:'idle',     clip:'Idle' },
+};
+// One-shot reactions layered over the resting clip when a state CHANGES.
+const STATE_REACTION = { done:'Happy', error:'Sad' };
+
+const stage = document.getElementById('stage');
 const scene = new THREE.Scene();
 scene.fog = new THREE.FogExp2(0x070b12, 0.03);
 const camera = new THREE.PerspectiveCamera(46, innerWidth/innerHeight, 0.05, 500);
@@ -65,12 +101,30 @@ scene.add(new THREE.HemisphereLight(0x9fc4e0, 0x0a1420, 0.6));
 const rim = new THREE.PointLight(0x4a7bd6, 0.7, 80); rim.position.set(-8, 5, -8); scene.add(rim);
 
 // ---- adaptive framing -----------------------------------------------------
-let focus = new THREE.Vector3(0, 1, 0), radius = 8;
+// ASPECT-AWARE. The old version derived the orbit radius from the room's footprint alone, ignoring
+// the viewport: in the FLEET tab (a wide, short panel) the vertical FOV is the binding constraint,
+// so a 9.4m-deep office at that radius was cropped to a corner. We now solve for the distance that
+// actually fits the room's bounding sphere in BOTH axes, so the whole office is visible whatever
+// shape the panel is — and re-solve on resize.
+let focus = new THREE.Vector3(0, 1, 0), radius = 8, fitR = 6;
+function solveRadius() {
+  const vFov = THREE.MathUtils.degToRad(camera.fov);
+  const hFov = 2 * Math.atan(Math.tan(vFov / 2) * camera.aspect);
+  // distance needed for the bounding sphere to fit each axis; take the tighter one, plus margin.
+  // The room is viewed from 32° elevation, so its depth foreshortens to ~cos(32°) on screen and the
+  // strict bounding-sphere fit leaves a lot of dead space. 0.78 pulls in to a framing that fills the
+  // panel while still keeping the far wall inside the frustum.
+  const d = Math.max(fitR / Math.sin(vFov / 2), fitR / Math.sin(hFov / 2));
+  radius = d * 0.78;
+  camera.near = Math.max(0.01, radius / 200); camera.far = radius * 12;
+  camera.updateProjectionMatrix();
+}
 function frame(box) {
   box.getCenter(focus);
   const size = box.getSize(new THREE.Vector3());
-  radius = Math.max(size.x, size.z) * 0.6 + size.y * 0.4;   // tighter framing so the office fills the view
-  camera.near = radius / 100; camera.far = radius * 12; camera.updateProjectionMatrix();
+  fitR = 0.5 * Math.hypot(size.x, size.z) * 0.82;   // bounding-sphere radius of the floor plan
+  focus.y = box.min.y + size.y * 0.28;              // look slightly above the floor, not at the ceiling
+  solveRadius();
 }
 
 // ---- loaders --------------------------------------------------------------
@@ -78,10 +132,98 @@ const draco = new DRACOLoader().setDecoderPath('./vendor/three/jsm/libs/draco/gl
 const gltf = new GLTFLoader().setDRACOLoader(draco);
 const load = (url) => new Promise((res, rej) => gltf.load(url, res, undefined, rej));
 
-let charTemplate = null, charClip = null, charScale = 1, floorY = 0, charTargetH = 1.7;
-let seats = [];   // candidate positions on the office floor for agents to occupy
+let charTemplate = null, charScale = 1, floorY = 0, charTargetH = 1.7;
+let clips = {};            // name → AnimationClip (the character ships 12; we use 9)
+let pois = [];             // { name, kind, pos:Vector3, quat:Quaternion, taken:string|null }
+let navTris = [];          // flat navmesh triangles in XZ, for walkability tests
+let navGraph = [];         // adjacency over POI indices — the actual path network
 
-// Stylized fallback avatar (used if the GLB models fail to load) so the panel never blanks.
+// ---------------------------------------------------------------------------
+// NAVMESH. office.glb ships a `navMesh` object: a flat 308-triangle cutout of the genuinely walkable
+// floor (it excludes desks, the sofa, planters and the counter). We use it for two things: testing
+// whether a straight line between two anchors is clear, and building the path graph below.
+// ---------------------------------------------------------------------------
+function buildNav(mesh) {
+  const g = mesh.geometry;
+  const pos = g.attributes.position;
+  const idx = g.index;
+  const v = new THREE.Vector3();
+  const read = (i) => { v.fromBufferAttribute(pos, i); mesh.localToWorld(v); return { x:v.x, z:v.z }; };
+  if (idx) for (let i = 0; i < idx.count; i += 3) navTris.push([read(idx.getX(i)), read(idx.getX(i+1)), read(idx.getX(i+2))]);
+  else for (let i = 0; i < pos.count; i += 3) navTris.push([read(i), read(i+1), read(i+2)]);
+}
+function pointInTri(px, pz, t) {
+  const [a, b, c] = t;
+  const d = (b.z - c.z) * (a.x - c.x) + (c.x - b.x) * (a.z - c.z);
+  if (Math.abs(d) < 1e-9) return false;
+  const u = ((b.z - c.z) * (px - c.x) + (c.x - b.x) * (pz - c.z)) / d;
+  const w = ((c.z - a.z) * (px - c.x) + (a.x - c.x) * (pz - c.z)) / d;
+  return u >= -0.02 && w >= -0.02 && (u + w) <= 1.02;
+}
+function onNav(x, z) {
+  if (!navTris.length) return true;                    // no navmesh → don't constrain anything
+  for (const t of navTris) if (pointInTri(x, z, t)) return true;
+  return false;
+}
+/** Is the straight segment A→B walkable? Sampled every ~25cm. */
+function segClear(a, b) {
+  if (!navTris.length) return true;
+  const steps = Math.max(2, Math.ceil(a.distanceTo(b) / 0.25));
+  for (let i = 1; i < steps; i++) {
+    const t = i / steps;
+    if (!onNav(a.x + (b.x - a.x) * t, a.z + (b.z - a.z) * t)) return false;
+  }
+  return true;
+}
+/** Visibility graph over the anchors: edge = a clear straight walk. Dijkstra runs over this. */
+function buildGraph() {
+  navGraph = pois.map(() => []);
+  for (let i = 0; i < pois.length; i++) {
+    for (let j = i + 1; j < pois.length; j++) {
+      if (!segClear(pois[i].pos, pois[j].pos)) continue;
+      const d = pois[i].pos.distanceTo(pois[j].pos);
+      navGraph[i].push({ to:j, d }); navGraph[j].push({ to:i, d });
+    }
+  }
+}
+/** Shortest anchor-to-anchor route. Returns an array of POI indices (excluding the start). */
+function route(from, to) {
+  if (from === to) return [];
+  if (!navGraph.length) return [to];
+  const dist = new Array(pois.length).fill(Infinity), prev = new Array(pois.length).fill(-1);
+  const seen = new Set();
+  dist[from] = 0;
+  while (true) {
+    let u = -1, best = Infinity;
+    for (let i = 0; i < pois.length; i++) if (!seen.has(i) && dist[i] < best) { best = dist[i]; u = i; }
+    if (u < 0 || u === to) break;
+    seen.add(u);
+    for (const e of navGraph[u]) if (dist[u] + e.d < dist[e.to]) { dist[e.to] = dist[u] + e.d; prev[e.to] = u; }
+  }
+  if (dist[to] === Infinity) return [to];              // disconnected → walk straight and accept it
+  const path = []; for (let c = to; c !== -1 && c !== from; c = prev[c]) path.unshift(c);
+  return path;
+}
+/** Claim a free anchor of the requested kind, preferring the one nearest the agent. */
+function claimPoi(kind, near, agentId) {
+  let best = -1, bestD = Infinity;
+  for (let i = 0; i < pois.length; i++) {
+    const p = pois[i];
+    if (p.kind !== kind || (p.taken && p.taken !== agentId)) continue;
+    const d = near ? p.pos.distanceToSquared(near) : 0;
+    if (d < bestD) { bestD = d; best = i; }
+  }
+  if (best < 0) {                                       // that kind is full → fall back to any free spot
+    for (let i = 0; i < pois.length; i++) if (!pois[i].taken || pois[i].taken === agentId) { best = i; break; }
+  }
+  if (best >= 0) pois[best].taken = agentId;
+  return best;
+}
+function releasePoi(agentId) { for (const p of pois) if (p.taken === agentId) p.taken = null; }
+
+// ---------------------------------------------------------------------------
+// AVATARS
+// ---------------------------------------------------------------------------
 function fallbackAvatar() {
   const g = new THREE.Group();
   const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.28, 0.7, 4, 10),
@@ -93,165 +235,376 @@ function fallbackAvatar() {
   g.userData.tintTargets = [head.material];
   return g;
 }
-
-// Collect materials we can tint to reflect an agent's state (skinned mesh materials).
 function tintTargetsOf(root) {
   const mats = [];
   root.traverse((o) => { if (o.isMesh && o.material) { const m = Array.isArray(o.material) ? o.material : [o.material]; for (const mm of m) mats.push(mm); } });
   return mats;
 }
+// A floating nameplate so the agents are tellable apart without hovering every one.
+function nameplate(text) {
+  const cv = document.createElement('canvas'); cv.width = 256; cv.height = 64;
+  const ctx = cv.getContext('2d');
+  ctx.font = '600 30px -apple-system, Segoe UI, Roboto, sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = 'rgba(210,235,247,0.95)';
+  ctx.shadowColor = 'rgba(0,0,0,0.9)'; ctx.shadowBlur = 8;
+  ctx.fillText(String(text || '').slice(0, 18), 128, 32);
+  const tex = new THREE.CanvasTexture(cv); tex.colorSpace = THREE.SRGBColorSpace;
+  const spr = new THREE.Sprite(new THREE.SpriteMaterial({ map:tex, transparent:true, depthWrite:false }));
+  spr.scale.set(1.1, 0.275, 1);
+  return spr;
+}
 
-function makeAvatar() {
-  if (!charTemplate) return { group: fallbackAvatar(), mixer: null };
+function makeAvatar(label) {
+  if (!charTemplate) return { group: fallbackAvatar(), mixer: null, actions: {} };
   const group = skeletonClone(charTemplate);
   group.scale.setScalar(charScale);
   group.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.frustumCulled = false; } });
-  let mixer = null;
-  if (charClip) { mixer = new THREE.AnimationMixer(group); mixer.clipAction(charClip).play(); }
-  // a soft state aura ring at the feet
-  const aura = new THREE.Mesh(new THREE.RingGeometry(0.32, 0.46, 28), new THREE.MeshBasicMaterial({ color:0x3a4a5a, transparent:true, opacity:0.5, side:THREE.DoubleSide }));
-  aura.rotation.x = -Math.PI/2; aura.position.y = 0.02; group.add(aura);
-  // a bright status orb floating above the head — the unmistakable at-a-glance state signal. Sized in
-  // world units by dividing out charScale (the group is scaled, this child would otherwise inherit it).
-  const inv = 1 / (charScale || 1);
-  const orb = new THREE.Mesh(new THREE.SphereGeometry(0.14 * inv, 16, 16), new THREE.MeshBasicMaterial({ color:0x3a4a5a }));
-  orb.position.y = (charTargetH + 0.34) * inv; group.add(orb);
-  const glow = new THREE.Mesh(new THREE.SphereGeometry(0.22 * inv, 16, 16), new THREE.MeshBasicMaterial({ color:0x3a4a5a, transparent:true, opacity:0.28 }));
-  orb.add(glow);
-  group.userData.tintTargets = tintTargetsOf(group).slice(0, 2);
-  group.userData.aura = aura; group.userData.orb = orb; group.userData.glow = glow;
-  return { group, mixer };
-}
-
-// ---- agents ---------------------------------------------------------------
-let agents = [];   // { group, mixer, aura, state, target, phase }
-function seatFor(i, n) {
-  if (seats.length) return seats[i % seats.length];
-  // no office loaded → ring layout
-  const R = Math.max(3, 2 + n*0.3), a = (i/Math.max(1,n))*Math.PI*2;
-  return new THREE.Vector3(Math.cos(a)*R, floorY, Math.sin(a)*R);
-}
-function setCount(n) {
-  while (agents.length > n) { const a = agents.pop(); scene.remove(a.group); }
-  while (agents.length < n) {
-    const { group, mixer } = makeAvatar();
-    const av = { group, mixer, aura: group.userData.aura, orb: group.userData.orb, glow: group.userData.glow, tint: group.userData.tintTargets || [], state:'idle', target:new THREE.Color(0x3a4a5a), phase:Math.random()*6.28, baseY:floorY };
-    agents.push(av); scene.add(group);
+  const mixer = new THREE.AnimationMixer(group);
+  // Pre-build one action per clip so state changes are a crossfade, not a rebuild.
+  const actions = {};
+  for (const [name, clip] of Object.entries(clips)) {
+    const a = mixer.clipAction(clip);
+    if (name === 'Wave' || name === 'Happy' || name === 'Sad' || name === 'Pick') { a.setLoop(THREE.LoopOnce); a.clampWhenFinished = true; }
+    actions[name] = a;
   }
-  agents.forEach((a, i) => { const p = seatFor(i, agents.length); a.group.position.set(p.x, floorY, p.z); a.group.lookAt(focus.x, floorY, focus.z); });
+  const inv = 1 / (charScale || 1);
+  const aura = new THREE.Mesh(new THREE.RingGeometry(0.32 * inv, 0.46 * inv, 28), new THREE.MeshBasicMaterial({ color:0x3a4a5a, transparent:true, opacity:0.5, side:THREE.DoubleSide }));
+  aura.rotation.x = -Math.PI/2; aura.position.y = 0.02 * inv; group.add(aura);
+  const orb = new THREE.Mesh(new THREE.SphereGeometry(0.13 * inv, 16, 16), new THREE.MeshBasicMaterial({ color:0x3a4a5a }));
+  orb.position.y = (charTargetH + 0.30) * inv; group.add(orb);
+  const glow = new THREE.Mesh(new THREE.SphereGeometry(0.21 * inv, 16, 16), new THREE.MeshBasicMaterial({ color:0x3a4a5a, transparent:true, opacity:0.28 }));
+  orb.add(glow);
+  const plate = nameplate(label); plate.position.y = (charTargetH + 0.62) * inv; plate.scale.multiplyScalar(inv); group.add(plate);
+  group.userData.tintTargets = tintTargetsOf(group).slice(0, 2);
+  return { group, mixer, actions, aura, orb, glow, plate };
 }
+
+// ---------------------------------------------------------------------------
+// AGENT RUNTIME — keyed by AGENT ID, not array index. The old code indexed by position, so any
+// reordering of the roster silently swapped every character's identity.
+// ---------------------------------------------------------------------------
+const agents = new Map();     // id → runtime record
+const CLIP_FADE = 0.28;
+
+function playClip(a, name, { once = false } = {}) {
+  const next = a.actions[name];
+  if (!next || a.clip === name) return;
+  const prev = a.actions[a.clip];
+  next.reset();
+  next.setEffectiveWeight(1);
+  next.enabled = true;
+  if (prev && prev !== next) { next.crossFadeFrom(prev, CLIP_FADE, false); }
+  next.play();
+  a.clip = name;
+  a.clipOnce = once;
+}
+/** Layer a one-shot reaction (Wave/Happy/Sad) then fall back to the resting clip. */
+function react(a, name) {
+  if (!a.actions[name]) return;
+  playClip(a, name, { once:true });
+  clearTimeout(a.reactTimer);
+  const dur = (clips[name] && clips[name].duration) || 1.2;
+  a.reactTimer = setTimeout(() => { a.clip = null; playClip(a, a.restClip || 'Idle'); }, dur * 1000);
+}
+
+function spawnAgent(info) {
+  const label = info.name || info.role || info.id;
+  const av = makeAvatar(label);
+  const a = {
+    id: info.id, ...av,
+    tint: av.group.userData.tintTargets || [],
+    state: 'idle', status: info.status || '', name: label, role: info.role || '',
+    task: info.task || '', step: info.step || '', since: info.since || Date.now(),
+    steerable: info.steerable !== false,
+    phase: Math.random() * 6.28,
+    poi: -1, path: [], clip: null, restClip: 'Idle', reactTimer: null, walkT: 0,
+  };
+  // Enter at a spawn point and wave hello — the arrival should be legible, not a pop-in.
+  const start = claimPoi('idle', null, a.id);
+  a.poi = start;
+  if (start >= 0) { a.group.position.copy(pois[start].pos); a.group.quaternion.copy(pois[start].quat); }
+  else { a.group.position.set(0, floorY, 0); }
+  a.group.userData.agentId = a.id;
+  scene.add(a.group);
+  agents.set(a.id, a);
+  react(a, 'Wave');
+  return a;
+}
+function despawnAgent(a) {
+  clearTimeout(a.reactTimer);
+  releasePoi(a.id);
+  scene.remove(a.group);
+  agents.delete(a.id);
+}
+
+/** Send an agent to an anchor of the given kind, routing over the navmesh. */
+function retarget(a, kind, restClip) {
+  const cur = a.poi >= 0 ? pois[a.poi].pos : a.group.position;
+  const dest = claimPoi(kind, cur, a.id);
+  a.restClip = restClip;
+  if (dest < 0 || dest === a.poi) { if (!a.path.length) playClip(a, restClip); return; }
+  // Free the old anchor only once we're actually leaving it.
+  for (const p of pois) if (p.taken === a.id && p !== pois[dest]) p.taken = null;
+  pois[dest].taken = a.id;
+  a.path = route(a.poi >= 0 ? a.poi : dest, dest).map((i) => pois[i]);
+  a.poi = dest;
+  if (a.path.length) playClip(a, 'Walk');
+  else { a.group.position.copy(pois[dest].pos); a.group.quaternion.copy(pois[dest].quat); playClip(a, restClip); }
+}
+
+// ---------------------------------------------------------------------------
+// LIVE ROSTER INGEST
+// ---------------------------------------------------------------------------
+let haveData = false, lastRoster = [];
 function applyState(list) {
-  document.getElementById('tally').textContent = `${list.length} agent${list.length===1?'':'s'} · ${list.filter(x=>x.state==='working').length} working`;
-  if (list.length !== agents.length) setCount(list.length);
-  list.forEach((info, i) => { const a = agents[i]; if (!a) return;
-    a.state = info.state || 'idle'; a.target = new THREE.Color(STATE_COLOR[a.state] ?? STATE_COLOR.idle);
-    a.id = info.id || null; a.name = info.name || info.codename || info.role || ('Agent ' + (i + 1));   // for click-to-inspect
-    a.group.userData.agentIdx = i;
-  });
-}
+  haveData = true;
+  lastRoster = list;
+  const live = new Set();
+  for (const info of list) {
+    if (!info || !info.id) continue;
+    live.add(info.id);
+    let a = agents.get(info.id) || spawnAgent(info);
+    const stateChanged = a.state !== (info.state || 'idle');
+    a.state = info.state || 'idle';
+    a.status = info.status || a.status;
+    a.task = info.task || '';
+    a.step = info.step || '';
+    a.tool = info.tool || null;
+    a.since = info.since || a.since;
+    a.steerable = info.steerable !== false;
+    a.target = new THREE.Color(STATE_COLOR[a.state] ?? STATE_COLOR.idle);
+    if (stateChanged) {
+      const map = STATE_POI[a.state] || STATE_POI.idle;
+      retarget(a, map.kind, map.clip);
+      const r = STATE_REACTION[a.state];
+      if (r) react(a, r);
+    }
+  }
+  for (const [id, a] of [...agents]) if (!live.has(id)) despawnAgent(a);
 
-// ---- demo + live input ----------------------------------------------------
-let demo = true;
-const DEMO = ['research','design','code','test','review'];
-function demoTick(t) {
-  const states = ['idle','thinking','working','working','done'];
-  applyState(DEMO.map((role, i) => ({ role, state: states[(Math.floor(t*0.4)+i)%states.length] })));
+  const working = list.filter((x) => x.state === 'working').length;
+  document.getElementById('tally').textContent = list.length
+    ? `${list.length} agent${list.length === 1 ? '' : 's'} · ${working} working` : 'idle';
+  document.getElementById('empty').classList.toggle('on', list.length === 0);
 }
-function ingest(payload) { demo = false; applyState((payload && payload.agents) || []); }
+function ingest(payload) { applyState((payload && payload.agents) || []); }
 
-// ---- click-to-inspect: walk up to an agent and check in on it --------------
-// Raycast a click against the characters, resolve which agent was hit, and tell the host (the
-// FLEET tab via postMessage, or the popup via window.presence) so it focuses that suit's card /
-// opens its live monitor. Hover shows a name+state chip and a pointer cursor.
+// ---------------------------------------------------------------------------
+// HOVER + CLICK. Both used to be dead: pickAgent() bailed out whenever `demo` was true, and demo was
+// permanently true because the host skipped empty snapshots and so never sent a payload at all.
+// There is no demo mode now — an empty roster is an empty room, and picking always works.
+// ---------------------------------------------------------------------------
 const _ray = new THREE.Raycaster(), _ptr = new THREE.Vector2();
-const _label = document.getElementById('hoverlabel');
+const card = document.getElementById('hovercard');
+const hcDot = document.getElementById('hc-dot'), hcName = document.getElementById('hc-name');
+const hcStatus = document.getElementById('hc-status'), hcTask = document.getElementById('hc-task');
+const hcStep = document.getElementById('hc-step'), hcFoot = document.getElementById('hc-foot');
+
 function pickAgent(ev) {
-  if (demo || !agents.length) return null;
+  if (!agents.size) return null;
   const rect = renderer.domElement.getBoundingClientRect();
   _ptr.x = ((ev.clientX - rect.left) / rect.width) * 2 - 1;
   _ptr.y = -((ev.clientY - rect.top) / rect.height) * 2 + 1;
   _ray.setFromCamera(_ptr, camera);
-  const hits = _ray.intersectObjects(agents.map((a) => a.group), true);
+  const hits = _ray.intersectObjects([...agents.values()].map((a) => a.group), true);
   if (!hits.length) return null;
   let o = hits[0].object;
-  while (o && o.userData.agentIdx == null && o.parent) o = o.parent;
-  return (o && o.userData.agentIdx != null) ? agents[o.userData.agentIdx] : null;
+  while (o && o.userData.agentId == null && o.parent) o = o.parent;
+  return (o && o.userData.agentId != null) ? agents.get(o.userData.agentId) : null;
 }
+const ago = (ts) => {
+  const s = Math.max(0, Math.round((Date.now() - ts) / 1000));
+  return s < 60 ? s + 's' : s < 3600 ? Math.floor(s / 60) + 'm ' + (s % 60) + 's' : Math.floor(s / 3600) + 'h ' + Math.floor((s % 3600) / 60) + 'm';
+};
 renderer.domElement.addEventListener('pointermove', (ev) => {
   const a = pickAgent(ev);
-  renderer.domElement.style.cursor = a ? 'pointer' : 'default';
-  if (_label) {
-    if (a) { _label.textContent = a.name + ' · ' + a.state; _label.style.left = ev.clientX + 'px'; _label.style.top = (ev.clientY - 12) + 'px'; _label.style.opacity = '1'; }
-    else _label.style.opacity = '0';
-  }
+  renderer.domElement.style.cursor = (a && a.steerable) ? 'pointer' : a ? 'help' : 'default';
+  if (!a) { card.classList.remove('on'); return; }
+  hcDot.style.background = STATE_CSS[a.state] || STATE_CSS.idle;
+  hcName.textContent = a.name;
+  hcStatus.textContent = a.status || a.state;
+  hcTask.textContent = a.task || '(no task recorded)';
+  hcStep.textContent = a.step || (a.tool ? '→ ' + a.tool : '');
+  hcStep.style.display = (a.step || a.tool) ? '' : 'none';
+  hcFoot.textContent = (a.steerable ? 'click to steer · ' : 'background job · ') + ago(a.since);
+  card.style.left = ev.clientX + 'px';
+  card.style.top = (ev.clientY - 14) + 'px';
+  card.classList.add('on');
 });
+renderer.domElement.addEventListener('pointerleave', () => card.classList.remove('on'));
 renderer.domElement.addEventListener('click', (ev) => {
   const a = pickAgent(ev);
   if (!a) return;
-  const detail = { type: 'agent-click', id: a.id, name: a.name, state: a.state };
+  const detail = { type:'agent-click', id:a.id, name:a.name, state:a.state, steerable:a.steerable, task:a.task };
   try { if (window.parent && window.parent !== window) window.parent.postMessage(detail, '*'); } catch {}
   try { if (window.presence && window.presence.inspect) window.presence.inspect(detail); } catch {}
-  a.group.scale.setScalar(1.12); setTimeout(() => { a.group.scale.setScalar(1); }, 160);   // click confirm
+  react(a, 'Listen' in clips ? 'Listen' : 'LookAround');   // it acknowledges you
+  a.group.scale.setScalar(charScale * 1.1);
+  setTimeout(() => { a.group.scale.setScalar(charScale); }, 160);
 });
 
-// popup (IPC preload) OR iframe (postMessage) — support both so this file works in either mount.
+// popup (IPC preload) OR iframe (postMessage) — support both mounts.
 if (window.presence && window.presence.onUpdate) window.presence.onUpdate(ingest);
 window.addEventListener('message', (e) => { if (e.data && e.data.type === 'presence') ingest(e.data); });
+
+// Testability seam for scripts/shoot-presence.js: where each agent currently is, in screen pixels,
+// plus what it's doing. Read-only — it exposes no way to mutate the scene, and the app never calls
+// it. Without this a visual test has to blind-probe the canvas for a character, which is flaky the
+// moment the framing or the seating layout changes.
+window.__presenceProbe = () => [...agents.values()].map((a) => {
+  const v = a.group.position.clone();
+  v.y += charTargetH * 0.6;
+  v.project(camera);
+  return {
+    id: a.id, name: a.name, state: a.state, clip: a.clip, restClip: a.restClip,
+    walking: a.path.length > 0, poi: a.poi >= 0 ? pois[a.poi].name : null,
+    pathLen: a.path.length, clipOnce: !!a.clipOnce,
+    offTarget: a.poi >= 0 ? +a.group.position.distanceTo(pois[a.poi].pos).toFixed(3) : null,
+    x: Math.round((v.x * 0.5 + 0.5) * innerWidth),
+    y: Math.round((-v.y * 0.5 + 0.5) * innerHeight),
+    onScreen: v.z < 1 && Math.abs(v.x) <= 1 && Math.abs(v.y) <= 1,
+  };
+});
 
 // ---- boot -----------------------------------------------------------------
 Promise.all([ load('./vendor/presence3d/models/office.glb').catch(() => null),
               load('./vendor/presence3d/models/character.glb').catch(() => null) ])
 .then(([office, character]) => {
   if (office) {
-    office.scene.traverse((o) => { if (o.isMesh) { o.receiveShadow = true; o.castShadow = true; } });
+    const poiNodes = [], toHide = [];
+    office.scene.traverse((o) => {
+      const n = o.name || '';
+      if (n === 'navMesh') { toHide.push(o); if (o.isMesh) buildNav(o); }
+      else if (n.startsWith('poi-')) { poiNodes.push(o); toHide.push(o); }
+      else if (o.isMesh) { o.receiveShadow = true; o.castShadow = true; }
+    });
+    scene.add(office.scene);
+    office.scene.updateMatrixWorld(true);
+    for (const o of toHide) o.visible = false;
+    // Parse `poi-<kind>-<n>`: poi-sit_work-3 → kind 'sit_work'; poi-idle-spawn-2 and
+    // poi-idle-area-hub both → kind 'idle'. World transforms, so the anchors survive any
+    // parent transform the asset might grow later.
+    for (const o of poiNodes) {
+      const m = /^poi-([a-z_]+?)(?:-(?:spawn|area))?-([a-z0-9]+)$/i.exec(o.name);
+      const kind = m ? m[1].toLowerCase() : 'idle';
+      pois.push({
+        name: o.name, kind,
+        pos: o.getWorldPosition(new THREE.Vector3()),
+        quat: o.getWorldQuaternion(new THREE.Quaternion()),
+        taken: null,
+      });
+    }
+    buildGraph();
     const box = new THREE.Box3().setFromObject(office.scene);
     floorY = box.min.y;
-    scene.add(office.scene);
     frame(box);
-    // scatter seat points across the office floor footprint (grid inside the bbox, inset from walls)
-    const size = box.getSize(new THREE.Vector3()), c = box.getCenter(new THREE.Vector3());
-    const cols = 4, rows = 3, ix = size.x*0.62/cols, iz = size.z*0.62/rows;
-    for (let r = 0; r < rows; r++) for (let col = 0; col < cols; col++)
-      seats.push(new THREE.Vector3(c.x + (col - (cols-1)/2)*ix, floorY, c.z + (r - (rows-1)/2)*iz));
   } else {
     const grid = new THREE.GridHelper(24, 24, 0x16324a, 0x0e2033); grid.material.transparent = true; grid.material.opacity = 0.3; scene.add(grid);
     frame(new THREE.Box3(new THREE.Vector3(-6,0,-6), new THREE.Vector3(6,3,6)));
+    for (let i = 0; i < 8; i++) {
+      const ang = (i / 8) * Math.PI * 2;
+      pois.push({ name:'ring-'+i, kind:'idle', pos:new THREE.Vector3(Math.cos(ang)*4, 0, Math.sin(ang)*4), quat:new THREE.Quaternion(), taken:null });
+    }
+    buildGraph();
   }
   if (character) {
     charTemplate = character.scene;
-    charClip = (character.animations && character.animations[0]) || null;
+    for (const c of (character.animations || [])) clips[c.name] = c;
     const cb = new THREE.Box3().setFromObject(character.scene);
     const chH = Math.max(0.001, cb.getSize(new THREE.Vector3()).y);
     const targetH = office ? Math.min(2, (new THREE.Box3().setFromObject(office.scene).getSize(new THREE.Vector3()).y) * 0.5) : 1.7;
     charScale = targetH / chH; charTargetH = targetH;
   }
-  // Any avatars spawned before the models finished loading are fallback capsules — drop them so the
-  // next tick rebuilds every agent as the real rigged character now that charTemplate exists.
-  for (const a of agents) scene.remove(a.group);
-  agents = [];
+  // Anything spawned before the models landed is a fallback capsule — drop those and REBUILD from
+  // the retained roster with the real rig. The old code cleared and then waited for the next push,
+  // which is fine against main.js's 1.2s poll but leaves an empty room anywhere the payload only
+  // arrives on change (the pop-out presence window, the dev harness) — and it also threw away the
+  // POI claims, so the rebuilt agents piled onto the same anchor.
+  for (const [, a] of agents) { clearTimeout(a.reactTimer); scene.remove(a.group); }
+  agents.clear();
+  for (const p of pois) p.taken = null;
   document.getElementById('loading').style.display = 'none';
+  if (lastRoster.length) applyState(lastRoster);
+  else document.getElementById('empty').classList.toggle('on', true);
 })
 .catch((e) => { console.error('presence load failed', e); document.getElementById('loading').textContent = 'scene unavailable'; });
 
-addEventListener('resize', () => { camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight); });
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  renderer.setSize(innerWidth, innerHeight);
+  solveRadius();                                    // re-fit: a wider panel needs a different distance
+});
 
+// ---- frame ----------------------------------------------------------------
+const WALK_SPEED = 1.25;                                   // m/s — reads as purposeful, not scurrying
 const clockT0 = performance.now(); let prev = clockT0;
+const _tmp = new THREE.Vector3();
 (function animate(now){
   requestAnimationFrame(animate);
   now = now || performance.now();
   const t = (now - clockT0) / 1000, dt = Math.min(0.05, (now - prev) / 1000); prev = now;
-  if (demo) demoTick(t);
-  // slow cinematic orbit around the room
-  const orb = t * 0.12;
-  camera.position.set(focus.x + Math.sin(orb)*radius, focus.y + radius*0.55, focus.z + Math.cos(orb)*radius);
-  camera.lookAt(focus.x, focus.y + radius*0.12, focus.z);
-  for (const a of agents) {
-    if (a.mixer) a.mixer.update(dt * (a.state==='working' ? 1.6 : a.state==='thinking' ? 1.1 : 0.8));
-    if (a.aura) { a.aura.material.color.lerp(a.target, 0.08); a.aura.material.opacity = 0.3 + (a.state==='working' ? (Math.sin(t*5+a.phase)*0.25+0.3) : a.state==='thinking' ? 0.25 : 0.12); }
-    if (a.orb) { a.orb.material.color.lerp(a.target, 0.1); a.orb.position.y += 0; const pulse = a.state==='working' ? 1 + Math.sin(t*6+a.phase)*0.18 : a.state==='thinking' ? 1 + Math.sin(t*3+a.phase)*0.1 : 1; a.orb.scale.setScalar(pulse); }
-    if (a.glow) { a.glow.material.color.lerp(a.target, 0.1); a.glow.material.opacity = a.state==='idle' ? 0.16 : 0.3 + (a.state==='working' ? Math.sin(t*6+a.phase)*0.12 : 0); }
-    for (const m of a.tint) { if (m.emissive) { m.emissive.lerp(a.target, 0.05); m.emissiveIntensity = a.state==='working' ? 0.5 + Math.sin(t*7+a.phase)*0.2 : a.state==='done' ? 0.4 : a.state==='thinking' ? 0.35 : 0.15; } }
-    a.group.position.y = a.baseY + (a.state==='working' ? Math.sin(t*5+a.phase)*0.03 : 0);
+
+  // Slow cinematic orbit at a fixed elevation. Spherical (not cylindrical) so the TOTAL camera
+  // distance stays exactly `radius` — the value solveRadius() proved fits the room — instead of
+  // drifting further out as the height term is added on top.
+  const orb = t * 0.12, elev = THREE.MathUtils.degToRad(32);
+  const horiz = Math.cos(elev) * radius;
+  camera.position.set(focus.x + Math.sin(orb) * horiz, focus.y + Math.sin(elev) * radius, focus.z + Math.cos(orb) * horiz);
+  camera.lookAt(focus.x, focus.y, focus.z);
+
+  for (const [, a] of agents) {
+    // --- walking: consume the navmesh route waypoint by waypoint --------------
+    if (a.path.length) {
+      const wp = a.path[0];
+      _tmp.copy(wp.pos).sub(a.group.position); _tmp.y = 0;
+      const dist = _tmp.length();
+      if (dist < 0.06) {
+        a.path.shift();
+        if (!a.path.length) {                            // arrived: snap to the anchor's exact pose
+          a.group.position.copy(wp.pos);
+          a.group.quaternion.copy(wp.quat);
+          playClip(a, a.restClip || 'Idle');
+        }
+      } else {
+        _tmp.normalize();
+        a.group.position.addScaledVector(_tmp, Math.min(WALK_SPEED * dt, dist));
+        // face the direction of travel
+        const yaw = Math.atan2(_tmp.x, _tmp.z);
+        const want = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0), yaw);
+        a.group.quaternion.slerp(want, 1 - Math.pow(0.001, dt));
+        if (a.clip !== 'Walk' && !a.clipOnce) playClip(a, 'Walk');
+      }
+    } else if (a.clip === 'Walk' && a.poi >= 0) {
+      // SELF-HEAL: the route emptied without the arrival branch firing (a retarget landed mid-step,
+      // or the destination was re-claimed while we were walking to it). Without this the agent is
+      // stranded metres from its anchor, moonwalking the Walk clip forever. Snap to the anchor and
+      // settle into the resting pose rather than trying to enumerate every race that can do it.
+      a.group.position.copy(pois[a.poi].pos);
+      a.group.quaternion.copy(pois[a.poi].quat);
+      playClip(a, a.restClip || 'Idle');
+    }
+    // --- animation + state tint ---------------------------------------------
+    if (a.mixer) a.mixer.update(dt);
+    if (a.plate) a.plate.quaternion.copy(camera.quaternion);
+    const tgt = a.target || new THREE.Color(STATE_COLOR.idle);
+    if (a.aura) {
+      a.aura.material.color.lerp(tgt, 0.08);
+      a.aura.material.opacity = 0.3 + (a.state==='working' ? (Math.sin(t*5+a.phase)*0.25+0.3) : a.state==='thinking' ? 0.25 : 0.12);
+    }
+    if (a.orb) {
+      a.orb.material.color.lerp(tgt, 0.1);
+      const pulse = a.state==='working' ? 1 + Math.sin(t*6+a.phase)*0.18 : a.state==='thinking' ? 1 + Math.sin(t*3+a.phase)*0.1 : 1;
+      a.orb.scale.setScalar(pulse);
+    }
+    if (a.glow) {
+      a.glow.material.color.lerp(tgt, 0.1);
+      a.glow.material.opacity = a.state==='idle' ? 0.16 : 0.3 + (a.state==='working' ? Math.sin(t*6+a.phase)*0.12 : 0);
+    }
+    for (const m of a.tint) if (m.emissive) {
+      m.emissive.lerp(tgt, 0.05);
+      m.emissiveIntensity = a.state==='working' ? 0.5 + Math.sin(t*7+a.phase)*0.2 : a.state==='done' ? 0.4 : a.state==='thinking' ? 0.35 : 0.15;
+    }
   }
   renderer.render(scene, camera);
 })();

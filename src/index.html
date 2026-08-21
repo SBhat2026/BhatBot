@@ -2093,11 +2093,25 @@ function pushPresenceToIframe(snap) {
 window.bhatbot.onPresenceUpdate && window.bhatbot.onPresenceUpdate((snap) => { _lastPresence = snap; pushPresenceToIframe(snap); });
 // Replay the latest snapshot once the iframe has (re)loaded so it isn't blank on first open.
 document.getElementById('fleet3d') && document.getElementById('fleet3d').addEventListener('load', () => { if (_lastPresence) pushPresenceToIframe(_lastPresence); });
-// Click-to-inspect from the 3D office: a click on a character in the FLEET presence scene focuses
-// that agent's steer-card (scroll + flash + focus its input) AND opens its live monitor window.
+// Click-to-inspect from the 3D office: clicking a character focuses that agent's steer-card
+// (scroll + flash + focus its input) and opens its live monitor window.
+//
+// Two things this now gets right that it could not before. (1) It actually fires — presenceSnapshot
+// emitted no `id`, so the `!e.data.id` guard discarded every click that ever reached here. (2) It
+// distinguishes STEERABLE fleet suits from background jobs: a `job:*` entry has no suit-card and no
+// feedback queue, so popping an empty monitor for one was just a dead window.
 window.addEventListener('message', (e) => {
   if (!e.data || e.data.type !== 'agent-click' || !e.data.id) return;
   const id = e.data.id;
+  if (e.data.steerable === false) {                 // background job — surface it, nothing to steer
+    const fl = document.getElementById('fleetline');
+    if (fl) {
+      const restore = fl.textContent;               // the fleet counter repaints on the next update anyway
+      fl.textContent = '▸ ' + (e.data.name || id) + ' — background job, not steerable';
+      setTimeout(() => { if (fl.textContent.startsWith('▸ ')) fl.textContent = restore; }, 4000);
+    }
+    return;
+  }
   const el = document.getElementById('suit-card-' + id);
   if (el) {
     el.scrollIntoView({ behavior: 'smooth', block: 'center' });

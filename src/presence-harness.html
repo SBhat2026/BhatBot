@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Presence harness</title>
+<style>
+  html,body { margin:0; height:100%; background:#05080d; font-family:-apple-system,'Segoe UI',Roboto,sans-serif; }
+  #wrap { position:fixed; inset:0; display:flex; flex-direction:column; }
+  iframe { flex:1; border:0; width:100%; }
+  #bar { flex:0 0 auto; display:flex; gap:8px; align-items:center; padding:8px 12px; background:#0a1017; border-top:1px solid #1d2833; }
+  button { background:#132030; color:#9fc7dd; border:1px solid #24384a; border-radius:6px; padding:5px 11px; font-size:12px; cursor:pointer; font-family:inherit; }
+  button:hover { border-color:#3d6b8c; color:#dcf0fa; }
+  #log { margin-left:auto; color:#6f93a6; font-size:11px; font-family:ui-monospace,Menlo,monospace; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <iframe id="f" src="presence.html"></iframe>
+  <div id="bar">
+    <button data-n="0">empty</button>
+    <button data-n="1">1 agent</button>
+    <button data-n="3">3 agents</button>
+    <button data-n="6">6 agents</button>
+    <button data-n="12">12 (cap)</button>
+    <button id="cycle">cycle states</button>
+    <span id="log">—</span>
+  </div>
+</div>
+<script>
+// Dev harness for src/presence.html. It speaks the SAME postMessage contract main.js uses
+// (`{type:'presence', agents:[…]}`), so the scene can be driven — states, walking, seating, hover,
+// click — without an API key, an agent run, or any spend. Not shipped in the app; open it with:
+//   cd src && python3 -m http.server 8910   →   http://localhost:8910/presence-harness.html
+const f = document.getElementById('f');
+const log = document.getElementById('log');
+const STATES = ['idle', 'thinking', 'working', 'done', 'error'];
+const ROLES = ['research', 'design', 'code', 'test', 'review', 'scout', 'oracle', 'echo', 'forge', 'atlas', 'medic', 'weaver'];
+const CODENAMES = ['ORACLE', 'SCOUT', 'FORGE', 'ATLAS', 'ECHO', 'MEDIC', 'VANGUARD', 'SENTRY', 'RELAY', 'PRISM', 'BEACON', 'WARDEN'];
+const TASKS = [
+  'grep the repo for orphaned tool_use pairs',
+  'draft the migration plan for lib/history.js',
+  'run the fleet spill regression suite',
+  'audit prompt-cache breakpoint placement',
+  'summarise the last 200 blackboard posts',
+  'rebuild the project file index',
+];
+const STEPS = ['reading main.js', 'running verify', 'waiting on rate budget', 'writing report', 'calling run_shell', ''];
+
+let n = 3, tick = 0, cycling = false;
+function roster() {
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const steer = i < Math.max(1, n - 1);          // last one is a background job, to test non-steerable
+    out.push({
+      id: steer ? 'suit-' + i : 'job:bg-' + i,
+      role: ROLES[i % ROLES.length],
+      name: steer ? CODENAMES[i % CODENAMES.length] : 'weaver',
+      state: STATES[(tick + i) % STATES.length],
+      status: ['queued', 'running', 'working', 'done', 'failed'][(tick + i) % 5],
+      task: TASKS[i % TASKS.length],
+      step: STEPS[(tick + i) % STEPS.length],
+      tool: null,
+      since: Date.now() - (i + 1) * 37000,
+      steerable: steer,
+    });
+  }
+  return out;
+}
+function push() {
+  const agents = roster();
+  f.contentWindow.postMessage({ type: 'presence', agents }, '*');
+  log.textContent = `${agents.length} agents · tick ${tick} · ` + agents.map((a) => a.state[0]).join('');
+}
+document.querySelectorAll('button[data-n]').forEach((b) => b.addEventListener('click', () => { n = +b.dataset.n; push(); }));
+document.getElementById('cycle').addEventListener('click', () => {
+  cycling = !cycling;
+  log.textContent = cycling ? 'cycling…' : 'paused';
+});
+setInterval(() => { if (cycling) { tick++; push(); } }, 3500);
+// Echo agent clicks so the click path is observable without the host app.
+window.addEventListener('message', (e) => {
+  if (e.data && e.data.type === 'agent-click') log.textContent = '🖱 click → ' + e.data.id + ' (' + e.data.state + ', steerable=' + e.data.steerable + ')';
+});
+f.addEventListener('load', () => setTimeout(push, 900));
+</script>
+</body>
+</html>

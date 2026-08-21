@@ -62,6 +62,7 @@ const WebSocket = require('ws');
 const { createTtsWs } = require('./lib/ttsws');   // T1 — continuous ws streaming TTS transport (config.ttsTransport==='ws')
 const speech = require('./lib/speech');                 // human-speech shaping: emoji→spoken-cue/drop + context-aware punctuation
 const { validateHistory, sealDanglingToolUse, evictOldImages, isRetryableTool, TRANSIENT_RE } = require('./lib/history');  // SPLIT_PLAN step 9 (pure agent-loop helpers)
+const reasoning = require('./lib/reasoning');          // adaptive thinking / effort / compaction / task-budget shaping
 const projects = require('./lib/projects');            // #24 — project memory + living auto-summary
 const visualInspect = require('./lib/inspect');
 const security = require('./lib/security');          // P0.4 — injection sanitizer + daily audit
@@ -1027,6 +1028,10 @@ function tagLastBlockForCache(messages) {
     const bi = last.content.length - 1;
     const blk = last.content[bi];
     if (!blk || typeof blk !== 'object' || blk.cache_control) return messages;   // untaggable / already tagged
+    // Never tag a thinking block: adding cache_control MUTATES it, and a modified thinking block is
+    // rejected when it's echoed back on the next turn. Cheap to skip — a turn ending in a thinking
+    // block has a tool_use or text block right behind it that the next call will tag instead.
+    if (blk.type === 'thinking' || blk.type === 'redacted_thinking') return messages;
     newContent = last.content.slice();
     newContent[bi] = { ...blk, cache_control: { type: 'ephemeral' } };
   } else {
@@ -1485,6 +1490,33 @@ async function ollamaChat(messages, system, model) {
   return ((j.message && j.message.content) || '').replace(/<think>[\s\S]*?<\/think>\s*/g, '').trim();
 }
 
+// Apply the modern agentic surface (adaptive thinking + effort + compaction + task budget) to an
+// outbound body, then strip the private `_reason` hint so it never reaches the wire.
+//
+// Every Claude call in the app funnels through anthropicRequest/anthropicStream, so shaping HERE is
+// what makes the upgrade universal instead of a per-call-site retrofit across ~40 call sites. Call
+// sites that want something other than the default opt in by setting `body._reason = {...}` (see
+// lib/reasoning.js for the option shape); everything else gets adaptive thinking for free.
+//
+// FAIL-OPEN: any throw here falls back to the unshaped body — a bug in the capability matrix must
+// degrade BhatBot to its previous behaviour, never take the agent offline.
+function applyReasoning(body) {
+  try {
+    if (loadConfig().reasoning === false) {                     // kill switch
+      if (body && body._reason) { const b = { ...body }; delete b._reason; return { body: b, betas: [] }; }
+      return { body, betas: [] };
+    }
+    const hint = (body && body._reason) || {};
+    const { body: shaped, betas } = reasoning.shapeRequest(body, hint);
+    delete shaped._reason;
+    return { body: shaped, betas };
+  } catch (e) {
+    console.warn('[reasoning] shaping failed, sending unshaped:', e.message);
+    if (body && body._reason) { const b = { ...body }; delete b._reason; return { body: b, betas: [] }; }
+    return { body, betas: [] };
+  }
+}
+
 async function anthropicRequest(body, apiKey, { retries = 5 } = {}) {
   // Add the conversation cache breakpoint when the payload is big enough to be worth a cache write
   // (small one-off judge/plan calls skip it — the write premium would outweigh a prefix that never
@@ -1495,13 +1527,19 @@ async function anthropicRequest(body, apiKey, { retries = 5 } = {}) {
       body = { ...body, messages: tagLastBlockForCache(body.messages) };
     }
   } catch {}
+  const shaped = applyReasoning(body);
+  body = shaped.body;
+  const betaHeader = shaped.betas.length ? shaped.betas.join(',') : null;
   let attempt = 0;
   while (true) {
     let res;
     try {
       res = await fetch('https://api.anthropic.com/v1/messages', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+        headers: {
+          'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01',
+          ...(betaHeader ? { 'anthropic-beta': betaHeader } : {}),
+        },
         body: JSON.stringify(body)
       });
     } catch (e) {                                   // network blip → retry too
@@ -1675,7 +1713,12 @@ async function callClaude(messages, apiKey, model) {
     // This is the single chokepoint every Claude tool-loop call shares, so the API can never
     // see an unpaired tool_use (the recurring "tool_use without tool_result" 400), no matter
     // which entry point (chat/voice/telegram/cloud-bridge/pacing re-entry) built the messages.
-    messages: validateHistory(capTokens(messages))
+    messages: validateHistory(capTokens(messages)),
+    // The depth tier already sized max_tokens; it now also sets REASONING depth (effort), so an
+    // "ack" turn stops burning Opus-grade thinking on "yes" and a "deep" turn gets xhigh.
+    // Compaction switches on once the conversation is big enough to be at risk from capTokens'
+    // lossy head-trim — below that threshold the beta surface would buy nothing.
+    _reason: { depth: d.depth, compact: estimateTokens(messages) > 60000 },
   }, apiKey);
   logDepthOutcome(d, r0, 'tool');            // every response → dataset; clipped:1 = the "needs more" signal
   if (d.depth === 'ack') return r0;          // trivial exchange — never worth continuing
@@ -1694,14 +1737,20 @@ async function callClaude(messages, apiKey, model) {
 // Streaming variant — emits text deltas via onText(delta) as they arrive (first word in
 // ~0.5s instead of waiting ~full generation), then returns the SAME assembled shape as
 // anthropicRequest so the tool loop is unchanged. Used on the desktop chat path.
-async function anthropicStream(body, apiKey, onText, { retries = 3 } = {}) {
+async function anthropicStream(body, apiKey, onText, { retries = 3, onThinking = null } = {}) {
+  const shaped = applyReasoning(body);
+  body = shaped.body;
+  const betaHeader = shaped.betas.length ? shaped.betas.join(',') : null;
   let attempt = 0;
   while (true) {
     let res;
     try {
       res = await fetch('https://api.anthropic.com/v1/messages', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+        headers: {
+          'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01',
+          ...(betaHeader ? { 'anthropic-beta': betaHeader } : {}),
+        },
         body: JSON.stringify({ ...body, stream: true })
       });
     } catch (e) { if (attempt >= retries) throw e; await sleep(Math.min(1000 * 2 ** attempt, 16000) + Math.random() * 400); attempt++; continue; }
@@ -1742,11 +1791,30 @@ async function anthropicStream(body, apiKey, onText, { retries = 3 } = {}) {
         }
         else if (ev.type === 'content_block_start') {
           const b = ev.content_block;
-          blocks[ev.index] = b.type === 'tool_use' ? { type: 'tool_use', id: b.id, name: b.name, _json: '' } : { type: 'text', text: '' };
+          // BLOCK-TYPE FAITHFUL. This used to collapse EVERY non-tool_use block to {type:'text'},
+          // which was harmless while we only ever received text + tool_use — and silently
+          // destructive the moment adaptive thinking was switched on: a `thinking` block became an
+          // empty text block, its thinking_delta/signature_delta were dropped on the floor, and the
+          // mangled block went straight into history. Thinking blocks must be echoed back UNCHANGED
+          // on the next turn (the API rejects modified ones, and dropping them can trip ordering /
+          // signature errors), so anything we don't specifically understand is now preserved as-is
+          // rather than coerced. Same reason compaction blocks pass through untouched.
+          if (b.type === 'tool_use') blocks[ev.index] = { type: 'tool_use', id: b.id, name: b.name, _json: '' };
+          else if (b.type === 'text') blocks[ev.index] = { type: 'text', text: '' };
+          else if (b.type === 'thinking') blocks[ev.index] = { type: 'thinking', thinking: b.thinking || '', signature: b.signature || '' };
+          else blocks[ev.index] = { ...b };                  // redacted_thinking, compaction, fallback, …
         } else if (ev.type === 'content_block_delta') {
           const b = blocks[ev.index]; if (!b) continue;
           if (ev.delta.type === 'text_delta') { b.text += ev.delta.text; if (onText) try { onText(ev.delta.text); } catch {} }
           else if (ev.delta.type === 'input_json_delta') { b._json += ev.delta.partial_json; }
+          // Summarized reasoning streams as thinking_delta. It goes to onThinking (the HUD's
+          // "thinking" line), NOT onText — routing it to onText would speak the model's reasoning
+          // aloud through TTS and print it as the answer.
+          else if (ev.delta.type === 'thinking_delta') {
+            b.thinking = (b.thinking || '') + ev.delta.thinking;
+            if (onThinking) try { onThinking(ev.delta.thinking); } catch {}
+          }
+          else if (ev.delta.type === 'signature_delta') { b.signature = (b.signature || '') + ev.delta.signature; }
         } else if (ev.type === 'content_block_stop') {
           const b = blocks[ev.index];
           if (b && b.type === 'tool_use') { try { b.input = JSON.parse(b._json || '{}'); } catch { b.input = {}; } delete b._json; }
@@ -3585,7 +3653,13 @@ async function droneAgentRun(ctx, task) {
   const _droneT0 = Date.now(); const _droneTrace = [];   // procedural learning from drones (main + fleet/drones)
   for (let i = 0; i < maxTurns; i++) {
     let resp;
-    try { resp = await pacedSubagentRequest({ model, max_tokens: 3072, system: ctx.system, tools: toolDefs, messages: hist.slice(-24) }, getApiKey()); }
+    // Drones are subagents: Anthropic's guidance is low effort for them, and a wide fleet makes that
+    // a real cost lever (a 6-drone roster at xhigh would dwarf the single Opus call that planned it).
+    // taskBudget hands the drone its own remaining loop allowance so it paces itself instead of
+    // getting silently reaped mid-thought by the fleet supervisor's stall watchdog — it's a no-op on
+    // Sonnet (which has no task-budget surface) and activates automatically if drones move to Opus.
+    try { resp = await pacedSubagentRequest({ model, max_tokens: 3072, system: ctx.system, tools: toolDefs, messages: hist.slice(-24),
+      _reason: { subagent: true, taskBudget: maxTurns * 3072 * 4 } }, getApiKey()); }
     catch (e) { return { status: finalText ? 'partial' : 'failed', summary: finalText || ('drone model error: ' + e.message) }; }
     const content = resp.content || [];
     hist.push({ role: 'assistant', content });
@@ -5123,6 +5197,9 @@ function fleetBroadcast(payload) {
     fleetAgents.set(payload.id, { ...cur, ...payload, feedback: cur.feedback || [], ts: Date.now() });
   }
   relayAgentLog(payload);   // hub: capture + relay each agent's log to the cloud → other bots
+  // Same event drives the 3D office, so a status change lands there immediately instead of waiting
+  // up to 1.2s for the next poll tick — the character reacts on the same frame as its card.
+  pushPresenceNow();
   try { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('fleet-update', payload); } catch {}
   // mirror to any open per-agent monitor windows (each filters to its own id)
   for (const [, w] of agentWindows) { try { if (w && !w.isDestroyed()) w.webContents.send('fleet-update', payload); } catch {} }
@@ -7849,26 +7926,107 @@ async function startMcpHub() {
   catch (e) { console.warn('[mcphub] connectAll failed:', e.message); }
 }
 
-// Map live background jobs → agent-presence avatars for the 3D presence window.
+// ===========================================================================================
+// AGENT PRESENCE — ONE ROSTER.
+//
+// This used to be two disjoint rosters showing in the same tab, which is why the FLEET dashboard
+// never worked:
+//   • the 3D office was fed from jobsBus (background jobs)
+//   • the steerable suit-cards were fed from fleetAgents (real agents, with ids)
+// So the characters you saw in the office were never the agents in the cards under them, and — the
+// actual killer — presenceSnapshot() emitted NO `id`, so every click the office raycast resolved
+// was dropped on the floor by the renderer's `if (!e.data.id) return`. Clicking a character could
+// not have worked, in any state, ever.
+//
+// Now there is a single roster. fleetAgents is the authority (those are real, steerable, id-bearing
+// agents); jobsBus entries are folded in behind them as non-steerable presence so long-running
+// background work still shows up in the room. Every entry carries the identity + live detail the UI
+// needs for hover ("what is this one actually working on") and click (steer/monitor by id).
 const JOB_STATE = { running: 'working', active: 'working', queued: 'thinking', blocked: 'thinking', done: 'done', completed: 'done', failed: 'error', error: 'error', cancelled: 'idle' };
+// Fleet suit status → presence state. 'stopping' reads as working (it's still winding down) and
+// 'parked' as idle (a rate-limit park is a live agent waiting, not a dead one).
+const FLEET_STATE = {
+  queued: 'thinking', running: 'working', working: 'working', active: 'working',
+  stopping: 'working', parked: 'idle', done: 'done', ok: 'done',
+  failed: 'error', error: 'error', stopped: 'idle',
+};
+const PRESENCE_CAP = 12;                                  // office has 14 POIs; keep a little headroom
+
 function presenceSnapshot() {
-  let jobs = [];
-  try { jobs = (jobsBus.active ? jobsBus.active() : jobsBus.list()) || []; } catch {}
-  const agents = jobs.slice(0, 12).map((j) => ({ role: j.name || j.kind || 'agent', state: JOB_STATE[j.status] || 'idle', label: (j.note || '').slice(0, 40) }));
+  const agents = [];
+  const seen = new Set();
+  // 1) real fleet suits first — these are the ones with ids, tasks, and a steer box.
+  try {
+    const now = Date.now();
+    for (const [id, a] of fleetAgents) {
+      if (agents.length >= PRESENCE_CAP) break;
+      if (!a || seen.has(id)) continue;
+      seen.add(id);
+      const status = a.status || 'queued';
+      agents.push({
+        id,
+        role: a.role || id,
+        name: a.codename || a.role || id,
+        state: FLEET_STATE[status] || 'idle',
+        status,                                            // raw status, for the hover chip
+        task: String(a.task || '').slice(0, 160),
+        step: String(a.step || a.note || '').slice(0, 120),
+        tool: a.tool || null,
+        since: a.ts || now,
+        steerable: true,                                   // has a suit-card + feedback queue
+      });
+    }
+  } catch {}
+  // 2) background jobs behind them — visible presence, but nothing to steer.
+  try {
+    const jobs = (jobsBus.active ? jobsBus.active() : jobsBus.list()) || [];
+    for (const j of jobs) {
+      if (agents.length >= PRESENCE_CAP) break;
+      const id = 'job:' + (j.id || j.name || agents.length);
+      if (seen.has(id)) continue;
+      seen.add(id);
+      agents.push({
+        id,
+        role: j.name || j.kind || 'job',
+        name: j.name || j.kind || 'job',
+        state: JOB_STATE[j.status] || 'idle',
+        status: j.status || 'running',
+        task: String(j.goal || j.kind || '').slice(0, 160),
+        step: String(j.note || '').slice(0, 120),
+        tool: null,
+        since: j.startedAt || Date.now(),
+        steerable: false,
+      });
+    }
+  } catch {}
   return { agents };
 }
-// Push live fleet state to the presence window a few times a second while it's open (updatePresence
-// no-ops when the window is closed, so this is cheap). Empty snapshots are skipped so the window's
-// built-in demo animation keeps it alive when nothing is running.
+
+// Push the live roster to every presence surface a few times a second.
+//
+// This deliberately pushes EMPTY snapshots too. The old version returned early on an empty roster to
+// "let the demo animation keep the office alive" — but the renderer only leaves demo mode when it
+// receives a payload, so on an idle machine (the normal case) it never got one, stayed in demo
+// forever, and demo mode hard-disables hover and click. The placeholder office you could never
+// interact with WAS this early-return. An empty push now means "genuinely nobody home", and the
+// renderer draws a real empty room.
+function pushPresence() {
+  try {
+    const snap = presenceSnapshot();
+    wm.updatePresence(snap);                            // popup presence window (if open)
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('presence-update', snap);   // FLEET-tab iframe
+  } catch {}
+}
+// Event-driven push, throttled so a burst of fleet events (a 6-drone fleet all reporting at once)
+// coalesces into one frame instead of six.
+let _presenceSoon = null;
+function pushPresenceNow() {
+  if (_presenceSoon) return;
+  _presenceSoon = setTimeout(() => { _presenceSoon = null; pushPresence(); }, 120);
+  _presenceSoon.unref?.();
+}
 function startPresenceFeed() {
-  const t = setInterval(() => {
-    try {
-      const snap = presenceSnapshot();
-      if (!snap.agents.length) return;                 // no active agents → let the office idle (demo loop)
-      wm.updatePresence(snap);                          // popup presence window (if open)
-      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('presence-update', snap);   // FLEET-tab iframe
-    } catch {}
-  }, 1200);
+  const t = setInterval(pushPresence, 1200);            // baseline poll: catches jobsBus + elapsed-time drift
   t.unref?.();
 }
 async function tickScheduler() {
