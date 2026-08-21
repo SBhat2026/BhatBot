@@ -8291,6 +8291,40 @@ function presenceSnapshot() {
       });
     }
   } catch {}
+  // 3) THE STANDING ROSTER — the long-lived specialists (lib/subagents.js: ORACLE/FORGE/WARDEN).
+  //
+  // Without these the office was empty whenever nothing happened to be mid-flight, which is most of
+  // the time — so the FLEET tab, a view whose entire job is showing you who you have, showed an
+  // immaculate unoccupied room. That reads as broken even though every part of it was working: the
+  // scene rendered, the feed pushed, the roster was simply empty.
+  //
+  // These agents genuinely exist and persist (each keeps its own conversation across delegations),
+  // so drawing them idle is honest rather than decorative. They are added LAST and skipped when the
+  // same specialist is already on screen doing real work, so a live run always wins the anchor and
+  // the character you see working is the one actually working.
+  try {
+    for (const a of subagents.list()) {
+      if (agents.length >= PRESENCE_CAP) break;
+      const id = 'sub:' + a.name;
+      const code = a.codename || a.name.toUpperCase();
+      // Already represented by a live suit/job of the same identity? Leave that one alone.
+      if (seen.has(id) || agents.some((x) => x.name === code || x.role === a.name)) continue;
+      seen.add(id);
+      agents.push({
+        id,
+        role: a.name,
+        name: code,
+        state: 'idle',
+        status: 'standing by',
+        task: `${a.name} specialist — ${a.turns ? `${a.turns} turn${a.turns === 1 ? '' : 's'} of history` : 'no history yet'}`,
+        step: '',
+        tool: null,
+        since: Date.now(),
+        steerable: false,                                  // no suit-card until it is actually running
+        standing: true,                                    // lets the UI style it as "available", not "busy"
+      });
+    }
+  } catch {}
   return { agents };
 }
 

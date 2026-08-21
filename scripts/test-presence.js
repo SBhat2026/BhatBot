@@ -32,16 +32,23 @@ const prelude = [
   grab('const PRESENCE_CAP ='),
 ].join('\n');
 
-function build(fleetAgents, jobs) {
+// `subagents` must be injected too, or the standing-roster branch silently throws into its own
+// try/catch and every assertion about it passes vacuously — the test would still be green while
+// testing nothing. Default to the real roster shape; pass [] to model "no specialists configured".
+function build(fleetAgents, jobs, standing) {
   const jobsBus = { active: () => jobs, list: () => jobs };
-  return new Function('fleetAgents', 'jobsBus',
-    prelude + '\n' + extract(main, 'presenceSnapshot') + '\nreturn presenceSnapshot;')(fleetAgents, jobsBus);
+  const roster = standing === undefined
+    ? [{ name: 'research', codename: 'ORACLE', turns: 3 }, { name: 'coding', codename: 'FORGE', turns: 0 }, { name: 'lifeadmin', codename: 'WARDEN', turns: 12 }]
+    : standing;
+  const subagents = { list: () => roster };
+  return new Function('fleetAgents', 'jobsBus', 'subagents',
+    prelude + '\n' + extract(main, 'presenceSnapshot') + '\nreturn presenceSnapshot;')(fleetAgents, jobsBus, subagents);
 }
 
 // --- THE bug: every agent must carry an id, or the click handler drops it ---------------------
 {
   const fa = new Map([['suit-1', { role: 'research', codename: 'ORACLE', task: 'scan the repo', status: 'running', step: 'grep', ts: 1000 }]]);
-  const snap = build(fa, [])();
+  const snap = build(fa, [], [])();
   ok(snap.agents.length === 1, 'one fleet suit → one presence entry');
   ok(snap.agents[0].id === 'suit-1', 'entry carries the fleet id (the whole reason clicks were dead)');
   ok(snap.agents.every((a) => a.id), 'EVERY entry has a non-empty id');
@@ -55,7 +62,7 @@ function build(fleetAgents, jobs) {
 // --- both rosters in one room, suits first ----------------------------------------------------
 {
   const fa = new Map([['suit-a', { role: 'code', status: 'working', task: 't' }]]);
-  const snap = build(fa, [{ id: 'j1', name: 'weaver', status: 'running', note: 'linking' }])();
+  const snap = build(fa, [{ id: 'j1', name: 'weaver', status: 'running', note: 'linking' }], [])();
   ok(snap.agents.length === 2, 'fleet suits AND background jobs share one roster');
   ok(snap.agents[0].id === 'suit-a', 'steerable suits rank first');
   ok(snap.agents[1].id === 'job:j1', 'jobs get a namespaced id so they can never collide with a suit id');
@@ -65,28 +72,28 @@ function build(fleetAgents, jobs) {
 
 // --- status → state mapping edge cases --------------------------------------------------------
 {
-  const st = (status) => build(new Map([['x', { role: 'r', status }]]), [])().agents[0].state;
+  const st = (status) => build(new Map([['x', { role: 'r', status }]]), [], [])().agents[0].state;
   ok(st('queued') === 'thinking', 'queued reads as thinking');
   ok(st('stopping') === 'working', 'stopping still reads as working (it is winding down, not dead)');
   ok(st('parked') === 'idle', 'a rate-limit park is a waiting agent, not an error');
   ok(st('failed') === 'error', 'failed → error');
   ok(st('done') === 'done', 'done → done');
   ok(st('weird-unknown-status') === 'idle', 'unknown status degrades to idle rather than undefined');
-  ok(build(new Map([['x', { role: 'r' }]]), [])().agents[0].state === 'thinking', 'missing status defaults to queued/thinking');
+  ok(build(new Map([['x', { role: 'r' }]]), [], [])().agents[0].state === 'thinking', 'missing status defaults to queued/thinking');
 }
 
 // --- capacity + resilience --------------------------------------------------------------------
 {
   const fa = new Map();
   for (let i = 0; i < 30; i++) fa.set('s' + i, { role: 'r', status: 'working' });
-  const snap = build(fa, [])();
+  const snap = build(fa, [], [])();
   ok(snap.agents.length === 12, 'roster caps at PRESENCE_CAP (the office has 18 anchors)');
 }
 {
   const fa = new Map();
   for (let i = 0; i < 12; i++) fa.set('s' + i, { role: 'r', status: 'working' });
   const jobs = [{ id: 'j1', name: 'x', status: 'running' }];
-  ok(build(fa, jobs)().agents.every((a) => a.steerable), 'a full suit roster crowds jobs out, not the other way round');
+  ok(build(fa, jobs, [])().agents.every((a) => a.steerable), 'a full suit roster crowds jobs out, not the other way round');
 }
 {
   // jobsBus throwing must not take the office down — it is the lower-priority half of the roster.
@@ -98,16 +105,49 @@ function build(fleetAgents, jobs) {
   ok(snap.agents.length === 1, 'a throwing jobsBus still yields the fleet suits');
 }
 {
-  const snap = build(new Map(), [])();
-  ok(Array.isArray(snap.agents) && snap.agents.length === 0, 'empty roster → empty array (NOT skipped)');
+  const snap = build(new Map(), [], [])();
+  ok(Array.isArray(snap.agents) && snap.agents.length === 0, 'nothing running AND no specialists → empty array (NOT skipped)');
   // The old startPresenceFeed early-returned on this case, so the renderer never left demo mode and
   // hover/click stayed disabled forever. An empty push must be a real, deliverable payload.
+}
+
+// ── THE STANDING ROSTER — why the office is no longer empty at rest ───────────────────────────
+// The FLEET tab showed an immaculate unoccupied room whenever nothing was mid-flight, which is most
+// of the time. Every part of it worked — the scene rendered, the feed pushed — the roster was just
+// empty, because it only ever contained IN-FLIGHT work. The long-lived specialists in
+// lib/subagents.js genuinely exist and persist, so drawing them idle is honest, not decorative.
+{
+  const snap = build(new Map(), [])();
+  ok(snap.agents.length === 3, 'with nothing running, the standing specialists populate the office');
+  ok(snap.agents.every((a) => a.state === 'idle'), 'and they are drawn IDLE — grey in the legend, not pretending to work');
+  ok(snap.agents.every((a) => a.standing === true), 'each is flagged `standing` so the UI can tell available from busy');
+  ok(snap.agents.every((a) => a.steerable === false), 'and none is steerable — there is no suit-card until it actually runs');
+  ok(snap.agents.map((a) => a.name).join(',') === 'ORACLE,FORGE,WARDEN', 'they carry their codenames, so identity matches every other surface');
+  ok(snap.agents.every((a) => a.id.startsWith('sub:')), 'ids are namespaced, so they can never collide with a suit or job id');
+  ok(/3 turns of history/.test(snap.agents[0].task), 'the hover card says how much history each specialist carries');
+  ok(/no history yet/.test(snap.agents[1].task), '…and says so plainly when there is none');
+}
+{
+  // A live run must WIN the anchor: the character you see working is the one actually working.
+  const fa = new Map([['suit-1', { role: 'research', codename: 'ORACLE', status: 'running', task: 'digging' }]]);
+  const snap = build(fa, [])();
+  const oracles = snap.agents.filter((a) => a.name === 'ORACLE');
+  ok(oracles.length === 1, 'a specialist that is actually running is NOT also drawn as a standing idle copy');
+  ok(oracles[0].steerable === true && oracles[0].state === 'working', 'and the surviving one is the live, steerable, working entry');
+  ok(snap.agents.length === 3, 'the other specialists still stand by');
+}
+{
+  // Real work must never be crowded out by decoration.
+  const fa = new Map();
+  for (let i = 0; i < 12; i++) fa.set('s' + i, { role: 'r', status: 'working' });
+  const snap = build(fa, [])();
+  ok(snap.agents.length === 12 && snap.agents.every((a) => a.steerable), 'at capacity the standing roster yields entirely to live agents');
 }
 
 // --- long fields are bounded so a runaway task string can't bloat every 1.2s frame -------------
 {
   const fa = new Map([['s', { role: 'r', status: 'working', task: 'x'.repeat(999), step: 'y'.repeat(999) }]]);
-  const a = build(fa, [])().agents[0];
+  const a = build(fa, [], [])().agents[0];
   ok(a.task.length === 160, 'task clipped to 160 chars');
   ok(a.step.length === 120, 'step clipped to 120 chars');
 }
