@@ -577,7 +577,7 @@ function getApiKey() {
 // while the encrypted vault persisted — this silently broke the agent with "No ANTHROPIC_API_KEY"
 // even though the key was safe in the vault), restore the newest ref per known secret field. Only
 // fills fields that are MISSING (never clobbers a present value), so it's safe + idempotent.
-const VAULT_FIELDS = ['apiKey', 'openaiKey', 'geminiKey', 'darkbloomKey', 'googleKey', 'elevenLabsKey', 'replicateKey', 'telegramToken', 'spotifyClientSecret', 'spotifyRefreshToken', 'gmailAppPassword', 'twilioToken', 'cloudToken'];
+const VAULT_FIELDS = ['apiKey', 'openaiKey', 'geminiKey', 'darkbloomKey', 'googleKey', 'elevenLabsKey', 'replicateKey', 'telegramToken', 'spotifyClientSecret', 'spotifyRefreshToken', 'gmailAppPassword', 'twilioToken', 'cloudToken', 'acedataToken'];
 function reconcileVaultRefs() {
   try {
     const raw = loadConfigRaw();
@@ -853,7 +853,9 @@ async function refreshNotionRecall(query) {
 let _semanticRecall = { key: '', text: '' };
 async function refreshSemanticRecall(query) {
   try {
-    if (loadConfig().semanticRecall === false || !semantic.isReady || !semantic.isReady()) { _semanticRecall = { key: '', text: '' }; return; }
+    // embedderReady, not isReady — isReady() only knows about an OpenAI key, so with the local
+    // Ollama embedder in use this gate was permanently closed and semantic recall never ran.
+    if (loadConfig().semanticRecall === false || !semantic.embedderReady || !(await semantic.embedderReady())) { _semanticRecall = { key: '', text: '' }; return; }
     const key = notionRecallKey(query);
     if (!key || key === _semanticRecall.key) return;
     const hits = await Promise.race([
@@ -1205,9 +1207,16 @@ function rateBudget(model = MODEL_HAIKU) {
 // Unlike the old crude "audit lines × $0.004", this prices ACTUAL usage from each API
 // response (incl. cache read/write tiers), so chooseModel + the cost system-block can make
 // genuine budget-aware decisions ("calculate the cost, then chunk").
-const MODEL_PRICES = {                              // USD / 1M tokens: [input, output, cacheWrite, cacheRead]
-  'claude-opus-4-8':   [15, 75, 18.75, 1.50],
-  'claude-fable-5':    [5, 25, 6.25, 0.50],         // estimate; refine when official pricing lands
+// USD / 1M tokens: [input, output, cacheWrite, cacheRead]. cacheWrite = 1.25×in, cacheRead = 0.1×in.
+//
+// CORRECTED 2026-08-21. Opus was still carrying the 4.1-era $15/$75, which is 3× what Opus 4.8
+// actually costs ($5/$25) — so every Opus turn was booked at triple, the daily ledger overstated
+// spend, and the DAG cost governor (lib/agents/select.js, monthly cap) throttled Opus agents long
+// before the real budget was touched. Fable 5 had the opposite error: listed at Opus's old
+// placeholder $5/$25 when it bills $10/$50, so the most expensive model was under-counted by half.
+const MODEL_PRICES = {
+  'claude-opus-4-8':   [5, 25, 6.25, 0.50],
+  'claude-fable-5':    [10, 50, 12.50, 1.00],
   'claude-sonnet-4-6': [3, 15, 3.75, 0.30],
   'claude-haiku-4-5':  [1, 5, 1.25, 0.10],
   // Cross-provider TEXT-offload models (Phase 2, Deliverable #4) — no cache tiers, so cacheWrite/
@@ -1357,12 +1366,27 @@ function referencesRunningJob(text) {
 // finish(); every Claude tool-loop call reads it via activeTools(). null ⇒ full catalog (default,
 // and the graceful fallback when retrieval is off / unavailable / low-confidence).
 let _activeTools = null;
-// Base tool set (retrieval-filtered or full) PLUS any live external MCP-plugin tools, so the model
-// can call `mcp__<plugin>__<tool>` the same as a native tool.
+// Live external MCP-connector tools, minus any a native tool supersedes (lib/connectors.js `hide`).
+function hubTools() {
+  try { return mcphub.toolSchemas({ hidden: connectors.hiddenToolIds() }); } catch { return []; }
+}
+// The FULL catalog the model could call: native tools plus live connector tools. This is what tool
+// retrieval ranks over — connector tools are ordinary catalog members, not a privileged appendix.
+function fullCatalog() {
+  const hub = hubTools();
+  return hub.length ? TOOLS.concat(hub) : TOOLS;
+}
+// The tools for THIS turn.
+//
+// This used to be `(_activeTools || TOOLS).concat(hubTools())` — i.e. connector tools were appended
+// AFTER retrieval had already chosen the turn's subset, so they were exempt from it and rode along on
+// every single turn. With Seedance connected that was 3,571 tokens on a turn like "what time is it",
+// and 42% of the entire tool budget on a typical retrieved turn. Retrieval now ranks connector tools
+// alongside native ones (see agentLoop), so `_activeTools` already contains whichever are relevant
+// and there is nothing left to append. The fallback path — retrieval off, no embedding key, or low
+// confidence — still gets the full catalog including connectors, exactly as before.
 function activeTools() {
-  const base = _activeTools || TOOLS;
-  try { const hub = mcphub.toolSchemas(); if (hub.length) return base.concat(hub); } catch {}
-  return base;
+  return _activeTools || fullCatalog();
 }
 // W2 — last LLM step's usage, captured right after every Claude call so the per-tool audit entry
 // can be tagged with the model + token cost of the step that invoked it. {model,tin,tout,usd}.
@@ -5494,7 +5518,13 @@ function describeAction(name, input = {}) {
       case 'ask_ai': return 'Consulting a second model';
       case 'notify_user': return 'Reaching you out-of-band';
       case 'build_project': return `Building: ${s(input.goal, 60)}`;
-      default: return `Working on ${String(name || 'the task').replace(/_/g, ' ')}`;
+      default: {
+        // Connector tools fall through to the generic branch, where `mcp__seedance__list_models`
+        // narrated as "Working on mcp  seedance  list models". Name the service and the verb instead.
+        const m = mcphub.parseId(name);
+        if (m) return `${m.plugin[0].toUpperCase() + m.plugin.slice(1)} · ${m.tool.replace(new RegExp('^' + m.plugin + '_'), '').replace(/_/g, ' ')}`;
+        return `Working on ${String(name || 'the task').replace(/_/g, ' ')}`;
+      }
     }
   } catch { return `Working on ${String(name || 'the task').replace(/_/g, ' ')}`; }
 }
@@ -5708,11 +5738,14 @@ async function agentLoop(history, apiKey, event, opts = {}) {
   _activeTools = null;
   if (loadConfig().toolRetrieval !== false) {
     try {
-      const sel = await toolselect.select(lastUserText(history), TOOLS, { k: Number(loadConfig().toolRetrievalK) || 12 });
+      // Rank over the FULL catalog — native + live connector tools. Ranking only the native ones and
+      // appending connectors afterwards is what made them retrieval-exempt and permanently on the wire.
+      const catalog = fullCatalog();
+      const sel = await toolselect.select(lastUserText(history), catalog, { k: Number(loadConfig().toolRetrievalK) || 12 });
       if (sel && sel.tools && sel.tools.length) {
         _activeTools = sel.tools;
-        sendToActivity('tool-update', { type: 'thinking', text: `🧰 tools: ${sel.tools.length}/${TOOLS.length} selected for this turn` });
-        try { fs.appendFileSync(AUDIT_PATH, JSON.stringify({ ts: new Date().toISOString(), toolSelect: sel.tools.length, of: TOOLS.length, names: sel.names }) + '\n'); } catch {}
+        sendToActivity('tool-update', { type: 'thinking', text: `🧰 tools: ${sel.tools.length}/${catalog.length} selected for this turn` });
+        try { fs.appendFileSync(AUDIT_PATH, JSON.stringify({ ts: new Date().toISOString(), toolSelect: sel.tools.length, of: catalog.length, names: sel.names }) + '\n'); } catch {}
       }
     } catch { /* retrieval is best-effort; fall back to full catalog */ }
   }
@@ -8133,8 +8166,35 @@ async function startMcpHub() {
   for (const s of skipped) console.warn(`[mcphub] '${s.name}' skipped — ${s.reason}`);
   if (!specs.length) { console.log('[mcphub] no external MCP connectors configured'); return; }
   if (!mcphub.available()) { console.warn('[mcphub] MCP SDK unavailable — connectors skipped'); return; }
-  try { const st = await mcphub.connectAll(specs, { log: (m) => console.log(m) }); console.log(`[mcphub] ready — ${st.total} tool(s) across ${st.plugins.length} connector(s)`); }
-  catch (e) { console.warn('[mcphub] connectAll failed:', e.message); }
+  try {
+    const st = await mcphub.connectAll(specs, { log: (m) => console.log(m) });
+    console.log(`[mcphub] ready — ${st.total} tool(s) across ${st.plugins.length} connector(s)`);
+    // RETRY, because a boot-time failure was otherwise PERMANENT for the session: the tools simply
+    // did not exist until the app was restarted, and nothing said so except one line in the log.
+    // Observed live — the Mac woke from sleep mid-boot, the connect hung, and the hub sat at
+    // "0 tool(s)" indefinitely. Backs off, gives up after a few tries, and never retries a connector
+    // that is merely unauthenticated (that is a config problem; retrying it forever is noise).
+    if (st.failed && st.failed.length) scheduleMcpRetry(st.failed);
+  } catch (e) { console.warn('[mcphub] connectAll failed:', e.message); }
+}
+let _mcpRetry = 0, _mcpRetryTimer = null;
+function scheduleMcpRetry(failed) {
+  if (_mcpRetryTimer || _mcpRetry >= 4) return;
+  const delay = Math.min(300000, 20000 * Math.pow(2, _mcpRetry));   // 20s, 40s, 80s, 160s
+  _mcpRetry++;
+  console.warn(`[mcphub] ${failed.join(', ')} did not connect — retrying in ${Math.round(delay / 1000)}s (attempt ${_mcpRetry}/4)`);
+  _mcpRetryTimer = setTimeout(async () => {
+    _mcpRetryTimer = null;
+    try {
+      const { specs } = connectors.resolveSpecs(loadConfig());
+      const retry = specs.filter((s) => failed.includes(s.name) && !mcphub.status().plugins.some((p) => p.name === s.name));
+      if (!retry.length) { _mcpRetry = 0; return; }
+      const st = await mcphub.connectAll(retry, { log: (m) => console.log(m) });
+      if (st.failed && st.failed.length) scheduleMcpRetry(st.failed);
+      else { _mcpRetry = 0; console.log(`[mcphub] recovered — ${st.total} tool(s) now live`); }
+    } catch (e) { console.warn('[mcphub] retry failed:', e.message); }
+  }, delay);
+  if (_mcpRetryTimer.unref) _mcpRetryTimer.unref();
 }
 
 // ===========================================================================================

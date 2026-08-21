@@ -24,14 +24,21 @@ for (const n of ['save_memory', 'read_file', 'write_file', 'run_shell', 'notify_
   ok(ts.CORE.includes(n), `CORE includes "${n}"`);
 
 (async () => {
-  // ---- graceful degradation (no embedding key in test env → isReady false) ----
+  // ---- graceful degradation (NO embedder of any kind available) ----
+  // This used to assert `semantic.isReady() === false` and lean on the test machine having no OpenAI
+  // key. That is no longer the right question: select() gates on embedderReady(), which also counts a
+  // local Ollama — and on a dev box Ollama IS running, so the "no embedder" branch stopped being
+  // exercised at all. Stub the gate rather than depend on the environment.
   const bigCatalog = Array.from({ length: 20 }, (_, i) => ({ name: 'tool_' + i, description: 'does thing ' + i }));
-  ok(semantic.isReady() === false, 'precondition: no embedding key in test env');
-  ok((await ts.select('anything', bigCatalog)) === null, 'select: no embedding key → null (caller uses FULL catalog, never stranded)');
+  const realEmbedderReady = semantic.embedderReady;
+  semantic.embedderReady = async () => false;
+  ok((await ts.select('anything', bigCatalog)) === null, 'select: no embedder at all → null (caller uses FULL catalog, never stranded)');
+  semantic.embedderReady = realEmbedderReady;
 
   // ---- tiny catalog → null (retrieval not worth it) ----
-  // (force-enable embeddings via monkey-patch so this isn't just the no-key path)
+  // (force-enable embeddings via monkey-patch so this isn't just the no-embedder path)
   semantic.isReady = () => true;
+  semantic.embedderReady = async () => true;
   semantic.embedBatch = async (arr) => ({ vecs: arr.map((s) => ({ _text: s })) });
   semantic.cosine = (a, b) => {
     const wa = new Set(String(a._text || '').toLowerCase().match(/[a-z]+/g) || []);

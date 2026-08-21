@@ -155,4 +155,31 @@ const throws = (fn, re, m) => { try { fn(); } catch (e) { if (re.test(e.message)
   ok(connectors.tokenFor(connectors.REGISTRY.seedance, cfg, cfg.mcpPlugins[0]) === 'real-token-value-12345',
     'an unresolved explicit handle falls THROUGH to the next source rather than shadowing a working token');
 }
-console.log(`✅ connectors/mcphub/configsec: ${pass} assertions passed (incl. vault-handle guard)`);
+
+// ── a hung connector must not hold the app hostage ────────────────────────────────────────────
+// Observed live: the Mac woke from sleep mid-boot, the streamable-HTTP connect hung, the SSE
+// fallback hung behind it, and startMcpHub took NINE MINUTES to fail — then sat at "0 tool(s)" for
+// the rest of the session because nothing retried. Three properties keep that from recurring.
+// 10.255.255.1 is non-routable, so this is deterministic and needs no network.
+(async () => {
+  const BLACKHOLE = { name: 'blackhole', transport: 'http', url: 'https://10.255.255.1/mcp', auth: { token: 'x' } };
+
+  const t0 = Date.now();
+  const n = await mcphub.connectOne(BLACKHOLE, { timeoutMs: 1500 });
+  const elapsed = Date.now() - t0;
+  ok(n === 0, 'an unreachable connector yields zero tools rather than throwing');
+  ok(elapsed < 12000, `and gives up in ${(elapsed / 1000).toFixed(1)}s — bounded by the timeout, not by the socket (was ~9 minutes)`);
+
+  const t1 = Date.now();
+  const st = await mcphub.connectAll([BLACKHOLE, { ...BLACKHOLE, name: 'blackhole2' }], { timeoutMs: 1500 });
+  const par = Date.now() - t1;
+  ok(Array.isArray(st.failed) && st.failed.length === 2, 'connectAll REPORTS which connectors failed, so the caller can retry them');
+  ok(st.failed.includes('blackhole') && st.failed.includes('blackhole2'), '…by name');
+  ok(st.total === 0, 'and reports zero live tools');
+  // Serial would be ~2x one connector's budget; parallel is ~1x. Generous bound to stay stable.
+  ok(par < elapsed * 1.8, `two dead connectors resolve in ${(par / 1000).toFixed(1)}s — connected in PARALLEL, so one slow endpoint does not gate the others`);
+
+  ok(mcphub.status().plugins.length === 0, 'a failed connector leaves no half-registered entry behind');
+
+  console.log(`✅ connectors/mcphub/configsec: ${pass} assertions passed (incl. vault-handle guard + hang bounds)`);
+})();
