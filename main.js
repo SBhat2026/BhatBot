@@ -85,6 +85,7 @@ const resolve = require('./lib/resolve');             // DaVinci Resolve native 
 const mcphub = require('./lib/mcphub');               // MCP-client hub — consume external MCP servers as plugins
 const connectors = require('./lib/connectors');       // hosted MCP connectors (Seedance …) — registry + host pinning
 const visualbuild = require('./lib/visualbuild');     // Seedance generate→poll→artifact (visual building)
+const assetgen = require('./lib/assetgen');           // 2D→3D→printable asset pipeline, run in code not by the model
 const figures = require('./lib/figures');             // data-accurate matplotlib/seaborn figures
 const logins = require('./lib/logins');               // domain-keyed login profiles (CRED_REF handles)
 const modePrompts = require('./lib/prompts');         // P4  — mode-switching system prompts
@@ -186,9 +187,13 @@ try {
 } catch {}
 
 const HOTKEY = 'CommandOrControl+Shift+B';
-const MODEL_SONNET = 'claude-sonnet-4-6';      // corrected from stale spec id
+// Current generation, verified against GET /v1/models on 2026-08-21.
+// Sonnet 5 is BOTH newer and cheaper than Sonnet 4.6 ($2/$10 vs $3/$15) — the launch introductory
+// rate became the standard price — so moving the workhorse tier forward cuts ~33% off the model
+// that handles most turns. Opus 5 matches Opus 4.8's $5/$25.
+const MODEL_SONNET = 'claude-sonnet-5';        // workhorse — most turns
 const MODEL_HAIKU = 'claude-haiku-4-5';        // RETIRED from routing — kept only for legacy price/rate maps
-const MODEL_OPUS = 'claude-opus-4-8';          // deepest reasoning — reserved for HEAVY tasks (sims, heavy coding+interpretation)
+const MODEL_OPUS = 'claude-opus-5';            // deepest reasoning — reserved for HEAVY tasks (sims, heavy coding+interpretation)
 const MODEL_FABLE = 'claude-fable-5';          // native subagents + high autonomy — opt-in heavy/autonomous tier (config.useFable)
 const MAX_AGENT_ITERATIONS = 20;   // step ceiling; complex tasks need headroom to retry/replan
 // PERSISTENCE — how hard BhatBot pushes to FINISH a complex task before it reports back. Tunable via
@@ -1166,11 +1171,17 @@ function _winSum(bucket, model) {
 function recordTokens(model, inTok, outTok) { _winPush(_win.in, model, inTok); _winPush(_win.out, model, outTok); }
 // Tier-2 per-model caps (ITPM / OTPM). Conservative within the published tier-2 ranges
 // (ITPM 100K–450K, OTPM 8K–90K). Override per model via config.rateLimits[model] = {itpm,otpm}.
+// Starting estimates only — lib/rate.js replaces these with the live `anthropic-ratelimit-*` headers
+// on the first real call (see "[rate] now pacing against live headers"). Entries for BOTH the current
+// and previous generation, so a config that pins an older model still paces correctly instead of
+// falling through to a default.
 const RATE_LIMITS = {
+  'claude-sonnet-5':   { itpm: 450000, otpm: 90000 },
   'claude-sonnet-4-6': { itpm: 450000, otpm: 90000 },
   'claude-haiku-4-5':  { itpm: 100000, otpm: 50000 },
+  'claude-opus-5':     { itpm: 100000, otpm: 16000 },
   'claude-opus-4-8':   { itpm: 100000, otpm: 16000 },
-  'claude-fable-5':    { itpm: 200000, otpm: 32000 },   // conservative until live headers (T1) correct it
+  'claude-fable-5':    { itpm: 200000, otpm: 32000 },
 };
 function rateLimitsFor(model) {
   const c = loadConfig();
@@ -1207,36 +1218,16 @@ function rateBudget(model = MODEL_HAIKU) {
 // Unlike the old crude "audit lines × $0.004", this prices ACTUAL usage from each API
 // response (incl. cache read/write tiers), so chooseModel + the cost system-block can make
 // genuine budget-aware decisions ("calculate the cost, then chunk").
-// USD / 1M tokens: [input, output, cacheWrite, cacheRead]. cacheWrite = 1.25×in, cacheRead = 0.1×in.
-//
-// CORRECTED 2026-08-21. Opus was still carrying the 4.1-era $15/$75, which is 3× what Opus 4.8
-// actually costs ($5/$25) — so every Opus turn was booked at triple, the daily ledger overstated
-// spend, and the DAG cost governor (lib/agents/select.js, monthly cap) throttled Opus agents long
-// before the real budget was touched. Fable 5 had the opposite error: listed at Opus's old
-// placeholder $5/$25 when it bills $10/$50, so the most expensive model was under-counted by half.
-const MODEL_PRICES = {
-  'claude-opus-4-8':   [5, 25, 6.25, 0.50],
-  'claude-fable-5':    [10, 50, 12.50, 1.00],
-  'claude-sonnet-4-6': [3, 15, 3.75, 0.30],
-  'claude-haiku-4-5':  [1, 5, 1.25, 0.10],
-  // Cross-provider TEXT-offload models (Phase 2, Deliverable #4) — no cache tiers, so cacheWrite/
-  // cacheRead mirror input (unused in practice; offload usage carries only input/output tokens).
-  'gpt-4o-mini':       [0.15, 0.60, 0.15, 0.15],
-  'gemini-2.0-flash':  [0.10, 0.40, 0.10, 0.10],
-};
+// Pricing lives in lib/pricing.js — ONE table, cache tiers derived from the published multipliers,
+// family fallback so a new model id is never billed at $0, and a config override
+// (config.modelPrices) so a rate change can be corrected without a code edit.
+const pricing = require('./lib/pricing');
+pricing.setOverrides(() => { try { return loadConfig().modelPrices || {}; } catch { return {}; } });
 const COSTS_PATH = path.join(os.homedir(), '.bhatbot', 'costs.json');
-function priceFor(model) {
-  if (!model) return MODEL_PRICES[MODEL_HAIKU];
-  if (MODEL_PRICES[model]) return MODEL_PRICES[model];
-  const bare = model.replace(/^claude-/, '');
-  const k = Object.keys(MODEL_PRICES).find((m) => m.replace(/^claude-/, '') === bare || model.includes(m.replace(/^claude-/, '')));
-  return MODEL_PRICES[k] || MODEL_PRICES[MODEL_HAIKU];
-}
+function priceFor(model) { return pricing.tuple(model || MODEL_HAIKU); }
 function costOf(model, u) {
   if (!u) return 0;
-  const [pin, pout, pcw, pcr] = priceFor(model);
-  return ((u.input_tokens || 0) * pin + (u.output_tokens || 0) * pout
-    + (u.cache_creation_input_tokens || 0) * pcw + (u.cache_read_input_tokens || 0) * pcr) / 1e6;
+  return pricing.usd(model || MODEL_HAIKU, u);
 }
 function recordCost(model, usage) {
   try {
@@ -5141,6 +5132,20 @@ async function executeTool(name, input) {
         result = await generateImage(input); break;
       case 'visual_build':
         result = await visualBuild(input || {}); break;
+      case 'make_asset': {
+        // The whole chain in ONE call. Driving generate_image → generate_3d → make_printable from
+        // the model costs a full conversation replay per stage; the sequence is deterministic once
+        // the target is known, so it runs here.
+        sendToActivity('tool-update', { type: 'thinking', text: '🧱 building asset…' });
+        result = await assetgen.build(input || {}, {
+          generateImage, generate3D, makePrintable,
+          log: (m) => console.log(m),
+        });
+        if (result && result.success && (result.model || result.printable) && input.open !== false) {
+          try { openInteractive3D(result.model || result.printable); } catch {}
+        }
+        break;
+      }
       case 'connectors': {
         const cfg = loadConfig();
         if (input && input.action === 'enable') {
@@ -5280,7 +5285,19 @@ async function executeTool(name, input) {
         if (rf.error && !rf.desires.length) { result = { success: false, error: 'reflection failed: ' + rf.error, portrait_gaps: portrait._gaps }; break; }
         const drillish = /how (would|do|did) you|implement|build it|go deeper|more detail|walk me through/i.test(focus);
         let text;
-        if (drillish) { let schematic = ''; try { schematic = fs.readFileSync(path.join(__dirname, 'BHATBOT_SCHEMATIC.md'), 'utf8'); } catch {} text = await narrate.drill(rf.desires, { focus, anthropicRequest, apiKey: getApiKey(), schematic }); }
+        if (drillish) {
+          // Grounding for the drill. This used to read BHATBOT_SCHEMATIC.md — a June planning brief
+          // that described an intended system, not the built one, and whose read was wrapped in a
+          // silent catch, so once it drifted (or was pruned) the drill just narrated with no ground
+          // truth at all and nothing said so. ARCHITECTURE.md + BACKLOG.md are the two documents
+          // that are actually maintained, so the drill now reasons from what is true today.
+          let schematic = '';
+          for (const doc of ['ARCHITECTURE.md', 'BACKLOG.md']) {
+            try { schematic += (schematic ? '\n\n---\n\n' : '') + fs.readFileSync(path.join(__dirname, doc), 'utf8'); } catch {}
+          }
+          if (!schematic) console.warn('[reflect] drill has no architecture grounding — ARCHITECTURE.md/BACKLOG.md unreadable');
+          text = await narrate.drill(rf.desires, { focus, anthropicRequest, apiKey: getApiKey(), schematic });
+        }
         else text = narrate.render(rf.desires, { mode: depth === 'brief' ? 'top' : 'full' });
         // Reflection → PROPOSAL (Siddhant's rule 2026-07-01): asking what I'd improve surfaces an offer,
         // but a session only STARTS with an explicit go-ahead (no more auto-start on reflection). If
@@ -5500,6 +5517,9 @@ function describeAction(name, input = {}) {
       case 'phone_mirror': return `Phone: ${s(input.action)}`;
       case 'generate_image': return `Generating an image of “${s(input.prompt || input.query)}”`;
       case 'visual_build': return `Building a video: “${s(input.prompt)}”`;
+      case 'make_asset': return input.want === 'printable' ? `Building a printable model of “${s(input.prompt || input.image, 40)}”`
+        : input.want === 'model' ? `Building a 3D model of “${s(input.prompt || input.image, 40)}”`
+        : `Generating an image of “${s(input.prompt, 44)}”`;
       case 'connectors': return input.action === 'enable' ? `Enabling the ${s(input.name, 24)} connector` : 'Checking connectors';
       case 'generate_3d': case 'make_printable': return 'Building a 3D model';
       case 'simulate': case 'sci_compute': return 'Running a computation';
@@ -6008,7 +6028,7 @@ async function agentLoop(history, apiKey, event, opts = {}) {
       try { if (_mission) _mission.step({ name: block.name, input: block.input, result, ms: _spanMs, spanId: _spanId, status: _spanStatus }); } catch {}
       // Jarvis HUD: surface visuals inline in chat — generated images / design renders /
       // explicit screenshots as holo-cards, and 3D outputs as an in-chat spinning model.
-      const showImage = result._image && (['generate_image', 'visual_build', 'make_figure', 'simulate', 'sci_compute', 'studio_write', 'ui_inspect', 'screen_parse', 'vision_click', 'molecule', 'maps', 'phone_mirror'].includes(block.name)
+      const showImage = result._image && (['generate_image', 'visual_build', 'make_asset', 'make_figure', 'simulate', 'sci_compute', 'studio_write', 'ui_inspect', 'screen_parse', 'vision_click', 'molecule', 'maps', 'phone_mirror'].includes(block.name)
         || (block.name === 'browser' && block.input && block.input.action === 'screenshot'));
       const model3d = (block.name === 'generate_3d' || block.name === 'make_printable') && result.success && result.path ? result.path : undefined;
       sendToAll(event, 'tool-update', {
@@ -7948,9 +7968,9 @@ function opsSnapshot() {
     fleet: () => { try { const a = jobsBus.active() || []; return { active: a.length, agents: a.map((j) => ({ id: j.id, role: j.agent || j.kind, task: j.name })),
       // Live OTPM-derived width so the panel shows what's ACTUALLY available now vs the static cap.
       width: fleetWidth(MODEL_SONNET), cap: FLEET_CAP,
-      widthByModel: { sonnet: fleetWidth(MODEL_SONNET), fable: fleetWidth(MODEL_FABLE), opus: fleetWidth('claude-opus-4-8') } }; }
+      widthByModel: { sonnet: fleetWidth(MODEL_SONNET), fable: fleetWidth(MODEL_FABLE), opus: fleetWidth(MODEL_OPUS) } }; }
       catch { return { active: 0, agents: [], width: 0, cap: FLEET_CAP }; } },
-    budgets: () => [MODEL_SONNET, MODEL_FABLE, 'claude-opus-4-8'].map((m) => { try { const b = rateBudget(m); return { model: m.replace(/^claude-/, ''), outFree: b.outFree, outSafe: b.outSafe }; } catch { return { model: m, outFree: null }; } }),
+    budgets: () => [MODEL_SONNET, MODEL_FABLE, MODEL_OPUS].map((m) => { try { const b = rateBudget(m); return { model: m.replace(/^claude-/, ''), outFree: b.outFree, outSafe: b.outSafe }; } catch { return { model: m, outFree: null }; } }),
     costToday: () => { try { return costToday(); } catch { return null; } },
     recentEvents: () => { try { return rstate.recentEvents(20); } catch { return []; } },
   });
@@ -8187,9 +8207,10 @@ function scheduleMcpRetry(failed) {
     _mcpRetryTimer = null;
     try {
       const { specs } = connectors.resolveSpecs(loadConfig());
-      const retry = specs.filter((s) => failed.includes(s.name) && !mcphub.status().plugins.some((p) => p.name === s.name));
+      const live = new Set(mcphub.status().plugins.map((p) => p.name));
+      const retry = specs.filter((s) => failed.includes(s.name) && !live.has(s.name));
       if (!retry.length) { _mcpRetry = 0; return; }
-      const st = await mcphub.connectAll(retry, { log: (m) => console.log(m) });
+      const st = await mcphub.connectAll(retry, { log: (m) => console.log(m) });   // parallel, like the first pass
       if (st.failed && st.failed.length) scheduleMcpRetry(st.failed);
       else { _mcpRetry = 0; console.log(`[mcphub] recovered — ${st.total} tool(s) now live`); }
     } catch (e) { console.warn('[mcphub] retry failed:', e.message); }
@@ -10518,7 +10539,11 @@ app.whenReady().then(() => {
     startMemoryMaintenance();   // always-on memory upkeep (runs on a timer, independent of the window)
     startSynapseWorker();       // SYNAPSE second brain — free re-import loop + slow budget-capped paid pass
     startWeaver();              // always-on connection weaving while a window is open
-    startMcpHub();              // connect external MCP-server plugins (config.mcpPlugins) → tools for the agent
+    // Fire-and-forget: connector handshakes are remote round-trips and must never gate boot. They
+    // race each other (lib/mcphub.connectAll) and each races its own transports, so the hub is live
+    // in about the time of the single slowest endpoint, and a dead one costs one timeout in the
+    // background instead of stalling everything behind it.
+    startMcpHub().catch((e) => console.warn('[mcphub] start failed:', e.message));
     startPresenceFeed();        // stream live fleet state to the 3D presence window while it's open
     startCacheKeepAlive();   // Task 5 — prompt-cache warm-keeper (default on; keeps first token fast after idle gaps)
     setTimeout(() => { maybeRenderAcks().catch(() => {}); }, 6000);   // pre-render ack clips in the background (instant first audio)

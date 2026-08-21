@@ -109,37 +109,20 @@ const mcphub = require('../lib/mcphub');
   }
 }
 
-// ── the two price tables must agree ───────────────────────────────────────────────────────────
-// main.js MODEL_PRICES bills the chat loop; lib/agents/select.js PRICES enforces the DAG agents'
-// monthly cost CAP. They are separate tables for separate consumers, and they had silently drifted:
-// Opus 4.8 sat at the 4.1-era $15/$75 in BOTH — 3× its real $5/$25 — so every Opus turn was booked
-// at triple and the governor throttled agents long before the real budget was reached. An
-// overstated price is not a reporting nit; it starves the fan-out.
+// ── pricing is single-sourced ─────────────────────────────────────────────────────────────────
+// main.js used to carry its own MODEL_PRICES and lib/agents/select.js a rival copy; they drifted
+// (Opus billed 3x over, Fable 2x under). Both now read lib/pricing.js, so the invariant is simply
+// that no second table has reappeared. Rates themselves are covered by scripts/test-pricing.js.
 {
+  ok(!/const MODEL_PRICES = \{/.test(main), 'main.js no longer defines its own price table');
+  ok(/require\('\.\/lib\/pricing'\)/.test(main), 'main.js prices through lib/pricing.js');
   const select = require('../lib/agents/select');
-  const block = /const MODEL_PRICES = \{([\s\S]*?)\n\};/.exec(main);
-  ok(block, 'found MODEL_PRICES in main.js');
-  const mp = {};
-  for (const r of block[1].matchAll(/'([^']+)':\s*\[([\d.]+),\s*([\d.]+)/g)) mp[r[1]] = [+r[2], +r[3]];
-  ok(Object.keys(mp).length >= 4, 'parsed the price table');
-
-  // Sanity floor: a price table that has drifted an order of magnitude is worse than none.
-  ok(mp['claude-opus-4-8'][0] === 5 && mp['claude-opus-4-8'][1] === 25, 'Opus 4.8 is priced at its actual $5/$25');
-  ok(mp['claude-fable-5'][0] === 10 && mp['claude-fable-5'][1] === 50, 'Fable 5 is priced at its actual $10/$50');
-  ok(mp['claude-sonnet-4-6'][0] === 3 && mp['claude-sonnet-4-6'][1] === 15, 'Sonnet 4.6 is priced at $3/$15');
-  ok(mp['claude-haiku-4-5'][0] === 1 && mp['claude-haiku-4-5'][1] === 5, 'Haiku 4.5 is priced at $1/$5');
-
-  for (const [model, [i, o]] of Object.entries(mp)) {
-    const p = select.PRICES[model];
-    if (!p) continue;                                  // select only prices what its chains can pick
-    ok(p[0] === i && p[1] === o, `${model}: the chat and DAG price tables agree (${i}/${o} vs ${p[0]}/${p[1]})`);
-  }
-  // Every model a chain can actually select must have a price, or its spend books as zero.
+  const pricing = require('../lib/pricing');
   for (const chain of Object.values(select.CHAINS)) {
     for (const [, key] of chain) {
       const id = select.DEFAULT_MODELS[key];
       if (!id || !/^claude-/.test(id)) continue;
-      ok(select.PRICES[id], `${id} (chain rung "${key}") has a price — an unpriced model spends invisibly against the cap`);
+      ok(pricing.base(id).input > 0, `${id} (a live chain rung) is priced — an unpriced model spends invisibly against the cap`);
     }
   }
 }

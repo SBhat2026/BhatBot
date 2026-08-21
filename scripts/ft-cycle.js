@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 'use strict';
-// W5 / AMBITIOUS_ROADMAP.md §A2 — one-command continual-learning cycle:
+// W5 / BACKLOG.md (fine-tuning) — one-command continual-learning cycle:
 //   export traces → THRESHOLD GUARD → LoRA train → serve adapter → gated A/B eval → stop server.
 //
 // The guard is the point: a future cron (`manage_schedule`) can call this nightly and it will

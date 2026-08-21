@@ -102,4 +102,30 @@ const ok = (c, m) => { assert.ok(c, m); pass++; };
   ok(r.thinksOutLoud('claude-fable-5') === true, 'fable 5 does (always on)');
 }
 
+
+// ── every ROUTED model must be in the capability matrix ───────────────────────────────────────
+// shapeRequest() bails out entirely for an unknown id — no thinking, no effort, no compaction, no
+// task budget — and does it silently, because bailing out is also the correct behaviour for a model
+// we genuinely do not know. So pointing the router at a new model without adding it here turns the
+// whole agentic surface off with no error anywhere. That is exactly what moving to Opus 5 would
+// have done. This reads the router's own constants out of main.js so it cannot drift from them.
+{
+  const fs = require('fs'), path = require('path');
+  const main = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
+  const routed = [...main.matchAll(/^const MODEL_(SONNET|OPUS|FABLE) = '([^']+)'/gm)].map((m) => [m[1], m[2]]);
+  ok(routed.length >= 3, 'found the router model constants in main.js');
+  for (const [name, id] of routed) {
+    ok(r.CAPS[id], `MODEL_${name} (${id}) is in the capability matrix — otherwise its agentic surface is silently off`);
+  }
+  // And the shaping must actually engage for each of them.
+  for (const [name, id] of routed) {
+    const { body } = r.shapeRequest({ model: id, max_tokens: 8000, messages: [] }, { depth: 'deep' });
+    const shaped = !!(body.thinking || (body.output_config && body.output_config.effort));
+    ok(shaped, `MODEL_${name} (${id}) actually gets shaped (thinking and/or effort present)`);
+  }
+  // Sonnet 5 gained xhigh over Sonnet 4.6 — verified against GET /v1/models on 2026-08-21.
+  ok(r.CAPS['claude-sonnet-5'].effort.includes('xhigh'), 'Sonnet 5 supports xhigh');
+  ok(!r.CAPS['claude-sonnet-4-6'].effort.includes('xhigh'), 'Sonnet 4.6 still does NOT — the clamp is still needed for it');
+  ok(r.CAPS['claude-opus-5'].effort.includes('xhigh') && r.CAPS['claude-opus-5'].compact, 'Opus 5 has the full effort ladder + compaction');
+}
 console.log(`✅ reasoning: ${pass} assertions passed`);

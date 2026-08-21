@@ -44,7 +44,10 @@ const live = new Set(TOOLS.map((t) => t.name));
       const a = new Set(sets[i][1]), b = new Set(sets[j][1]);
       const inter = [...a].filter((x) => b.has(x)).length;
       const jac = inter / new Set([...a, ...b]).size;
-      ok(jac < 0.7, `${sets[i][0]} vs ${sets[j][0]} are distinct (Jaccard ${jac.toFixed(2)} < 0.70) — the split earns its cost`);
+      // Roles may share tools — a coding and a browser agent both needing read_file is fine, and
+      // agents are now allowed to overlap on a goal when it buys verification or contrast. What
+      // must not happen is CONVERGENCE: near-identical kits mean the role labels are decoration.
+      ok(jac < 0.8, `${sets[i][0]} vs ${sets[j][0]} have not converged (Jaccard ${jac.toFixed(2)} < 0.80)`);
     }
   }
   // Each specialist must own something no one else has, or it is not a specialist.
@@ -53,6 +56,25 @@ const live = new Set(TOOLS.map((t) => t.name));
     const others = new Set(sets.filter(([n]) => n !== name).flatMap(([, t]) => t));
     ok(tools.some((t) => !others.has(t)), `${name} has at least one tool no other role has (a real specialty)`);
   }
+}
+
+// ── overlap is allowed, but must be DELIBERATE ────────────────────────────────────────────────
+// Two agents on one goal is sometimes the right call (verify a high-stakes answer, contrast two
+// angles, race a route that may stall) and usually the wrong one (twice the cost for the same
+// answer). So the planner is told to default to different subtasks and to declare `overlaps` when
+// it duplicates on purpose — and the runner must carry that flag through, or an intentional second
+// opinion is indistinguishable from an accidental repeat and gets "optimized" away.
+{
+  const sys = roles.ROLES.orchestrator.system;
+  ok(/DEFAULT TO DIFFERENT WORK/i.test(sys), 'differentiation is the stated default');
+  ok(/overlap/i.test(sys) && /VERIFY|CONTRAST|RACE/.test(sys), 'and deliberate overlap is permitted, with the reasons it pays');
+  ok(/"overlaps"/.test(sys), 'the planner is told how to declare it in the schema');
+  ok(/never overlap more than two/i.test(sys), 'with a cap, so "overlap" cannot become "run everything N times"');
+  ok(/split it instead/i.test(sys), 'and an explicit steer away from overlapping merely because a task is large');
+
+  const orchSrc = require('fs').readFileSync(require('path').join(__dirname, '..', 'lib', 'agents', 'orchestrator.js'), 'utf8');
+  ok(/overlaps/.test(orchSrc), 'the orchestrator runtime carries `overlaps` through to the task record');
+  ok(/idMap\[String\(n\)\]/.test(orchSrc), 'and remaps its local ids to real ids, like `needs`');
 }
 
 // ── the orchestrator plans, it does not do ────────────────────────────────────────────────────
