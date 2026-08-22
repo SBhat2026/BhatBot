@@ -7537,12 +7537,26 @@ let schedulerTimer = null, schedulerRunning = new Set(), schedulerBusy = false;
 // that skips: its premise is stale by the time it lands, and every deferred tick fires at once when
 // the lock drops — a thundering herd on the machine that was already busy. The next tick is seconds
 // to minutes away, so skipping costs nothing and keeps the system calm under load.
-function bgTick(name, fn) {
+// Consecutive skips per worker. lib/agentlock.js counts skips "so the pattern is visible in
+// telemetry rather than silent" — but nothing ever read that telemetry, so a background loop that
+// never got the lock was indistinguishable from one with nothing to do. Same for the governor's
+// thermal deferral. Both are legitimate reasons to skip; being unable to SEE them is not.
+const _bgSkips = new Map();
+function bgSkipped(name, why) {
+  const n = (_bgSkips.get(name) || 0) + 1;
+  _bgSkips.set(name, n);
+  // Report on the 1st, then at 5 and every 20th — enough to notice a stuck worker, not enough to
+  // drown the log at a 12-second cadence.
+  if (n === 1 || n === 5 || n % 20 === 0) console.log(`[${name}] skipped ×${n} — ${why}`);
+}
+function bgTick(name, fn, { onSkip = null } = {}) {
   return async () => {
     try {
       governor.poll();
-      if (!governor.allowBackgroundTick(name)) return;   // thermal/memory critical → defer proactive work
+      if (!governor.allowBackgroundTick(name)) { bgSkipped(name, 'governor is shedding load (thermal/memory)'); if (onSkip) onSkip('governor'); return; }
       const r = await agentLock.tryRun(name, fn);
+      if (r && r.ran === false) { bgSkipped(name, `lock held by ${r.holder || 'another worker'}`); if (onSkip) onSkip(r.holder); return; }
+      _bgSkips.delete(name);                             // it ran — reset the streak
       if (r && r.error) console.warn(`[${name}] tick failed:`, r.error.message);
     } catch (e) { console.warn(`[${name}] tick wrapper failed:`, e && e.message); }
   };
@@ -8175,7 +8189,7 @@ function stopWeaver() { if (_weaverTimer) { clearInterval(_weaverTimer); _weaver
 // that map first, so a working item becomes a live, steerable character that walks to a desk and
 // turns blue — and, because it is a real fleet entry, clicking it opens its monitor like any other.
 const BACKLOG_STATE = path.join(os.homedir(), '.bhatbot', 'backlog-worker.json');
-let _blTimer = null, _blRunning = false, _blIdleSince = Date.now();
+let _blTimer = null, _blRunning = false, _blIdleSince = Date.now(), _blLastReason = null;
 function backlogState() { try { return JSON.parse(fs.readFileSync(BACKLOG_STATE, 'utf8')); } catch { return {}; } }
 function saveBacklogState(s) { try { fs.mkdirSync(path.dirname(BACKLOG_STATE), { recursive: true }); fs.writeFileSync(BACKLOG_STATE, JSON.stringify(s, null, 2)); } catch {} }
 
@@ -8190,7 +8204,18 @@ async function backlogTick() {
     busy: agentState === 'running' || agentState === 'paused',
     lockHeld: false,                      // bgTick already holds the shared lock around this call
   });
-  if (!decision.run) { if (cfg.verbose) console.log('[backlog] idle — ' + decision.reason); return; }
+  if (!decision.run) {
+    // SAY WHY, but only when the answer CHANGES. This was gated behind cfg.verbose, so by default a
+    // worker that never ran looked identical to one that had nothing to do — and "is the background
+    // worker actually working?" was unanswerable without editing config and restarting. Logging the
+    // reason on every 20-minute tick would be noise; logging it on transition is the useful signal.
+    if (decision.reason !== _blLastReason) {
+      _blLastReason = decision.reason;
+      console.log('[backlog] holding off — ' + decision.reason);
+    }
+    return;
+  }
+  _blLastReason = null;
 
   _blRunning = true;
   const item = decision.item;
@@ -8247,8 +8272,24 @@ function startBacklogWorker() {
   if (cfg.enabled === false) { console.log('[backlog] worker disabled by config'); return; }
   if (_blTimer) clearInterval(_blTimer);
   const everyMs = Math.max(5, Number(cfg.everyMin) || backlogworker.DEFAULTS.everyMin) * 60000;
-  _blTimer = setInterval(bgTick('backlog', backlogTick), everyMs);
-  setTimeout(bgTick('backlog', backlogTick), 90000);   // first look shortly after boot, not during it
+  // RETRY SOON ON A SKIP, rather than losing a whole cycle.
+  //
+  // Skipping when the lock is held is correct (lib/agentlock.js explains why background work skips
+  // instead of queueing), but it interacts badly with a LOW-frequency worker: weaver ticks every 12
+  // seconds and often holds the lock, while this ticks every 20 minutes — so one unlucky collision
+  // costs 20 minutes, and that is exactly what was observed, as `[backlog] skipped ×1 — lock held by
+  // weaver`. A single short retry is not the thundering herd that comment warns about; that concern
+  // is about N deferred ticks firing at once, and this is one worker rescheduling itself once.
+  let _blRetry = null;
+  const tick = bgTick('backlog', backlogTick, {
+    onSkip: () => {
+      if (_blRetry) return;                              // one pending retry at a time, never a queue
+      _blRetry = setTimeout(() => { _blRetry = null; tick(); }, 60000);
+      if (_blRetry.unref) _blRetry.unref();              // must never hold the app open at quit
+    },
+  });
+  _blTimer = setInterval(tick, everyMs);
+  setTimeout(tick, 90000);   // first look shortly after boot, not during it
   const d = { ...backlogworker.DEFAULTS, ...cfg };
   console.log(`[backlog] worker on — up to ${d.maxPerDay} item(s)/day, $${d.usdPerDay}/day, only after ${Math.round(d.minIdleMs / 1000)}s idle`);
 }
