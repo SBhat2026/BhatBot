@@ -120,6 +120,16 @@ const { classifyDepth } = require('../lib/depth');      // A3 — response-depth
       assert.equal(wav.readUInt32LE(40), 8);                // 4 samples * 2 bytes
     }],
     ['voicestream: session greets, transcribes utterance, replies', async () => {
+      // POLL, DO NOT SLEEP. These waits used to be fixed setTimeouts (40/20/100ms) sized against an
+      // idle machine. Inside `npm run verify` they run behind 87 other suites, and under that load
+      // 100ms was not always enough for the reply to synthesize — so this test failed at random and
+      // blocked a push that had nothing to do with it. A flaky gate is worse than no gate: it
+      // teaches you to reach for --no-verify. Waiting on the CONDITION is both faster and stable.
+      const until = async (fn, ms = 4000, label = 'condition') => {
+        const t0 = Date.now();
+        while (Date.now() - t0 < ms) { if (fn()) return true; await new Promise((r) => setTimeout(r, 5)); }
+        throw new Error(`timed out after ${ms}ms waiting for ${label}`);
+      };
       const { EventEmitter } = require('events');
       const calls = { synth: 0, transcribe: 0, begin: 0 };
       const sent = [];
@@ -132,13 +142,19 @@ const { classifyDepth } = require('../lib/depth');      // A3 — response-depth
       });
       const ws = new FakeWS(); vs.handle(ws, {});
       ws.emit('message', JSON.stringify({ event: 'start', start: { streamSid: 'MZ', callSid: 'CA' } }));
-      await new Promise((r) => setTimeout(r, 40));
+      await until(() => sent.some((m) => m.event === 'mark'), 4000, 'the greeting mark');
       const gm = sent.find((m) => m.event === 'mark'); ws.emit('message', JSON.stringify({ event: 'mark', mark: { name: gm.mark.name } }));
-      await new Promise((r) => setTimeout(r, 20));
+      // Fixed settle, deliberately. Acknowledging the mark flips the session out of "playing the
+      // greeting" and back to listening — a synchronous state change, not async work, so there is
+      // nothing meaningful to poll on (`calls.begin` is ALREADY 1 from the greeting, so polling it
+      // returns instantly and the media below arrives while the session is still deaf). 150ms is
+      // generous for a state flip; the part that genuinely varies under load is the synthesis
+      // below, and that is what gets polled.
+      await new Promise((r) => setTimeout(r, 150));
       const voiced = Buffer.alloc(160, 0x10).toString('base64'), silent = Buffer.alloc(160, 0xff).toString('base64');
       for (let i = 0; i < 20; i++) ws.emit('message', JSON.stringify({ event: 'media', media: { payload: voiced } }));
       for (let i = 0; i < 40; i++) ws.emit('message', JSON.stringify({ event: 'media', media: { payload: silent } }));
-      await new Promise((r) => setTimeout(r, 100));
+      await until(() => calls.synth >= 2 && calls.begin >= 2, 6000, 'the reply to be synthesized');
       assert.ok(calls.synth >= 2, 'greeting + reply synthesized');
       assert.equal(calls.transcribe, 1, 'utterance transcribed once');
       assert.equal(calls.begin, 2, 'greeting turn + reply turn');
@@ -155,11 +171,16 @@ const { classifyDepth } = require('../lib/depth');      // A3 — response-depth
         voicePoll: () => ({ ready: true, text: '', more: false }), log: () => {},
       });
       const ws = new FakeWS(); vs.handle(ws, {});
+      const until = async (fn, ms = 4000, label = 'condition') => {
+        const t0 = Date.now();
+        while (Date.now() - t0 < ms) { if (fn()) return true; await new Promise((r) => setTimeout(r, 5)); }
+        throw new Error(`timed out after ${ms}ms waiting for ${label}`);
+      };
       ws.emit('message', JSON.stringify({ event: 'start', start: { streamSid: 'MZ', callSid: 'CA' } }));
-      await new Promise((r) => setTimeout(r, 20));   // still busy (synth pending / playing)
+      await new Promise((r) => setTimeout(r, 20));   // deliberate: we need it STILL busy (synth pending)
       const voiced = Buffer.alloc(160, 0x10).toString('base64');
       for (let i = 0; i < 25; i++) ws.emit('message', JSON.stringify({ event: 'media', media: { payload: voiced } }));
-      await new Promise((r) => setTimeout(r, 30));
+      await until(() => sent.some((m) => m.event === 'clear'), 4000, 'the barge-in flush');
       assert.ok(sent.some((m) => m.event === 'clear'), 'sent clear to flush queued audio on barge-in');
     }],
   ]);
