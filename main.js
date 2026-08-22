@@ -86,6 +86,7 @@ const mcphub = require('./lib/mcphub');               // MCP-client hub — cons
 const connectors = require('./lib/connectors');       // hosted MCP connectors (Seedance …) — registry + host pinning
 const visualbuild = require('./lib/visualbuild');     // Seedance generate→poll→artifact (visual building)
 const assetgen = require('./lib/assetgen');           // 2D→3D→printable asset pipeline, run in code not by the model
+const backlogworker = require('./lib/backlogworker'); // specialists work real BACKLOG.md items while idle
 const figures = require('./lib/figures');             // data-accurate matplotlib/seaborn figures
 const logins = require('./lib/logins');               // domain-keyed login profiles (CRED_REF handles)
 const modePrompts = require('./lib/prompts');         // P4  — mode-switching system prompts
@@ -5809,6 +5810,10 @@ async function agentLoop(history, apiKey, event, opts = {}) {
   // All exits go through here so live guidance can be offered for learning (2a).
   const finish = (text) => {
     agentState = 'idle';
+    // Restart the idle clock the background worker waits on. Anchoring it to the END of a real turn
+    // is what makes "only while you are away" mean anything — a clock started at boot would let the
+    // worker fire mid-conversation just because no turn happened to be in flight at that instant.
+    _blIdleSince = Date.now();
     // T2 abort-guard: if this exit is an interruption mid-tool-call, seal the dangling tool_use with
     // synthetic '[interrupted]' results NOW, so the stored history is pairing-safe at the source.
     history = sealDanglingToolUse(history);
@@ -8146,6 +8151,95 @@ function startWeaver() {
   console.log(`[weaver] started — a slice every ${everyMs / 1000}s while a window is open`);
 }
 function stopWeaver() { if (_weaverTimer) { clearInterval(_weaverTimer); _weaverTimer = null; } if (_weaver) _weaver.stop(); }
+
+// ── BACKLOG WORKER — the specialists work real items while you are away ─────────────────────────
+//
+// The FLEET office was populated but motionless: the standing specialists have nothing to do, so
+// they stand there. This gives them BACKLOG.md. They move because they are genuinely working, which
+// makes the office a truthful readout rather than an animation.
+//
+// The registration into `fleetAgents` is the part that matters visually: presenceSnapshot() reads
+// that map first, so a working item becomes a live, steerable character that walks to a desk and
+// turns blue — and, because it is a real fleet entry, clicking it opens its monitor like any other.
+const BACKLOG_STATE = path.join(os.homedir(), '.bhatbot', 'backlog-worker.json');
+let _blTimer = null, _blRunning = false, _blIdleSince = Date.now();
+function backlogState() { try { return JSON.parse(fs.readFileSync(BACKLOG_STATE, 'utf8')); } catch { return {}; } }
+function saveBacklogState(s) { try { fs.mkdirSync(path.dirname(BACKLOG_STATE), { recursive: true }); fs.writeFileSync(BACKLOG_STATE, JSON.stringify(s, null, 2)); } catch {} }
+
+async function backlogTick() {
+  if (_blRunning) return;
+  const cfg = loadConfig().backlogWorker || {};
+  let items = [];
+  try { items = backlogworker.parseBacklog(fs.readFileSync(path.join(__dirname, 'BACKLOG.md'), 'utf8')); } catch {}
+  const decision = backlogworker.plan({
+    now: Date.now(), items, state: backlogState(), cfg,
+    idleSince: _blIdleSince,
+    busy: agentState === 'running' || agentState === 'paused',
+    lockHeld: false,                      // bgTick already holds the shared lock around this call
+  });
+  if (!decision.run) { if (cfg.verbose) console.log('[backlog] idle — ' + decision.reason); return; }
+
+  _blRunning = true;
+  const item = decision.item;
+  try {
+    const res = await backlogworker.runItem(item, {
+      log: (m) => console.log(m),
+      // Each state change is mirrored into fleetAgents so the office animates from real work.
+      onState: ({ id, agent, status, step }) => {
+        try {
+          const code = (subagents.AGENTS[agent] && subagents.AGENTS[agent].codename) || agent.toUpperCase();
+          if (status === 'done' || status === 'failed') {
+            fleetAgents.set(id, { ...(fleetAgents.get(id) || {}), status, step: '', ts: Date.now() });
+            // Let the finished character stand for a moment, then leave — otherwise the office
+            // slowly fills with completed work nobody is doing.
+            setTimeout(() => { try { fleetAgents.delete(id); pushPresenceNow(); } catch {} }, 45000);
+          } else {
+            fleetAgents.set(id, { id, role: agent, codename: code, task: item.text.slice(0, 160), status, step: step || '', text: '', feedback: [] });
+          }
+          pushPresenceNow();
+        } catch {}
+      },
+      // The opts are USED, not decorated: maxSteps bounds the tool loop (a write-up does not need
+      // eight tool steps) and runItem races the whole thing against maxItemMs.
+      runAgent: async (name, brief, o = {}) => {
+        // MEASURE the spend, do not ask for it. subagents.run does not report cost, so `usd` came
+        // back undefined → 0 on every item, and the daily $ cap could therefore never trigger: it
+        // was a documented guarantee that did nothing, in the one loop that spends money unattended.
+        // costToday() is the real ledger every LLM call already writes to, so the delta across the
+        // run is what was actually billed — including any tools the specialist called.
+        const before = costToday().usd || 0;
+        const r = await subagents.run(name, brief, subagentDeps(), { maxSteps: o.maxSteps || 5 });
+        const spent = Math.max(0, (costToday().usd || 0) - before);
+        return { success: r && r.success !== false, result: (r && (r.result || r.text)) || '', usd: spent };
+      },
+    }, { maxItemMs: cfg.maxItemMs, maxSteps: cfg.maxSteps });
+
+    saveBacklogState(backlogworker.record(backlogState(), item, res, Date.now()));
+    // SAY WHY IT FAILED. This logged a bare ✗ with a duration, which is how a 1-second failure and a
+    // 2-hour one looked identical in the log — and both happened. The error and the cost are the two
+    // things you actually need to decide whether the loop is working or quietly burning money.
+    const cost = res.usd ? ` · $${res.usd.toFixed(3)}` : '';
+    console.log(`[backlog] ${res.ok ? '✓' : '✗'} ${item.agent} — ${item.text.slice(0, 60)} (${Math.round((res.ms || 0) / 1000)}s${cost})`
+      + (res.ok ? '' : ` — ${res.error || 'no error reported'}`));
+    // The write-up is the artifact. Bank it so the work survives the session.
+    if (res.ok && res.text) {
+      try { synapse().brain.upsertNode({ type: 'finding', ref: 'backlog:' + backlogworker.itemKey(item), label: item.text.slice(0, 90), text: String(res.text).slice(0, 6000), meta: { source: 'backlog-worker', agent: item.agent } }, Date.now()); synapse().save(); } catch {}
+    }
+  } catch (e) { console.warn('[backlog] tick failed:', e.message); }
+  finally { _blRunning = false; }
+}
+
+function startBacklogWorker() {
+  const cfg = loadConfig().backlogWorker || {};
+  if (cfg.enabled === false) { console.log('[backlog] worker disabled by config'); return; }
+  if (_blTimer) clearInterval(_blTimer);
+  const everyMs = Math.max(5, Number(cfg.everyMin) || backlogworker.DEFAULTS.everyMin) * 60000;
+  _blTimer = setInterval(bgTick('backlog', backlogTick), everyMs);
+  setTimeout(bgTick('backlog', backlogTick), 90000);   // first look shortly after boot, not during it
+  const d = { ...backlogworker.DEFAULTS, ...cfg };
+  console.log(`[backlog] worker on — up to ${d.maxPerDay} item(s)/day, $${d.usdPerDay}/day, only after ${Math.round(d.minIdleMs / 1000)}s idle`);
+}
+function stopBacklogWorker() { if (_blTimer) { clearInterval(_blTimer); _blTimer = null; } }
 
 function startSynapseWorker() {
   const c = synapseWorkerConfig();
@@ -10573,6 +10667,7 @@ app.whenReady().then(() => {
     startMemoryMaintenance();   // always-on memory upkeep (runs on a timer, independent of the window)
     startSynapseWorker();       // SYNAPSE second brain — free re-import loop + slow budget-capped paid pass
     startWeaver();              // always-on connection weaving while a window is open
+    startBacklogWorker();       // idle-time: the standing specialists work real BACKLOG.md items
     // Fire-and-forget: connector handshakes are remote round-trips and must never gate boot. They
     // race each other (lib/mcphub.connectAll) and each races its own transports, so the hub is live
     // in about the time of the single slowest endpoint, and a dead one costs one timeout in the

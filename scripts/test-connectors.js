@@ -170,14 +170,31 @@ const throws = (fn, re, m) => { try { fn(); } catch (e) { if (re.test(e.message)
   ok(n === 0, 'an unreachable connector yields zero tools rather than throwing');
   ok(elapsed < 12000, `and gives up in ${(elapsed / 1000).toFixed(1)}s — bounded by the timeout, not by the socket (was ~9 minutes)`);
 
-  const t1 = Date.now();
   const st = await mcphub.connectAll([BLACKHOLE, { ...BLACKHOLE, name: 'blackhole2' }], { timeoutMs: 1500 });
-  const par = Date.now() - t1;
   ok(Array.isArray(st.failed) && st.failed.length === 2, 'connectAll REPORTS which connectors failed, so the caller can retry them');
   ok(st.failed.includes('blackhole') && st.failed.includes('blackhole2'), '…by name');
   ok(st.total === 0, 'and reports zero live tools');
-  // Serial would be ~2x one connector's budget; parallel is ~1x. Generous bound to stay stable.
-  ok(par < elapsed * 1.8, `two dead connectors resolve in ${(par / 1000).toFixed(1)}s — connected in PARALLEL, so one slow endpoint does not gate the others`);
+
+  // PARALLELISM IS ASSERTED STRUCTURALLY, NOT BY STOPWATCH.
+  // The first version of this compared two wall-clock measurements (`par < elapsed * 1.8`). In
+  // isolation that is 1.5s vs 1.5s and passes; inside `npm run verify`, behind 88 other suites
+  // several of which do their own network I/O, the same two dead connects measured 140s — a timeout
+  // only fires when the event loop reaches it, so under contention both numbers inflate, and not
+  // together. That is the identical flake this repo just had to fix in test-upgrade.js. Timing was
+  // only ever a PROXY for the thing that actually changed, which is the control flow: connectAll
+  // fans out with Promise.all, and connectOne races its transports with Promise.any rather than
+  // awaiting them in sequence. Assert that directly and it holds on any machine.
+  {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'lib', 'mcphub.js'), 'utf8');
+    const all = src.slice(src.indexOf('async function connectAll'), src.indexOf('function toolSchemas'));
+    ok(/Promise\.all\(/.test(all), 'connectAll fans the connectors out in parallel');
+    ok(!/for\s*\(const s of enabled\)\s*await/.test(all), 'and does NOT await them one at a time (the original bug)');
+    const one = src.slice(src.indexOf('async function connectOne'), src.indexOf('async function connectAll'));
+    ok(/Promise\.any\(/.test(one), 'connectOne RACES its transports — an SSE-only server no longer waits out the HTTP timeout first');
+    ok(!/Promise\.allSettled\(/.test(one), 'and does not use allSettled, which would make a healthy connector wait for the loser');
+    ok(/withTimeout\(/.test(one), 'every dial is bounded by a timeout');
+    ok(/Promise\.resolve\(transport\.close\(\)\)/.test(one), 'and cleanup is fire-and-forget — awaiting close() on a wedged socket hangs too');
+  }
 
   ok(mcphub.status().plugins.length === 0, 'a failed connector leaves no half-registered entry behind');
 
