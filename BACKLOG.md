@@ -1,6 +1,14 @@
 # BhatBot — Backlog
 
-_The single list of what is actually open. Verified against the code on 2026-08-21._
+_The single list of what is actually open. Re-verified against the code on 2026-08-21._
+
+> **This file is only worth anything if it is true.** Its first draft was transcribed from the old
+> sprint docs and labelled "verified" when it was not: **T4** (streaming digest) and **T5/T6** (the
+> learned spoken-length loop) were both fully wired in `main.js` — the grep that "proved" them open
+> had looked in `lib/speech.js`, where `makeSpeakStream` does not live — and **B3** was already
+> extracted to `mcp-server.js`. Three wrong entries out of about twenty, in a file whose entire job
+> is to be trusted, and which `lib/introspect.js` and `lib/codescan.js` read as live open debt.
+> Check the code before adding a line here, and check it again before believing one.
 
 This replaces the debt that was scattered across ~17 phase notes, sprint reports and roadmaps.
 Those files had drifted badly: **most of what they listed as "not built" had shipped months ago**
@@ -25,7 +33,6 @@ extraction itself still pays: steps 1–7 landed (`lib/pure.js`, `lib/audit.js`,
 
 - ⬜ **B1** — extract the agent loop (`agentLoop` / `runPipeline` / `fastReply` / `dispatchTurn`) into `lib/loop.js`
 - ⬜ **B2** — extract the tool registry + `executeTool` into `lib/tools/` (one file per tool group)
-- ⬜ **B3** — extract the Express/MCP server + IPC wiring into `lib/server.js`
 - ⬜ **B4** — extract voice/TTS (`speakDesktop`, speak-stream, `maybeAdjustSpeed`) into `lib/voice.js`
 
 ### Deferred capability modules (designed, never built)
@@ -41,13 +48,8 @@ From the FORGE sprint. The runtime floor each depends on **does** exist
 - ⬜ **P3 Scout** — web enrichment of graph nodes. No enrichment exists at all today.
 - ⬜ **P5 Sync** — local ↔ cloud ↔ Notion reconciliation.
 
-### Voice
-- ⬜ **T4 streaming digest mode** — `classifySpeechMode(runningText)` in `lib/speech.js` + a `digest` mode in `makeSpeakStream` (headline-first, no summarize round-trip). De-prioritized once, still wanted.
-- ⬜ **T5/T6 learned spoken-length loop** — close the loop from `lib/spokenmodel.js` telemetry back into length selection.
-
-### Proactivity (AMBITIOUS_ROADMAP §C)
+### Proactivity
 - ⬜ **C1 initiative engine** — idle-time pass over calendar + unread important mail that proposes, not just reports
-- ⬜ **C2 notification budget + quiet hours** — cap proactive pings/day; `lib/ambient.js` has the signal plumbing but no budget
 - ⬜ **C3 outcome learning** — track whether a proactive ping was acted on, feed that back into C1's threshold
 
 ### Fine-tuning (AMBITIOUS_ROADMAP §A)
