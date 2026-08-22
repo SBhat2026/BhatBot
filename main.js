@@ -1891,6 +1891,19 @@ async function anthropicStream(body, apiKey, onText, { retries = 3, onThinking =
           const cr = usage.cache_read_input_tokens || 0;
           if (cr > 0) console.log('[CACHE HIT]', cr, 'tokens read from cache');
           else if ((usage.input_tokens || 0) > 800) console.warn('[CACHE MISS] check cache_control placement');
+          // Report what context editing ACTUALLY did. We ask for clear_thinking + clear_tool_uses on
+          // every agentic turn, but until now nothing read the response back, so a wrong beta header
+          // or a trigger that never fires would have been indistinguishable from working perfectly.
+          // Same lesson as the rate-limit headers: a feature you cannot observe is a feature you
+          // cannot trust.
+          try {
+            const applied = (ev.message && ev.message.context_management && ev.message.context_management.applied_edits) || [];
+            for (const a of applied) {
+              const cleared = a.cleared_input_tokens || 0;
+              console.log(`[context] ${String(a.type).replace(/_\d+$/, '')} freed ${cleared} tokens`
+                + (a.cleared_tool_uses ? ` (${a.cleared_tool_uses} tool use(s))` : ''));
+            }
+          } catch {}
         }
         else if (ev.type === 'content_block_start') {
           const b = ev.content_block;
