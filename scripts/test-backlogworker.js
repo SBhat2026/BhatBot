@@ -210,5 +210,23 @@ const base = { now: NOW, items, idleSince: NOW - 10 * 60000, busy: false, lockHe
     ok(/no error reported/.test(src), 'and the log line reports the failure reason');
   }
 
+  // ── transient refusals retry; permanent ones wait ───────────────────────────────────────────
+  // The boot tick lands at 90s against a 120s idle threshold — a guaranteed no, for a condition
+  // that clears 30 seconds later. Without the hint the worker then waited a full 20-minute cycle,
+  // which is the same "a transient refusal costs a whole period" bug as the lock skip.
+  {
+    const t = (ctx) => w.plan({ now: NOW, items, state: {}, idleSince: NOW - 9e6, busy: false, lockHeld: false, ...ctx });
+    ok(t({ idleSince: NOW - 5000 }).retry === true, 'not-idle-long-enough retries shortly — it clears on its own');
+    ok(t({ busy: true }).retry === true, 'busy retries — a foreground turn ends');
+    ok(t({ lockHeld: true }).retry === true, 'a lock skip retries — the holder finishes');
+    ok(!t({ state: { day: today, countToday: 99 } }).retry, 'a daily cap does NOT retry — nothing clears until tomorrow');
+    ok(!t({ items: [] }).retry, 'nothing-to-do does NOT retry — spinning on an empty list is pointless');
+    ok(!t({ cfg: { enabled: false } }).retry, 'and disabled does not retry');
+
+    const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'main.js'), 'utf8');
+    ok(/decision\.retry && _blOnSkip/.test(src), 'the live wiring acts on the hint');
+    ok(/if \(_blRetry\) return;/.test(src), 'and keeps at most ONE pending retry, so it can never become a queue');
+  }
+
   console.log(`✅ backlog worker: ${pass} assertions passed`);
 })().catch((e) => { console.error('❌ backlog worker:', e.message); process.exit(1); });

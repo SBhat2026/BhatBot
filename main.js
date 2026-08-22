@@ -8189,7 +8189,7 @@ function stopWeaver() { if (_weaverTimer) { clearInterval(_weaverTimer); _weaver
 // that map first, so a working item becomes a live, steerable character that walks to a desk and
 // turns blue — and, because it is a real fleet entry, clicking it opens its monitor like any other.
 const BACKLOG_STATE = path.join(os.homedir(), '.bhatbot', 'backlog-worker.json');
-let _blTimer = null, _blRunning = false, _blIdleSince = Date.now(), _blLastReason = null;
+let _blTimer = null, _blRunning = false, _blIdleSince = Date.now(), _blLastReason = null, _blOnSkip = null;
 function backlogState() { try { return JSON.parse(fs.readFileSync(BACKLOG_STATE, 'utf8')); } catch { return {}; } }
 function saveBacklogState(s) { try { fs.mkdirSync(path.dirname(BACKLOG_STATE), { recursive: true }); fs.writeFileSync(BACKLOG_STATE, JSON.stringify(s, null, 2)); } catch {} }
 
@@ -8211,8 +8211,11 @@ async function backlogTick() {
     // reason on every 20-minute tick would be noise; logging it on transition is the useful signal.
     if (decision.reason !== _blLastReason) {
       _blLastReason = decision.reason;
-      console.log('[backlog] holding off — ' + decision.reason);
+      console.log('[backlog] holding off — ' + decision.reason + (decision.retry ? ' (retrying shortly)' : ''));
     }
+    // A refusal that clears on its own gets the same short retry as a lock skip, rather than
+    // costing a full 20-minute cycle.
+    if (decision.retry && _blOnSkip) _blOnSkip('transient');
     return;
   }
   _blLastReason = null;
@@ -8281,13 +8284,13 @@ function startBacklogWorker() {
   // weaver`. A single short retry is not the thundering herd that comment warns about; that concern
   // is about N deferred ticks firing at once, and this is one worker rescheduling itself once.
   let _blRetry = null;
-  const tick = bgTick('backlog', backlogTick, {
-    onSkip: () => {
-      if (_blRetry) return;                              // one pending retry at a time, never a queue
-      _blRetry = setTimeout(() => { _blRetry = null; tick(); }, 60000);
-      if (_blRetry.unref) _blRetry.unref();              // must never hold the app open at quit
-    },
-  });
+  const onSkip = () => {
+    if (_blRetry) return;                                // one pending retry at a time, never a queue
+    _blRetry = setTimeout(() => { _blRetry = null; tick(); }, 60000);
+    if (_blRetry.unref) _blRetry.unref();                // must never hold the app open at quit
+  };
+  _blOnSkip = onSkip;                                    // backlogTick reuses it for transient refusals
+  const tick = bgTick('backlog', backlogTick, { onSkip });
   _blTimer = setInterval(tick, everyMs);
   setTimeout(tick, 90000);   // first look shortly after boot, not during it
   const d = { ...backlogworker.DEFAULTS, ...cfg };
