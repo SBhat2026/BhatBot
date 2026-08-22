@@ -8260,7 +8260,7 @@ async function backlogTick() {
     console.log(`[backlog] ${res.ok ? '✓' : '✗'} ${item.agent} — ${item.text.slice(0, 60)} (${Math.round((res.ms || 0) / 1000)}s${cost})`
       + (res.ok ? '' : ` — ${res.error || 'no error reported'}`));
     // The write-up is the artifact. Bank it so the work survives the session.
-    if (res.ok && res.text) {
+    if (res.ok && res.text && res.text.trim().length > 40) {
       try { synapse().brain.upsertNode({ type: 'finding', ref: 'backlog:' + backlogworker.itemKey(item), label: item.text.slice(0, 90), text: String(res.text).slice(0, 6000), meta: { source: 'backlog-worker', agent: item.agent } }, Date.now()); synapse().save(); } catch {}
     }
   } catch (e) { console.warn('[backlog] tick failed:', e.message); }

@@ -168,7 +168,12 @@ const throws = (fn, re, m) => { try { fn(); } catch (e) { if (re.test(e.message)
   const n = await mcphub.connectOne(BLACKHOLE, { timeoutMs: 1500 });
   const elapsed = Date.now() - t0;
   ok(n === 0, 'an unreachable connector yields zero tools rather than throwing');
-  ok(elapsed < 12000, `and gives up in ${(elapsed / 1000).toFixed(1)}s — bounded by the timeout, not by the socket (was ~9 minutes)`);
+  // Generous ceiling ON PURPOSE. What this distinguishes is "our deadline fired" from "no deadline,
+  // so the SOCKET's own ~75s-per-attempt timeout governs" — which is what produced the original
+  // nine-minute stall. A tight bound is a third flake waiting to happen: this whole suite runs
+  // behind ~90 others and a 1.5s timer only fires when the event loop reaches it, so the nominal
+  // 1.5s legitimately measured 12.4s under load. 30s still separates the two cases by a mile.
+  ok(elapsed < 30000, `and gives up in ${(elapsed / 1000).toFixed(1)}s — bounded by OUR timeout, not by the socket (was ~9 minutes)`);
 
   const st = await mcphub.connectAll([BLACKHOLE, { ...BLACKHOLE, name: 'blackhole2' }], { timeoutMs: 1500 });
   ok(Array.isArray(st.failed) && st.failed.length === 2, 'connectAll REPORTS which connectors failed, so the caller can retry them');
