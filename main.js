@@ -1821,7 +1821,21 @@ async function callClaude(messages, apiKey, model) {
     // "ack" turn stops burning Opus-grade thinking on "yes" and a "deep" turn gets xhigh.
     // Compaction switches on once the conversation is big enough to be at risk from capTokens'
     // lossy head-trim — below that threshold the beta surface would buy nothing.
-    _reason: { depth: d.depth, compact: estimateTokens(messages) > 60000 },
+    // THE CONTEXT LADDER, cheapest first. Each stage should get its chance before the next,
+    // costlier one fires:
+    //   30–100K  server-side tool-result CLEARING (depth-scaled, lib/reasoning.js) — no inference,
+    //            transcript untouched, cheapest thing that works
+    //   110K     server-side COMPACTION — a model round-trip, but high fidelity
+    //   120K     trimHistory() — our own summarizing trim
+    //   150K     capTokens() — hard drop of the oldest turns, the last resort
+    //
+    // This threshold was 60K, which put the EXPENSIVE lossy stage first, right in the range where
+    // clearing is the correct tool — we were paying for a summarization round-trip to remove tool
+    // output that could simply have been dropped. Anthropic's cookbook runs compaction at 150–180K;
+    // we sit at 110K instead because capTokens hard-caps the wire at 150K, so a 150K trigger would
+    // never fire, and because our own trimHistory at 120K would otherwise pre-empt the better
+    // summarizer with a cruder one.
+    _reason: { depth: d.depth, compact: estimateTokens(messages) > COMPACT_TRIGGER_TOKENS },
   }, apiKey);
   logDepthOutcome(d, r0, 'tool');            // every response → dataset; clipped:1 = the "needs more" signal
   if (d.depth === 'ack') return r0;          // trivial exchange — never worth continuing
@@ -2239,6 +2253,9 @@ async function askAI(input) {
 // most recent CONTEXT_KEEP_TAIL tokens verbatim; both fit under the wire cap with headroom. Raised
 // with the wire cap so a long autonomous fan-out keeps ~80K of verbatim recent context (was 16K)
 // and only summarizes past ~120K (was 28K) — i.e. we now actually USE the 200K window. Env-overridable.
+// Server-side compaction fires here: after clearing has had its chance (30–100K) and just BEFORE
+// our own cruder trimHistory (120K), so the high-fidelity summarizer goes first.
+const COMPACT_TRIGGER_TOKENS = Number(process.env.BB_COMPACT_TRIGGER) || 110000;
 const CONTEXT_TRIM_BUDGET = Number(process.env.BB_CONTEXT_BUDGET) || 120000;
 const CONTEXT_KEEP_TAIL = Number(process.env.BB_CONTEXT_TAIL) || 80000;
 // Live threshold: config.midLoopTrimThreshold overrides the default at runtime (no restart).
@@ -3412,8 +3429,15 @@ function orchestratorAdapters(wsDir, event) {
   return {
     ollamaUp,
     ollamaChat: (m, s, model) => ollamaChat(m, s, model),
-    anthropic: async (m, s, model) => {
-      const j = await anthropicRequest({ model, max_tokens: 2048, system: [{ type: 'text', text: s, cache_control: { type: 'ephemeral' } }], messages: m }, getApiKey());
+    anthropic: async (m, s, model, opts = {}) => {
+      const j = await anthropicRequest({
+        model, max_tokens: 2048,
+        system: [{ type: 'text', text: s, cache_control: { type: 'ephemeral' } }], messages: m,
+        // Carries a caller's JSON schema to output_config.format. Without this the schema the DAG
+        // planner builds would be constructed, passed down two layers, and then silently dropped
+        // here — enforced-looking and doing nothing.
+        ...(opts.schema ? { _reason: { schema: opts.schema, schemaName: opts.schemaName } } : {}),
+      }, getApiKey());
       return (j.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('\n');
     },
     // Cross-provider offload callers (plain text, no tools) — spread agent load off the
@@ -8076,8 +8100,14 @@ function synapse() {
         embedBatch: (texts) => semantic.embedBatch(texts),
         // The GUI already owns a rate-paced, router-aware Claude client — use it here rather than
         // opening a second uncounted channel. The headless worker injects lib/llm.js instead.
-        llm: async ({ system, content, maxTokens }) => {
-          const r = await anthropicRequest({ model: MODEL_SONNET, max_tokens: maxTokens || 256, system, messages: [{ role: 'user', content }] }, getApiKey());
+        // `schema` rides through to output_config.format (lib/reasoning.js), so a caller that needs
+        // JSON gets it ENFORCED rather than digging it out of prose with a regex afterwards.
+        llm: async ({ system, content, maxTokens, schema, schemaName }) => {
+          const r = await anthropicRequest({
+            model: MODEL_SONNET, max_tokens: maxTokens || 256, system,
+            messages: [{ role: 'user', content }],
+            ...(schema ? { _reason: { schema, schemaName } } : {}),
+          }, getApiKey());
           return (r.content || []).filter((x) => x.type === 'text').map((x) => x.text).join(' ');
         },
         listProjects: () => projects.list(),

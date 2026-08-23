@@ -163,10 +163,34 @@ const ok = (c, m) => { assert.ok(c, m); pass++; };
   const both = types({ compact: true });
   ok(both.indexOf('clear_thinking_20251015') < both.indexOf('clear_tool_uses_20250919'), 'clear_thinking is listed FIRST, as the API requires');
 
+  // Values sourced from Anthropic's context-engineering cookbook (trigger 30K / keep 4 /
+  // clear_at_least 10K; working ranges 30K–100K, 3–6, 10K) rather than chosen by feel. The first
+  // pass used 40K/3/5K and clear_at_least was HALF the recommended floor.
   const ct = cm({}).find((e) => e.type === 'clear_tool_uses_20250919');
-  ok(ct.trigger.value >= 20000, 'the trigger is high enough that short conversations are untouched');
-  ok(ct.keep.value >= 3, 'recent tool results are kept — the model still sees what it just did');
-  ok(ct.clear_at_least.value > 0, 'clear_at_least is set, so a clear is worth the cache invalidation it costs');
+  ok(ct.keep.value >= 3 && ct.keep.value <= 6, `keep is inside the published 3–6 range (${ct.keep.value})`);
+  ok(ct.clear_at_least.value >= 10000, 'clear_at_least meets the 10K floor — below it, a clear invalidates the cache prefix without freeing enough to pay for the re-write');
+
+  // Depth-scaled inside the published band: an 'ack' turn has no use for 100K of tool history and
+  // a 'deep' turn is crippled without it. Reuses lib/depth.js rather than inventing a second policy.
+  const trig = (d) => cm({ depth: d }).find((e) => e.type === 'clear_tool_uses_20250919').trigger.value;
+  ok(trig('ack') < trig('deep'), 'a cheap turn clears sooner than a deep one');
+  ok(trig('conversational') <= trig('detailed') && trig('detailed') <= trig('deep'), 'the trigger rises monotonically with depth');
+  for (const d of ['ack', 'conversational', 'detailed', 'deep']) {
+    ok(trig(d) >= 30000 && trig(d) <= 100000, `${d} (${trig(d)}) sits inside the published 30K–100K band`);
+  }
+  ok(trig(undefined) >= 30000, 'an unclassified turn still gets a sane trigger');
+  ok(cm({ depth: 'deep', clearTrigger: 12345 }).find((e) => e.type === 'clear_tool_uses_20250919').trigger.value === 12345,
+    'an explicit override still wins');
+
+  // The LADDER: clearing must be cheaper and earlier than compaction, or the expensive lossy stage
+  // runs in the range where simply dropping tool output would have done.
+  const mainSrc = require('fs').readFileSync(require('path').join(__dirname, '..', 'main.js'), 'utf8');
+  const compactAt = Number((/BB_COMPACT_TRIGGER\) \|\| (\d+)/.exec(mainSrc) || [])[1]);
+  ok(compactAt > 100000, `compaction fires at ${compactAt} — ABOVE the clearing band, not at 60K inside it`);
+  const trimAt = Number((/BB_CONTEXT_BUDGET\) \|\| (\d+)/.exec(mainSrc) || [])[1]);
+  const capAt = Number((/BB_WIRE_CAP\) \|\| (\d+)/.exec(mainSrc) || [])[1]);
+  ok(compactAt < trimAt, 'and BELOW our own trimHistory, so the high-fidelity summarizer goes before the crude one');
+  ok(trimAt < capAt, 'which in turn runs before the hard drop');
   for (const t of ['save_memory', 'ask_options']) {
     ok(ct.exclude_tools.includes(t), `${t} is excluded — clearing it would erase the ANSWER, not save context`);
   }
