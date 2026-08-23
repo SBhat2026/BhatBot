@@ -123,4 +123,34 @@ redact.setSecretProvider(() => [LIVE, OPAQUE, 'short']);
   ok(ms < 60, `100KB redacts in ${ms.toFixed(1)}ms — cheap enough for the per-tool-call hot path`);
 }
 
+// ── binary payloads must NOT be walked ────────────────────────────────────────────────────────
+// redactDeep runs on EVERY tool result, and several carry base64 (_image from screenshots, vision,
+// generated art). Standard base64 contains '+' and '/', which are word boundaries — so a
+// `\bAIza…` or `\bAKIA…` run can match INSIDE an image and the replacement silently corrupts it.
+// Verified before the fix: 'SGVsbG8+AIzaSyD…' → 'SGVsbG8+[REDACTED]+…'. Nothing findable lives in
+// there anyway: a secret does not survive base64 encoding in a form these rules could match.
+{
+  redact.setSecretProvider(() => []);
+  const evil = 'SGVsbG8+AIzaSyD1234567890abcdefghijklmnopqrst+V29ybGQ=';
+  ok(redact.redact(evil) !== evil, 'precondition: this blob DOES trip a shape rule when treated as text');
+
+  const res = { _image: evil, shot: evil, screenshot: evil, nested: { _image: evil } };
+  redact.redactDeep(res);
+  for (const k of ['_image', 'shot', 'screenshot']) ok(res[k] === evil, `${k} is left byte-identical — corrupting a screenshot is silent and total`);
+  ok(res.nested._image === evil, 'including nested ones');
+
+  // But an ordinary text field carrying the same shape is still redacted.
+  const txt = { content: 'key AIzaSyD1234567890abcdefghijklmnopqrstuv here' };
+  redact.redactDeep(txt);
+  ok(/\[REDACTED\]/.test(txt.content), 'a real key in a TEXT field is still caught');
+  ok(redact.BINARY_KEYS.has('_image'), 'the skip list is exported so it can be extended with new payload keys');
+
+  // And it is free rather than merely safe.
+  const big = { _image: Buffer.alloc(300000).toString('base64') };
+  const t0 = process.hrtime.bigint();
+  redact.redactDeep(big);
+  const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+  ok(ms < 1, `a 400KB image costs ${ms.toFixed(2)}ms instead of ~1.4ms on every vision tool call`);
+}
+
 console.log(`✅ redact: ${pass} assertions passed`);

@@ -27,6 +27,8 @@ function extract(src, name) {
 // Pull the state maps + the function out of main.js so the test tracks the real source, not a copy.
 const grab = (decl) => { const i = main.indexOf(decl); const j = main.indexOf('\n', main.indexOf(';', i)); return main.slice(i, j); };
 const prelude = [
+  'let _rosterCache = null, _rosterAt = 0;',
+  'const ROSTER_TTL_MS = 30000;',
   grab('const JOB_STATE ='),
   main.slice(main.indexOf('const FLEET_STATE ='), main.indexOf('};', main.indexOf('const FLEET_STATE =')) + 2),
   grab('const PRESENCE_CAP ='),
@@ -41,8 +43,12 @@ function build(fleetAgents, jobs, standing) {
     ? [{ name: 'research', codename: 'ORACLE', turns: 3 }, { name: 'coding', codename: 'FORGE', turns: 0 }, { name: 'lifeadmin', codename: 'WARDEN', turns: 12 }]
     : standing;
   const subagents = { list: () => roster };
+  // presenceSnapshot reads the roster through standingRoster(), a 30s-TTL cache added because
+  // subagents.list() reads one history FILE PER SPECIALIST and the presence feed polls every 1.2s —
+  // ~150 file reads a minute to draw three idle characters. Extract it alongside so the test
+  // exercises the real path rather than a shape that no longer exists.
   return new Function('fleetAgents', 'jobsBus', 'subagents',
-    prelude + '\n' + extract(main, 'presenceSnapshot') + '\nreturn presenceSnapshot;')(fleetAgents, jobsBus, subagents);
+    prelude + '\n' + extract(main, 'standingRoster') + '\n' + extract(main, 'presenceSnapshot') + '\nreturn presenceSnapshot;')(fleetAgents, jobsBus, subagents);
 }
 
 // --- THE bug: every agent must carry an id, or the click handler drops it ---------------------
@@ -150,6 +156,26 @@ function build(fleetAgents, jobs, standing) {
   const a = build(fa, [], [])().agents[0];
   ok(a.task.length === 160, 'task clipped to 160 chars');
   ok(a.step.length === 120, 'step clipped to 120 chars');
+}
+
+// ── a BACKGROUND run is visible but not steerable ─────────────────────────────────────────────
+// The backlog worker borrows fleetAgents so the office animates from real work. presenceSnapshot
+// used to assert `steerable: true` for every fleetAgents entry, so clicking one called
+// openAgentWindow() for an agent with no monitor stream and no suit-card — the same dead-window bug
+// already fixed for `job:*`, reintroduced through a different door the moment another subsystem
+// started writing to that map. `steerable` is now DERIVED from the entry.
+{
+  const fa = new Map([
+    ['suit-1', { role: 'code', codename: 'FORGE', status: 'running', task: 'a real fleet suit' }],
+    ['backlog:x', { role: 'research', codename: 'ORACLE', status: 'working', task: 'a backlog item', background: true }],
+  ]);
+  const snap = build(fa, [], [])();
+  const suit = snap.agents.find((a) => a.id === 'suit-1');
+  const bg = snap.agents.find((a) => a.id === 'backlog:x');
+  ok(suit.steerable === true, 'a real fleet suit stays steerable — it has a card and a feedback queue that is actually drained');
+  ok(bg.steerable === false, 'a background run is NOT steerable — nothing reads its feedback and it has no monitor');
+  ok(bg.state === 'working' && bg.task === 'a backlog item', 'but it is still fully visible: state, task and hover text all work');
+  ok(bg.name === 'ORACLE', 'and it carries the specialist codename, so it is the same identity everywhere');
 }
 
 console.log(`✅ presence: ${pass} assertions passed`);

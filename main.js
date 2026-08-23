@@ -8265,7 +8265,7 @@ async function backlogTick() {
             // slowly fills with completed work nobody is doing.
             setTimeout(() => { try { fleetAgents.delete(id); pushPresenceNow(); } catch {} }, 45000);
           } else {
-            fleetAgents.set(id, { id, role: agent, codename: code, task: item.text.slice(0, 160), status, step: step || '', text: '', feedback: [] });
+            fleetAgents.set(id, { id, role: agent, codename: code, task: item.text.slice(0, 160), status, step: step || '', text: '', feedback: [], background: true });
           }
           pushPresenceNow();
         } catch {}
@@ -8425,6 +8425,19 @@ const FLEET_STATE = {
 };
 const PRESENCE_CAP = 12;                                  // office has 14 POIs; keep a little headroom
 
+// The standing roster, cached. subagents.list() reads one history FILE PER SPECIALIST to compute a
+// `turns` count, and presenceSnapshot runs on the 1.2s presence poll — so rendering three idle
+// characters was costing ~150 file reads a minute for a number that only changes when a specialist
+// actually runs. The count is cosmetic (it appears in the hover card), so a short TTL is plenty.
+let _rosterCache = null, _rosterAt = 0;
+const ROSTER_TTL_MS = 30000;
+function standingRoster() {
+  const now = Date.now();
+  if (_rosterCache && now - _rosterAt < ROSTER_TTL_MS) return _rosterCache;
+  try { _rosterCache = subagents.list(); _rosterAt = now; } catch { _rosterCache = _rosterCache || []; }
+  return _rosterCache;
+}
+
 function presenceSnapshot() {
   const agents = [];
   const seen = new Set();
@@ -8446,7 +8459,13 @@ function presenceSnapshot() {
         step: String(a.step || a.note || '').slice(0, 120),
         tool: a.tool || null,
         since: a.ts || now,
-        steerable: true,                                   // has a suit-card + feedback queue
+        // DERIVED, not asserted. A fleet suit launched by `fleet`/`plan_and_run` has a suit-card and
+        // a feedback queue that fleetDrainFeedback actually delivers. A background run (the backlog
+        // worker) borrows fleetAgents purely so the office animates from real work — it has no card
+        // and nothing reads its feedback, so calling it steerable pops a monitor window for an agent
+        // that has no monitor. That is the same dead-window bug already fixed for `job:*` entries,
+        // and it came back through a different door the moment another subsystem wrote here.
+        steerable: !a.background,
       });
     }
   } catch {}
@@ -8484,7 +8503,7 @@ function presenceSnapshot() {
   // same specialist is already on screen doing real work, so a live run always wins the anchor and
   // the character you see working is the one actually working.
   try {
-    for (const a of subagents.list()) {
+    for (const a of standingRoster()) {
       if (agents.length >= PRESENCE_CAP) break;
       const id = 'sub:' + a.name;
       const code = a.codename || a.name.toUpperCase();
