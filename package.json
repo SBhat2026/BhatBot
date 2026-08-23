@@ -123,6 +123,7 @@
     "test:subagent": "node scripts/test-subagent-wrapup.js",
     "test:structured": "node scripts/test-structured-output.js",
     "test:durability": "node scripts/test-brain-durability.js",
+    "audit:degrade": "node scripts/check-silent-degrade.js",
     "shoot:presence": "node scripts/shoot-presence.js"
   },
   "dependencies": {
