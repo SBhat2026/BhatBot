@@ -214,6 +214,19 @@
   #sy-3d { position: absolute; inset: 0; display: none; }
   #synapse-panel.mode3d #sy-canvas { display: none; }
   #synapse-panel.mode3d #sy-3d { display: block; }
+  /* Hover explanation — shared by the 2D canvas and the 3D constellation. A label alone answers
+     "what is this called"; the two questions you actually have are what KIND of thing it is and
+     whether it is load-bearing, so the tooltip leads with those. */
+  #synapse-panel { position: relative; }
+  #synapse-panel .sy-tip { position: absolute; z-index: 40; pointer-events: none; max-width: 300px;
+    background: rgba(10,16,24,.96); border: 1px solid var(--line); border-radius: 9px; padding: 9px 11px;
+    box-shadow: 0 10px 34px rgba(0,0,0,.55); font-size: 11.5px; line-height: 1.5; }
+  #synapse-panel .sy-tip .t { color: var(--text); font-weight: 600; margin-bottom: 3px; }
+  #synapse-panel .sy-tip .k { color: var(--accent); font-size: 10.5px; letter-spacing: .02em; }
+  #synapse-panel .sy-tip .r { color: var(--text-dim); margin-top: 5px; }
+  #synapse-panel .sy-tip .v { color: var(--text-dim2); margin-top: 4px; font-size: 10.5px; }
+  #synapse-panel .sy-tip .x { color: var(--text-dim2); margin-top: 6px; padding-top: 6px;
+    border-top: 1px solid var(--line); font-size: 10.5px; }
   #sy-inbox { position: absolute; top: 10px; right: 10px; width: 288px; max-height: 62%; overflow-y: auto; z-index: 3;
     background: color-mix(in srgb, var(--surface) 92%, transparent); border: 1px solid var(--line); border-radius: 10px; padding: 9px 11px; font-size: 12px; }
   #sy-inbox.empty { display: none; }
@@ -429,6 +442,11 @@
   /* BhatBot orb: layered reactor — tick ring + concentric rings + dual hex core + equalizer */
   #orb { position: relative; width: 232px; height: 232px; flex-shrink: 0; filter: drop-shadow(0 0 22px rgba(0,200,255,.22)); }
   /* outer tick/graduation ring (radial gradient "notches") */
+  /* PROBATION — the wake fired and we are waiting three seconds to see if you meant us. Deliberately
+     the quietest state in the HUD: a faint amber breath, no motion, no sound. If it turns out you
+     were talking to someone else, this is the only thing that ever happened. */
+  #orb.probation { filter: drop-shadow(0 0 26px rgba(242,193,78,.34)); }
+  #orb.probation .core { box-shadow: 0 0 26px rgba(242,193,78,.5); animation: corepulse 1.2s ease-in-out infinite; }
   #orb .ticks { position: absolute; inset: 0; border-radius: 50%; animation: spin 30s linear infinite;
     background: repeating-conic-gradient(from 0deg, rgba(0,200,255,.34) 0deg 1.4deg, transparent 1.4deg 9deg);
     -webkit-mask: radial-gradient(circle, transparent 0 47%, #000 47% 50%, transparent 50.5%);
@@ -2137,7 +2155,13 @@ window.bhatbot.onStudioReload && window.bhatbot.onStudioReload(() => reloadStudi
     reheat(0.5);   // graph changed → nudge the layout, don't restart it
     G.nodes = (g.nodes || []).map((n) => { const p = prev[n.id] || {}; const node = { ...n, x: p.x != null ? p.x : (Math.random() * 400 - 200), y: p.y != null ? p.y : (Math.random() * 300 - 150), vx: 0, vy: 0 }; byId[n.id] = node; return node; });
     G.edges = (g.edges || []).filter((e) => byId[e.from] && byId[e.to]);
-    const st = document.getElementById('sy-stats'); if (st && g.stats) st.textContent = `${g.stats.nodes} nodes · ${g.stats.edges} links · ${g.stats.proposed} proposed`;
+    recomputeDegree();          // hover explains a node's ROLE, which is degree-relative
+
+    // `pruned` was already computed by brain.stats() and shown nowhere, so the autoprune — which
+    // runs on every worker tick — was invisible: the graph just quietly got smaller.
+    const st = document.getElementById('sy-stats');
+    if (st && g.stats) st.textContent = `${g.stats.nodes} nodes · ${g.stats.edges} links · ${g.stats.proposed} proposed`
+      + (g.stats.pruned ? ` · ${g.stats.pruned} pruned` : '');
     const bd = document.getElementById('sy-budget'); if (bd && g.budget) bd.textContent = `$${(g.budget.spent || 0).toFixed(3)} / $${(g.budget.limit || 1).toFixed(2)}`;
     renderInbox(g.edges || []);
     if (g.meta) renderSuggest(g.meta.suggestions || []);
@@ -2257,6 +2281,7 @@ window.bhatbot.onStudioReload && window.bhatbot.onStudioReload(() => reloadStudi
   function pick(mx, my) { const p = s2w(mx, my); let best = null, bd = 1e9; for (const n of G.nodes) { const dx = n.x - p.x, dy = n.y - p.y, d = dx * dx + dy * dy, r = 7 + (n.importance || 1) * 1.5; if (d < r * r && d < bd) { bd = d; best = n; } } return best; }
   cv.addEventListener('mousedown', (e) => { const n = pick(e.offsetX, e.offsetY); if (n) dragNode = n; else { panning = true; last = { x: e.offsetX, y: e.offsetY }; } });
   cv.addEventListener('mousemove', (e) => { hover = pick(e.offsetX, e.offsetY); cv.style.cursor = hover ? 'pointer' : (panning ? 'grabbing' : 'grab');
+    showTip(dragNode || panning ? null : hover, e.clientX, e.clientY);
     if (dragNode) { const p = s2w(e.offsetX, e.offsetY); dragNode.x = p.x; dragNode.y = p.y; dragNode.vx = dragNode.vy = 0; }
     else if (panning && last) { view.x += e.offsetX - last.x; view.y += e.offsetY - last.y; last = { x: e.offsetX, y: e.offsetY }; } });
   window.addEventListener('mouseup', () => { dragNode = null; panning = false; last = null; });
@@ -2297,52 +2322,233 @@ window.bhatbot.onStudioReload && window.bhatbot.onStudioReload(() => reloadStudi
   // On open: ensure the graph is populated (free import if empty) so it's never blank.
   if (navBtn) navBtn.addEventListener('click', () => setTimeout(async () => { size(); ingest(await (window.bhatbot.synapseEnsure ? window.bhatbot.synapseEnsure() : window.bhatbot.synapseGraph())); }, 60));
   window.addEventListener('resize', () => { if (panel.classList.contains('active')) size(); });
-  // ---- 3D toggle (Three.js constellation; reuses 2D positions + a hashed z spread) ----
+  // ── WHAT A NODE MEANS, AND WHAT IT DOES HERE ────────────────────────────────────────────────────
+  // A graph of 1,774 dots is not self-explaining. Hovering used to show a label, which answers "what
+  // is this called" and not the two questions you actually have: what KIND of thing is this, and is
+  // it load-bearing? Degree answers the second — a hub is where a cluster is held together, and an
+  // isolated node is one the Weaver has not found a use for yet.
+  const TYPE_MEANING = {
+    project: 'a project — the work itself, with its files and findings hanging off it',
+    file: 'a file on disk, attributed to the project it belongs to',
+    memory: 'something worth remembering, kept from a past conversation',
+    concept: 'an idea that recurs across projects — the connective tissue between them',
+    finding: 'a result or conclusion recorded from real work',
+    notion: 'a page imported from Notion',
+  };
+  let degree = {}, hubAt = 8;
+  function recomputeDegree() {
+    degree = {};
+    for (const e of G.edges) { degree[e.from] = (degree[e.from] || 0) + 1; degree[e.to] = (degree[e.to] || 0) + 1; }
+    // "Hub" is relative to THIS graph, not a number picked once: the 90th percentile of degree.
+    const ds = Object.values(degree).sort((a, b) => a - b);
+    hubAt = ds.length ? Math.max(4, ds[Math.floor(ds.length * 0.9)]) : 8;
+  }
+  function describeNode(n) {
+    const d = degree[n.id] || 0;
+    const nb = G.edges.filter((e) => e.from === n.id || e.to === n.id);
+    const names = nb.slice(0, 3).map((e) => (byId[e.from === n.id ? e.to : e.from] || {}).label).filter(Boolean);
+    const confirmed = nb.filter((e) => e.status === 'confirmed').length;
+    const role = d === 0 ? 'isolated — nothing links to it yet, so it is not contributing until the Weaver finds a connection'
+      : d >= hubAt ? `a hub — ${d} links, one of the most connected nodes here, so it is what holds this cluster together`
+      : d === 1 ? 'a leaf — one link, reached only through its neighbour'
+      : `${d} links${confirmed ? `, ${confirmed} you confirmed` : ''}`;
+    return {
+      label: n.label, type: n.type,
+      meaning: TYPE_MEANING[n.type] || 'an entry in the graph',
+      role,
+      via: names.length ? 'connects: ' + names.join(' · ') : '',
+      text: String(n.text || '').replace(/\s+/g, ' ').slice(0, 150),
+    };
+  }
+  // One tooltip, shared by the 2D canvas and the 3D constellation — so hovering means the same thing
+  // in both views instead of one of them being the "real" one.
+  const tip = document.createElement('div');
+  tip.className = 'sy-tip'; tip.style.display = 'none';
+  panel.appendChild(tip);
+  // The content is rebuilt ONLY when the node under the cursor changes. describeNode scans all
+  // ~2,300 edges, and the 3D view calls this every frame while you hover — doing the scan and an
+  // innerHTML reflow 60 times a second to redraw an identical tooltip is a real cost for no change.
+  let tipFor = null;
+  function showTip(n, clientX, clientY) {
+    if (!n) { tipFor = null; tip.style.display = 'none'; return; }
+    if (n.id !== tipFor) {
+      tipFor = n.id;
+      const d = describeNode(n);
+      tip.innerHTML = `<div class="t">${esc(d.label)}</div>`
+        + `<div class="k">${esc(d.type)} — ${esc(d.meaning)}</div>`
+        + `<div class="r">${esc(d.role)}</div>`
+        + (d.via ? `<div class="v">${esc(d.via)}</div>` : '')
+        + (d.text ? `<div class="x">${esc(d.text)}</div>` : '');
+    }
+    tip.style.display = 'block';
+    const r = panel.getBoundingClientRect();
+    const w = tip.offsetWidth, h = tip.offsetHeight;
+    // Flip rather than overflow, so a node near the right or bottom edge is still readable.
+    let x = clientX - r.left + 16, y = clientY - r.top + 16;
+    if (x + w > r.width - 8) x = clientX - r.left - w - 16;
+    if (y + h > r.height - 8) y = clientY - r.top - h - 16;
+    tip.style.left = Math.max(8, x) + 'px'; tip.style.top = Math.max(8, y) + 'px';
+  }
+  cv.addEventListener('mouseleave', () => showTip(null));
+
+  // ---- 3D constellation (reuses the 2D positions + a hashed z spread) ----
+  //
+  // INSTANCED. The old renderer built one Mesh per node and one Line per edge, rebuilding all of
+  // them on every update — at real scale that is ~4,100 objects and ~4,100 draw calls per frame for
+  // a graph that is mostly dots. Nodes are now a single InstancedMesh and edges a single
+  // LineSegments: two draw calls, which is also what makes per-frame raycast hovering affordable.
   let three = null;
   const hashCode = (s) => { let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0; return Math.abs(h); };
   async function init3D() { if (three) { update3D(); return; }
     try { const THREE = await import('./vendor/three/three.module.js'); const host = document.getElementById('sy-3d');
-      const rn = new THREE.WebGLRenderer({ antialias: true, alpha: true }); rn.setSize(host.clientWidth, host.clientHeight); host.innerHTML = ''; host.appendChild(rn.domElement);
-      const sc = new THREE.Scene(); const cam = new THREE.PerspectiveCamera(55, host.clientWidth / host.clientHeight, 0.1, 5000); cam.position.set(0, 0, 640);
+      const rn = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+      rn.setPixelRatio(Math.min(devicePixelRatio, 2));
+      rn.setSize(host.clientWidth, host.clientHeight); host.innerHTML = ''; host.appendChild(rn.domElement);
+      const sc = new THREE.Scene();
+      const cam = new THREE.PerspectiveCamera(55, host.clientWidth / host.clientHeight, 0.1, 8000);
       const grp = new THREE.Group(); sc.add(grp);
-      three = { THREE, rn, sc, cam, grp, host, orb: 0, elev: 0, drag: null };
+      const ray = new THREE.Raycaster(); ray.params.Points = { threshold: 6 };
+      three = { THREE, rn, sc, cam, grp, host, ray, dist: 660, drag: null, spin: true,
+                inst: null, lines: null, order: [], hover: -1, pointer: null, baseColor: null };
       rn.domElement.style.cursor = 'grab';
 
-      // ---- hold-and-drag to turn the constellation; slow drift when you let go -------------------
-      // The camera orbit and the group's Y-spin were both pure functions of frame count, so the
-      // graph was a screensaver: you could see a cluster you wanted to inspect and had no way to
-      // bring it round. Both are now paused while a pointer is held, and the drag writes the same
-      // azimuth/elevation the idle drift advances — so releasing resumes from where you stopped
-      // rather than jumping back to where the timeline says it should be.
-      const RADIUS = 660, MAX_ELEV = 1.25;
-      const onDown = (ev) => { if (ev.button) return; three.drag = { id: ev.pointerId, x: ev.clientX, y: ev.clientY };
-        try { rn.domElement.setPointerCapture(ev.pointerId); } catch {} rn.domElement.style.cursor = 'grabbing'; };
-      const onMove = (ev) => { const d = three && three.drag; if (!d || ev.pointerId !== d.id) return;
+      // ---- hold-and-drag to turn it in ANY direction; slow drift when you let go ------------------
+      // The previous version orbited a camera by azimuth and elevation, with elevation clamped to
+      // ±72° to stop the view flipping over the poles — so "rotate it any way you like" was not
+      // actually true, and the top and bottom of the graph were unreachable. This applies the drag
+      // as an incremental rotation of the GROUP about the camera's own right and up axes, which has
+      // no poles and no clamp: every orientation is reachable, and the idle drift simply continues
+      // from wherever you left it rather than snapping back to a clock-driven angle.
+      const axisX = new THREE.Vector3(1, 0, 0), axisY = new THREE.Vector3(0, 1, 0);
+      const qTmp = new THREE.Quaternion();
+      const rotate = (dx, dy) => {
+        qTmp.setFromAxisAngle(axisY, dx); grp.quaternion.premultiply(qTmp);
+        qTmp.setFromAxisAngle(axisX, dy); grp.quaternion.premultiply(qTmp);
+        lastPick.moving = true;    // the graph moved under a stationary cursor → the hit can change
+      };
+      const onDown = (ev) => { if (ev.button) return;
+        three.drag = { id: ev.pointerId, x: ev.clientX, y: ev.clientY, moved: 0 };
+        try { rn.domElement.setPointerCapture(ev.pointerId); } catch {}
+        rn.domElement.style.cursor = 'grabbing'; showTip(null); };
+      const onMove = (ev) => {
+        three.pointer = { x: ev.clientX, y: ev.clientY };
+        const d = three.drag;
+        if (!d || ev.pointerId !== d.id) return;
         const dx = ev.clientX - d.x, dy = ev.clientY - d.y; d.x = ev.clientX; d.y = ev.clientY;
-        three.orb -= (dx / Math.max(1, host.clientWidth)) * Math.PI * 2.2;
-        three.elev = Math.max(-MAX_ELEV, Math.min(MAX_ELEV, three.elev + (dy / Math.max(1, host.clientHeight)) * Math.PI * 1.1)); };
-      const onUp = (ev) => { const d = three && three.drag; if (!d || (ev && ev.pointerId !== d.id)) return;
-        try { rn.domElement.releasePointerCapture(d.id); } catch {} three.drag = null; rn.domElement.style.cursor = 'grab'; };
+        d.moved += Math.abs(dx) + Math.abs(dy);
+        rotate((dx / Math.max(1, host.clientWidth)) * Math.PI * 2.2,
+               (dy / Math.max(1, host.clientHeight)) * Math.PI * 2.2);
+      };
+      const onUp = (ev) => { const d = three.drag; if (!d || (ev && ev.pointerId !== d.id)) return;
+        try { rn.domElement.releasePointerCapture(d.id); } catch {}
+        // A drag that barely moved was a CLICK on a node, not an attempt to turn the graph.
+        if (d.moved < 4 && three.hover >= 0) { const n = byId[three.order[three.hover]]; if (n) showDetail(n); }
+        three.drag = null; rn.domElement.style.cursor = 'grab'; };
       rn.domElement.addEventListener('pointerdown', onDown);
       rn.domElement.addEventListener('pointermove', onMove);
       rn.domElement.addEventListener('pointerup', onUp);
       rn.domElement.addEventListener('pointercancel', onUp);
+      rn.domElement.addEventListener('pointerleave', () => { three.pointer = null; showTip(null); });
+      rn.domElement.addEventListener('wheel', (ev) => { ev.preventDefault();
+        three.dist = Math.max(120, Math.min(2600, three.dist * (ev.deltaY < 0 ? 0.9 : 1.1))); }, { passive: false });
 
+      const HOVER_COLOR = new THREE.Color('#ffffff');
+      const tmpColor = new THREE.Color();
+      // Raycasting an InstancedMesh tests every instance behind the bounding sphere, so at ~1,800
+      // nodes it is not free. It only ever changes when the pointer moves or the graph turns, so it
+      // runs on those and not on every frame of an idle drift.
+      let lastPick = { x: -1, y: -1, moving: true };
+      function pick() {
+        if (!three.inst || !three.pointer || three.drag) return -1;
+        if (!lastPick.moving && three.pointer.x === lastPick.x && three.pointer.y === lastPick.y) return three.hover;
+        lastPick = { x: three.pointer.x, y: three.pointer.y, moving: false };
+        const r = rn.domElement.getBoundingClientRect();
+        const nx = ((three.pointer.x - r.left) / r.width) * 2 - 1;
+        const ny = -((three.pointer.y - r.top) / r.height) * 2 + 1;
+        ray.setFromCamera({ x: nx, y: ny }, cam);
+        const hits = ray.intersectObject(three.inst, false);
+        return hits.length ? hits[0].instanceId : -1;
+      }
       (function anim() { if (!three) return;
-        if (!three.drag) { three.orb += 0.0016; three.grp.rotation.y += 0.0022; }   // held = frozen, so you can actually look at it
-        const h = Math.cos(three.elev) * RADIUS;
-        three.cam.position.set(Math.sin(three.orb) * h, Math.sin(three.elev) * RADIUS, Math.cos(three.orb) * h);
-        three.cam.lookAt(0, 0, 0); three.rn.render(three.sc, three.cam); requestAnimationFrame(anim); })();
+        requestAnimationFrame(anim);
+        // Held = frozen, so you can actually look at what you brought round. Hovering also pauses
+        // the drift: a tooltip attached to a node that keeps sliding away is worse than no tooltip.
+        if (!three.drag && three.hover < 0) rotate(0.0016, 0);
+        cam.position.set(0, 0, three.dist); cam.lookAt(0, 0, 0);
+
+        const hit = pick();
+        if (hit !== three.hover) {
+          if (three.inst && three.baseColor) {
+            const restore = (i) => { if (i >= 0 && i < three.order.length) {
+              tmpColor.setHex(three.baseColor[i]); three.inst.setColorAt(i, tmpColor); } };
+            restore(three.hover);
+            if (hit >= 0) three.inst.setColorAt(hit, HOVER_COLOR);
+            if (three.inst.instanceColor) three.inst.instanceColor.needsUpdate = true;
+          }
+          three.hover = hit;
+          rn.domElement.style.cursor = hit >= 0 ? 'pointer' : (three.drag ? 'grabbing' : 'grab');
+          const n = hit >= 0 ? byId[three.order[hit]] : null;
+          if (n && three.pointer) showTip(n, three.pointer.x, three.pointer.y); else showTip(null);
+        } else if (hit >= 0 && three.pointer) {
+          const n = byId[three.order[hit]];
+          if (n) showTip(n, three.pointer.x, three.pointer.y);
+        }
+        rn.render(sc, cam); })();
       update3D();
+      window.addEventListener('resize', () => { if (!three) return;
+        rn.setSize(host.clientWidth, host.clientHeight);
+        cam.aspect = host.clientWidth / Math.max(1, host.clientHeight); cam.updateProjectionMatrix(); });
     } catch (e) { console.warn('synapse 3d unavailable', e); }
   }
-  function update3D() { if (!three) return; const { THREE, grp } = three; while (grp.children.length) grp.remove(grp.children[0]);
-    const pos = {};
-    for (const n of G.nodes) { const z = (hashCode(n.id) % 400) - 200; pos[n.id] = [n.x, -n.y, z];
-      const m = new THREE.Mesh(new THREE.SphereGeometry(3 + (n.importance || 1) * 1.3, 10, 10), new THREE.MeshBasicMaterial({ color: TYPE_COLOR[n.type] || '#8a94a6' })); m.position.set(n.x, -n.y, z); grp.add(m); }
-    for (const e of G.edges) { const a = pos[e.from], b = pos[e.to]; if (!a || !b) continue;
-      const g = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(a[0], a[1], a[2]), new THREE.Vector3(b[0], b[1], b[2])]);
-      grp.add(new THREE.Line(g, new THREE.LineBasicMaterial({ color: 0x3a4a5a, transparent: true, opacity: e.status === 'confirmed' ? 0.5 : 0.2 }))); }
+
+  function update3D() {
+    if (!three) return;
+    const { THREE, grp } = three;
+    for (const c of [...grp.children]) { grp.remove(c); c.geometry && c.geometry.dispose(); c.material && c.material.dispose(); }
+    const N = G.nodes.length;
+    if (!N) { three.inst = null; three.lines = null; three.order = []; return; }
+
+    // Nodes: one instanced sphere, scaled per node by importance. Radius 1 in the geometry so the
+    // per-instance matrix carries the size.
+    const geo = new THREE.SphereGeometry(1, 12, 10);
+    const mat = new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.95 });
+    const inst = new THREE.InstancedMesh(geo, mat, N);
+    const m4 = new THREE.Matrix4(), col = new THREE.Color();
+    const pos = {}, order = new Array(N), base = new Int32Array(N);
+    for (let i = 0; i < N; i++) {
+      const n = G.nodes[i];
+      const z = (hashCode(n.id) % 400) - 200;
+      pos[n.id] = [n.x, -n.y, z];
+      order[i] = n.id;
+      const r = 3 + (n.importance || 1) * 1.3;
+      m4.makeScale(r, r, r); m4.setPosition(n.x, -n.y, z);
+      inst.setMatrixAt(i, m4);
+      col.set(TYPE_COLOR[n.type] || '#8a94a6');
+      inst.setColorAt(i, col);
+      base[i] = col.getHex();
+    }
+    inst.instanceMatrix.needsUpdate = true;
+    if (inst.instanceColor) inst.instanceColor.needsUpdate = true;
+    grp.add(inst);
+
+    // Edges: one LineSegments for everything, with per-vertex colour carrying confirmed-vs-proposed
+    // instead of a material per edge.
+    const drawn = G.edges.filter((e) => pos[e.from] && pos[e.to]);
+    const verts = new Float32Array(drawn.length * 6);
+    const cols = new Float32Array(drawn.length * 6);
+    for (let i = 0; i < drawn.length; i++) {
+      const a = pos[drawn[i].from], b = pos[drawn[i].to];
+      verts.set([a[0], a[1], a[2], b[0], b[1], b[2]], i * 6);
+      const c = drawn[i].status === 'confirmed' ? 0.42 : 0.16;
+      cols.set([c * 0.55, c * 0.82, c, c * 0.55, c * 0.82, c], i * 6);
+    }
+    const lgeo = new THREE.BufferGeometry();
+    lgeo.setAttribute('position', new THREE.BufferAttribute(verts, 3));
+    lgeo.setAttribute('color', new THREE.BufferAttribute(cols, 3));
+    const lines = new THREE.LineSegments(lgeo, new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.85 }));
+    grp.add(lines);
+
+    three.inst = inst; three.lines = lines; three.order = order; three.baseColor = base; three.hover = -1;
   }
 })();
 
@@ -3130,10 +3336,49 @@ window.bhatbot.onToggleVoiceLock && window.bhatbot.onToggleVoiceLock(() => { voi
 // Vosk listener heard "bhatbot …": run the command, or arm voice if none. Either way, a wake
 // word opens conversation mode so BhatBot keeps listening until told it's done.
 window.bhatbot.onWakeCommand((text) => {
-  setConvo(true);
-  if (text && text.trim()) submitVoice(text.trim());  // "jarvis do X" → execute, or steer if busy
-  else if (!recording) startVoice();                  // bare "jarvis" → arm Whisper capture
+  // NOT setConvo here: opening the conversation first would make the addressivity gate's
+  // `!convoMode` guard skip the very utterance it exists to judge. The gate opens it on acceptance.
+  if (text && text.trim()) { _fromWake = true; submitVoice(text.trim()); }   // "bhatbot do X"
+  else if (!recording) { armProbation(); startVoice(); }   // bare "bhatbot" → PROBATION, not commitment
 });
+
+// ── THE 3-SECOND PROBATION WINDOW ────────────────────────────────────────────────────────────────
+// Hearing the name is not the same as being spoken to. You say "BhatBot" when telling someone what
+// it did, reading its name off the screen, or complaining about it — and no acoustic detector can
+// tell those apart, because at the acoustic level they are identical.
+//
+// So a wake no longer COMMITS. It opens a three-second window and waits to see what follows:
+//   • speech within 3s  → promoted to a real listening turn (and only THEN does convo mode open,
+//     so an abandoned wake doesn't leave the mic armed behind it)
+//   • silence for 3s    → you said the name in passing. Stand down without a sound.
+// What was actually said is then judged by lib/addressivity.js in submitVoice, which is the half
+// that catches "I told BhatBot to do that yesterday".
+//
+// Silent by design, but never invisible: every decision is logged to the activity feed, so the
+// thresholds can be tuned against real transcripts instead of guesses.
+const PROBATION_MS = 3000;
+let probationUntil = 0;     // 0 = not on probation
+let _fromWake = false;      // this utterance began with the wake word (so it must prove addressivity)
+let _abandoned = false;     // the capture was stood down — do not transcribe what we caught
+
+function armProbation() {
+  probationUntil = Date.now() + PROBATION_MS;
+  _fromWake = true; _abandoned = false;
+  if (orb) orb.classList.add('probation');
+}
+function promoteProbation() {
+  if (!probationUntil) return;
+  probationUntil = 0;
+  if (orb) orb.classList.remove('probation');
+  setConvo(true);           // deferred to here: only a wake that went somewhere opens the loop
+}
+function standDown(why) {
+  probationUntil = 0; _fromWake = false; _abandoned = true;
+  if (orb) orb.classList.remove('probation');
+  endVoice();
+  tbar.classList.remove('on'); tbar.textContent = '';
+  try { window.bhatbot.logWakeDecision({ kept: false, why }); } catch {}
+}
 // Barge-in: user spoke over Bhatbot → main already stopped the TTS; arm capture so their
 // interrupting words become the next command.
 // Only reopen the mic on barge-in while a conversation is open — otherwise barging over the
@@ -3467,7 +3712,13 @@ function watchSilence(stream) {
     if (calibN < 25) { floor = (floor * calibN + rms) / (calibN + 1); calibN++; }   // first ~400ms = room floor
     const gate = Math.max(0.02, floor * 2.2);
     if (rms > gate) { silenceAt = Date.now(); spoke = true; }
-    else if (spoke && elapsed > MIN_UTTER_MS && Date.now() - silenceAt > SILENCE_MS) { endVoice(); return; }
+    // PROBATION: the wake fired, so we are listening on approval. Real speech promotes the turn;
+    // three seconds of nothing means the name was said in passing, and we leave without a sound.
+    if (probationUntil) {
+      if (spoke) promoteProbation();
+      else if (Date.now() > probationUntil) { standDown('the name was said, but nothing followed within 3s'); return; }
+    }
+    if (rms <= gate && spoke && elapsed > MIN_UTTER_MS && Date.now() - silenceAt > SILENCE_MS) { endVoice(); return; }
     if (elapsed > MAX_UTTER_MS) { endVoice(); return; }   // hard stop → guarantees a transcribe
   }, 100);
 }
@@ -3483,14 +3734,19 @@ async function onRecStop() {
   setMicRecording(false);
   try { micStream && micStream.getTracks().forEach((t) => t.stop()); } catch {}
   try { audioCtx && audioCtx.close(); } catch {}
-  if (!audioChunks.length) { tbar.classList.remove('on'); if (convoMode) { ttsIdle = true; maybeRearm(); } return; }
+  // Stood down during probation: throw the audio away rather than paying for a transcription of
+  // three seconds of room tone (and never re-arm — that is what "in passing" means).
+  if (_abandoned) { _abandoned = false; audioChunks = []; tbar.classList.remove('on'); tbar.textContent = ''; return; }
+  if (!audioChunks.length) { _fromWake = false; tbar.classList.remove('on'); if (convoMode) { ttsIdle = true; maybeRearm(); } return; }
   const blob = new Blob(audioChunks, { type: 'audio/webm' });
   const buf = await blob.arrayBuffer();
   tbar.classList.add('on'); tbar.textContent = '⏳ transcribing…';
   const res = await window.bhatbot.transcribeAudio({ audioBuffer: Array.from(new Uint8Array(buf)), mimeType: 'audio/webm' });
   tbar.classList.remove('on'); tbar.textContent = '';
+  // A wake that produced no transcript must not leave _fromWake armed — it would make the NEXT
+  // utterance, spoken with no wake word at all, prove addressivity and almost certainly fail.
   if (res && res.text) submitVoice(res.text);
-  else if (res && res.error) addErr('STT: ' + res.error);
+  else { _fromWake = false; if (res && res.error) addErr('STT: ' + res.error); }
 }
 // Voice input router: while the agent is WORKING, a spoken instruction is injected as live
 // guidance into the running task (barge-in steering) instead of starting a new request.
@@ -3516,6 +3772,33 @@ function submitVoice(text) {
     return;
   }
   _goOnCount = 0;   // completed (or hit the cap) → reset the nudge counter for the next turn
+  // ADDRESSIVITY GATE — was that said TO me, or ABOUT me? (lib/addressivity.js)
+  //
+  // ONLY for utterances the wake word started. In conversation mode or under a voice lock you have
+  // already said you are talking to it, and demanding the name again there would make the assistant
+  // deaf mid-conversation — which is a far worse failure than one false wake.
+  if (_fromWake && !convoMode && !voiceLocked) {
+    _fromWake = false;
+    const a = (window.bhatbot.addressivity && window.bhatbot.addressivity(t)) || { verdict: 'yes' };
+    if (a.verdict === 'no') {
+      addThought('· stood down (' + (a.reasons && a.reasons[0] ? a.reasons[a.reasons.length - 1].replace(/^[+-]\d+\s*/, '') : 'not addressed to me') + ')');
+      try { window.bhatbot.logWakeDecision({ kept: false, why: 'not addressed', text: t, score: a.score, reasons: a.reasons }); } catch {}
+      return;
+    }
+    // The genuinely ambiguous middle goes to the cheap local model rather than a coin flip. Same
+    // escape hatch the clarity gate's 'borderline' branch already uses.
+    if (a.verdict === 'unsure') {
+      try { window.bhatbot.logWakeDecision({ kept: 'deferred', why: 'ambiguous', text: t, score: a.score, reasons: a.reasons }); } catch {}
+      window.bhatbot.voiceIntent(t).then((r) => {
+        if (r && r.ok === false) addThought('· stood down (not addressed to me)');
+        else { setConvo(true); submitVoice(a.command || t); }
+      }).catch(() => { setConvo(true); submitVoice(a.command || t); });
+      return;
+    }
+    try { window.bhatbot.logWakeDecision({ kept: true, text: t, score: a.score }); } catch {}
+    setConvo(true);                       // addressed → the conversation is genuinely open now
+    t = a.command || t;                   // act on the request, not on the vocative in front of it
+  }
   // CLARITY GATE — discard rambling / thinking-aloud instead of acting on it (heuristic first,
   // cheap model for borderline). Keep listening after a drop so the flow isn't broken.
   const gate = (window.bhatbot.voiceGate && window.bhatbot.voiceGate(t)) || { action: 'ok' };

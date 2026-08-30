@@ -86,6 +86,7 @@ const mcphub = require('./lib/mcphub');               // MCP-client hub — cons
 const connectors = require('./lib/connectors');       // hosted MCP connectors (Seedance …) — registry + host pinning
 const visualbuild = require('./lib/visualbuild');     // Seedance generate→poll→artifact (visual building)
 const assetgen = require('./lib/assetgen');           // 2D→3D→printable asset pipeline, run in code not by the model
+const blender = require('./lib/blender');             // headless Blender: designed geometry + animation, not reconstruction
 const backlogworker = require('./lib/backlogworker'); // specialists work real BACKLOG.md items while idle
 const figures = require('./lib/figures');             // data-accurate matplotlib/seaborn figures
 const logins = require('./lib/logins');               // domain-keyed login profiles (CRED_REF handles)
@@ -5184,6 +5185,34 @@ async function executeTool(name, input) {
         }
         break;
       }
+      case 'make_model': {
+        // Designed geometry, not reconstructed geometry — see lib/blender.js. The whole build is one
+        // call for the same reason make_asset is: the model contributes the bpy, and every round trip
+        // it would otherwise spend discovering "the render was empty" costs a full conversation replay.
+        sendToActivity('tool-update', { type: 'thinking', text: '⬢ Blender — building…' });
+        if (input.show !== false) openBlenderStudio();
+        const r = await blender.run(input || {}, {
+          timeoutMs: Math.min(600000, Math.max(20000, Number(input.timeout_ms) || 240000)),
+          onEvent: (e) => {
+            // The Studio window wants the source; the model must never be sent it back (it wrote it).
+            if (e.k === 'start') { let source = ''; try { source = fs.readFileSync(e.script, 'utf8'); } catch {} blenderEvent({ ...e, source }); }
+            else blenderEvent(e);
+            if (e.k === 'step' && e.status === 'run') sendToActivity('tool-update', { type: 'thinking', text: `⬢ ${e.name}` });
+          },
+        });
+        // Trim for the model: it needs the verdict, the timings and the artifact paths. The per-step
+        // preview paths are for the window, and shipping ~20 of them back is pure token cost.
+        const { previews, ...slim } = r;
+        result = slim;
+        result.glb = (r.exports || []).find((x) => x.format === 'glb')?.path;
+        if (r.preview) {
+          try {
+            result._image = fs.readFileSync(r.preview).toString('base64');
+            result._imageMime = 'image/png';
+          } catch {}
+        }
+        break;
+      }
       case 'connectors': {
         const cfg = loadConfig();
         if (input && input.action === 'enable') {
@@ -5511,6 +5540,68 @@ function openActionView() {
     return { success: true };
   } catch (e) { return { success: false, error: e.message }; }
 }
+// ===========================================================================
+// BLENDER STUDIO — watch a model get built.
+//
+// Two things justify a window rather than a line in the chat log. A build has INTERNAL structure
+// (steps that each take time and can each fail), and its output is visual, so a spinner followed by
+// a file path throws away everything that would tell you whether it worked. And when it comes out
+// wrong the thing you want is the actual bpy that ran, which lives here beside the render of it.
+//
+// Previews cross as PATHS, not base64. Each step writes a 512x384 PNG; piping ~8 of those through
+// IPC per build, encoded, is a few megabytes for pixels the window can read off disk itself.
+// ===========================================================================
+let blenderWin = null;
+function openBlenderStudio() {
+  try {
+    if (blenderWin && !blenderWin.isDestroyed()) { blenderWin.show(); return { success: true }; }
+    const asset = path.join(__dirname, 'src', 'blender.html');
+    if (!fs.existsSync(asset)) return { success: false, error: 'blender.html missing' };
+    blenderWin = new BrowserWindow({
+      width: 1040, height: 720, resizable: true, minWidth: 620, minHeight: 420,
+      title: 'BhatBot — Blender Studio', backgroundColor: '#0a0f17',
+      webPreferences: { contextIsolation: true, preload: path.join(__dirname, 'src', 'preload-blender.js') },
+    });
+    _blenderReady = false; _blenderPending = [];   // a fresh window has not loaded yet — buffer again
+    blenderWin.loadFile(asset);
+    blenderWin.on('closed', () => { blenderWin = null; _blenderReady = false; _blenderPending = []; });
+    return { success: true };
+  } catch (e) { return { success: false, error: e.message }; }
+}
+// Buffer events that arrive before the window has finished loading, so opening the Studio and
+// starting a build in the same tool call doesn't lose the first few steps (which includes the
+// `start` event carrying the script — without it the window shows an empty source pane).
+let _blenderPending = [], _blenderReady = false;
+function blenderEvent(e) {
+  if (!blenderWin || blenderWin.isDestroyed()) return;
+  if (!_blenderReady) { _blenderPending.push(e); if (_blenderPending.length > 200) _blenderPending.shift(); return; }
+  try { blenderWin.webContents.send('blender-event', e); } catch {}
+}
+ipcMain.on('blender-ready', () => {
+  _blenderReady = true;
+  for (const e of _blenderPending) { try { blenderWin && !blenderWin.isDestroyed() && blenderWin.webContents.send('blender-event', e); } catch {} }
+  _blenderPending = [];
+});
+// The window's ONLY file read. Confined to the Blender workspace so a compromised renderer cannot
+// turn "show me the model" into an arbitrary-file reader; `path.resolve` first so `..` cannot walk out.
+const BLENDER_WORKSPACE = path.join(os.homedir(), '.bhatbot', 'blender');
+ipcMain.handle('blender-read-model', (_e, p) => {
+  try {
+    // realpath, not just resolve: `resolve` collapses `..` but follows nothing, so a symlink planted
+    // inside the workspace would still point wherever it likes and pass a prefix check.
+    const full = fs.realpathSync(path.resolve(String(p || '')));
+    const root = fs.realpathSync(BLENDER_WORKSPACE);
+    if (full !== root && !full.startsWith(root + path.sep)) {
+      console.warn('[blender] refused a read outside the workspace:', full);
+      return null;
+    }
+    const st = fs.statSync(full);
+    if (st.size > 80 * 1024 * 1024) return null;
+    return { data: fs.readFileSync(full).toString('base64') };
+  } catch { return null; }
+});
+ipcMain.handle('open-blender-studio', () => openBlenderStudio());
+
 // Push one live-view update (no-op if the window isn't open). shot = base64 jpeg of the screen.
 function actionView(payload) {
   try { if (actionViewWin && !actionViewWin.isDestroyed()) actionViewWin.webContents.send('fleet-update', { id: 'live', ...payload }); } catch {}
@@ -5560,6 +5651,7 @@ function describeAction(name, input = {}) {
         : `Generating an image of “${s(input.prompt, 44)}”`;
       case 'connectors': return input.action === 'enable' ? `Enabling the ${s(input.name, 24)} connector` : 'Checking connectors';
       case 'generate_3d': case 'make_printable': return 'Building a 3D model';
+      case 'make_model': return `Modelling ${s(input.name || (Array.isArray(input.ops) && input.ops.length ? `${input.ops.length} part(s)` : 'a 3D object'), 40)} in Blender`;
       case 'simulate': case 'sci_compute': return 'Running a computation';
       case 'studio_write': return 'Rendering the 3D scene';
       case 'make_figure': return 'Making a figure';
@@ -6070,9 +6162,10 @@ async function agentLoop(history, apiKey, event, opts = {}) {
       try { if (_mission) _mission.step({ name: block.name, input: block.input, result, ms: _spanMs, spanId: _spanId, status: _spanStatus }); } catch {}
       // Jarvis HUD: surface visuals inline in chat — generated images / design renders /
       // explicit screenshots as holo-cards, and 3D outputs as an in-chat spinning model.
-      const showImage = result._image && (['generate_image', 'visual_build', 'make_asset', 'make_figure', 'simulate', 'sci_compute', 'studio_write', 'ui_inspect', 'screen_parse', 'vision_click', 'molecule', 'maps', 'phone_mirror'].includes(block.name)
+      const showImage = result._image && (['generate_image', 'visual_build', 'make_asset', 'make_model', 'make_figure', 'simulate', 'sci_compute', 'studio_write', 'ui_inspect', 'screen_parse', 'vision_click', 'molecule', 'maps', 'phone_mirror'].includes(block.name)
         || (block.name === 'browser' && block.input && block.input.action === 'screenshot'));
-      const model3d = (block.name === 'generate_3d' || block.name === 'make_printable') && result.success && result.path ? result.path : undefined;
+      const model3d = (block.name === 'generate_3d' || block.name === 'make_printable') && result.success && result.path ? result.path
+        : (block.name === 'make_model' && result.success && result.glb ? result.glb : undefined);
       sendToAll(event, 'tool-update', {
         type: 'tool_done', name: block.name,
         result: { ...result, _image: undefined, _imageMime: undefined },
@@ -6726,6 +6819,13 @@ async function runSlashCommand(cmd) {
   switch (cmd.name) {
     case 'help':
       return { reply: commands.help(cmd.argv[0]) };
+
+    case 'blender': {
+      // The window normally opens itself when make_model runs; this is how you get back to the last
+      // build without starting a new one.
+      const r = openBlenderStudio();
+      return { reply: r.success ? 'Blender Studio open. Ask me to build something and it fills in as Blender works.' : `Could not open it: ${r.error}` };
+    }
 
     case 'agents': {
       const active = jobsBus.active();
@@ -8771,6 +8871,12 @@ function startWakeHelper() {
       BHATBOT_SPEAKER_GATE: wc.speakerGate != null ? String(wc.speakerGate) : 'auto',
       BHATBOT_SPEAKER_ADAPT: wc.speakerAdapt === false ? '0' : '1',
       BHATBOT_VOICEID_VENV: path.join(os.homedir(), '.bhatbot', 'voiceid-venv'),
+      // Loudness gate (the "it triggers on the slightest sound" fix). Raise wakeRms in config if it
+      // still fires from across the room; lower it if you have to lean into the mic.
+      ...(wc.wakeRms != null ? { BHATBOT_WAKE_RMS: String(wc.wakeRms) } : {}),
+      ...(wc.wakeMargin != null ? { BHATBOT_WAKE_MARGIN: String(wc.wakeMargin) } : {}),
+      ...(wc.wakeConf != null ? { BHATBOT_WAKE_CONF: String(wc.wakeConf) } : {}),
+      ...(wc.wakeEngines ? { BHATBOT_WAKE_ENGINES: String(wc.wakeEngines) } : {}),
       ...(wc.speakerThreshold != null ? { BHATBOT_SPEAKER_THRESH: String(wc.speakerThreshold) } : {}),
       ...(wc.micDevice != null ? { BHATBOT_MIC_DEVICE: String(wc.micDevice) } : {}) };
     wakeProc = require('child_process').spawn(resolvePython(), ['-u', script], { env: wakeEnv });
@@ -8795,7 +8901,15 @@ function startWakeHelper() {
             if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('barge-in', {});
           }
         }
-        else if (line === 'WAKE') { bargeInInterrupt(); triggerWake(''); }   // a spoken wake preempts the current turn
+        // `WAKE` (legacy) or `WAKE <peak-rms> <detector>`. A spoken wake preempts the current turn.
+        else if (line === 'WAKE' || line.startsWith('WAKE ')) {
+          const [, peak, via] = line.split(/\s+/);
+          // The renderer arms the 3-second probation window (it owns the mic); we only record what
+          // the detector heard, so an accepted wake and a discarded one can be told apart later.
+          _wakeStats.armed++;
+          console.log(`[wake] heard${peak ? ` (peak ${peak})` : ''}${via ? ` via ${via}` : ''} — on probation for 3s`);
+          bargeInInterrupt(); triggerWake('');
+        }
         else if (line.startsWith('CMD')) { bargeInInterrupt(); triggerWake(line.slice(3).trim()); }
         else if (line === 'READY') console.log('[wake] listener ready');
       }
@@ -8817,6 +8931,25 @@ function startWakeHelper() {
     wakeProc.on('exit', (code) => { console.log('[wake] listener exited', code); wakeProc = null; });
   } catch (e) { console.warn('wake helper failed:', e.message); }
 }
+
+// ── WAKE DECISIONS — silent to you, never silent to us ──────────────────────────────────────────
+// Siddhant chose "silent, but logged": nothing pops up when a wake is discarded. That is only a good
+// choice if the decisions are RECORDED somewhere, or neither of us can ever tell whether it ignored
+// him because the gate worked or because something broke. Every verdict lands here.
+const _wakeStats = { armed: 0, kept: 0, dropped: 0, deferred: 0, lastDrop: null };
+ipcMain.on('wake-decision', (_e, d = {}) => {
+  const text = String(d.text || '').slice(0, 120);
+  if (d.kept === true) { _wakeStats.kept++; console.log(`[wake] ✓ addressed (score ${d.score}) — "${text}"`); }
+  else if (d.kept === 'deferred') { _wakeStats.deferred++; console.log(`[wake] ? ambiguous (score ${d.score}) — asking the cheap model — "${text}"`); }
+  else {
+    _wakeStats.dropped++;
+    _wakeStats.lastDrop = { at: Date.now(), why: d.why, text, score: d.score };
+    console.log(`[wake] ✕ stood down — ${d.why}${d.score != null ? ` (score ${d.score})` : ''}${text ? ` — "${text}"` : ''}`);
+    if (Array.isArray(d.reasons) && d.reasons.length) console.log('        ' + d.reasons.join(' · '));
+  }
+  sendToActivity('tool-update', { type: 'thinking', text: d.kept === true ? '🎙 wake accepted' : '🎙 wake discarded — ' + (d.why || 'not addressed') });
+});
+function wakeStats() { return { ..._wakeStats }; }
 
 // ---------------------------------------------------------------------------
 // IPC

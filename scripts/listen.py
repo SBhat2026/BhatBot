@@ -1,10 +1,19 @@
 #!/usr/bin/env python3
 """Bhatbot always-on wake-word listener (offline, lightweight, no account).
 
-Two detectors share one mic stream:
-  1. openWakeWord  -> "hey jarvis"  (purpose-built model, reliable, low false-positive)
-  2. Vosk grammar  -> "hey bhatbot" (matched via in-vocab homophones, since
-     "bhatbot" is not a real word and isn't in any speech model's vocabulary)
+"BhatBot" is the only wake word. It is matched by a Vosk grammar over in-vocab homophones, since
+"bhatbot" is not a real word and is in no speech model's vocabulary. openWakeWord is still supported
+but OFF by default — its model says "hey jarvis", which is a different wake word.
+
+FOUR GATES, cheapest first, because each one alone is too permissive:
+  1. LOUDNESS   — an absolute floor plus a margin over learned room tone. Sounds that are merely
+                  present no longer reach the detector at all.
+  2. GRAMMAR    — the phrase must OPEN the utterance, and "but bot" sits in the grammar purely as a
+                  decoy to absorb near-misses without being accepted.
+  3. SPEAKER    — the buffered utterance must match Siddhant's voice profile (learns online).
+  4. ADDRESSIVITY — outside this file: main.js opens a 3-second probation window and lib/addressivity.js
+                  decides from the TRANSCRIPT whether it was being spoken to or merely spoken about.
+                  Gate 4 is what makes a false wake harmless rather than merely rarer.
 
 SPEAKER GATING (the false-activation fix): once an owner voice profile exists, a wake hit only
 counts if the buffered utterance MATCHES Siddhant's voice (speaker embedding cosine >= threshold).
@@ -19,8 +28,11 @@ the actual command (Whisper transcribes arbitrary speech far better than the sma
 Env:
   BHATBOT_WAKE_DEBUG=1       print scores / heard text to stderr (tuning)
   BHATBOT_WAKE_THRESH=0.5    openWakeWord score threshold
+  BHATBOT_WAKE_RMS=0.02      absolute loudness floor a wake must clear (raise if it still over-triggers)
+  BHATBOT_WAKE_MARGIN=3.5    how far over learned room tone the peak must sit
+  BHATBOT_WAKE_CONF=0.55     minimum mean per-word confidence for a grammar hit
   BHATBOT_VOSK_MODEL         path to vosk model (default ~/.bhatbot/vosk-model)
-  BHATBOT_WAKE_ENGINES       "oww,vosk" (default both) — disable one if noisy
+  BHATBOT_WAKE_ENGINES       "vosk" (default) or "oww,vosk" to also accept "hey jarvis"
   BHATBOT_SPEAKER_GATE       auto|1|0  (default auto: gate once a profile exists / can be built)
   BHATBOT_SPEAKER_ADAPT      1|0  (default 1: keep learning the owner's voice from each wake)
   BHATBOT_SPEAKER_THRESH     override the profile's match threshold (0..1)
@@ -41,7 +53,10 @@ import collections
 DEBUG = os.environ.get("BHATBOT_WAKE_DEBUG") == "1"
 THRESH = float(os.environ.get("BHATBOT_WAKE_THRESH", "0.5"))
 MODEL_DIR = os.path.expanduser(os.environ.get("BHATBOT_VOSK_MODEL", "~/.bhatbot/vosk-model"))
-ENGINES = os.environ.get("BHATBOT_WAKE_ENGINES", "oww,vosk").split(",")
+# Default is VOSK ONLY. openWakeWord's model is "hey_jarvis" — a different wake word — and Siddhant
+# asked for "BhatBot" to be the only one. Re-enable with BHATBOT_WAKE_ENGINES=oww,vosk if you want
+# the Jarvis trigger back; it is the lower-false-positive detector, just for the wrong phrase.
+ENGINES = os.environ.get("BHATBOT_WAKE_ENGINES", "vosk").split(",")
 DEBOUNCE = 2.5  # seconds to ignore further hits after a wake
 
 # --- Speaker gating / online enrollment ---
@@ -196,11 +211,53 @@ class Speaker:
             derr("profile save err:", ex)
 
 
-# In-vocab homophones for "hey bhatbot" (Vosk small can't say "bhatbot").
-BHATBOT_PHRASES = ["hey bought bot", "hey but bot", "bought bot", "but bot"]
-JARVIS_PHRASES = ["hey jarvis", "jarvis"]
-MATCH_PHRASES = ["hey bought bot", "hey but bot", "bought bot", "but bot", "hey jarvis", "jarvis"]
-VOSK_GRAMMAR = json.dumps(BHATBOT_PHRASES + JARVIS_PHRASES + ["[unk]"])
+# In-vocab homophones for "bhatbot" (Vosk small has no such word, so it can only ever hear the
+# nearest real ones).
+#
+# THE GRAMMAR AND THE ACCEPT SET ARE DELIBERATELY DIFFERENT. A constrained Vosk grammar forces every
+# utterance onto its nearest member, so a two-syllable entry like "but bot" becomes a magnet: "but
+# what", "about", "but I thought" and half of ordinary conversation land on it, and the old code then
+# accepted any of them as a wake. Removing it from the grammar does not help — the audio just lands
+# on "bought bot" instead. So "but bot" STAYS in the grammar as a DECOY that absorbs those matches,
+# and is excluded from ACCEPT. The sink is the point.
+#
+# "jarvis" is gone entirely: Siddhant asked for one wake word, and a bare two-syllable name in the
+# grammar was the second-largest source of false triggers.
+VOSK_GRAMMAR_PHRASES = ["hey bought bot", "bought bot", "hey but bot", "but bot", "bot bot", "hey bot bot"]
+ACCEPT_PHRASES = ["hey bought bot", "bought bot", "hey but bot", "bot bot", "hey bot bot"]
+VOSK_GRAMMAR = json.dumps(VOSK_GRAMMAR_PHRASES + ["[unk]"])
+
+# Minimum mean word confidence for a grammar hit (Vosk reports per-word conf when SetWords is on).
+WAKE_CONF = float(os.environ.get("BHATBOT_WAKE_CONF", "0.55"))
+
+# ── LOUDNESS GATE ────────────────────────────────────────────────────────────────────────────────
+# The complaint that started this: "it detects even the slightest sounds which sound like the wake
+# word". RMS was computed ONLY for barge-in, and only while TTS was speaking — so on the wake path
+# there was no volume threshold at all, and a detector fed near-silence will eventually hallucinate
+# into it.
+#
+# Two bars, and a candidate must clear both: an ABSOLUTE floor (speech aimed at this machine is
+# roughly 0.03-0.15 RMS; room tone is 0.001-0.01), and a RELATIVE one against a slowly-learned noise
+# floor, so a noisy room raises the bar instead of defeating it.
+WAKE_RMS_MIN = float(os.environ.get("BHATBOT_WAKE_RMS", "0.02"))
+WAKE_RMS_MARGIN = float(os.environ.get("BHATBOT_WAKE_MARGIN", "3.5"))
+RECENT_FRAMES = 20            # ~1.6s at 80ms/frame — the window a wake phrase actually occupies
+
+
+def wake_bar(floor):
+    """The loudness a wake candidate must clear, given the current room tone."""
+    return max(WAKE_RMS_MIN, floor * WAKE_RMS_MARGIN)
+
+
+def accepts(text):
+    """Does this Vosk transcript OPEN with an accepted wake phrase?
+
+    Substring matching was the old rule, and it accepted the name anywhere in a sentence — which is
+    exactly the case where you are talking ABOUT BhatBot rather than to it. Kept at module scope,
+    with wake_bar, so both gates are testable without a microphone (see scripts/test-wakegate.js).
+    """
+    t = (text or "").strip().lower()
+    return any(t == p or t.startswith(p + " ") for p in ACCEPT_PHRASES)
 
 
 def _resolve_device(np_mod):
@@ -243,10 +300,28 @@ def main():
                 print("WAKE_ERR vosk model missing:", MODEL_DIR, file=sys.stderr, flush=True)
             else:
                 rec = KaldiRecognizer(Model(MODEL_DIR), 16000, VOSK_GRAMMAR)
+                rec.SetWords(True)          # per-word confidence — the grammar decode alone has none
                 derr("vosk grammar ready")
         except Exception as e:
             print("WAKE_ERR vosk:", e, file=sys.stderr, flush=True)
             rec = None
+
+    # FAIL OPEN, LOUDLY. The default is vosk-only, so a missing or broken Vosk model would otherwise
+    # leave no detector at all and BhatBot would be silently deaf — which is a far worse failure than
+    # answering to the wrong wake word. If openWakeWord can load, take it and SAY that the wake word
+    # is temporarily "hey jarvis", so the degradation is visible rather than inferred from silence.
+    if rec is None and oww is None and not use_oww:
+        try:
+            from openwakeword.model import Model as OWW
+            import openwakeword
+            base = os.path.join(os.path.dirname(openwakeword.__file__), "resources", "models")
+            jarvis = glob.glob(os.path.join(base, "hey_jarvis*.onnx"))
+            oww = OWW(wakeword_models=jarvis, inference_framework="onnx") if jarvis else OWW()
+            print('[wake] Vosk unavailable — falling back to openWakeWord, so the wake word is '
+                  '"hey jarvis" until the Vosk model at %s is restored' % MODEL_DIR,
+                  file=sys.stderr, flush=True)
+        except Exception:
+            oww = None
 
     if oww is None and rec is None:
         print("WAKE_ERR no detector available", file=sys.stderr, flush=True)
@@ -273,6 +348,18 @@ def main():
     voiced_frames = 0
     # Rolling ~2s utterance buffer for speaker embedding on a wake/barge candidate.
     utt = collections.deque(maxlen=int(SR * UTT_SECONDS))
+    # Loudness state: a slowly-learned room-tone estimate plus the recent peak a wake must clear.
+    recent_rms = collections.deque(maxlen=RECENT_FRAMES)
+    noise_floor = [0.004]
+    gated = [0, 0.0]                      # [count since last report, last report time]
+
+    def loud_enough():
+        """Was anything recently said AT this machine? Both bars, or it isn't a wake."""
+        if not recent_rms:
+            return False, 0.0, wake_bar(noise_floor[0])
+        peak = max(recent_rms)
+        bar = wake_bar(noise_floor[0])
+        return peak >= bar, peak, bar
 
     if BARGE:
         threading.Thread(target=_stdin_reader, daemon=True).start()
@@ -302,11 +389,25 @@ def main():
         if _wake_muted or now < _wake_mute_grace_until:
             derr("WAKE suppressed (self-name) via", why)
             return
+        # Loudness first: it is the cheapest check and rejects the whole class of complaint that
+        # started this — a faint sound the detector talked itself into.
+        heard, peak, bar = loud_enough()
+        if not heard:
+            gated[0] += 1
+            if now - gated[1] > 60:                       # visible without needing DEBUG, but not spam
+                print("[wake] gated %d quiet trigger(s) in the last minute "
+                      "(peak %.4f < bar %.4f, floor %.4f)" % (gated[0], peak, bar, noise_floor[0]),
+                      file=sys.stderr, flush=True)
+                gated[0], gated[1] = 0, now
+            derr("gated (too quiet): peak=%.4f bar=%.4f via %s" % (peak, bar, why))
+            return
         if not owner_speaking():                          # only Siddhant's voice wakes it
             return
         last_wake = now
-        derr("WAKE via", why)
-        print("WAKE", flush=True)
+        derr("WAKE via %s (peak %.3f)" % (why, peak))
+        # The main process arms a 3-second probation window on this line, then decides from the
+        # TRANSCRIPT whether it was actually being spoken to (lib/addressivity.js).
+        print("WAKE %.3f %s" % (peak, why.replace(" ", "_")), flush=True)
 
     dev = _resolve_device(np)
     print("READY", flush=True)
@@ -316,8 +417,16 @@ def main():
             data = q.get()
             pcm = np.frombuffer(data, dtype=np.int16)
             utt.extend(pcm.tolist())
+            # Loudness, measured on EVERY frame. It used to be computed only inside the barge-in
+            # branch, i.e. only while BhatBot was talking, which is why the wake path had no volume
+            # threshold to raise.
+            rms = float(np.sqrt(np.mean((pcm.astype(np.float32) / 32768.0) ** 2))) if pcm.size else 0.0
+            recent_rms.append(rms)
+            # Learn room tone from the quiet frames only, so a long utterance cannot drag the floor
+            # up and deafen the gate behind it.
+            if rms < max(WAKE_RMS_MIN, noise_floor[0] * 3.0):
+                noise_floor[0] = noise_floor[0] * 0.995 + rms * 0.005
             if BARGE and _tts_active:
-                rms = float(np.sqrt(np.mean((pcm.astype(np.float32) / 32768.0) ** 2))) if pcm.size else 0.0
                 if rms >= BARGE_THRESH:
                     voiced_frames += 1
                     if voiced_frames >= BARGE_FRAMES and (time.time() - last_barge) > 1.0:
@@ -343,11 +452,17 @@ def main():
             if rec is not None:
                 try:
                     if rec.AcceptWaveform(data):
-                        text = json.loads(rec.Result()).get("text", "").strip()
+                        res = json.loads(rec.Result())
+                        text = res.get("text", "").strip()
                         if text and text != "[unk]":
                             derr("vosk heard:", repr(text))
-                            if any(p in text for p in MATCH_PHRASES):
-                                fire("vosk:" + text)
+                            if accepts(text):
+                                words = res.get("result") or []
+                                conf = (sum(w.get("conf", 1.0) for w in words) / len(words)) if words else 1.0
+                                if conf >= WAKE_CONF:
+                                    fire("vosk:%s@%.2f" % (text, conf))
+                                else:
+                                    derr("vosk hit below confidence: %r conf=%.2f" % (text, conf))
                 except Exception as e:
                     derr("vosk err", e)
 

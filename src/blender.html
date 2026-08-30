@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<!-- Vendored three.js + local files only; no network. Previews are read straight off disk as file:
+     URLs rather than base64'd through the IPC pipe — a 512x384 PNG per step adds up fast. -->
+<meta http-equiv="Content-Security-Policy"
+  content="default-src 'self' file:; script-src 'self' 'unsafe-inline' file: 'wasm-unsafe-eval'; worker-src 'self' blob:; style-src 'self' 'unsafe-inline' file:; img-src 'self' file: data: blob:; connect-src 'self' file: data: blob:; object-src 'none'; base-uri 'none'; form-action 'none';" />
+<title>BhatBot — Blender Studio</title>
+<style>
+  :root { --accent:#00c8ff; --bg:#0a0f17; --surface:#101823; --line:#1b2836;
+          --text:#cfe4ee; --dim:#7f97ad; --dim2:#4d647c; --ok:#59e39b; --bad:#ff6b6b; --warn:#f2c14e; }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body { height:100%; overflow:hidden; background:var(--bg); color:var(--text);
+    font-family:'JetBrains Mono', ui-monospace, monospace; font-size:12px; }
+  body { display:flex; flex-direction:column; }
+
+  header { display:flex; align-items:center; gap:12px; padding:9px 14px; border-bottom:1px solid var(--line);
+    background:linear-gradient(180deg,#0d141d,#0a0f17); flex:0 0 auto; }
+  header b { color:var(--accent); letter-spacing:.14em; font-weight:600; }
+  #jobname { color:var(--text); }
+  #elapsed { margin-left:auto; color:var(--dim2); font-variant-numeric:tabular-nums; }
+  #state { padding:2px 9px; border-radius:99px; border:1px solid var(--line); color:var(--dim); font-size:11px; }
+  #state.run { color:var(--accent); border-color:#134c63; animation:pulse 1.4s ease-in-out infinite; }
+  #state.ok  { color:var(--ok);  border-color:#1d4c39; }
+  #state.bad { color:var(--bad); border-color:#5a2430; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.55} }
+
+  main { flex:1 1 auto; display:grid; grid-template-columns: minmax(240px, 38%) 1fr; min-height:0; }
+  .pane { min-height:0; display:flex; flex-direction:column; }
+  .pane + .pane { border-left:1px solid var(--line); }
+  .ptitle { padding:6px 12px; color:var(--dim2); font-size:10.5px; letter-spacing:.12em;
+    border-bottom:1px solid var(--line); display:flex; align-items:center; gap:8px; flex:0 0 auto; }
+  .ptitle .sp { margin-left:auto; }
+
+  /* script */
+  #code { flex:1 1 auto; overflow:auto; padding:8px 0 20px; line-height:1.55; }
+  #code .ln { display:flex; padding:0 12px; white-space:pre; }
+  #code .ln .n { flex:0 0 34px; color:#2f4356; text-align:right; padding-right:10px; user-select:none; }
+  #code .ln.step { background:#0e1a24; color:var(--accent); }
+  #code .ln.step.cur { background:#123043; }
+  #code .ln.cur { background:#0d1a25; }
+
+  /* preview */
+  #stage { flex:1 1 auto; position:relative; background:
+      repeating-conic-gradient(#0d141d 0% 25%, #0b111a 0% 50%) 50% / 22px 22px; min-height:0; }
+  #shot { position:absolute; inset:0; width:100%; height:100%; object-fit:contain; display:none; }
+  #glcanvas { position:absolute; inset:0; width:100%; height:100%; display:none; }
+  #placeholder { position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+    color:var(--dim2); font-size:11.5px; text-align:center; padding:24px; line-height:1.7; }
+  .vbtn { background:var(--surface); border:1px solid var(--line); color:var(--dim); border-radius:6px;
+    padding:2px 9px; font:inherit; font-size:10.5px; cursor:pointer; }
+  .vbtn:hover { color:var(--text); border-color:#22506a; }
+  .vbtn.on { color:var(--accent); border-color:#1b5b78; background:#0d1f2b; }
+
+  /* step tape + log */
+  footer { flex:0 0 auto; border-top:1px solid var(--line); background:#0b1119; max-height:38%;
+    display:flex; flex-direction:column; }
+  #tape { display:flex; flex-wrap:wrap; gap:6px; padding:8px 12px; }
+  .chip { display:flex; align-items:center; gap:6px; border:1px solid var(--line); border-radius:6px;
+    padding:2px 9px; color:var(--dim); background:var(--surface); font-size:11px; }
+  .chip .m { color:var(--dim2); font-variant-numeric:tabular-nums; }
+  .chip.run { color:var(--accent); border-color:#134c63; }
+  .chip.ok  { color:var(--ok);  border-color:#1b3f31; }
+  .chip.bad { color:var(--bad); border-color:#4d2029; }
+  #summary { padding:0 12px 8px; color:var(--dim); line-height:1.7; }
+  #summary .k { color:var(--dim2); }
+  #summary a { color:var(--accent); text-decoration:none; }
+  #err { padding:8px 12px; color:var(--bad); line-height:1.6; display:none; white-space:pre-wrap; }
+  #log { overflow:auto; padding:0 12px 10px; color:#3d5468; font-size:10.5px; line-height:1.5;
+    white-space:pre-wrap; display:none; }
+</style>
+</head>
+<body>
+
+<header>
+  <b>⬢ BLENDER STUDIO</b>
+  <span id="jobname">idle</span>
+  <span id="state">waiting</span>
+  <span id="elapsed"></span>
+</header>
+
+<main>
+  <div class="pane">
+    <div class="ptitle">script.py <span class="sp"></span><button class="vbtn" id="logbtn">blender log</button></div>
+    <div id="code"></div>
+  </div>
+  <div class="pane">
+    <div class="ptitle">viewport
+      <span class="sp"></span>
+      <button class="vbtn on" id="vshot">render</button>
+      <button class="vbtn" id="vgl" disabled>3D</button>
+    </div>
+    <div id="stage">
+      <div id="placeholder">Nothing building yet.<br>Ask BhatBot to make a model and this window fills in as Blender works.</div>
+      <img id="shot" alt="viewport render" />
+      <canvas id="glcanvas"></canvas>
+    </div>
+  </div>
+</main>
+
+<footer>
+  <div id="tape"></div>
+  <div id="summary"></div>
+  <div id="err"></div>
+  <div id="log"></div>
+</footer>
+
+<script type="importmap">
+{ "imports": {
+  "three": "./vendor/three/three.module.js",
+  "three/addons/": "./vendor/three/jsm/"
+} }
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s == null ? '' : s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+
+// ── state ────────────────────────────────────────────────────────────────────────────────────────
+let steps = [];          // { name, status, ms, error }
+let started = 0, tick = null, logLines = [];
+
+function setState(cls, text) { const e = $('state'); e.className = cls || ''; e.textContent = text; }
+function startClock() {
+  started = Date.now();
+  clearInterval(tick);
+  tick = setInterval(() => { $('elapsed').textContent = ((Date.now() - started) / 1000).toFixed(1) + 's'; }, 100);
+}
+function stopClock() { clearInterval(tick); tick = null; }
+
+// ── script pane ──────────────────────────────────────────────────────────────────────────────────
+// The generated source, with the running step highlighted. Seeing the actual bpy is most of the
+// point: when a build comes out wrong, the script is the thing you want to read, not a summary of it.
+let codeLines = [];
+function renderCode(src) {
+  codeLines = String(src || '').split('\n');
+  $('code').innerHTML = codeLines.map((l, i) => {
+    const isStep = /^\s*#\s*--\s*step/.test(l);
+    return `<div class="ln${isStep ? ' step' : ''}" data-i="${i}"><span class="n">${i + 1}</span><span>${esc(l) || ' '}</span></div>`;
+  }).join('');
+}
+function highlightStep(name) {
+  const lines = [...document.querySelectorAll('#code .ln')];
+  lines.forEach((el) => el.classList.remove('cur'));
+  let on = false, first = null;
+  for (const el of lines) {
+    const txt = el.textContent;
+    const isStep = el.classList.contains('step');
+    if (isStep) on = txt.includes(name);
+    if (on) { el.classList.add('cur'); if (!first) first = el; }
+  }
+  if (first) first.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+}
+
+// ── step tape ────────────────────────────────────────────────────────────────────────────────────
+function renderTape() {
+  $('tape').innerHTML = steps.map((s) => {
+    const icon = s.status === 'ok' ? '✓' : s.status === 'fail' ? '✕' : '⟳';
+    return `<span class="chip ${s.status === 'fail' ? 'bad' : s.status === 'ok' ? 'ok' : 'run'}">${icon} ${esc(s.name)}`
+      + (s.ms != null ? ` <span class="m">${(s.ms / 1000).toFixed(2)}s</span>` : '') + '</span>';
+  }).join('');
+}
+
+// ── preview ──────────────────────────────────────────────────────────────────────────────────────
+function showShot(p) {
+  // Cache-bust: every step writes a DIFFERENT file, but the final render is rewritten per build.
+  $('shot').src = 'file://' + p + '?t=' + Date.now();
+  $('shot').style.display = 'block';
+  $('placeholder').style.display = 'none';
+  setView('shot');
+}
+function setView(which) {
+  const gl = which === 'gl';
+  $('glcanvas').style.display = gl ? 'block' : 'none';
+  $('shot').style.display = gl ? 'none' : ($('shot').src ? 'block' : 'none');
+  $('vgl').classList.toggle('on', gl);
+  $('vshot').classList.toggle('on', !gl);
+  if (gl) resizeGL();
+}
+$('vshot').onclick = () => setView('shot');
+$('vgl').onclick = () => { if (!$('vgl').disabled) setView('gl'); };
+$('logbtn').onclick = () => {
+  const el = $('log');
+  const open = el.style.display === 'block';
+  el.style.display = open ? 'none' : 'block';
+  $('logbtn').classList.toggle('on', !open);
+};
+
+// ── the GLB viewer ───────────────────────────────────────────────────────────────────────────────
+// Plays animations, which the shared 3D viewer does not — and a Blender build is exactly the case
+// where the thing you made MOVES, so a still frame of it would be a poor way to check the work.
+let renderer, scene, camera, controls, mixer, currentModel, clock;
+function initGL() {
+  if (renderer) return;
+  renderer = new THREE.WebGLRenderer({ canvas: $('glcanvas'), antialias: true, alpha: true });
+  renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+  scene = new THREE.Scene();
+  camera = new THREE.PerspectiveCamera(45, 1, 0.01, 5000);
+  controls = new OrbitControls(camera, renderer.domElement);
+  controls.enableDamping = true; controls.dampingFactor = 0.08;
+  scene.add(new THREE.HemisphereLight(0xbfe6ff, 0x0a0f17, 1.2));
+  const key = new THREE.DirectionalLight(0xffffff, 1.5); key.position.set(1, 1.4, 1); scene.add(key);
+  const rim = new THREE.DirectionalLight(0x66ccff, 0.6); rim.position.set(-1, 0.5, -0.8); scene.add(rim);
+  clock = new THREE.Clock();
+  (function loop() {
+    requestAnimationFrame(loop);
+    if ($('glcanvas').style.display === 'none') return;      // don't burn frames on a hidden canvas
+    if (mixer) mixer.update(clock.getDelta()); else clock.getDelta();
+    controls.update();
+    renderer.render(scene, camera);
+  })();
+}
+function resizeGL() {
+  if (!renderer) return;
+  const r = $('stage').getBoundingClientRect();
+  renderer.setSize(r.width, r.height, false);
+  camera.aspect = r.width / Math.max(1, r.height); camera.updateProjectionMatrix();
+}
+addEventListener('resize', resizeGL);
+
+async function loadGLB(p) {
+  initGL();
+  try {
+    const buf = await window.blenderStudio.readModel(p);
+    if (!buf || !buf.data) return;
+    const bytes = Uint8Array.from(atob(buf.data), (c) => c.charCodeAt(0));
+    new GLTFLoader().parse(bytes.buffer, '', (gltf) => {
+      if (currentModel) scene.remove(currentModel);
+      if (mixer) { mixer.stopAllAction(); mixer = null; }
+      currentModel = gltf.scene;
+      const box = new THREE.Box3().setFromObject(currentModel);
+      const size = box.getSize(new THREE.Vector3()), c = box.getCenter(new THREE.Vector3());
+      currentModel.position.sub(c);
+      const d = Math.max(size.x, size.y, size.z) || 1;
+      camera.position.set(d * 1.5, d * 1.1, d * 1.7);
+      camera.near = d / 100; camera.far = d * 50; camera.updateProjectionMatrix();
+      controls.target.set(0, 0, 0); controls.update();
+      scene.add(currentModel);
+      if (gltf.animations && gltf.animations.length) {
+        mixer = new THREE.AnimationMixer(currentModel);
+        for (const clip of gltf.animations) mixer.clipAction(clip).play();
+      }
+      $('vgl').disabled = false;
+      resizeGL();
+    }, () => {});
+  } catch {}
+}
+
+// ── event stream ─────────────────────────────────────────────────────────────────────────────────
+window.blenderStudio.onEvent((e) => {
+  if (!e || !e.k) return;
+  switch (e.k) {
+    case 'start':
+      steps = (e.steps || []).map((n) => ({ name: n, status: 'wait' }));
+      $('jobname').textContent = e.name || 'model';
+      $('summary').innerHTML = ''; $('err').style.display = 'none'; $('err').textContent = '';
+      $('log').textContent = ''; logLines = [];
+      $('vgl').disabled = true;
+      setState('run', 'building'); startClock(); renderTape();
+      if (e.source) renderCode(e.source);
+      break;
+    case 'step': {
+      const s = steps[e.i] || (steps[e.i] = { name: e.name });
+      s.name = e.name; s.status = e.status === 'run' ? 'run' : e.status; s.ms = e.ms; s.error = e.error;
+      renderTape();
+      if (e.status === 'run') highlightStep(e.name);
+      if (e.status === 'fail') { $('err').style.display = 'block'; $('err').textContent = `✕ ${e.name}\n${e.error || ''}`; }
+      break;
+    }
+    case 'preview': case 'final_preview': showShot(e.path); break;
+    case 'engine':
+      if ((e.tried || []).length) push(`render engine fell back to ${e.engine} (tried ${e.tried.join(', ')})`);
+      break;
+    case 'stats':
+      $('summary').innerHTML = `<span class="k">mesh</span> ${e.objects} object${e.objects === 1 ? '' : 's'} · `
+        + `${(e.tris || 0).toLocaleString()} tris · ${(e.verts || 0).toLocaleString()} verts`
+        + (e.frame_end > e.frame_start ? ` · <span class="k">anim</span> ${e.frame_end - e.frame_start + 1} frames` : '');
+      break;
+    case 'export':
+      $('summary').innerHTML += `<br><span class="k">→</span> ${esc(e.path.split('/').pop())} (${Math.round(e.bytes / 1024)} KB)`;
+      if (e.format === 'glb') loadGLB(e.path);
+      break;
+    case 'blend':
+      $('summary').innerHTML += `<br><span class="k">→</span> ${esc(e.path.split('/').pop())} <span class="k">— open this in Blender to keep working on it</span>`;
+      break;
+    case 'note': push(e.text); break;
+    case 'log': push(e.text); break;
+    case 'done':
+      stopClock();
+      setState(e.ok ? 'ok' : 'bad', e.ok ? 'done' : 'failed');
+      $('elapsed').textContent = ((Date.now() - started) / 1000).toFixed(1) + 's';
+      break;
+  }
+});
+
+function push(t) {
+  if (!t) return;
+  logLines.push(t);
+  if (logLines.length > 300) logLines.shift();
+  const el = $('log');
+  el.textContent = logLines.join('\n');
+  el.scrollTop = el.scrollHeight;
+}
+
+window.blenderStudio.ready();
+</script>
+</body>
+</html>

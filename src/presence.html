@@ -363,6 +363,7 @@ function spawnAgent(info) {
     steerable: info.steerable !== false,
     phase: Math.random() * 6.28,
     poi: -1, path: [], clip: null, restClip: 'Idle', reactTimer: null, walkT: 0,
+    nextBeat: null,          // when this agent next wanders or fidgets (see idleBeat)
   };
   // Enter at a spawn point and wave hello — the arrival should be legible, not a pop-in.
   const start = claimPoi('idle', null, a.id);
@@ -382,11 +383,69 @@ function despawnAgent(a) {
   agents.delete(a.id);
 }
 
+// ---------------------------------------------------------------------------
+// IDLE LIFE — the office should look inhabited, not staffed by mannequins.
+//
+// Agents reached their anchor and then stood perfectly still until their STATE changed, which for an
+// idle fleet is forever. The room read as a diorama.
+//
+// The distinction that keeps it meaningful: only agents with nothing to do WANDER. A working agent is
+// at a desk because that is what blue means, and having it get up and stroll would make the colour
+// legend a lie — so it fidgets in place instead. Movement still tells you something true.
+const STROLL_MIN_MS = 7000, STROLL_MAX_MS = 18000;      // between strolls, when idle
+const FIDGET_MIN_MS = 16000, FIDGET_MAX_MS = 38000;     // between micro-motions, when seated and busy
+const rnd = (lo, hi) => lo + Math.random() * (hi - lo);
+const FIDGETS = ['LookAround', 'Listen', 'Pick'];
+
+function scheduleIdleBeat(a, now, lo, hi) { a.nextBeat = now + rnd(lo, hi); }
+
+/** Wander to a DIFFERENT free idle anchor. claimPoi picks the nearest, which is the one you're on. */
+function strollTo(a) {
+  const free = [];
+  for (let i = 0; i < pois.length; i++) {
+    const p = pois[i];
+    if (p.kind === 'idle' && i !== a.poi && (!p.taken || p.taken === a.id)) free.push(i);
+  }
+  if (!free.length) return false;
+  const dest = free[(Math.random() * free.length) | 0];
+  for (const p of pois) if (p.taken === a.id && p !== pois[dest]) p.taken = null;
+  pois[dest].taken = a.id;
+  a.path = route(a.poi >= 0 ? a.poi : dest, dest).map((i) => pois[i]);
+  a.poi = dest;
+  a.restClip = 'Idle';
+  if (a.path.length) { playClip(a, 'Walk'); return true; }
+  a.group.position.copy(pois[dest].pos); a.group.quaternion.copy(pois[dest].quat); playClip(a, 'Idle');
+  return true;
+}
+
+/** One beat of idle behaviour for an agent that has arrived and has nothing queued. */
+function idleBeat(a, now) {
+  if (a.nextBeat == null) { scheduleIdleBeat(a, now, 1500, STROLL_MAX_MS); return; }
+  if (now < a.nextBeat || a.clipOnce) return;            // mid-reaction: let it finish
+  const seated = a.state === 'working' || a.state === 'thinking';
+  const fidget = FIDGETS.filter((c) => clips[c] && a.actions[c]);
+  if (seated) {
+    if (fidget.length) react(a, fidget[(Math.random() * fidget.length) | 0]);
+    scheduleIdleBeat(a, now, FIDGET_MIN_MS, FIDGET_MAX_MS);
+    return;
+  }
+  // Idle: mostly stroll somewhere else, sometimes just look around. Both, so the movement has a
+  // rhythm rather than a metronome of walking.
+  if (fidget.length && Math.random() < 0.35) {
+    react(a, fidget[(Math.random() * fidget.length) | 0]);
+    scheduleIdleBeat(a, now, 4000, 9000);
+  } else {
+    strollTo(a);
+    scheduleIdleBeat(a, now, STROLL_MIN_MS, STROLL_MAX_MS);
+  }
+}
+
 /** Send an agent to an anchor of the given kind, routing over the navmesh. */
 function retarget(a, kind, restClip) {
   const cur = a.poi >= 0 ? pois[a.poi].pos : a.group.position;
   const dest = claimPoi(kind, cur, a.id);
   a.restClip = restClip;
+  a.nextBeat = null;    // a real assignment resets the idle rhythm, so it doesn't stroll on arrival
   if (dest < 0 || dest === a.poi) { if (!a.path.length) playClip(a, restClip); return; }
   // Free the old anchor only once we're actually leaving it.
   for (const p of pois) if (p.taken === a.id && p !== pois[dest]) p.taken = null;
@@ -640,6 +699,8 @@ const _tmp = new THREE.Vector3();
       a.group.quaternion.copy(pois[a.poi].quat);
       playClip(a, a.restClip || 'Idle');
     }
+    // --- idle life: arrived, nothing queued → wander or fidget ----------------
+    if (!a.path.length) idleBeat(a, now);
     // --- animation + state tint ---------------------------------------------
     if (a.mixer) a.mixer.update(dt);
     if (a.plate) a.plate.quaternion.copy(camera.quaternion);

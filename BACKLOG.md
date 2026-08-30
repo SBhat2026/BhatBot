@@ -43,6 +43,14 @@ From the FORGE sprint. The runtime floor each depends on **does** exist
 - ⬜ `lib/swarm.js` — persona/scenario runner so drones can swarm-test an app (two agents conversing)
 - ⬜ `lib/visualloop.js` — design → critique → revise loop for visual work (N iterations against a rubric)
 - ⬜ `lib/compbio.js` — AlphaFold/PDB fetch + render (a `1crn.cif` fixture is already in the repo for an offline test)
+  — now also has a renderer: `make_model` can build the figure in Blender rather than only viewing a structure.
+
+### Blender (`lib/blender.js`, shipped — these are the next steps, not gaps)
+- ⬜ **Reuse a build.** Every `make_model` call starts from an empty scene. Opening the previous
+  `.blend` and editing it is what "make the shade taller" should mean, and today it re-runs the script.
+- ⬜ **Materials beyond a base colour.** `_paint` sets Base Color; roughness, metalness and emission
+  are reachable from the same node and would cost almost nothing to expose.
+- ⬜ **Turn a render into a video.** The frames exist and Seedance is already wired for image→video.
 
 ### Second brain (SECOND_BRAIN_PLAN.md)
 - ⬜ **P3 Scout** — web enrichment of graph nodes. No enrichment exists at all today.
@@ -65,7 +73,11 @@ Gated on data volume, not on code:
 - ⬜ **SideStore install** for the native phone build (instructions in `SIDESTORE-AND-NOTION-SETUP.txt`)
 - ⬜ **Cloud deploy** — `cloud/` is ready; deploying it and setting its secrets is your call, since your keys live there
 - ⬜ **Stable tunnel** — a Cloudflare named tunnel needs a domain on your CF account
-- ⬜ **Merge `endurance-pass-b` → `main`** — the branch now carries a lot
+- ⬜ **Tune the wake gate against your room.** `make_model` and the addressivity gate need no tuning,
+  but the loudness floor does: it ships at `wakeRms 0.02` / `wakeMargin 3.5`. If it still triggers
+  from across the room, raise `wakeRms` in config; if you have to lean into the mic, lower it. Every
+  gated trigger is reported (`[wake] gated N quiet trigger(s) in the last minute …` with the measured
+  peak and bar), so tune against the numbers rather than the feel.
 
 ---
 

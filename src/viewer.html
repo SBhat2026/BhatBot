@@ -54,6 +54,8 @@ const fill = new THREE.DirectionalLight(0x66ccff, 0.5); fill.position.set(-1, 0.
 let grid = null;
 
 let current = null;
+let mixer = null;                       // GLB animation playback (a Blender build usually moves)
+const clock = new THREE.Clock();
 function addGrid(maxDim) {
   if (grid) scene.remove(grid);
   grid = new THREE.GridHelper(maxDim * 3, 24, 0x0a4a63, 0x10202c);
@@ -76,7 +78,16 @@ function setModel(buf, ext, name, info) {
     if (current) { scene.remove(current); current = null; }
     let obj;
     if (ext === 'glb' || ext === 'gltf') {
-      new GLTFLoader().parse(buf, '', (gltf) => { mount(gltf.scene); }, (e) => showError('GLB parse failed: ' + e));
+      // Animations were being dropped on the floor: only `gltf.scene` was mounted, so a turntable or
+      // a rig built in Blender arrived as a still pose with no sign anything was missing.
+      new GLTFLoader().parse(buf, '', (gltf) => {
+        mount(gltf.scene);
+        if (mixer) { mixer.stopAllAction(); mixer = null; }
+        if (gltf.animations && gltf.animations.length) {
+          mixer = new THREE.AnimationMixer(gltf.scene);
+          for (const clip of gltf.animations) mixer.clipAction(clip).play();
+        }
+      }, (e) => showError('GLB parse failed: ' + e));
       return;
     } else {
       const geo = new STLLoader().parse(buf);
@@ -106,7 +117,12 @@ function resize() {
   renderer.setSize(w, h, false); camera.aspect = w / h; camera.updateProjectionMatrix();
 }
 addEventListener('resize', resize); resize();
-(function loop() { requestAnimationFrame(loop); controls.update(); renderer.render(scene, camera); })();
+(function loop() {
+  requestAnimationFrame(loop);
+  const dt = clock.getDelta();
+  if (mixer) mixer.update(dt);
+  controls.update(); renderer.render(scene, camera);
+})();
 
 window.viewer.onModel((d) => {
   document.getElementById('err').style.display = 'none';

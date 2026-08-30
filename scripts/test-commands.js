@@ -6,7 +6,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const ROOT = path.join(__dirname, '..');
-const { createCommands, parse } = require(path.join(ROOT, 'lib', 'commands'));
+const { createCommands, parse, BUILTINS } = require(path.join(ROOT, 'lib', 'commands'));
 const { classifyIntake } = require(path.join(ROOT, 'lib', 'pure'));
 
 let pass = 0;
@@ -56,11 +56,11 @@ console.log('[commands]');
 {
   const c = createCommands({ dir: path.join(TMP, 'none') });
   const names = c.list().map((x) => x.name).sort();
-  assert.deepStrictEqual(names, ['agent', 'agents', 'help', 'new-command']);
+  assert.deepStrictEqual(names, BUILTINS.map((b) => b.name).sort());
   assert.ok(c.list().every((x) => x.builtin));
   assert.ok(c.get('agent').description.length > 10);
   assert.strictEqual(c.get('nope'), null);
-  ok('the four builtins are always registered');
+  ok('every builtin is always registered');
 }
 
 // 5. Custom commands load from disk, with and without front-matter.
@@ -125,7 +125,7 @@ console.log('[commands]');
   const m = c.match('ag');
   assert.strictEqual(m[0].name, 'agent', 'prefix matches rank first');
   assert.ok(m.some((x) => x.name === 'archive'), 'description matches still appear');
-  assert.strictEqual(c.match('').length, 5, 'empty prefix lists everything');
+  assert.strictEqual(c.match('').length, BUILTINS.length + 1, 'empty prefix lists everything (builtins + the custom one)');
   ok('autocomplete ranks prefix matches above description matches');
 }
 

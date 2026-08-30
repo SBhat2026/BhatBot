@@ -92,6 +92,10 @@ contextBridge.exposeInMainWorld('bhatbot', {
   onCanvasAdd: (cb) => ipcRenderer.on('canvas-add', (_e, p) => cb(p)),
   onCanvasClear: (cb) => ipcRenderer.on('canvas-clear', (_e, p) => cb(p)),
   voiceGate: (text) => { try { return require('./lib/pure').looksActionable(text); } catch { return { action: 'ok', reason: 'gate-error' }; } },
+  // Was that said TO me or ABOUT me? Pure + synchronous, so the mic path never waits on IPC to
+  // decide. Fails OPEN ('yes') — going deaf is a worse failure than one false wake.
+  addressivity: (text) => { try { return require('./lib/addressivity').score(text, { hadWake: true }); } catch { return { verdict: 'yes', score: 0, reasons: ['gate-error'], command: text }; } },
+  logWakeDecision: (d) => ipcRenderer.send('wake-decision', d),
   voiceIntent: (text) => ipcRenderer.invoke('voice-intent', { text }),
   onToggleVoiceLock: (cb) => ipcRenderer.on('toggle-voice-lock', () => cb()),
   endSession: () => ipcRenderer.send('end-session'),
