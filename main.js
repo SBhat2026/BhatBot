@@ -57,7 +57,7 @@ const agentTeam = require('./lib/orchestrator');        // C — parallel same-t
 const planner = require('./lib/planner');               // B1 — decompose a goal into a task DAG for the team
 const ambient = require('./lib/ambient');              // #18 — opt-in proactive Calendar/Mail awareness (OFF by default)
 const phonemirror = require('./lib/phonemirror');       // iPhone Mirroring glue — open/focus + gesture shortcuts + window geometry for the phone_mirror tool
-const { splitForSpeech, estimateToolCost, stripReasoning, classifySpeech, createSpeechNormalizer, isPromissory, shouldExtendBudget, toolSig, detectLoop, progressLine, classifyIntake, conversationContinuity } = require('./lib/pure');  // SPLIT_PLAN step 1
+const { splitForSpeech, estimateToolCost, stripReasoning, classifySpeech, createSpeechNormalizer, isPromissory, shouldExtendBudget, toolSig, detectLoop, progressLine, classifyIntake, conversationContinuity, shouldRaiseFleet } = require('./lib/pure');  // SPLIT_PLAN step 1
 const WebSocket = require('ws');
 const { createTtsWs } = require('./lib/ttsws');   // T1 — continuous ws streaming TTS transport (config.ttsTransport==='ws')
 const speech = require('./lib/speech');                 // human-speech shaping: emoji→spoken-cue/drop + context-aware punctuation
@@ -499,6 +499,21 @@ function latMark(label) {
     _latSeen.add(label);
     console.log(`[latency] +${String(Date.now() - _latT0).padStart(5)}ms  ${label}`);
   } catch {}
+}
+// TIME ONE STAGE OF THE PREAMBLE. The marks above are cumulative wall-clock stamps, which tell you
+// WHEN something happened but not what it COST — and with the preamble stages now overlapping, "when"
+// no longer implies "how long". This reports the duration of the stage itself, so the critical path
+// is readable from the log instead of subtracted by hand. Zero cost when debugLatency is off.
+async function latStage(label, fn) {
+  // Instrumentation must never be able to break the thing it measures: if loadConfig() throws here,
+  // an un-guarded read would take the STAGE down with it — recall or tool retrieval would simply
+  // never run, and the symptom would be a slow, dumb turn with no error anywhere near the cause.
+  let on = false;
+  try { on = !!_latT0 && !!loadConfig().debugLatency; } catch {}
+  if (!on) return fn();
+  const t0 = Date.now();
+  try { return await fn(); }
+  finally { try { console.log(`[latency]   ${String(Date.now() - t0).padStart(5)}ms  ↳ ${label}`); } catch {} }
 }
 
 // ---------------------------------------------------------------------------
@@ -5482,9 +5497,34 @@ function relayAgentLog(payload) {
     try { if (_cloudBridge && _cloudBridge.send) _cloudBridge.send({ type: 'agentlog', entry }); } catch {}
   } catch {}
 }
+// ── SHOW THE OFFICE WHEN THE OFFICE IS DOING SOMETHING ──────────────────────────────────────────
+// Three tools (deploy_drones, plan_and_run, fleet) each raised the FLEET panel themselves, so the
+// auto-switch existed exactly three times and covered nothing else — a DAG fan-out, a delegated
+// project or a background specialist all started work with the panel still showing the chat.
+//
+// fleetBroadcast is the ONE place every agent's first heartbeat passes through, so the decision
+// belongs here: the first agent to start real work in a quiet office brings the office up, once.
+// Gated three ways, because a screen that yanks itself around is worse than one that never moves:
+// only for genuinely active states, only when nothing was already running (so a five-agent fan-out
+// switches once, not five times), and never more than once a minute.
+let _fleetShownAt = 0;
+function maybeShowFleet(payload) {
+  try {
+    if (loadConfig().autoShowFleet === false) return;
+    // The rule itself is pure.shouldRaiseFleet — readable and testable on its own, rather than a
+    // condition that can only be understood by reading this one call site.
+    const d = shouldRaiseFleet(payload, [...fleetAgents.values()], Date.now() - _fleetShownAt);
+    if (!d.raise) return;
+    _fleetShownAt = Date.now();
+    console.log('[fleet] raising the office —', d.why);
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('show-panel', 'vanguard');
+  } catch {}
+}
+
 function fleetBroadcast(payload) {
   if (payload && payload.id) {
     const cur = fleetAgents.get(payload.id) || { id: payload.id, feedback: [] };
+    maybeShowFleet(payload);   // BEFORE the set, so "was anything else already working" is honest
     fleetAgents.set(payload.id, { ...cur, ...payload, feedback: cur.feedback || [], ts: Date.now() });
   }
   relayAgentLog(payload);   // hub: capture + relay each agent's log to the cloud → other bots
@@ -5770,19 +5810,44 @@ function needsPlan(text) {
   return verbs >= 1 && (multi || t.length > 120);
 }
 // parseJsonLoose lives once, near the pipeline stages (defined below); the earlier duplicate was removed.
-async function quickPlan(taskText, apiKey) {
+// The plan Siddhant is shown and read before work starts. It is on the critical path of every
+// substantial turn, so it is tuned for LATENCY, not depth: the deep thinking belongs in the main
+// loop, which is about to run anyway with the whole catalog and the whole conversation.
+//   • a SCHEMA, so a chatty reply cannot yield "no plan" silently. That was the real failure mode —
+//     parseJsonLoose returning null meant the turn just quietly never announced anything, which is
+//     indistinguishable from "the planner is disabled".
+//   • effort 'low', because a 3-6 item plan does not need extended reasoning and every token of it
+//     is time Siddhant spends watching nothing happen.
+//   • it is told which tools are actually available this turn, so the steps describe things BhatBot
+//     can really do instead of a plausible-sounding plan the executor then has to reinterpret.
+const QUICK_PLAN_SCHEMA = {
+  type: 'object',
+  properties: {
+    steps: { type: 'array', minItems: 1, maxItems: 6, items: { type: 'string' },
+      description: 'Concrete actions BhatBot will take, imperative, each under 12 words.' },
+    spoken: { type: 'string', description: 'At most 2 sentences of plain spoken English summarising the approach. No markdown, no numbered list.' },
+  },
+  required: ['steps', 'spoken'],
+  additionalProperties: false,
+};
+async function quickPlan(taskText, apiKey, { toolNames = [] } = {}) {
   const system = `You are BhatBot's fast planner. Draft a SHORT execution plan for Siddhant's request.
-Return ONLY JSON: {"steps":["<imperative action>", ...3-6 items],"spoken":"<=2 sentences, plain spoken English summarizing your approach — no markdown, no numbered list>"}
-Steps = concrete actions/tools BhatBot will take, each under 12 words. No preamble, JSON only.`;
+Steps = concrete actions/tools BhatBot will take, each under 12 words.`
+    + (toolNames.length ? `\nTools available for this task: ${toolNames.join(', ')}. Prefer these; do not invent capabilities.` : '');
   try {
     const r = await anthropicRequest({ model: MODEL_SONNET, max_tokens: 400,
       system: [{ type: 'text', text: system }],
-      messages: [{ role: 'user', content: String(taskText || '').slice(0, 2000) }] }, apiKey, { retries: 1 });
+      messages: [{ role: 'user', content: String(taskText || '').slice(0, 2000) }],
+      _reason: { schema: QUICK_PLAN_SCHEMA, schemaName: 'quick_plan', effort: 'low' },
+    }, apiKey, { retries: 1 });
     const txt = (r.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('');
-    const j = parseJsonLoose(txt);
-    if (!j || !Array.isArray(j.steps) || !j.steps.length) return null;
+    const j = parseJsonLoose(txt);   // schema-shaped already; the loose parse is the no-schema fallback
+    if (!j || !Array.isArray(j.steps) || !j.steps.length) {
+      console.warn('[plan] planner returned nothing usable — the turn will run without an announced plan');
+      return null;
+    }
     return { steps: j.steps.slice(0, 6).map((s) => String(s).slice(0, 120)), spoken: String(j.spoken || '').slice(0, 320) };
-  } catch { return null; }
+  } catch (e) { console.warn('[plan] planner failed:', e.message); return null; }
 }
 function appendToLastUser(history, text) {
   for (let i = history.length - 1; i >= 0; i--) {
@@ -5840,7 +5905,23 @@ async function agentLoop(history, apiKey, event, opts = {}) {
   // A durable sidecar for this turn: goal stored verbatim, every tool journaled, parkable + resumable.
   // Opened only for ACTION-shaped asks (a chat reply has nothing to resume), and discarded in finish()
   // if the turn ends quickly — ordinary two-step turns must not litter the disk. See lib/mission.js.
-  const _missionGoal = lastUserText(history) || _lastUserText || '';
+  // ── THE ASK ─────────────────────────────────────────────────────────────────────────────────────
+  // What Siddhant actually said, captured HERE and never re-derived. Everything in the preamble —
+  // mode, recall, tool retrieval, planning, and the post-turn judges — keys off this one string.
+  //
+  // It has to be captured before the mission anchor is appended, because `lastUserText(history)`
+  // after that point returns THE ANCHOR, not the request. The anchor is a block about goals, plans,
+  // budgets and steps, so every consumer downstream was being handed mission bookkeeping:
+  //   • tool retrieval ranked the anchor's vocabulary and pulled in delegate_project /
+  //     notion_log_activity / write_agent_directive / plan_and_run, displacing five tools the request
+  //     actually needed. Measured on "render a spinning low-poly desk lamp in blender and export a
+  //     glb": generate_3d fell 0.7254 → 0.6372. Self-reinforcing, too — an anchor about planning
+  //     retrieves planning tools, so the model plans instead of acting.
+  //   • procedural memory banked every routine under a TRIGGER of mission boilerplate, and anchors
+  //     are near-identical across turns, so the store was learning to match anything.
+  //   • the action-verify judge was asked "did it do what was asked?" with the anchor as the ask.
+  const _ask = lastUserText(history) || _lastUserText || '';
+  const _missionGoal = _ask;
   let _mission = null, _replay = null;
   try {
     if (opts.missionId) {
@@ -5857,7 +5938,7 @@ async function agentLoop(history, apiKey, event, opts = {}) {
   } catch (e) { console.warn('[mission] open failed (continuing without one):', e.message); }
 
   history = validateHistory(history);            // heal any corruption before it compounds
-  history = await trimHistory(history, apiKey);
+  history = await latStage('trimHistory', () => trimHistory(history, apiKey));
   // Seam S2 (entry): trimHistory summarizes the HEAD of history — which is exactly where the original
   // request lives. Re-anchor immediately so a long/resumed run never loses the goal it was given.
   if (_mission) history = [...history, { role: 'user', content: _mission.anchor({ resumed: !!opts.missionId }) }];
@@ -5868,46 +5949,62 @@ async function agentLoop(history, apiKey, event, opts = {}) {
 
   // P4 — select the operating mode for this task: the local router's classification when
   // the pipeline escalated to us, else the zero-cost regex classifier on the task text.
-  currentMode = opts.suggestedMode || modePrompts.classifyMode(lastUserText(history));
+  currentMode = opts.suggestedMode || modePrompts.classifyMode(_ask);
   sendToActivity('tool-update', { type: 'thinking', text: '🎛 mode: ' + currentMode });
 
-  // Passive auto-recall from the shared Notion bank — fold relevant facts (written by the Mac,
-  // the cloud backend, or any other agent) into the memory block before we answer. Bounded to 4s.
-  // SPEED: this blocks the FIRST token on every turn. Skip it for trivial turns (greetings, short
-  // acks, "yes"/"stop"/"thanks") that can't benefit from long-term recall — those answer instantly.
-  // The three recalls still run for anything substantive. Gate is config-tunable (recallGate:false
-  // forces the old always-recall behaviour).
-  if (loadConfig().recallGate === false || turnNeedsRecall(lastUserText(history))) {
-    await Promise.all([refreshNotionRecall(lastUserText(history)), refreshSemanticRecall(lastUserText(history)), refreshEpisodicVec(lastUserText(history))]);
-  }
-  refreshProceduralRecall(lastUserText(history));   // learned step-series (sync) + speculative prefetch of the known first read
+  // ── THE PREAMBLE RUNS AS ONE WAVE, NOT THREE ────────────────────────────────────────────────────
+  // Recall, tool retrieval and planning each depend on exactly one thing — `_ask` — and on nothing
+  // the others produce. They were nevertheless awaited one after another, so the wait before the
+  // first model call was their SUM: three network round-trips deep, with the planner (a full Sonnet
+  // request) last in the queue behind two that had already finished their work.
+  //
+  // Started together here, awaited individually below at the point each is actually needed, so the
+  // critical path becomes max() instead of sum() — in practice the planner, with recall and
+  // retrieval finishing underneath it for free.
+  //
+  // Every promise carries its own .catch: a promise started now and awaited later would otherwise
+  // raise an unhandled rejection in the window between the two, which is a crash, not a slow turn.
+  const _wantRecall = loadConfig().recallGate === false || turnNeedsRecall(_ask);
+  const recallP = _wantRecall
+    // Timed individually, not as a lump: with the three stages now overlapping, recall is what the
+    // critical path actually is, and "recall took 512ms" is not something anyone can act on.
+    ? Promise.all([
+        latStage('recall·notion', () => refreshNotionRecall(_ask)),
+        latStage('recall·semantic', () => refreshSemanticRecall(_ask)),
+        latStage('recall·episodic', () => refreshEpisodicVec(_ask)),
+      ]).catch(() => {})
+    : Promise.resolve();
 
-  // W1 — context-rot prevention: inject only the tools relevant to THIS turn (top-k by embedding
-  // similarity + a small always-present CORE set), computed ONCE here and reused across every
-  // tool-loop step (never swap mid-loop). null ⇒ full catalog (no key / low confidence / disabled).
-  _activeTools = null;
-  if (loadConfig().toolRetrieval !== false) {
-    try {
-      // Rank over the FULL catalog — native + live connector tools. Ranking only the native ones and
-      // appending connectors afterwards is what made them retrieval-exempt and permanently on the wire.
-      const catalog = fullCatalog();
-      const sel = await toolselect.select(lastUserText(history), catalog, { k: Number(loadConfig().toolRetrievalK) || 12 });
-      if (sel && sel.tools && sel.tools.length) {
-        _activeTools = sel.tools;
-        sendToActivity('tool-update', { type: 'thinking', text: `🧰 tools: ${sel.tools.length}/${catalog.length} selected for this turn` });
-        try { fs.appendFileSync(AUDIT_PATH, JSON.stringify({ ts: new Date().toISOString(), toolSelect: sel.tools.length, of: catalog.length, names: sel.names }) + '\n'); } catch {}
-      }
-    } catch { /* retrieval is best-effort; fall back to full catalog */ }
-  }
+  const _catalog = loadConfig().toolRetrieval !== false ? fullCatalog() : null;
+  const toolsP = _catalog
+    // Rank over the FULL catalog — native + live connector tools. Ranking only the native ones and
+    // appending connectors afterwards is what made them retrieval-exempt and permanently on the wire.
+    ? latStage('tool retrieval', () => toolselect.select(_ask, _catalog, { k: Number(loadConfig().toolRetrievalK) || 12 })).catch(() => null)
+    : Promise.resolve(null);
+
+  // The planner is the ONE stage deliberately chained rather than raced: it runs after retrieval so
+  // it can be told which tools this turn actually has. Retrieval is ~50ms (and 0ms of embedding,
+  // since recall has already cached the vector for this exact string), while the planner is a model
+  // round-trip — so the chain costs almost nothing and buys a plan whose steps name real
+  // capabilities instead of plausible ones the executor then has to reinterpret.
+  const _wantPlan = !!opts.stream && !opts.suggestedMode && needsPlan(_ask);
+  const planP = _wantPlan
+    ? toolsP.then((sel) => latStage('quickPlan', () => quickPlan(_ask, apiKey, { toolNames: (sel && sel.names) || [] }))).catch(() => null)
+    : Promise.resolve(null);
+
+  refreshProceduralRecall(_ask);   // learned step-series (sync) + speculative prefetch of the known first read
 
   // Streaming: emit text deltas to the renderer (live bubble) AND speak each finished
   // sentence as it lands. Only on the desktop chat path (opts.stream); MCP/Telegram stay
   // non-streaming so their headless senders are untouched.
+  //
+  // Set up BEFORE the preamble is awaited, so the verbal ack lands while recall and the planner are
+  // still in flight rather than behind them.
   const stream = !!opts.stream;
   // The chat handler pre-opens the TTS stream (opts.ttsSeq) so the ack speaks at message
   // receipt, before history validation/trim — reuse it; only self-start on other entry points.
   const ttsSeq = stream ? (opts.ttsSeq != null ? opts.ttsSeq : ttsStreamStart()) : null;
-  if (stream && ttsSeq != null && opts.ttsSeq == null) maybeAck(ttsSeq, lastUserText(history));   // instant verbal ack
+  if (stream && ttsSeq != null && opts.ttsSeq == null) maybeAck(ttsSeq, _ask);   // instant verbal ack
   const speakParser = stream ? makeSpeakStream(ttsSeq) : null;
   // opts.onToken: a raw-delta sink (phone streaming) that captures the reply WITHOUT desktop TTS —
   // lets the Twilio path start speaking the first sentence before the full reply is generated.
@@ -5920,21 +6017,41 @@ async function agentLoop(history, apiKey, event, opts = {}) {
     if (capture) try { capture(delta); } catch {}
   } : undefined;
 
+  // ── COLLECT THE PREAMBLE ────────────────────────────────────────────────────────────────────────
+  // W1 — context-rot prevention: inject only the tools relevant to THIS turn (top-k by embedding
+  // similarity + a small always-present CORE set), computed ONCE here and reused across every
+  // tool-loop step (never swap mid-loop). null ⇒ full catalog (no key / low confidence / disabled).
+  _activeTools = null;
+  try {
+    const sel = await toolsP;
+    if (sel && sel.tools && sel.tools.length) {
+      _activeTools = sel.tools;
+      sendToActivity('tool-update', { type: 'thinking', text: `🧰 tools: ${sel.tools.length}/${_catalog.length} selected for this turn` });
+      try { fs.appendFileSync(AUDIT_PATH, JSON.stringify({ ts: new Date().toISOString(), toolSelect: sel.tools.length, of: _catalog.length, names: sel.names }) + '\n'); } catch {}
+    }
+  } catch { /* retrieval is best-effort; fall back to full catalog */ }
+
   // Fast plan + read-out (desktop voice path). Draft a quick plan, SPEAK a summary, show the
   // checklist, and inject it as execution context — then run without waiting for approval.
   // Siddhant steers live via the guidance box (folded into each step below).
-  if (stream && !opts.suggestedMode && needsPlan(lastUserText(history))) {
+  if (_wantPlan) {
     try {
-      const plan = await quickPlan(lastUserText(history), apiKey);
+      const plan = await planP;
       if (plan) {
-        sendToAll(event, 'tool-update', { type: 'plan', steps: plan.steps, spoken: plan.spoken });
+        sendToAll(event, 'tool-update', { type: 'plan', steps: plan.steps, spoken: plan.spoken, tools: (_activeTools || []).map((t) => t.name).slice(0, 14) });
         sendToActivity('plan', { steps: plan.steps, spoken: plan.spoken });
-        actionView({ role: 'BhatBot', status: 'working', task: lastUserText(history).slice(0, 200), note: '📋 Plan: ' + plan.steps.map((s, i) => (i + 1) + ') ' + s).join('  ') });
+        actionView({ role: 'BhatBot', status: 'working', task: _ask.slice(0, 200), note: '📋 Plan: ' + plan.steps.map((s, i) => (i + 1) + ') ' + s).join('  ') });
         if (ttsSeq != null) ttsStreamFeed(ttsSeq, plan.spoken);   // read the plan aloud
         appendToLastUser(history, `[EXECUTION PLAN — you have ALREADY spoken this summary to Siddhant aloud; do NOT re-read or restate it. Execute these steps now, in order, and incorporate any "[Live guidance from Siddhant]" notes as they arrive. Keep spoken output to brief progress + the final result.]\n` + plan.steps.map((s, i) => `${i + 1}. ${s}`).join('\n'));
       }
     } catch { /* planning is best-effort; never block execution */ }
   }
+
+  // Recall is awaited LAST because it is the only one whose result is not read here: the three
+  // refreshers write module-level caches that buildMemoryBlock() (sync) reads at the first model
+  // call. So it just has to have landed by now — and by now it almost always has, underneath the
+  // planner, for free.
+  await recallP;
 
   // All exits go through here so live guidance can be offered for learning (2a).
   const finish = (text) => {
@@ -5952,7 +6069,7 @@ async function agentLoop(history, apiKey, event, opts = {}) {
     if (speakParser) speakParser.finish(); else if (ttsSeq != null) ttsStreamFlush(ttsSeq);
     if (usedGuidance.length) sendToActivity('learn_prompt', { text: usedGuidance.join(' | ') });
     // Strip any <speak> tags from the returned text (renderer shows this as the final bubble).
-    reflectOnCorrection(history, lastUserText(history), text);   // async, non-blocking
+    reflectOnCorrection(history, _ask, text);   // async, non-blocking
     try { logRouterDecision({ taskType: _lastRouterTask || currentMode, model: _lastModel, ms: Date.now() - _turnT0, usd: +(costToday().usd - _usd0).toFixed(5) }); } catch {}   // #13
     // T5 — post-turn intake audit: did the classified intake actually get EXECUTED? Ties T1's routing
     // decision to the observed outcome (tools run, action-verify redos) so "answered without doing the
@@ -5983,7 +6100,7 @@ async function agentLoop(history, apiKey, event, opts = {}) {
     // #12 episodic memory is now recorded centrally in _dispatchTurnInner (covers fastReply +
     // pipeline-local too, which used to be dropped — starving the W5 fine-tune loop). Not here.
     // #24 project memory: if a project is open, record the turn + cheaply refresh its living summary.
-    try { const slug = projects.activeSlug(); if (slug) { projects.recordTurn(slug, lastUserText(history), clean); projects.maybeAutoSummarize(slug, { summarize: projectSummarize }).catch(() => {}); } } catch {}
+    try { const slug = projects.activeSlug(); if (slug) { projects.recordTurn(slug, _ask, clean); projects.maybeAutoSummarize(slug, { summarize: projectSummarize }).catch(() => {}); } } catch {}
     // Procedural memory: bank THIS turn's step-series so look-alike tasks get faster next time. "ok" =
     // the turn finished on its own (not stopped/aborted) with a real series of ≥2 tools. record() finds
     // the matching routine by signature and reinforces it (wins++) or seeds a new one — so following a
@@ -6031,7 +6148,10 @@ async function agentLoop(history, apiKey, event, opts = {}) {
   // iterations with no NOVEL tool signature (stuck/repeating) → stop extending.
   const HARD_CEILING = Math.max(maxIters, Number(loadConfig().agentMaxStepsHard) || 0, pcfg.hard);
   const EXTEND_STEP = pcfg.ext;
-  const userText0 = lastUserText(history);            // the original request, for the action-verify judge
+  // The original request — `_ask`, not a re-read of history, which by now ends in the mission anchor.
+  // The judge below is asked "did the assistant do what was asked?", and answering that against a
+  // block of mission bookkeeping is not a check, it is noise. Same for the procedural trigger key.
+  const userText0 = _ask;
   let toolsRan = 0, unproductive = 0, verifyCount = 0; const toolNamesRan = []; const seenSigs = [];
   let consecFail = 0, failNudgedAt = -1, _secondWind = false, _lastNarrateTs = Date.now();   // persistence: failure-retry ladder + one-time stuck replan + text-heartbeat clock
   let _loopNudged = false;   // loop breaker fires at most once per turn (so the nudge can't become the loop)
@@ -6919,6 +7039,11 @@ async function _dispatchTurnInner(history, apiKey, event, opts = {}) {
   const spd = maybeAdjustSpeed(userText);
   if (spd) return { text: spd, history: [...history, { role: 'assistant', content: spd }], _provider: 'local', _model: 'intent' };
   const surface = opts.stream ? 'desktop' : 'headless';
+  // The latency clock was started only by the desktop `chat` IPC, so every latMark/latStage was a
+  // silent no-op on every other surface — including scripts/bhatctl.js, which is the one way to
+  // measure a real turn from a terminal. Start it here for the surfaces that have no other entry;
+  // the desktop path has already started it (and starting again would discard its earlier marks).
+  if (!opts.stream) latStart();
   // T4 — announce the turn to the UI IMMEDIATELY, before recall / tool-selection / the first model
   // call (each of which can block for seconds). The status strip shows "working" within a frame
   // instead of going quiet. turn_done in the finally guarantees the strip never stays stuck.

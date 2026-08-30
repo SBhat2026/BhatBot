@@ -73,8 +73,13 @@ const mcphub = require('../lib/mcphub');
   // activeTools() must NOT append hub tools after retrieval — that is what made them exempt.
   ok(!/\.concat\(\s*mcphub\.toolSchemas\(\)/.test(main),
     'connector tools are not blind-appended to the retrieval result (that made them ride every turn)');
-  ok(/toolselect\.select\(lastUserText\(history\), catalog/.test(main),
-    'retrieval ranks over the FULL catalog (native + connectors), so connector tools are selected on relevance');
+  // The catalog half of this is the original point: rank native + connector tools together.
+  // The QUERY half used to be pinned as `lastUserText(history)` — which was the bug, not the
+  // contract: by the time retrieval runs, history ends in the mission anchor, so that expression
+  // returns mission bookkeeping rather than the request. `_ask` is captured before the anchor.
+  // (scripts/test-turn-preamble.js proves that structurally, against the parsed source.)
+  ok(/toolselect\.select\(_ask, _catalog/.test(main),
+    'retrieval ranks over the FULL catalog (native + connectors), keyed on the REQUEST not the anchor');
   ok(/function fullCatalog\(\)/.test(main), 'there is one definition of "every tool the model could call"');
 
   const hidden = connectors.hiddenToolIds();

@@ -178,4 +178,50 @@ function build(fleetAgents, jobs, standing) {
   ok(bg.name === 'ORACLE', 'and it carries the specialist codename, so it is the same identity everywhere');
 }
 
+
+// ── WHEN THE OFFICE RAISES ITSELF (lib/pure.shouldRaiseFleet) ────────────────────────────────────
+// Three tools used to raise the FLEET panel themselves, so the auto-switch covered those three and
+// nothing else — a DAG fan-out, a delegated project or a background specialist all started work with
+// the panel still showing chat. The rule now lives at the single point every agent heartbeat passes
+// through, and lives in lib/pure so it can be read and tested rather than inferred from a call site.
+{
+  const { shouldRaiseFleet, FLEET_RAISE_COOLDOWN_MS } = require('../lib/pure');
+  const NEVER = Infinity;
+
+  ok(shouldRaiseFleet({ id: 'a', status: 'working' }, [], NEVER).raise,
+    'fleet: the first agent to start work in a quiet office raises it');
+  ok(shouldRaiseFleet({ id: 'a', state: 'thinking' }, [], NEVER).raise,
+    'fleet: thinking counts as starting work, not just working');
+
+  // A five-agent fan-out must switch ONCE. Agents 2..N see agent 1 already working.
+  ok(!shouldRaiseFleet({ id: 'b', status: 'working' }, [{ id: 'a', status: 'working' }], 500).raise,
+    'fleet: a second agent does not raise it again — one switch per fan-out');
+  ok(/already working/.test(shouldRaiseFleet({ id: 'b', status: 'working' }, [{ id: 'a', status: 'working' }], 500).why),
+    'fleet: and it says why it declined, so a missing switch is explainable');
+
+  ok(!shouldRaiseFleet({ id: 'a', status: 'done' }, [], NEVER).raise,
+    'fleet: an agent FINISHING is not a reason to yank the screen');
+  ok(!shouldRaiseFleet({ id: 'a', status: 'failed' }, [], NEVER).raise, 'fleet: nor is one failing');
+  ok(!shouldRaiseFleet({ id: 'a', status: 'queued' }, [], NEVER).raise, 'fleet: nor is one being queued');
+
+  ok(!shouldRaiseFleet({ id: 'bl', status: 'working', background: true }, [], NEVER).raise,
+    'fleet: the idle backlog worker never hijacks the panel — it is not something Siddhant asked for');
+
+  ok(!shouldRaiseFleet({ id: 'd', status: 'working' }, [], FLEET_RAISE_COOLDOWN_MS - 1).raise,
+    'fleet: throttled inside the cooldown');
+  ok(shouldRaiseFleet({ id: 'd', status: 'working' }, [], FLEET_RAISE_COOLDOWN_MS + 1).raise,
+    'fleet: a genuinely new fan-out after the cooldown raises it again');
+
+  // An agent that has gone idle is not "already working", so the next real start still counts.
+  ok(shouldRaiseFleet({ id: 'b', status: 'working' }, [{ id: 'a', status: 'done' }], NEVER).raise,
+    'fleet: a finished agent lying around does not suppress the next real start');
+  ok(shouldRaiseFleet({ id: 'a', status: 'working' }, [{ id: 'a', status: 'working' }], NEVER).raise,
+    'fleet: an agent is not counted as its own competition');
+
+  for (const junk of [undefined, null, {}, { id: 'x' }]) {
+    const r = shouldRaiseFleet(junk || {}, [{ id: 'y' }, null], NEVER);
+    ok(r && typeof r.raise === 'boolean', 'fleet: junk input returns a decision rather than throwing');
+  }
+}
+
 console.log(`✅ presence: ${pass} assertions passed`);

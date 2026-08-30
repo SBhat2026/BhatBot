@@ -926,6 +926,12 @@
   #progress .pg-step.done { color: var(--text-dim2); }
   #progress .pg-step.done .pg-mk { color: var(--accent); }
   #progress .pg-log { padding: 2px 13px 10px; max-height: 108px; overflow-y: auto; }
+  /* The tools chosen for this turn, shown beside the plan — "what will you do" and "with what" are
+     both decided before the first model call, so showing only the steps hid half the work. */
+  #progress .pg-tools { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; padding: 0 13px 10px; }
+  #progress .pg-tools-k { color: var(--text-dim2); font-size: 10px; letter-spacing: .1em; text-transform: uppercase; margin-right: 3px; }
+  #progress .pg-tool { font-size: 10.5px; color: var(--text-dim); background: var(--surface);
+    border: 1px solid var(--line); border-radius: 5px; padding: 1px 6px; }
   #progress .pg-logrow { font-size: 11.5px; color: var(--text-dim2); padding: 2px 0; display: flex; gap: 7px; align-items: baseline; }
   #progress .pg-logrow .pg-ic { flex-shrink: 0; }
   #progress .pg-logrow.ok .pg-ic { color: var(--accent); }
@@ -1695,8 +1701,19 @@ window.bhatbot.onToolUpdate((u) => {
   else if (u.type === 'plan' && Array.isArray(u.steps)) {
     rmThinking();
     pgBuild(u.steps, 'Executing plan');   // persistent ticking checklist pinned atop the chat
+    // The plan answers "what will you do"; the tool list answers "with what". Both were decided
+    // before the first model call, so showing only the steps hid half of the work already done.
+    if (Array.isArray(u.tools) && u.tools.length && _pg.el) {
+      const row = document.createElement('div');
+      row.className = 'pg-tools';
+      row.innerHTML = '<span class="pg-tools-k">tools</span>'
+        + u.tools.map((t) => '<span class="pg-tool"></span>').join('');
+      [...row.querySelectorAll('.pg-tool')].forEach((el, i) => { el.textContent = u.tools[i]; });
+      _pg.el.appendChild(row);
+    }
     addThinking();
-    actLog('📋 plan (' + u.steps.length + ' steps) — executing; type in the steer box anytime to adjust');
+    actLog('📋 plan (' + u.steps.length + ' steps' + (u.tools && u.tools.length ? ', ' + u.tools.length + ' tools' : '')
+      + ') — executing; type in the steer box anytime to adjust');
   }
   else if (u.type === 'guidance_applied') { rmThinking(); addThought('↳ guidance applied: ' + u.text); addThinking(); actLog('↳ guidance: ' + u.text); }
   else if (u.kind === 'notify') { actLog('🔔 notify: ' + (u.text || ''), u.urgency === 'high' ? 'fail' : ''); }

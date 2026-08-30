@@ -47,6 +47,60 @@ function makeRunAgent(order, statusByGoal = {}) {
     fs.rmSync(wsDir, { recursive: true, force: true });
   }
 
+  // ---- ROLLING SCHEDULER: a dependent starts when ITS OWN dep is done, not when the wave is ----
+  // The barrier this replaces awaited the whole ready batch before recomputing what had become
+  // runnable, so a task needing only the fast branch waited on the slow one for nothing.
+  //
+  // Asserted by ORDER, not by a stopwatch: SLOW is held open until DEPENDENT is seen to launch, so a
+  // barrier cannot pass this by being quick, and a loaded machine cannot fail it by being slow. If
+  // the barrier were still there, DEPENDENT could never launch and the guard timer would fire.
+  {
+    const wsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bb-roll-'));
+    const board = createBlackboard({ dir: wsDir });
+    let releaseSlow;
+    const slowGate = new Promise((r) => { releaseSlow = r; });
+    let dependentLaunchedWhileSlowInFlight = false;
+    let slowFinished = false;
+    const guard = setTimeout(() => releaseSlow(), 4000);   // barrier present → break the deadlock and fail loudly
+
+    const runAgentFn = async (task) => {
+      if (task.goal === 'SLOW') { await slowGate; slowFinished = true; }
+      if (task.goal === 'DEPENDENT') { dependentLaunchedWhileSlowInFlight = !slowFinished; releaseSlow(); }
+      return { kind: 'result', task_id: task.id, agent: task.agent, status: 'ok', summary: `did ${task.goal}`, next: [], confidence: 1, cost: {} };
+    };
+    const planFn = async () => ([
+      { id: 'a', agent: 'research', goal: 'FAST' },
+      { id: 'b', agent: 'research', goal: 'SLOW' },
+      { id: 'c', agent: 'research', goal: 'DEPENDENT', needs: ['a'] },
+    ]);
+    const r = await orch.run('goal', { wsDir, concurrency: 3, adapters: { board }, planFn, runAgentFn });
+    clearTimeout(guard);
+    ok(r.completed === 3, 'rolling: every task still completes');
+    ok(dependentLaunchedWhileSlowInFlight,
+      'rolling: DEPENDENT launched while SLOW was still running — the wave barrier is gone');
+    fs.rmSync(wsDir, { recursive: true, force: true });
+  }
+
+  // ---- ROLLING: concurrency is still a hard ceiling ----
+  // Removing the barrier must not turn `concurrency` into a suggestion; nothing above the cap may
+  // ever be in flight at once.
+  {
+    const wsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bb-cap-'));
+    const board = createBlackboard({ dir: wsDir });
+    let live = 0, peak = 0;
+    const runAgentFn = async (task) => {
+      live++; peak = Math.max(peak, live);
+      await new Promise((r) => setImmediate(r));
+      live--;
+      return { kind: 'result', task_id: task.id, agent: task.agent, status: 'ok', summary: 'x', next: [], confidence: 1, cost: {} };
+    };
+    const planFn = async () => Array.from({ length: 9 }, (_, i) => ({ id: 'x' + i, agent: 'research', goal: 'g' + i }));
+    const r = await orch.run('goal', { wsDir, concurrency: 2, adapters: { board }, planFn, runAgentFn });
+    ok(r.completed === 9, 'rolling: all nine independent tasks completed');
+    ok(peak <= 2, `rolling: never exceeded concurrency 2 (peak was ${peak})`);
+    fs.rmSync(wsDir, { recursive: true, force: true });
+  }
+
   // ---- DAG: failed dependency BLOCKS the dependent with a reason; run does not crash ----
   {
     const wsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bb-dag2-'));

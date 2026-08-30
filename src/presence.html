@@ -285,18 +285,78 @@ function tintTargetsOf(root) {
   return mats;
 }
 // A floating nameplate so the agents are tellable apart without hovering every one.
-function nameplate(text) {
-  const cv = document.createElement('canvas'); cv.width = 256; cv.height = 64;
+// ── THE PLATE ABOVE AN AGENT'S HEAD ─────────────────────────────────────────────────────────────
+// It used to carry the agent's NAME, which is the one thing you can already tell from its colour and
+// its position. What you actually want to know while a fan-out runs is WHAT EACH ONE IS DOING — the
+// office was showing that something was happening without ever showing what.
+//
+// Two lines: name on top, current task under it in the state colour. The canvas and its redraw
+// function ride on the sprite, so a task change repaints in place instead of rebuilding a texture
+// (a fan-out changes step text constantly, and a rebuild per change would churn GPU uploads).
+const PLATE_W = 512, PLATE_H = 160;
+function nameplate(text, task, colorCss) {
+  const cv = document.createElement('canvas'); cv.width = PLATE_W; cv.height = PLATE_H;
   const ctx = cv.getContext('2d');
-  ctx.font = '600 30px -apple-system, Segoe UI, Roboto, sans-serif';
-  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-  ctx.fillStyle = 'rgba(210,235,247,0.95)';
-  ctx.shadowColor = 'rgba(0,0,0,0.9)'; ctx.shadowBlur = 8;
-  ctx.fillText(String(text || '').slice(0, 18), 128, 32);
   const tex = new THREE.CanvasTexture(cv); tex.colorSpace = THREE.SRGBColorSpace;
-  const spr = new THREE.Sprite(new THREE.SpriteMaterial({ map:tex, transparent:true, depthWrite:false }));
-  spr.scale.set(1.1, 0.275, 1);
+  const spr = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false }));
+  spr.scale.set(2.2, 0.6875, 1);          // same on-screen width per character as the old 1.1 × 0.275
+
+  /** Wrap to at most two lines that fit the plate, ellipsising rather than overflowing. */
+  function wrap(s, maxW, maxLines) {
+    const words = String(s || '').split(/\s+/).filter(Boolean);
+    const lines = [];
+    let cur = '';
+    for (const w of words) {
+      const next = cur ? cur + ' ' + w : w;
+      if (ctx.measureText(next).width <= maxW) { cur = next; continue; }
+      if (cur) lines.push(cur);
+      cur = w;
+      if (lines.length === maxLines) break;
+    }
+    if (cur && lines.length < maxLines) lines.push(cur);
+    if (!lines.length) return [];
+    while (lines.length > maxLines) lines.pop();
+    const last = lines[lines.length - 1];
+    if (ctx.measureText(last).width > maxW || words.join(' ').length > lines.join(' ').length) {
+      let t = last;
+      while (t.length > 4 && ctx.measureText(t + '…').width > maxW) t = t.slice(0, -1);
+      lines[lines.length - 1] = t === last && words.join(' ').length <= lines.join(' ').length ? t : t + '…';
+    }
+    return lines;
+  }
+
+  spr.userData.redraw = (name, doing, css) => {
+    ctx.clearRect(0, 0, PLATE_W, PLATE_H);
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.shadowColor = 'rgba(0,0,0,0.95)'; ctx.shadowBlur = 10;
+    ctx.font = '600 34px -apple-system, Segoe UI, Roboto, sans-serif';
+    ctx.fillStyle = 'rgba(214,238,250,0.97)';
+    const hasTask = !!String(doing || '').trim();
+    ctx.fillText(String(name || '').slice(0, 22), PLATE_W / 2, hasTask ? 30 : PLATE_H / 2);
+    if (hasTask) {
+      ctx.font = '500 26px -apple-system, Segoe UI, Roboto, sans-serif';
+      ctx.fillStyle = css || 'rgba(150,200,225,0.92)';
+      const lines = wrap(doing, PLATE_W - 24, 2);
+      lines.forEach((ln, i) => ctx.fillText(ln, PLATE_W / 2, 72 + i * 32));
+    }
+    tex.needsUpdate = true;
+  };
+  spr.userData.redraw(text, task, colorCss);
   return spr;
+}
+
+/** What this agent is doing, in the fewest words that are still true. */
+function plateTask(a) {
+  const t = String(a.step || a.task || a.status || '').replace(/\s+/g, ' ').trim();
+  if (!t) return a.state === 'working' ? 'working…' : '';
+  return t.slice(0, 90);
+}
+function refreshPlate(a) {
+  if (!a.plate || !a.plate.userData.redraw) return;
+  const doing = plateTask(a);
+  if (doing === a._plateText) return;              // nothing changed → no repaint, no GPU upload
+  a._plateText = doing;
+  a.plate.userData.redraw(a.name, doing, STATE_CSS[a.state] || STATE_CSS.idle);
 }
 
 function makeAvatar(label) {
@@ -319,7 +379,8 @@ function makeAvatar(label) {
   orb.position.y = (charTargetH + 0.30) * inv; group.add(orb);
   const glow = new THREE.Mesh(new THREE.SphereGeometry(0.21 * inv, 16, 16), new THREE.MeshBasicMaterial({ color:0x3a4a5a, transparent:true, opacity:0.28 }));
   orb.add(glow);
-  const plate = nameplate(label); plate.position.y = (charTargetH + 0.62) * inv; plate.scale.multiplyScalar(inv); group.add(plate);
+  // Raised a little to clear the taller two-line plate.
+  const plate = nameplate(label, '', null); plate.position.y = (charTargetH + 0.74) * inv; plate.scale.multiplyScalar(inv); group.add(plate);
   group.userData.tintTargets = tintTargetsOf(group).slice(0, 2);
   return { group, mixer, actions, aura, orb, glow, plate };
 }
@@ -477,6 +538,7 @@ function applyState(list) {
     a.since = info.since || a.since;
     a.steerable = info.steerable !== false;
     a.target = new THREE.Color(STATE_COLOR[a.state] ?? STATE_COLOR.idle);
+    refreshPlate(a);        // what it is doing, above its head — repaints only when the text changes
     if (stateChanged) {
       const map = STATE_POI[a.state] || STATE_POI.idle;
       retarget(a, map.kind, map.clip);
