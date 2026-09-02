@@ -16,6 +16,7 @@ process.env.HOME = TMP;
 const semantic = require('../lib/semantic');
 const ts = require('../lib/toolselect');
 
+const hashOf = (str) => { let h = 0; for (let i = 0; i < str.length; i++) h = (h * 31 + str.charCodeAt(i)) | 0; return h; };
 let pass = 0, fail = 0;
 const ok = (c, m) => { if (c) { pass++; console.log('✅ ' + m); } else { fail++; console.error('❌ ' + m); } };
 
@@ -88,6 +89,77 @@ for (const n of ['save_memory', 'read_file', 'write_file', 'run_shell', 'notify_
   const res2 = await ts.select('search the web', withNew, { k: 3 });
   ok(res2 && res2.names.includes('brand_new_tool'), 'select: un-vectored (cache-lagging) tool is always kept, never silently dropped');
   semantic.embedBatch = origEmbed;
+
+
+  // ── THE CACHE IS KEYED ON THE EMBEDDER, NOT JUST THE CATALOG ────────────────────────────────────
+  // Live state that prompted this: toolvecs.json held 768-d nomic vectors filed under the name
+  // 'text-embedding-3-small', because the model tag was hardcoded at save time. Nothing in the
+  // validity check looked at the model, so a cache built by one embedder is served to another —
+  // every cosine is then between mismatched lengths, returns 0, and select() falls back to the FULL
+  // catalog on every turn with nothing anywhere saying so.
+  {
+    const cachePath = path.join(TMP, '.bhatbot', 'toolvecs.json');
+    const cat3 = catalog.slice();
+    // Vectors must DIFFER per text, or every cosine is 1.0, the top-k covers the whole catalog and
+    // select() correctly returns null for "selected everything" — which would look like the failure
+    // this block is trying to detect.
+    const vecFor = (dim) => async (arr) => ({
+      vecs: arr.map((t) => { const v = new Array(dim).fill(0.01); v[Math.abs(hashOf(t)) % dim] = 1; return v; }),
+      model: 'model-' + dim,
+    });
+    const saved = semantic.embedBatch;
+
+    semantic.embedBatch = vecFor(768);
+    await ts.select('search the web', cat3, { k: 3 });
+    const c1 = JSON.parse(fs.readFileSync(cachePath, 'utf8'));
+    ok(c1.model === 'model-768' && c1.dim === 768, 'the cache records the embedder that ACTUALLY ran, not a hardcoded name');
+
+    // Now the embedder changes underneath it, as it does when a key expires or is restored.
+    semantic.embedBatch = vecFor(1536);
+    // minScore 0: this block is about surviving an embedder switch, not about the relevance bar.
+    // Synthetic one-hot vectors score ~0.09, below the real 0.18 default, which would make select()
+    // return null for a legitimate reason and mask the thing under test.
+    const res = await ts.select('search the web', cat3, { k: 3, minScore: 0 });
+    const c2 = JSON.parse(fs.readFileSync(cachePath, 'utf8'));
+    ok(c2.dim === 1536, 'a different embedder invalidates the vectors instead of being served stale ones');
+    ok(res && res.names.length, 'and retrieval still WORKS across the switch rather than silently sending everything');
+
+    semantic.embedBatch = saved;
+  }
+
+  // ── ONE CHANGED TOOL DOES NOT RE-EMBED ALL 85 ──────────────────────────────────────────────────
+  // The old validity test was a single hash over every description plus `length === tools.length`,
+  // so connectors coming online (85 -> 90) or one edited description threw the whole cache away.
+  // Measured on the real catalog that was ~13s of embedding, on the first turn's critical path, and
+  // it recurred every time the connector count flapped.
+  {
+    const saved = semantic.embedBatch;
+    let embedded = [];
+    semantic.embedBatch = async (arr) => { embedded.push(...arr); return { vecs: arr.map(() => [1, 0, 0]), model: 'stable', }; };
+
+    const base = catalog.slice();
+    await ts.select('search the web', base, { k: 3 });      // prime
+    embedded = [];
+    await ts.select('search the web', base, { k: 3 });      // unchanged catalog
+    ok(embedded.filter((t) => !/^search the web$/.test(t) && !/probe/.test(t)).length === 0,
+      'an unchanged catalog re-embeds NOTHING');
+
+    embedded = [];
+    const plusOne = base.concat([{ name: 'mcp__conn__thing', description: 'a connector tool that has just come online and needs a vector' }]);
+    await ts.select('search the web', plusOne, { k: 3 });
+    const toolEmbeds = embedded.filter((t) => /^mcp__conn__thing:/.test(t));
+    const otherEmbeds = embedded.filter((t) => /:/.test(t) && !/^mcp__conn__thing:/.test(t));
+    ok(toolEmbeds.length === 1, 'a newly-connected tool is embedded');
+    ok(otherEmbeds.length === 0, `...and ONLY it — the other ${base.length} keep their vectors (was: re-embed everything)`);
+
+    embedded = [];
+    const edited = plusOne.map((t) => (t.name === 'web_search' ? { ...t, description: t.description + ' now with an edited description' } : t));
+    await ts.select('search the web', edited, { k: 3 });
+    ok(embedded.filter((t) => /^web_search:/.test(t)).length === 1, 'an EDITED description re-embeds that tool');
+    ok(embedded.filter((t) => /:/.test(t) && !/^web_search:/.test(t)).length === 0, '...and leaves every other vector alone');
+
+    semantic.embedBatch = saved;
+  }
 
   try { fs.rmSync(TMP, { recursive: true, force: true }); } catch {}
   console.log(`\n${fail ? '❌' : '✅'} ${pass} passed, ${fail} failed`);

@@ -113,13 +113,51 @@ function mockSynapse({ toEmbed = 0, links = [], unexplained = [], budgetLeft = 1
     ok('suggestions fire once enough new links have accumulated');
   }
 
+  // 6b. A BLOCKED PHASE MUST NOT HOLD THE PIPELINE.
+  //
+  // The live failure, exactly: 1,821 nodes carried vectors from a retired embedder so they always
+  // looked unembedded, and the budget was spent so embedSome could never shrink that queue. Phase 1
+  // returned on every tick regardless, and the weaver never reached LINK, EXPLAIN or SUGGEST again —
+  // for ten days, while reporting itself "on" and busy "embedding".
+  {
+    const s = mockSynapse({ toEmbed: 1821, links: [[{ id: 'x', from: 'a', to: 'b', confidence: 0.9 }]] });
+    s.embedSome = async () => 0;                       // cannot embed: budget spent / no key / offline
+    const w = createWeaver({ synapse: s });
+    w.start();
+    for (let i = 0; i < 5; i++) await w.tick();
+    assert.ok(s.calls.linkSlice.length > 0, 'a stalled EMBED phase falls through to LINK instead of blocking it forever');
+    assert.ok(s.calls.suggest > 0 || s.calls.linkSlice.length >= 5, 'and keeps reaching the later phases every tick');
+    assert.ok(w.status().embedStalled === true, 'the stall is reported rather than looking like normal progress');
+    ok('a phase that cannot make progress does not hold the pipeline');
+
+    // ...and it must recover on its own once embedding works again, without a restart.
+    let canEmbed = false;
+    const s2 = mockSynapse({ toEmbed: 50 });
+    const realEmbed = s2.embedSome;
+    s2.embedSome = async (n) => (canEmbed ? realEmbed(n) : 0);
+    const w2 = createWeaver({ synapse: s2 });
+    w2.start();
+    await w2.tick();
+    assert.ok(w2.status().embedStalled === true, 'stalled while blocked');
+    canEmbed = true;
+    await w2.tick();
+    assert.ok(w2.status().embedStalled === false, 'and clears itself the moment embedding works again');
+    ok('the stall is a state, not a latch');
+  }
+
   // 7. EVERY GATE. A background loop that ignores the budget, the heat, or the user is a liability.
   {
     const s = mockSynapse({ toEmbed: 100 });
-    // budget exhausted
-    const broke = createWeaver({ synapse: { ...s, budget: () => ({ limit: 1, spent: 1, left: 0 }) } });
+    // BUDGET — bounded at the point of SPENDING, not by refusing to think.
+    // This assertion used to read `skipped === 'budget'`, which pinned a real bug as the contract:
+    // an exhausted budget skipped the entire tick, including LINK, which is local cosine over
+    // vectors already paid for. Live, that left the second brain inert for ten days. The money is
+    // still bounded — embedSome/explainEdges/suggest each check `left()` themselves.
+    const broke = createWeaver({ synapse: { ...mockSynapse({ toEmbed: 0 }), budget: () => ({ limit: 1, spent: 1, left: 0 }) } });
     broke.start();
-    assert.strictEqual((await broke.tick()).skipped, 'budget');
+    const brokeTick = await broke.tick();
+    assert.ok(!brokeTick.skipped, 'a spent budget does not skip the tick: ' + JSON.stringify(brokeTick));
+    assert.ok(broke.status().budgetSpent === true, 'but status still reports the budget as spent, so the UI can say so');
 
     // thermal
     const hot = createWeaver({ synapse: s, governor: { allowBackgroundTick: () => false } });

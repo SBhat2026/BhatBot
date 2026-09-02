@@ -228,5 +228,62 @@ const base = { now: NOW, items, idleSince: NOW - 10 * 60000, busy: false, lockHe
     ok(/if \(_blRetry\) return;/.test(src), 'and keeps at most ONE pending retry, so it can never become a queue');
   }
 
+  // ── A FAILURE THAT NEVER REACHED THE MODEL SAYS NOTHING ABOUT THE ITEM ──────────────────────────
+  // The live failure: a malformed-history 400 failed six items in under a second each. Every one was
+  // marked attempted, the queue emptied, and the worker went quiet for three days having done
+  // nothing. A run that reached the model always bills; zero spend AND zero output means it did not.
+  {
+    const item = items[0];
+    const infra = { ok: false, usd: 0, text: '', ms: 251, error: 'messages.0: unexpected `tool_result`' };
+    const real  = { ok: false, usd: 0.04, text: '', ms: 45000, error: 'ran out of tool budget' };
+    const good  = { ok: true, usd: 0.06, text: 'a write-up', ms: 60000 };
+
+    ok(w.neverRan(infra), 'a sub-second failure that billed nothing never reached the model');
+    ok(!w.neverRan(real), 'a failure that BILLED did reach the model — that is real evidence about the item');
+    ok(!w.neverRan(good), 'and a success is obviously not an infrastructure failure');
+
+    const afterInfra = w.record({ day: today }, item, infra, NOW);
+    ok(!Object.keys(afterInfra.attempted).length, 'an unreachable-model failure does NOT burn the item\'s 3-day cooldown');
+    ok(afterInfra.countToday === 0, 'nor does it count against the daily item cap — it was neither work nor spend');
+    ok(afterInfra.infraStreak === 1, 'it does count toward the breaker');
+    ok(afterInfra.last.neverRan === true, 'and is recorded as such, so the state file says WHY the queue stalled');
+
+    const afterReal = w.record({ day: today, infraStreak: 2 }, item, real, NOW);
+    ok(afterReal.attempted[w.itemKey(item)] === NOW, 'a genuine attempt DOES earn the cooldown');
+    ok(afterReal.infraStreak === 0, 'and clears the breaker — one blip must not latch');
+    ok(afterReal.countToday === 1, 'and counts against the daily cap');
+  }
+  // ── THE BREAKER ────────────────────────────────────────────────────────────────────────────────
+  {
+    const t = (state) => w.plan({ now: NOW, items, state, idleSince: NOW - 9e6, busy: false, lockHeld: false });
+    ok(t({ infraStreak: 2 }).run === true, 'two failed launches is not yet a pattern — keep going');
+    const tripped = t({ infraStreak: 3, last: { error: 'unexpected `tool_result`' } });
+    ok(tripped.run === false && tripped.broken === true, 'three in a row trips the breaker instead of failing every remaining item');
+    ok(/tool_result/.test(tripped.reason), 'and the refusal carries the actual error: ' + tripped.reason.slice(0, 80));
+    ok(!tripped.retry, 'the breaker does not retry on a short timer — waiting 30s does not fix a broken wire');
+
+    // The whole point: the queue must SURVIVE an outage. Twelve items, every launch failing on the
+    // wire — the shape of the live incident, where six went down in one night.
+    const many = Array.from({ length: 12 }, (_, i) => ({ id: 'i' + i, section: 'S', text: `open backlog item number ${i}`, agent: 'research' }));
+    let state = { day: today };
+    let attempts = 0;
+    for (let i = 0; i < 20; i++) {
+      const d = w.plan({ now: NOW, items: many, state, idleSince: NOW - 9e6, busy: false, lockHeld: false });
+      if (!d.run) break;
+      attempts++;
+      state = w.record(state, d.item, { ok: false, usd: 0, text: '', error: '400 unexpected `tool_result`' }, NOW);
+    }
+    ok(Object.keys(state.attempted || {}).length === 0, 'after a total outage, NOT ONE of the 12 items has been marked attempted');
+    ok(attempts === 3, `the worker stopped after ${attempts} attempts instead of walking all 12`);
+    ok(w.plan({ now: NOW, items: many, state, idleSince: NOW - 9e6, busy: false, lockHeld: false }).broken === true,
+      'and it says the queue is broken, not that there is nothing to do');
+  }
+  // The wrapper must carry the specialist's reason — it used to drop it, which is why the live log
+  // said "no error reported" for days while the reason existed one frame above.
+  {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'main.js'), 'utf8');
+    ok(/usd: spent, error: r && r\.error/.test(src), 'main.js propagates subagents.run\'s error out of the runAgent wrapper');
+  }
+
   console.log(`✅ backlog worker: ${pass} assertions passed`);
 })().catch((e) => { console.error('❌ backlog worker:', e.message); process.exit(1); });

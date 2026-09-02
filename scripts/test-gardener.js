@@ -245,6 +245,86 @@ const edge = (id, from, to, o = {}) => ({ id, from, to, type: 'relates-to', stat
   ok(!/require\(/.test(planBody) && !/\bfs\./.test(planBody), 'planGardening: pure — no fs, no I/O');
 }
 
+
+// ── AUTO-CURATION ────────────────────────────────────────────────────────────────────────────────
+// 2,293 proposed edges against 58 confirmed, with an inbox that shows 30. "Wait for the user to
+// decide" is not a policy at that scale — it is a queue that buries the good links in the bad.
+{
+  const NOW = Date.parse('2026-09-01T00:00:00Z');
+  const D = 864e5;
+  const node = (id, type, label) => ({ id, type, label, ref: id, status: 'confirmed', importance: 1, meta: {} });
+  const edge = (id, from, to, o = {}) => ({
+    id, from, to, type: 'relates-to', status: 'proposed', createdBy: 'connector',
+    createdAt: NOW - 10 * D, updatedAt: NOW - 10 * D, confidence: 0.5,
+    provenance: { via: 'embedding', score: 0.95 }, ...o,
+  });
+  const base = [node('a', 'file', 'gtf_gff3.py'), node('b', 'file', 'gff.py'), node('c', 'project', 'PRISM')];
+  const plan = (edges, opts = {}) => planGardening({ nodes: base, edges }, { now: NOW, ...opts });
+
+  // CONFIRM on a model-written rationale — real second-opinion evidence, not a restated cosine score.
+  {
+    const explained = edge('e1', 'a', 'c', { rationale: 'Both implement the same GTF/GFF3 attribute parsing.' });
+    const p = plan([explained, edge('e2', 'b', 'c')]);
+    ok(p.autoConfirm.length === 1 && p.autoConfirm[0].id === 'e1', 'auto-curate: an explained, high-similarity, long-ignored link is confirmed');
+    ok(!p.autoConfirm.some((c) => c.id === 'e2'), 'auto-curate: a bare cosine match is not — nothing has vetted it');
+    ok(/explained/.test(p.autoConfirm[0].reason), 'auto-curate: the reason says why — ' + p.autoConfirm[0].reason);
+  }
+  // Judged on the ORIGINAL similarity, not on the decayed confidence.
+  {
+    const decayed = edge('e3', 'a', 'c', { rationale: 'genuinely related, at length', confidence: 0.58, provenance: { score: 0.95 } });
+    ok(plan([decayed]).autoConfirm.length === 1,
+      'auto-curate: decay must not hide a strong link — confidence measures how long it was IGNORED, not the link');
+    const weak = edge('e4', 'a', 'c', { rationale: 'a rationale of sufficient length', confidence: 0.95, provenance: { score: 0.5 } });
+    ok(plan([weak]).autoConfirm.length === 0, 'auto-curate: a high confidence cannot rescue a weak similarity');
+  }
+  // DUPLICATES are a storage problem, not knowledge.
+  {
+    const dupA = node('m1', 'memory', "User: who's winning group A? Assistant: Mexico. Two wins, six points.");
+    const dupB = node('m2', 'memory', "User: who's winning group A? Assistant: Mexico are miles clear, nine points.");
+    const p = planGardening({ nodes: [...base, dupA, dupB], edges: [edge('e5', 'm1', 'm2', { rationale: 'Both memories record the same repeated question.', provenance: { score: 0.895 } })] }, { now: NOW });
+    ok(p.autoConfirm.length === 0 && p.stats.nearDuplicates === 1,
+      'auto-curate: two memories of the same exchange are declined — that link is the memory store echoing');
+    const cross = planGardening({ nodes: base, edges: [edge('e6', 'a', 'c', { rationale: 'A real cross-domain connection here.', provenance: { score: 0.895 } })] }, { now: NOW });
+    ok(cross.autoConfirm.length === 1, 'auto-curate: a file-to-project link at the same score is still kept');
+  }
+  // PRUNE the tail.
+  {
+    const many = Array.from({ length: 50 }, (_, i) => edge('p' + i, 'a', 'c', { provenance: { score: 0.9 - i * 0.001 } }));
+    const p = plan(many, { maxProposedBacklog: 10 });
+    ok(p.stats.autoPruned === 40, 'auto-curate: the proposed backlog is capped to a reviewable size (50 -> 10)');
+    ok(p.prune.filter((x) => x.auto).every((x) => /review horizon/.test(x.reason)), 'auto-curate: each cull says why');
+    const culled = new Set(p.prune.filter((x) => x.auto).map((x) => x.id));
+    ok(!culled.has('p0') && culled.has('p49'), 'auto-curate: the strongest survive and the weakest go');
+    const withExplained = [...many, edge('keep', 'b', 'c', { rationale: 'a genuine explanation of the link', provenance: { score: 0.1 } })];
+    ok(!plan(withExplained, { maxProposedBacklog: 5 }).prune.some((x) => x.id === 'keep'),
+      'auto-curate: a rationalized link is exempt from the horizon cull however low it ranks');
+    ok(plan(many, { autoCurate: false }).stats.autoPruned === 0, 'auto-curate: the whole behaviour can be switched off');
+  }
+  // THE MACHINE MUST NOT GRADE ITS OWN HOMEWORK.
+  {
+    const auto = Array.from({ length: 20 }, (_, i) => edge('x' + i, 'a', 'c', { status: 'pruned', curatedBy: 'auto' }));
+    const p = planGardening({ nodes: base, edges: auto }, { now: NOW, currentThreshold: 0.8 });
+    ok(p.threshold === null, 'auto-curate: auto-curated edges are excluded from the threshold controller');
+    ok(p.stats.decided === 0, 'auto-curate: they are not counted as decisions at all');
+    const human = auto.map((e) => ({ ...e, curatedBy: undefined }));
+    ok(planGardening({ nodes: base, edges: human }, { now: NOW, currentThreshold: 0.8 }).threshold !== null,
+      'auto-curate: the same 20 decisions made BY HAND still move the bar');
+  }
+  // apply() stamps the provenance so the next cycle can exclude them.
+  {
+    const b = brainLib.createBrain({ dir: path.join(TMP, 'auto') });
+    b.upsertNode({ type: 'file', ref: 'a', label: 'gtf.py' }, NOW);
+    b.upsertNode({ type: 'project', ref: 'c', label: 'PRISM' }, NOW);
+    b.upsertEdge({ from: brainLib.nodeId('file', 'a'), to: brainLib.nodeId('project', 'c'), type: 'relates-to',
+      status: 'proposed', confidence: 0.5, rationale: 'a genuine explanation of this link', provenance: { score: 0.95 } }, NOW - 10 * D);
+    const out = apply(b, planGardening({ nodes: b.nodes(), edges: b.edges() }, { now: NOW }));
+    ok(out.autoConfirmed === 1, 'auto-curate: apply() performs the confirmation');
+    const e = b.edges()[0];
+    ok(e.status === 'confirmed' && e.curatedBy === 'auto', 'auto-curate: stamps curatedBy so it is never mistaken for a human decision');
+    ok(/explained/.test(e.curatedReason || ''), 'auto-curate: records the reason on the edge for later');
+  }
+}
+
 try { fs.rmSync(TMP, { recursive: true, force: true }); } catch {}
 console.log(`\n${fail ? '❌' : '✅'} ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

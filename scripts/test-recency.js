@@ -156,4 +156,84 @@ const partOf = (from, to) => ({ id: 'e:' + from + to, from, to, type: 'part-of',
   ok(recency.readTouches('/definitely/not/here.log').size === 0, 'a missing audit log yields an empty map, not an exception');
 }
 
+// ── DORMANT PROJECTS ──────────────────────────────────────────────────────────────────────────
+// Siddhant's rule: archive projects begun over 3 weeks ago with no update in the last 3 days. BOTH
+// halves are required, and archiving must be reversible.
+{
+  const plan = (nodes, edges, opts = {}) => recency.planRecency({ nodes, edges }, { now: NOW, exists: () => true, mtimeOf: () => 0, ...opts });
+
+  const nodes = [
+    // old + quiet → archive
+    project('stale'), file('file:stale/a', 'stale', '/stale/a', NOW - 60 * D),
+    // old + touched yesterday → keep
+    project('live'), file('file:live/a', 'live', '/live/a', NOW - 60 * D), file('file:live/b', 'live', '/live/b', NOW - 1 * D),
+    // young + quiet → keep (not yet "begun over 3 weeks ago")
+    project('new'), file('file:new/a', 'new', '/new/a', NOW - 5 * D),
+  ];
+  const edges = [partOf('file:stale/a', 'project:stale'), partOf('file:live/a', 'project:live'), partOf('file:new/a', 'project:new')];
+  const p = plan(nodes, edges);
+  const archived = p.dormant.map((d) => d.ref);
+  ok(archived.includes('stale'), 'a project begun 60d ago and untouched for 60d is archived');
+  ok(!archived.includes('live'), 'a project touched yesterday is kept, however old it is');
+  ok(!archived.includes('new'), 'a project begun 5d ago is kept, however quiet it is');
+  ok(/begun 60d ago/.test(p.dormant[0].reason), 'and the reason says both halves: ' + p.dormant[0].reason);
+
+  // BOTH thresholds move independently.
+  ok(plan(nodes, edges, { dormantStaleDays: 90 }).dormant.length === 0, 'widening the staleness window spares everything');
+  ok(plan(nodes, edges, { dormantStartedDays: 3650 }).dormant.length === 0, 'requiring a longer history spares everything');
+  ok(plan(nodes, edges, { dormantEnabled: false }).dormant.length === 0, 'and the rule can be switched off entirely');
+
+  // ⚠ THE TRAP THIS FELL INTO. repoNodes() keys a project by absolute path, fileindex by bare name.
+  // Unnormalized, the project node never matched its own files, so its activity read as zero and its
+  // last update as "never recorded" — and the live run proposed archiving `bhatbot` itself while it
+  // was being edited. Same bug lib/brain.js already documents for proposeConnections.
+  {
+    const byPath = { id: 'project:users-sid-bhatbot', type: 'project', ref: '/Users/sid/bhatbot', label: 'bhatbot',
+      status: 'confirmed', importance: 1, meta: { root: '/Users/sid/bhatbot', kind: 'repo' } };
+    const its = [file('file:bhatbot/x', 'bhatbot', '/Users/sid/bhatbot/x', NOW - 40 * D),
+                 file('file:bhatbot/y', 'bhatbot', '/Users/sid/bhatbot/y', NOW - 1 * D)];   // edited yesterday
+    const r = plan([byPath, ...its], [partOf('file:bhatbot/x', byPath.id)]);
+    ok(!r.dormant.some((d) => d.id === byPath.id),
+      'a project keyed by ABSOLUTE PATH still matches its files, keyed by NAME — it is not archived while being edited');
+    ok(r.projects.some((x) => x.id === byPath.id && x.activity > 0), 'and its activity is measured rather than reading as zero');
+  }
+
+  // The activity signal being DEAD is different from everything genuinely being dormant.
+  {
+    const allOld = [project('a'), file('file:a/1', 'a', '/a/1', NOW - 60 * D),
+                    project('b'), file('file:b/1', 'b', '/b/1', NOW - 60 * D),
+                    project('c'), file('file:c/1', 'c', '/c/1', NOW - 60 * D),
+                    project('d'), file('file:d/1', 'd', '/d/1', NOW - 60 * D),
+                    project('e'), file('file:e/1', 'e', '/e/1', NOW - 60 * D)];
+    const r = plan(allOld, []);
+    ok(r.dormant.length === 0 && /activity signal looks dead/.test(r.stats.dormantAborted || ''),
+      'when NOTHING is active the pass holds back rather than archiving everything: ' + r.stats.dormantAborted);
+    // ...but one live project proves the signal works, and the rest are then trusted.
+    const withOneLive = [...allOld, project('f'), file('file:f/1', 'f', '/f/1', NOW - 1 * D)];
+    const r2 = plan(withOneLive, []);
+    ok(r2.dormant.length === 5 && !r2.stats.dormantAborted,
+      'one genuinely active project is enough to trust the signal and archive the other 5');
+  }
+
+  // REVERSIBILITY — the half that makes the whole rule safe.
+  {
+    const archivedNode = { id: 'project:back', type: 'project', ref: 'back', label: 'BACK', status: 'pruned',
+      importance: 1, meta: { repo: 'back', archivedBy: 'recency:dormant', archivedReason: 'was quiet' } };
+    const quiet = plan([archivedNode, project('live2'), file('file:live2/a', 'live2', '/l/a', NOW - 1 * D),
+                        file('file:back/a', 'back', '/b/a', NOW - 40 * D)], []);
+    ok(quiet.revive.length === 0, 'an archived project that is still quiet stays archived');
+
+    const touched = plan([archivedNode, project('live2'), file('file:live2/a', 'live2', '/l/a', NOW - 1 * D),
+                          file('file:back/a', 'back', '/b/a', NOW - 2 * 3600e3)], []);
+    ok(touched.revive.length === 1 && touched.revive[0].id === 'project:back',
+      'but working on it again brings it straight back — prune is sticky, so without this it would be archived forever');
+
+    // Only OUR archives are revived; a node the user pruned by hand stays pruned.
+    const userPruned = { ...archivedNode, meta: { repo: 'back' } };
+    ok(plan([userPruned, project('live2'), file('file:live2/a', 'live2', '/l/a', NOW - 1 * D),
+             file('file:back/a', 'back', '/b/a', NOW - 2 * 3600e3)], []).revive.length === 0,
+      'a node the USER pruned is never resurrected by the dormancy pass');
+  }
+}
+
 console.log(`✅ recency: ${pass} assertions passed`);

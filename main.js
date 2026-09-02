@@ -8506,7 +8506,12 @@ async function backlogTick() {
         const before = costToday().usd || 0;
         const r = await subagents.run(name, brief, subagentDeps(), { maxSteps: o.maxSteps || 5 });
         const spent = Math.max(0, (costToday().usd || 0) - before);
-        return { success: r && r.success !== false, result: (r && (r.result || r.text)) || '', usd: spent };
+        // CARRY THE ERROR. subagents.run returns a specific reason on failure and this wrapper used
+        // to drop it, so every failed item logged "no error reported" and the state file recorded the
+        // same. Live, that hid a 400 from a malformed history that had `research` and `coding` down
+        // for days: 6 of 7 items failed in under a second each, and the log could not say why. The
+        // reason existed the whole time and was thrown away one frame above where it was needed.
+        return { success: r && r.success !== false, result: (r && (r.result || r.text)) || '', usd: spent, error: r && r.error };
       },
     }, { maxItemMs: cfg.maxItemMs, maxSteps: cfg.maxSteps });
 

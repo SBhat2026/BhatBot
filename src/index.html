@@ -2173,6 +2173,7 @@ window.bhatbot.onStudioReload && window.bhatbot.onStudioReload(() => reloadStudi
     G.nodes = (g.nodes || []).map((n) => { const p = prev[n.id] || {}; const node = { ...n, x: p.x != null ? p.x : (Math.random() * 400 - 200), y: p.y != null ? p.y : (Math.random() * 300 - 150), vx: 0, vy: 0 }; byId[n.id] = node; return node; });
     G.edges = (g.edges || []).filter((e) => byId[e.from] && byId[e.to]);
     recomputeDegree();          // hover explains a node's ROLE, which is degree-relative
+    invalidate();               // new data always earns one repaint, settled or not
 
     // `pruned` was already computed by brain.stats() and shown nowhere, so the autoprune — which
     // runs on every worker tick — was invisible: the graph just quietly got smaller.
@@ -2276,34 +2277,125 @@ window.bhatbot.onStudioReload && window.bhatbot.onStudioReload(() => reloadStudi
       a.x += a.vx; a.y += a.vy;
     }
   }
+  // ── DRAWING ─────────────────────────────────────────────────────────────────────────────────────
+  // ⚠ LOAD-BEARING — the edges are stroked as THREE batched paths, not one path per edge.
+  //
+  // The old version called beginPath/stroke per edge and per node: ~4,200 separate path operations
+  // per frame at this graph size, every frame, forever. Canvas state changes are the expensive part,
+  // and the styles only take three distinct values, so all the confirmed edges can share one path
+  // and all the proposed ones another. Only the handful currently flashing need individual strokes,
+  // because each has its own fading alpha.
   function draw() {
     ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
     const w = cv.width / devicePixelRatio, h = cv.height / devicePixelRatio; ctx.clearRect(0, 0, w, h);
     ctx.save(); ctx.translate(w / 2 + view.x, h / 2 + view.y); ctx.scale(view.k, view.k);
-    for (const e of G.edges) { const a = byId[e.from], b = byId[e.to]; if (!a || !b) continue;
+
+    const flash = window._syFlash, nowMs = Date.now();
+    const flashing = [];
+    ctx.beginPath();                                   // pass 1: every confirmed edge, one path
+    for (const e of G.edges) {
+      if (e.status !== 'confirmed') continue;
+      const a = byId[e.from], b = byId[e.to]; if (!a || !b) continue;
+      const fl = flash && flash.get(e.id);
+      if (fl && nowMs - fl < 3000) { flashing.push([e, a, b, (nowMs - fl) / 3000]); continue; }
+      ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y);
+    }
+    ctx.strokeStyle = 'rgba(127,212,232,.5)'; ctx.lineWidth = 1.4 / view.k; ctx.stroke();
+
+    ctx.beginPath();                                   // pass 2: every proposed edge, one path
+    ctx.setLineDash([3, 3]);
+    for (const e of G.edges) {
+      if (e.status === 'confirmed') continue;
+      const a = byId[e.from], b = byId[e.to]; if (!a || !b) continue;
+      const fl = flash && flash.get(e.id);
+      if (fl && nowMs - fl < 3000) { flashing.push([e, a, b, (nowMs - fl) / 3000]); continue; }
+      ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y);
+    }
+    ctx.strokeStyle = 'rgba(150,160,175,.2)'; ctx.lineWidth = 0.8 / view.k; ctx.stroke();
+    ctx.setLineDash([]);
+
+    // pass 3: only the links the Weaver just made, each with its own fade.
+    for (const [, a, b, age] of flashing) {
       ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y);
-      // A link the Weaver just made glows for a few seconds, then joins the rest.
-      const fl = window._syFlash && window._syFlash.get(e.id);
-      const age = fl ? (Date.now() - fl) / 3000 : 2;
-      if (age < 1) { ctx.strokeStyle = `rgba(150,235,255,${(1 - age) * 0.95 + 0.3})`; ctx.lineWidth = (2.6 - age * 1.2) / view.k; ctx.stroke(); ctx.setLineDash([]); continue; }
-      ctx.strokeStyle = e.status === 'confirmed' ? 'rgba(127,212,232,.5)' : 'rgba(150,160,175,.2)';
-      ctx.lineWidth = (e.status === 'confirmed' ? 1.4 : 0.8) / view.k; if (e.status === 'proposed') ctx.setLineDash([3, 3]); ctx.stroke(); ctx.setLineDash([]); }
-    for (const n of G.nodes) { const r = 4 + (n.importance || 1) * 1.5; ctx.beginPath(); ctx.arc(n.x, n.y, r, 0, 6.283);
-      ctx.fillStyle = TYPE_COLOR[n.type] || '#8a94a6'; ctx.globalAlpha = n === hover ? 1 : 0.9; ctx.fill(); ctx.globalAlpha = 1;
-      if (n === hover || view.k > 1.7) { ctx.fillStyle = '#cfe4ee'; ctx.font = (11 / view.k) + 'px system-ui'; ctx.fillText(String(n.label).slice(0, 28), n.x + r + 2, n.y + 3); } }
+      ctx.strokeStyle = `rgba(150,235,255,${(1 - age) * 0.95 + 0.3})`;
+      ctx.lineWidth = (2.6 - age * 1.2) / view.k; ctx.stroke();
+    }
+
+    // Nodes batch by colour for the same reason — six fills instead of ~1,800.
+    const byColor = new Map();
+    for (const n of G.nodes) {
+      const c = TYPE_COLOR[n.type] || '#8a94a6';
+      let arr = byColor.get(c); if (!arr) { arr = []; byColor.set(c, arr); }
+      arr.push(n);
+    }
+    for (const [color, list] of byColor) {
+      ctx.beginPath();
+      for (const n of list) {
+        if (n === hover) continue;                     // the hovered node is drawn separately, opaque
+        const r = 4 + (n.importance || 1) * 1.5;
+        ctx.moveTo(n.x + r, n.y); ctx.arc(n.x, n.y, r, 0, 6.283);
+      }
+      ctx.fillStyle = color; ctx.globalAlpha = 0.9; ctx.fill(); ctx.globalAlpha = 1;
+    }
+    if (hover) {
+      const r = 4 + (hover.importance || 1) * 1.5;
+      ctx.beginPath(); ctx.arc(hover.x, hover.y, r, 0, 6.283);
+      ctx.fillStyle = TYPE_COLOR[hover.type] || '#8a94a6'; ctx.fill();
+    }
+    // Labels are the one genuinely per-node cost, so they are only paid when they are legible.
+    if (hover || view.k > 1.7) {
+      ctx.fillStyle = '#cfe4ee'; ctx.font = (11 / view.k) + 'px system-ui';
+      if (view.k > 1.7) for (const n of G.nodes) ctx.fillText(String(n.label).slice(0, 28), n.x + 6 + (n.importance || 1) * 1.5, n.y + 3);
+      else if (hover) ctx.fillText(String(hover.label).slice(0, 28), hover.x + 6 + (hover.importance || 1) * 1.5, hover.y + 3);
+    }
     ctx.restore();
   }
-  function loop() { tick(); draw(); requestAnimationFrame(loop); }
+
+  // ⚠ LOAD-BEARING — this loop must not draw when there is nothing to draw.
+  //
+  // It used to be `tick(); draw(); requestAnimationFrame(loop)` — unconditional, at 60fps, for the
+  // lifetime of the window. `tick()` already returns immediately once the layout settles, but
+  // `draw()` did not: a settled, motionless graph still repainted 1,835 nodes and 2,351 edges sixty
+  // times a second. Worse, `running` was set on the first ingest and never cleared, so this kept
+  // burning a core while the SYNAPSE panel was HIDDEN and the user was somewhere else entirely.
+  //
+  // Now a frame is drawn only when something has actually changed: the layout is still moving, a
+  // link is mid-flash, or an interaction marked the view dirty.
+  let needsDraw = true;
+  const invalidate = () => { needsDraw = true; };
+  function visible() { return panel.classList.contains('active') && !panel.classList.contains('mode3d'); }
+  function flashActive() {
+    const f = window._syFlash; if (!f || !f.size) return false;
+    const nowMs = Date.now();
+    for (const ts of f.values()) if (nowMs - ts < 3000) return true;
+    f.clear();                                          // all expired — stop checking every frame
+    return false;
+  }
+  let wasVisible = false;
+  function loop() {
+    requestAnimationFrame(loop);
+    const vis = visible();
+    // Becoming visible always earns one repaint. The panel can be opened from the stage dropdown as
+    // well as the nav rail, and that path does not go through the ingest() that would otherwise mark
+    // the view dirty — so without this an on-demand loop can leave the canvas blank on first open.
+    if (vis && !wasVisible) needsDraw = true;
+    wasVisible = vis;
+    if (!vis) return;                                   // hidden panel: no simulation, no paint
+    const moving = !settled();
+    if (moving) tick();
+    if (moving || needsDraw || flashActive()) { draw(); needsDraw = false; }
+  }
   const s2w = (mx, my) => ({ x: (mx - cv.clientWidth / 2 - view.x) / view.k, y: (my - cv.clientHeight / 2 - view.y) / view.k });
   function pick(mx, my) { const p = s2w(mx, my); let best = null, bd = 1e9; for (const n of G.nodes) { const dx = n.x - p.x, dy = n.y - p.y, d = dx * dx + dy * dy, r = 7 + (n.importance || 1) * 1.5; if (d < r * r && d < bd) { bd = d; best = n; } } return best; }
-  cv.addEventListener('mousedown', (e) => { const n = pick(e.offsetX, e.offsetY); if (n) dragNode = n; else { panning = true; last = { x: e.offsetX, y: e.offsetY }; } });
-  cv.addEventListener('mousemove', (e) => { hover = pick(e.offsetX, e.offsetY); cv.style.cursor = hover ? 'pointer' : (panning ? 'grabbing' : 'grab');
+  cv.addEventListener('mousedown', (e) => { const n = pick(e.offsetX, e.offsetY); if (n) dragNode = n; else { panning = true; last = { x: e.offsetX, y: e.offsetY }; } invalidate(); });
+  cv.addEventListener('mousemove', (e) => { const wasHover = hover; hover = pick(e.offsetX, e.offsetY); if (hover !== wasHover || dragNode || panning) invalidate();
+    cv.style.cursor = hover ? 'pointer' : (panning ? 'grabbing' : 'grab');
     showTip(dragNode || panning ? null : hover, e.clientX, e.clientY);
     if (dragNode) { const p = s2w(e.offsetX, e.offsetY); dragNode.x = p.x; dragNode.y = p.y; dragNode.vx = dragNode.vy = 0; }
     else if (panning && last) { view.x += e.offsetX - last.x; view.y += e.offsetY - last.y; last = { x: e.offsetX, y: e.offsetY }; } });
-  window.addEventListener('mouseup', () => { dragNode = null; panning = false; last = null; });
+  window.addEventListener('mouseup', () => { dragNode = null; panning = false; last = null; invalidate(); });
   cv.addEventListener('click', (e) => { if (panning) return; const n = pick(e.offsetX, e.offsetY); if (n) showDetail(n); });
-  cv.addEventListener('wheel', (e) => { e.preventDefault(); view.k = Math.max(0.2, Math.min(4, view.k * (e.deltaY < 0 ? 1.1 : 0.9))); }, { passive: false });
+  cv.addEventListener('wheel', (e) => { e.preventDefault(); view.k = Math.max(0.2, Math.min(4, view.k * (e.deltaY < 0 ? 1.1 : 0.9))); invalidate(); }, { passive: false });
   function showDetail(n) { const d = document.getElementById('sy-detail'); d.classList.remove('hidden');
     const nb = G.edges.filter((e) => e.from === n.id || e.to === n.id).length;
     d.innerHTML = `<span class="sy-d-x">✕</span><div class="sy-d-t">${esc(n.label)}</div>`
@@ -2315,7 +2407,7 @@ window.bhatbot.onStudioReload && window.bhatbot.onStudioReload(() => reloadStudi
   }
   const bBtn = document.getElementById('sy-build');
   bBtn.onclick = async () => { bBtn.textContent = 'building…'; bBtn.disabled = true; try { await window.bhatbot.synapseBuild(); } catch {} bBtn.textContent = '⟳ Build'; bBtn.disabled = false; };
-  document.getElementById('sy-mode').onclick = () => { panel.classList.toggle('mode3d'); if (panel.classList.contains('mode3d')) init3D(); };
+  document.getElementById('sy-mode').onclick = () => { panel.classList.toggle('mode3d'); if (panel.classList.contains('mode3d')) init3D(); else invalidate(); };
   window.bhatbot.onSynapseUpdate && window.bhatbot.onSynapseUpdate((g) => { ingest(g); if (panel.classList.contains('mode3d')) update3D(); });
   // ── THE WEAVER'S LIVE FEED ───────────────────────────────────────────────────────────────────────
   // Connections are found continuously in the background; this is where you watch it happen. A new
@@ -2338,7 +2430,9 @@ window.bhatbot.onStudioReload && window.bhatbot.onStudioReload(() => reloadStudi
   const navBtn = document.querySelector('.navbtn[data-panel="synapse"]');
   // On open: ensure the graph is populated (free import if empty) so it's never blank.
   if (navBtn) navBtn.addEventListener('click', () => setTimeout(async () => { size(); ingest(await (window.bhatbot.synapseEnsure ? window.bhatbot.synapseEnsure() : window.bhatbot.synapseGraph())); }, 60));
-  window.addEventListener('resize', () => { if (panel.classList.contains('active')) size(); });
+  // size() reassigns cv.width, which CLEARS the canvas — so a resize must always earn a repaint,
+  // otherwise an on-demand loop leaves the graph blank until something else happens to move.
+  window.addEventListener('resize', () => { if (panel.classList.contains('active')) { size(); invalidate(); } });
   // ── WHAT A NODE MEANS, AND WHAT IT DOES HERE ────────────────────────────────────────────────────
   // A graph of 1,774 dots is not self-explaining. Hovering used to show a label, which answers "what
   // is this called" and not the two questions you actually have: what KIND of thing is this, and is
