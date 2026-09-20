@@ -40,6 +40,7 @@ const rstate = require(path.join(ROOT, 'lib', 'runtime-state'));
 const pidlock = require(path.join(ROOT, 'lib', 'pidlock'));
 const llm = require(path.join(ROOT, 'lib', 'llm'));
 const miniagent = require(path.join(ROOT, 'lib', 'miniagent'));
+const failkind = require(path.join(ROOT, 'lib', 'failkind'));
 const { createSynapse } = require(path.join(ROOT, 'lib', 'synapse'));
 
 const LOCK = 'synapse-worker';
@@ -116,9 +117,15 @@ async function runCycle(synapse, { force = false } = {}) {
 // worker RUNS them, through lib/miniagent.js — a read-only tool-loop (search / fetch / read).
 //
 // A task that needs something this process cannot do (Mail.app, sending anything, the shell, the
-// vault) calls defer_to_app, and we deliberately do NOT markRan — the schedule stays due so the full
-// agent runs it properly on next launch. Producing a half-answer that quietly omits the part it
+// vault) calls defer_to_app, and we deliberately do NOT markRan — the occurrence survives so the
+// full agent runs it properly on next launch. Producing a half-answer that quietly omits the part it
 // couldn't reach would be worse than waiting, so deferral is a first-class outcome, not a failure.
+//
+// It is, however, a first-class outcome that costs money. "Leave it due" originally meant the worker
+// re-ran the whole task every 30-minute cycle — and a task only discovers it must defer AFTER doing
+// everything it can, so the morning brief ran its full web-search preamble and then gave up, 350
+// times over sixteen days. Deferral and failure both now back off (lib/failkind.js sizes the window),
+// scoped so that parking the worker never parks the app.
 const RESULTS_DIR = path.join(os.homedir(), '.bhatbot', 'schedule-results');
 
 function writeResult(s, payload) {
@@ -182,7 +189,7 @@ let _schedulesRunning = false;
 async function runDueSchedules() {
   if (_schedulesRunning) return;
   let due = [];
-  try { due = scheduler.due(Date.now()); } catch { return; }
+  try { due = scheduler.due(Date.now(), { host: 'worker' }); } catch { return; }
   if (!due.length) return;
 
   if (!llm.hasKey('anthropic')) {
@@ -201,14 +208,37 @@ async function runDueSchedules() {
       catch (e) { r = { error: String(e.message) }; }
 
       if (r.deferred) {
-        // Leave it DUE on purpose. markRan here would silently swallow the occurrence.
-        log(`⏰ "${s.title}" deferred — needs ${r.needs}; leaving it due for the desktop app`);
-        writeResult(s, { status: 'deferred', needs: r.needs, partial: r.partial || null });
+        // The occurrence is NOT consumed — markRan here would silently swallow it, and the app is
+        // the only host that can finish the job. But "leave it due" used to mean "re-run the whole
+        // task every 30 minutes", and the task runs its full web-search preamble before discovering
+        // it needs Mail: 350 deferrals of the morning brief by 2026-09-20, each one paid for. Park
+        // the WORKER (the app's view is untouched, so it picks this up the moment it opens).
+        const b = scheduler.markDeferred(s.id, { when: Date.now(), needs: r.needs });
+        log(`⏰ "${s.title}" deferred — needs ${String(r.needs).slice(0, 120)}; parked for the desktop app`);
+        if (!b || b.firstOfStreak) writeResult(s, { status: 'deferred', needs: r.needs, partial: r.partial || null });
         continue;
       }
       if (r.error || !r.text) {
-        log(`⏰ "${s.title}" failed: ${r.error || 'no output'} — leaving it due to retry`);
-        writeResult(s, { status: 'failed', error: r.error || 'no output' });
+        // A failure used to leave the schedule due, so the next tick tried again — correct for a
+        // dropped socket, and a 680-failure loop for an empty billing account. Classify first, then
+        // back off for as long as the KIND of failure deserves, and report once per streak.
+        const err = r.error || 'no output';
+        const v = failkind.classify(err);
+        const b = scheduler.markFailed(s.id, {
+          when: Date.now(), error: err, kind: v.kind,
+          backoffMs: (streak) => failkind.backoffMs(v.kind, streak),
+        });
+        const until = b ? new Date(b.blockedUntil).toLocaleTimeString() : 'shortly';
+        log(`⏰ "${s.title}" failed (${v.kind}, #${b ? b.streak : 1}): ${String(err).slice(0, 160)} — ${failkind.explain(v.kind, v.reason)} next attempt after ${until}`);
+
+        // ONE result file and ONE push per streak. Writing one per attempt is how 680 unread files
+        // accumulated; the information in attempt 681 is identical to attempt 2.
+        if (b && b.firstOfStreak) {
+          writeResult(s, { status: 'failed', error: err, kind: v.kind, reason: v.reason, blockedUntil: b.blockedUntil });
+          if (v.kind === failkind.PERMANENT) {
+            await telegramPush(`⏰ "${s.title}" is parked.\n\n${failkind.explain(v.kind, v.reason)}\n\n${String(err).slice(0, 600)}`);
+          }
+        }
         continue;
       }
 
@@ -274,12 +304,20 @@ function printStatus() {
           trimLogs: [path.join(os.homedir(), '.bhatbot', 'router.jsonl'), path.join(os.homedir(), '.bhatbot', 'logs', 'app.log')],
           semanticMaintain: () => { try { return semantic.maintain({ maxEpisodicAgeDays: mc.maxEpisodicAgeDays || 45 }); } catch (e) { return { error: e.message }; } },
           // Every deploy_drones call mints a run dir and nothing ever removed them.
-          pruneDirs: [{ dir: path.join(os.homedir(), '.bhatbot', 'drones'), prefix: 'run-', maxAgeDays: mc.maxRunDirAgeDays || 14 }],
+          pruneDirs: [
+            { dir: path.join(os.homedir(), '.bhatbot', 'drones'), prefix: 'run-', maxAgeDays: mc.maxRunDirAgeDays || 14 },
+            // Schedule results: 680 files had accumulated by 2026-09-20, 365 of them over a month
+            // old, because nothing pruned them. Bounded by BOTH age and count — a schedule that
+            // fires hourly produces recent files legitimately, so age alone is not a bound.
+            { dir: RESULTS_DIR, prefix: 's_', entryKind: 'file', maxAgeDays: mc.maxResultAgeDays || 30, keepNewest: mc.maxResults || 200 },
+          ],
           onReport: (r) => {
             const s = r.semantic || {};
             if (s.decayed || s.merged) log(`memmaint: semantic ${s.before}→${s.after} (decayed ${s.decayed}, merged ${s.merged})`);
-            const dropped = (r.dirs || []).reduce((n, d) => n + ((d.removed || []).length), 0);
-            if (dropped) log(`memmaint: removed ${dropped} aged-out run director${dropped === 1 ? 'y' : 'ies'}`);
+            for (const d of r.dirs || []) {
+              const n = (d.removed || []).length;
+              if (n) log(`memmaint: pruned ${n} aged-out entr${n === 1 ? 'y' : 'ies'} from ${path.basename(d.dir)}`);
+            }
           },
         },
       });

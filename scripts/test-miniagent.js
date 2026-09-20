@@ -142,7 +142,14 @@ const use = (name, input, id = 't1') => [{ type: 'tool_use', id, name, input }];
     ok(!/child_process|execSync|spawn/.test(src), 'lib/miniagent.js: no process execution anywhere in the file');
   }
 
-  // ---- the worker leaves a deferred/failed schedule DUE ----
+  // ---- the worker never consumes an occurrence it did not complete ----
+  //
+  // This block used to assert "a failed run leaves the schedule DUE", which was right about the
+  // occurrence and wrong about the cadence: staying due meant retrying on every 30-minute tick, and
+  // against a permanent error (an empty billing account) that produced 680 identical failures in
+  // sixteen days. The invariant that actually matters is narrower — markRan is success-only, so the
+  // occurrence is never silently swallowed — and a failure now BACKS OFF rather than staying hot.
+  // See lib/failkind.js and scripts/test-scheduler-backoff.js for the behaviour itself.
   {
     const w = fs.readFileSync(path.join(__dirname, 'synapse-worker.js'), 'utf8');
     const block = w.slice(w.indexOf('async function runDueSchedules'), w.indexOf('function printStatus'));
@@ -150,9 +157,12 @@ const use = (name, input, id = 't1') => [{ type: 'tool_use', id, name, input }];
     const deferIdx = block.indexOf('r.deferred');
     const markIdx = block.indexOf('scheduler.markRan');
     ok(deferIdx < markIdx, 'worker: the deferral branch precedes markRan');
-    ok(/continue;[\s\S]{0,400}scheduler\.markRan/.test(block), 'worker: deferred and failed runs `continue` BEFORE markRan — the schedule stays due');
+    ok(/continue;[\s\S]{0,600}scheduler\.markRan/.test(block), 'worker: deferred and failed runs `continue` BEFORE markRan — the occurrence is never consumed');
     ok(/only on genuine success/.test(block), 'worker: the markRan call documents that it is success-only');
     ok(/hasKey\('anthropic'\)/.test(block), 'worker: without a key it leaves schedules for the app rather than failing them');
+    ok(/failkind\.classify/.test(block), 'worker: a failure is CLASSIFIED before it is retried');
+    ok(/scheduler\.markFailed/.test(block), 'worker: a failure backs the schedule off instead of leaving it hot');
+    ok(/firstOfStreak/.test(block), 'worker: it reports once per streak, not once per attempt');
   }
 
   try { fs.rmSync(TMP, { recursive: true, force: true }); } catch {}

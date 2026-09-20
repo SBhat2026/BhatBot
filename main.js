@@ -93,6 +93,7 @@ const logins = require('./lib/logins');               // domain-keyed login prof
 const modePrompts = require('./lib/prompts');         // P4  — mode-switching system prompts
 const jobsBus = require('./lib/jobs');                // P5  — background job bus (task cards + spoken relay + steering) — B1: now durable
 const scheduler = require('./lib/scheduler');         // proactive scheduler (recurring/one-off autonomous tasks)
+const failkind = require('./lib/failkind');           // will waiting help? transient vs permanent failure
 // ── Pass B/C (endurance) ────────────────────────────────────────────────────────────────────────
 // B2 — ONE lock every background tick respects. dispatchTurn already serializes turns, but the six
 // background timers (scheduler 30s, patrol 5m, self-heal 15m, health 15m+, ambient 30m, synapse)
@@ -8792,7 +8793,7 @@ async function tickScheduler() {
   // user. A parked mission continues before a scheduled task because it is work already in flight.
   try { if (await tickMissions()) return; } catch (e) { console.warn('[mission] tick failed:', e.message); }
   let due = [];
-  try { due = scheduler.due(Date.now()); } catch { return; }
+  try { due = scheduler.due(Date.now(), { host: 'app' }); } catch { return; }
   if (!due.length) return;
   // Idempotency: nextRun is a fixed past instant for daily/weekly/once and advanced by markRan,
   // so an overdue job (Mac was asleep) fires exactly ONCE on wake — no missed-tick storm.
@@ -8807,6 +8808,7 @@ async function tickScheduler() {
   } finally { schedulerBusy = false; }
 }
 async function runScheduledTask(s) {
+  let failed = null;
   try {
     sendToActivity('tool-update', { type: 'thinking', text: '⏰ running scheduled: ' + s.title });
     const prompt = `[Scheduled task "${s.title}"] ${s.prompt}\n\nThis is a proactive/autonomous run (no one is watching the screen). Do the task, then reply with a SHORT spoken-style summary of what you did or found.`;
@@ -8817,10 +8819,28 @@ async function runScheduledTask(s) {
     sendToActivity('tool-update', { type: 'thinking', text: '⏰ ' + s.title + ' → ' + text.slice(0, 200) });
     try { notion.logActivity({ event: 'scheduled: ' + s.title, tool: 'scheduler', result: text.slice(0, 200) }); } catch {}
   } catch (e) {
+    failed = e;
     console.error('[scheduler] task failed:', s.id, e.message);
-    try { telegramNotify('⚠️ Scheduled task "' + s.title + '" failed: ' + e.message); } catch {}
   } finally {
-    scheduler.markRan(s.id, Date.now());   // advance/disable AFTER running so a crash mid-run retries next tick
+    // markRan used to run unconditionally here, which CONSUMED the occurrence on failure: a daily
+    // brief that died on a dead key was marked as having run, and the day's run was simply lost.
+    // The worker had the mirror-image bug (never consumed, so it retried forever — 680 times). Both
+    // now go through the same classifier: a success advances, a failure backs off for as long as the
+    // KIND of failure deserves and keeps its occurrence. See lib/failkind.js.
+    if (!failed) scheduler.markRan(s.id, Date.now());
+    else {
+      const v = failkind.classify(failed);
+      const b = scheduler.markFailed(s.id, {
+        when: Date.now(), error: failed.message || String(failed), kind: v.kind,
+        backoffMs: (streak) => failkind.backoffMs(v.kind, streak),
+      });
+      // One notification per streak. Notifying every attempt is how a broken key becomes 48 Telegram
+      // messages a day.
+      if (b && b.firstOfStreak) {
+        try { telegramNotify(`⚠️ Scheduled task "${s.title}" failed — ${failkind.explain(v.kind, v.reason)}\n\n${String(failed.message || failed).slice(0, 500)}`); } catch {}
+      }
+      sendToActivity('tool-update', { type: 'thinking', text: `⏰ ${s.title} failed (${v.kind}) — ${v.reason}` });
+    }
   }
 }
 
