@@ -39,6 +39,7 @@ const wsState = require('./lib/state');
 const wsMemory = require('./lib/memory');
 const semantic = require('./lib/semantic');           // #12 — embedding-based semantic/episodic recall (degrades gracefully)
 const toolselect = require('./lib/toolselect');        // W1 — per-turn tool retrieval (context-rot prevention)
+const toolcatalog = require('./lib/toolcatalog');       // tree-mode retrieval: categories + the toolbox escape hatch
 const { classifyDepth } = require('./lib/depth');       // A3 — per-turn response-depth → max_tokens + directive
 const depthmodel = require('./lib/depthmodel');         // Phase 3 #1 — learned depth model (heuristic = fallback)
 const taper = require('./lib/taper');                   // Phase 3 #2 — conversation-position ceiling taper
@@ -4427,6 +4428,34 @@ async function executeTool(name, input) {
         await shell.openExternal(input.url); result = { success: true, opened: input.url }; break;
       case 'make_printable':
         result = await makePrintable(input); break;
+      // The escape hatch for tree-mode retrieval. Only 1–3 of fourteen tool categories are on the
+      // wire each turn, so the model needs a way to reach the rest — WITHOUT the caller falling back
+      // to all 85 schemas, which is what the old low-confidence path did silently.
+      //
+      // It expands `_activeTools` in place, so the very next loop iteration sees the real schemas.
+      // That works because `activeTools()` reads this mutable on every step rather than capturing it
+      // once — the same property the W1 comment warns against swapping mid-loop, used deliberately
+      // here: this only ever ADDS, so no tool the model has already seen disappears underneath it.
+      case 'toolbox': {
+        const cat = String(input.category || '').trim();
+        const desc = toolcatalog.describe(cat, fullCatalog());
+        if (!desc) {
+          result = { success: false, error: `Unknown category "${cat}". Valid: ${Object.keys(toolcatalog.CATEGORIES).join(', ')}` };
+          break;
+        }
+        const add = toolcatalog.expand(cat, fullCatalog());
+        const have = new Set((_activeTools || []).map((t) => t.name));
+        const fresh = add.filter((t) => !have.has(t.name));
+        if (fresh.length) _activeTools = [...(_activeTools || []), ...fresh];
+        sendToActivity('tool-update', { type: 'thinking', text: `🧰 toolbox: +${fresh.length} ${cat} tool(s)${input.why ? ' — ' + String(input.why).slice(0, 60) : ''}` });
+        result = {
+          success: true, category: cat, loaded: fresh.map((t) => t.name),
+          already_available: add.filter((t) => have.has(t.name)).map((t) => t.name),
+          tools: desc.tools,
+          note: 'These are now callable. Call the one you need directly — do not call toolbox again for this category.',
+        };
+        break;
+      }
       case 'notify_user':
         result = await notifyUser(input.message, input.urgency || 'low', { awaitReply: !!input.awaitReply, taskId: input.taskId }); break;
       case 'ask_options': {
@@ -5708,6 +5737,7 @@ function describeAction(name, input = {}) {
       case 'bioart': return input.action === 'search' ? `Searching NIH BioArt: ${s(input.query, 40)}` : `Fetching a BioArt illustration`;
       case 'ask_ai': return 'Consulting a second model';
       case 'notify_user': return 'Reaching you out-of-band';
+      case 'toolbox': return `Reaching for the ${String(input.category || '')} tools`;
       case 'build_project': return `Building: ${s(input.goal, 60)}`;
       default: {
         // Connector tools fall through to the generic branch, where `mcp__seedance__list_models`
@@ -5977,11 +6007,25 @@ async function agentLoop(history, apiKey, event, opts = {}) {
     : Promise.resolve();
 
   const _catalog = loadConfig().toolRetrieval !== false ? fullCatalog() : null;
-  const toolsP = _catalog
-    // Rank over the FULL catalog — native + live connector tools. Ranking only the native ones and
-    // appending connectors afterwards is what made them retrieval-exempt and permanently on the wire.
-    ? latStage('tool retrieval', () => toolselect.select(_ask, _catalog, { k: Number(loadConfig().toolRetrievalK) || 12 })).catch(() => null)
-    : Promise.resolve(null);
+  // TWO RETRIEVAL MODES. 'tree' (lib/toolcatalog.js, the default) resolves the query to 1–3 of
+  // fourteen CATEGORIES with keyword + structural scoring — deterministic, 0ms, no embedding call on
+  // the critical path at all — and puts a `toolbox` meta-tool on the wire so the model can pull in a
+  // category the resolver missed. 'embed' is the old flat cosine top-k over all 85.
+  //
+  // The tree's headline is not the mean (4,778 → 2,620 tokens) but the tail: embed retrieval returns
+  // null on low confidence, which the fallback below reads as "send the full catalog" — 25,540
+  // tokens, silently. The tree never returns null, so that case cannot happen. Measured in
+  // scripts/test-toolcatalog.js against the live schema, not estimated.
+  const _treeMode = loadConfig().toolRetrievalMode !== 'embed';
+  const toolsP = !_catalog ? Promise.resolve(null)
+    : _treeMode
+      ? latStage('tool retrieval', () => {
+          const sel = toolcatalog.select(_ask, _catalog, { max: Number(loadConfig().toolCategoryMax) || 3 });
+          return { ...sel, tools: [toolcatalog.toolboxSchema(), ...sel.tools] };
+        }).catch(() => null)
+      // Rank over the FULL catalog — native + live connector tools. Ranking only the native ones and
+      // appending connectors afterwards is what made them retrieval-exempt and permanently on the wire.
+      : latStage('tool retrieval', () => toolselect.select(_ask, _catalog, { k: Number(loadConfig().toolRetrievalK) || 12 })).catch(() => null);
 
   // The planner is the ONE stage deliberately chained rather than raced: it runs after retrieval so
   // it can be told which tools this turn actually has. Retrieval is ~50ms (and 0ms of embedding,

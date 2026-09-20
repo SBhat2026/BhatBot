@@ -168,10 +168,34 @@ provider.chat({ messages, system, tools, schema, stream }) → { text, toolCalls
 instead of models — which is strictly better, because two providers' rate windows are genuinely
 independent where two Anthropic models' are not.
 
-**Blocker:** "terra/astra" — you said OpenAI line, but I need the exact API model IDs. They are not
-in my knowledge and not in the repo. `lib/providers.js` reads model IDs from config
-(`providers.openai.models.{fast,heavy}`), so the code lands without them and they drop in when you
-have them.
+### The model roster
+
+Confirmed by Siddhant 2026-09-20. Neither OpenAI model is in my training data, so **everything
+below about them is his description, not something I can verify** — treat capability claims as
+his spec, and the IDs as the strings to send.
+
+| Slot | Model | Use |
+|---|---|---|
+| local cheap | ollama 8B Q4 | tier 1 of the cascade — chat, triage, classification |
+| local mid | ollama 9.6 GB MoE, 53 tok/s | tier 2 ensemble, weaver rationales, gardener |
+| cloud workhorse | `claude-sonnet-5` | the floor cloud model; tool loops |
+| cloud balanced | **`gpt-5.6-terra`** | "a mix of high intelligence and cost efficiency for everyday professional work" |
+| cloud frontier | `claude-opus-5` | solo deep reasoning |
+| cloud frontier | **`gpt-6-astra`** | "complex reasoning, coding, and multi-step agent tasks with a large context window" |
+| ~~fan-out~~ | ~~`claude-fable-5-1`~~ | **removed** |
+
+Two consequences worth naming now:
+
+- **Terra displaces Sonnet on cost-sensitive cloud work, not Opus.** It sits between the local
+  cascade and the frontier tier, which is precisely the slot Haiku vacated and that Sonnet has been
+  over-serving ever since (`chooseModel()` returns Sonnet for *everything*, including "simple").
+- **Astra's large context window is what makes provider fan-out work.** Fable existed because
+  Opus's 16K output budget throttled drones to about three. Two providers' rate windows are
+  genuinely independent where two Anthropic models' are not, so a fleet can split across Astra and
+  Opus and get real parallelism rather than a bigger share of one cap.
+
+Model IDs live in config (`providers.openai.models.{balanced,frontier}`), never hardcoded — the one
+thing I can be sure of is that these strings will change.
 
 ---
 
@@ -218,15 +242,31 @@ not to the whole catalog.
 category the resolver didn't pick. This replaces the "return null → send all 85" fallback with
 "send 250 tokens and let the model ask". **The 25,531-token worst case stops existing.**
 
-### Projected cost
+### Cost — shipped and measured
 
-| | today | after |
-|---|---|---|
-| CORE | 3,289 (12 tools) | **~350** (`toolbox` + `notify_user`) |
-| Task tools | ~1,489 (top-12) | ~2,000 (one full category, ~7 tools) |
-| **Typical turn** | **4,778** | **~2,350** (−51%) |
-| Worst case | **25,531** | ~350 + one round trip |
-| Tools a local model must choose between | 24 | **~8** |
+Built, wired and measured against the live schema by `scripts/test-toolcatalog.js`, so these move
+if a tool's description grows rather than living on as a claim in this file.
+
+| | before | after | note |
+|---|---|---|---|
+| CORE | 3,298 (12 tools) | **766** (−77%) | `toolbox` 452 + `notify_user` 314 |
+| **Mean turn** (8 real queries) | **4,778** | **2,620** (−45%) | range 1,374–4,684 |
+| Worst case (nothing matches) | **25,540** | **766** | the silent full-catalog fallback is deleted |
+| Tools the model chooses between | 24 | **4–11** | this is what makes local tool-calling viable |
+| Retrieval latency | one embedding round trip | **0 ms** | keyword + structural scoring, no model call |
+
+I estimated CORE at ~350 and the mean at ~2,350 before building it; both were optimistic —
+`notify_user` alone is 314 tokens and the toolbox schema is 452, not 250. The −45% is real, the
+−51% was not.
+
+Two things the build changed from the design above:
+
+- **Structural signals, not just keywords.** `"read ~/notes/todo.md"` scored `desktop`, because
+  "notes" names a Mac app and a bare path scored nothing. Paths, filenames, URLs and code fences now
+  carry weight 3 — the same three regexes `quickRoute` already leans on, for the same reason.
+- **Inflections.** `"undo what you archived"` missed the `archive` keyword on a word boundary. A
+  short suffix list (`s|es|d|ed|ing`) rather than a stemmer: `er`/`ers` are excluded because
+  "render" and "renderer" are different things and conflating them makes a precise keyword noisy.
 
 That last row is note 3's real payoff. A local model cannot tool-call across 24 schemas reliably;
 across 8 well-named ones in a named category, it can. **This is what unlocks tools for the free
@@ -468,7 +508,8 @@ Custodian needs room to run inside (§4).
 
 ## 14. Open
 
-- **Exact OpenAI model IDs for "terra/astra."** Config-driven, so code lands without them.
+- **Terra/Astra capability claims are unverified.** Both post-date my training data; §4's table
+  records Siddhant's description. The A/B in §3 should cover them too, not just the local tier.
 - **Ensemble membership.** Which local models vote at tier 2 — needs the A/B data first.
 - **Whether the light theme keeps the HUD identity at all.** Deferred to the redesign preview.
 - **Cloud parity.** Everything here is desktop-side. `cloud/src/` has its own `toolselect`, `graph`

@@ -39,8 +39,23 @@ const mcphub = require('../lib/mcphub');
 
   const unimplemented = names.filter((n) => !cases.has(n));
   ok(unimplemented.length === 0, 'every ADVERTISED tool has a handler — otherwise the model calls it and gets "Unknown tool": ' + unimplemented.join(', '));
-  const unadvertised = [...cases].filter((n) => !names.includes(n));
+
+  // There is a SECOND legitimate source of advertisement. Tree-mode retrieval injects a `toolbox`
+  // meta-tool that lib/toolcatalog.js builds at call time, so it is deliberately absent from the
+  // static schema — it is the only tool whose own schema depends on the category list. The
+  // invariant the assertion below protects is unchanged (nothing implemented is unreachable); it
+  // just has to look in both places, otherwise the correct design reads as dead code.
+  const toolcatalog = require('../lib/toolcatalog');
+  const advertised = new Set([...names, toolcatalog.toolboxSchema().name]);
+  const unadvertised = [...cases].filter((n) => !advertised.has(n));
   ok(unadvertised.length === 0, 'every implemented tool is advertised — otherwise it is unreachable dead code: ' + unadvertised.join(', '));
+
+  // ...and the dynamic one must be genuinely reachable, not merely exempted from the check above.
+  ok(cases.has(toolcatalog.TOOLBOX_NAME), 'the toolbox meta-tool has a handler in executeTool');
+  ok(/toolcatalog\.select\(/.test(main), 'tree-mode retrieval is actually called from main.js');
+  ok(/toolcatalog\.toolboxSchema\(\)/.test(main), 'the toolbox schema is actually put on the wire');
+  ok(/_activeTools = \[\.\.\.\(_activeTools \|\| \[\]\), \.\.\.fresh\]/.test(main),
+    'the toolbox handler expands the turn\'s tool set in place — otherwise it loads a category the model still cannot call');
 
   for (const t of TOOLS) {
     ok(typeof t.description === 'string' && t.description.length > 20, `${t.name} has a real description (retrieval ranks on it — a stub makes the tool unfindable)`);
