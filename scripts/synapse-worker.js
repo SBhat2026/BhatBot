@@ -95,7 +95,41 @@ function build() {
   return { synapse, anthropicKey: !!anthropicKey, openaiKey: !!openaiKey };
 }
 
-async function runCycle(synapse, { force = false } = {}) {
+// ── WAKEFULNESS, HELD ONLY WHILE WORKING ──────────────────────────────────────────────────────────
+// On AC this Mac already has `pmset sleep 0`, so nothing here is load-bearing today. It matters when
+// the machine is on battery (where sleep is set to one minute) and for the general case: a cycle
+// that gets suspended halfway through resumes late and out of order.
+//
+// Two guards, both needed. Killing the process at the end of the cycle is what keeps the assertion
+// PER-CYCLE — a blanket one would hold the Mac awake for the 98.7% of the time the worker is idle.
+// `-w <our pid>` is the backstop: if this process dies mid-cycle and never reaches the kill,
+// caffeinate exits with the process it is watching, so a crash cannot leave the machine awake
+// forever. That is the failure mode of every keep-awake utility, and it costs one argument to avoid.
+//
+// Entirely best-effort: no caffeinate (or a non-Darwin host) simply means no assertion.
+// See BACKGROUND_EXECUTION.md §5.
+const { spawn } = require('child_process');
+
+async function withWakefulness(label, fn) {
+  let caf = null;
+  if (process.platform === 'darwin') {
+    try {
+      caf = spawn('caffeinate', ['-i', '-w', String(process.pid)], { stdio: 'ignore' });
+      caf.on('error', () => { caf = null; });
+    } catch { caf = null; }
+  }
+  try {
+    return await fn();
+  } finally {
+    if (caf) { try { caf.kill(); } catch {} }
+  }
+}
+
+async function runCycle(synapse, opts = {}) {
+  return withWakefulness('cycle', () => runCycleInner(synapse, opts));
+}
+
+async function runCycleInner(synapse, { force = false } = {}) {
   const t0 = Date.now();
   try {
     const out = await synapse.tick({ force });
@@ -187,6 +221,10 @@ async function pushCloudReplica(synapse) {
 
 let _schedulesRunning = false;
 async function runDueSchedules() {
+  return withWakefulness('schedules', runDueSchedulesInner);
+}
+
+async function runDueSchedulesInner() {
   if (_schedulesRunning) return;
   let due = [];
   try { due = scheduler.due(Date.now(), { host: 'worker' }); } catch { return; }
