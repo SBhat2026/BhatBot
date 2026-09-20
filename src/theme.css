@@ -1,0 +1,283 @@
+/* ── BHATBOT THEME TOKENS ──────────────────────────────────────────────────────────────────────────
+ *
+ * THREE PALETTES, ONE LAYOUT, ONE TYPE SYSTEM.
+ *
+ *   day      (default)  Daylight — cool paper, teal instrument. What you work in.
+ *   standby             Paper & Ink — warm paper, oxblood. What it wears when it is idling, running
+ *                       in the background, or when you ask for it. The difference is deliberately
+ *                       visible from across the room: you should be able to tell at a glance whether
+ *                       it is working for you or ticking over on its own.
+ *   night               The original HUD, unchanged. Near-black, electric cyan.
+ *
+ * PRECEDENCE — set `data-theme` on <html>. An explicit pin always wins; otherwise standby beats the
+ * time of day, because "it is idling" is a fact about the system and "it is 9pm" is only a fact
+ * about the clock.
+ *
+ *     pinned  >  standby  >  night (after sunset)  >  day
+ *
+ * TYPOGRAPHY IS SHARED ACROSS ALL THREE, and it is the half that carries the character:
+ *   --font-mono    chrome, labels, telemetry, code, state words. The instrument.
+ *   --font-speech  what he SAYS — spoken captions, chat replies, the thinking stream. A serif,
+ *                  because it is prose being read, not data being scanned, and because the voice it
+ *                  belongs to is a butler rather than a console.
+ *   --font-ui      everything else: buttons, inputs, secondary chrome.
+ *
+ * LAYOUT tokens come from the Soft Studio direction: surfaces lift off the ground with a shadow
+ * instead of being outlined, so hierarchy comes from elevation rather than from fourteen identical
+ * borders all claiming equal importance.
+ *
+ * WHY A FILE AND NOT INLINE. src/index.html carries ~1,100 lines of inline <style>, and the values
+ * below are referenced by the renderer, the prototype, and (later) the phone. One definition.
+ */
+
+:root,
+:root[data-theme="day"] {
+  /* ── ground and surfaces ── */
+  --bg: #EEF2F5;
+  --surface: #FAFCFD;
+  --surface-2: #F3F7F9;
+  --surface-sunk: #E6ECF0;
+
+  /* ── ink ── */
+  --text: #12222C;
+  --text-dim: #4A626F;
+  --text-dim2: #6D8492;
+
+  /* ── the instrument ── */
+  --accent: #0B6E8C;
+  --accent-soft: rgba(11, 110, 140, 0.10);
+  --accent-line: rgba(11, 110, 140, 0.34);
+  --accent-ink: #085468;          /* accent as text on a light ground: 7.1:1 */
+
+  /* ── semantic, separate from the accent on purpose ── */
+  --ok: #17724A;
+  --warn: #8A5A06;
+  --err: #A32B2B;
+  --ok-soft: rgba(23, 114, 74, 0.12);
+  --warn-soft: rgba(138, 90, 6, 0.12);
+  --err-soft: rgba(163, 43, 43, 0.10);
+
+  --line: #C9D4DC;
+  --line-soft: #DDE5EA;
+
+  /* ── elevation (the Soft Studio half) ── */
+  --shadow-1: 0 1px 2px rgba(18, 34, 44, .06), 0 2px 8px -4px rgba(18, 34, 44, .10);
+  --shadow-2: 0 1px 2px rgba(18, 34, 44, .07), 0 8px 24px -12px rgba(18, 34, 44, .20);
+  --shadow-3: 0 2px 4px rgba(18, 34, 44, .08), 0 22px 56px -22px rgba(18, 34, 44, .30);
+
+  --radius: 10px;
+  --radius-sm: 7px;
+  --radius-lg: 16px;
+
+  /* ── the orb, per model tier — see §TIERS below ── */
+  --orb-core: #7FD3E8;
+  --orb-mid: #1E8FAF;
+  --orb-rim: #0B6E8C;
+  --orb-glow: rgba(11, 110, 140, 0.30);
+  --orb-sat: 1;
+}
+
+/* ── STANDBY — Paper & Ink ────────────────────────────────────────────────────────────────────────
+ * Warm, quiet, and unmistakably a different mode. Nothing about it says "working".
+ */
+:root[data-theme="standby"] {
+  --bg: #F6F3EC;
+  --surface: #FCFAF5;
+  --surface-2: #F2EEE4;
+  --surface-sunk: #EDE8DC;
+
+  --text: #22201B;
+  --text-dim: #5C5648;
+  --text-dim2: #857D6C;
+
+  --accent: #8C3A1E;
+  --accent-soft: rgba(140, 58, 30, 0.09);
+  --accent-line: rgba(140, 58, 30, 0.30);
+  --accent-ink: #7A3018;          /* 7.4:1 on the warm ground */
+
+  --ok: #4A6A2B;
+  --warn: #8A5A06;
+  --err: #98301F;
+  --ok-soft: rgba(74, 106, 43, 0.12);
+  --warn-soft: rgba(138, 90, 6, 0.12);
+  --err-soft: rgba(152, 48, 31, 0.10);
+
+  --line: #D8D0BF;
+  --line-soft: #E6E0D3;
+
+  --shadow-1: 0 1px 2px rgba(34, 32, 27, .05), 0 2px 8px -4px rgba(34, 32, 27, .09);
+  --shadow-2: 0 1px 2px rgba(34, 32, 27, .06), 0 8px 24px -12px rgba(34, 32, 27, .18);
+  --shadow-3: 0 2px 4px rgba(34, 32, 27, .07), 0 22px 56px -22px rgba(34, 32, 27, .26);
+
+  --orb-core: #E0B191;
+  --orb-mid: #B4552C;
+  --orb-rim: #8C3A1E;
+  --orb-glow: rgba(140, 58, 30, 0.26);
+  --orb-sat: 0.86;                /* standby is literally less vivid */
+}
+
+/* ── NIGHT — the original HUD, preserved ─────────────────────────────────────────────────────────
+ * Values lifted verbatim from src/index.html's :root so the dark theme is pixel-continuous with
+ * what shipped. The only additions are the tokens the new layout needs.
+ */
+:root[data-theme="night"] {
+  --bg: #090d13;
+  --surface: #0d1520;
+  --surface-2: #111c2b;
+  --surface-sunk: #070b10;
+
+  --text: #c8d6e5;
+  --text-dim: #8199ae;            /* was #5b708a — raised to clear 4.5:1 on the near-black ground */
+  --text-dim2: #647d94;
+
+  --accent: #00c8ff;
+  --accent-soft: rgba(0, 200, 255, 0.10);
+  --accent-line: rgba(0, 200, 255, 0.34);
+  --accent-ink: #4fd8ff;
+
+  --ok: #2fe08a;
+  --warn: #ffb02e;
+  --err: #ff4d5e;
+  --ok-soft: rgba(47, 224, 138, 0.12);
+  --warn-soft: rgba(255, 176, 46, 0.12);
+  --err-soft: rgba(255, 77, 94, 0.12);
+
+  --line: #15212f;
+  --line-soft: #101a26;
+
+  /* On a dark ground a drop shadow does nothing; elevation reads as a lighter surface plus a rim. */
+  --shadow-1: 0 0 0 1px rgba(255, 255, 255, .04);
+  --shadow-2: 0 0 0 1px rgba(255, 255, 255, .06), 0 10px 30px -14px rgba(0, 0, 0, .9);
+  --shadow-3: 0 0 0 1px rgba(255, 255, 255, .08), 0 26px 64px -22px rgba(0, 0, 0, .95);
+
+  --orb-core: #9BEBFF;
+  --orb-mid: #17A8D4;
+  --orb-rim: #00c8ff;
+  --orb-glow: rgba(0, 200, 255, 0.34);
+  --orb-sat: 1;
+}
+
+/* ── TYPE ─────────────────────────────────────────────────────────────────────────────────────────
+ * Shared by every theme. The serif is not decoration: it marks the difference between the system
+ * reporting data and the butler saying something, which is the same distinction the voice layer
+ * makes between the command register and the commentary register.
+ */
+:root {
+  --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+  --font-speech: 'Newsreader', 'Iowan Old Style', Georgia, 'Times New Roman', serif;
+  --font-ui: -apple-system, 'SF Pro Text', 'Segoe UI', Inter, Roboto, system-ui, sans-serif;
+
+  --step--1: 11.5px;
+  --step-0: 13.5px;
+  --step-1: 16px;
+  --step-2: 21px;
+  --step-3: 28px;
+
+  /* Labels and state words: the instrument voice. */
+  --label-size: var(--step--1);
+  --label-track: 0.13em;
+}
+
+.t-label {
+  font-family: var(--font-mono);
+  font-size: var(--label-size);
+  letter-spacing: var(--label-track);
+  text-transform: uppercase;
+  color: var(--text-dim);
+  font-weight: 500;
+}
+
+/* What he says. Larger, serif, looser — it is read, not scanned. */
+.t-speech {
+  font-family: var(--font-speech);
+  font-size: var(--step-1);
+  line-height: 1.5;
+  color: var(--text);
+}
+
+.t-data { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+
+/* ── SURFACE ──────────────────────────────────────────────────────────────────────────────────────
+ * One card class, three elevations. A card takes a border ONLY in night, where a shadow is invisible.
+ */
+.card {
+  background: var(--surface);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-1);
+  padding: 14px 16px;
+}
+.card--raised { box-shadow: var(--shadow-2); }
+.card--float { box-shadow: var(--shadow-3); }
+
+/* ── §TIERS — THE ORB SHOWS WHAT IS THINKING ──────────────────────────────────────────────────────
+ *
+ * The orb's colour is not decoration; it is the one place the model tier is visible without opening
+ * a panel. The rule is richness: the harder the thing thinking about your request, the more saturated
+ * and luminous the orb. A local model is muted and cool. Sonnet is the theme's own accent. Opus or
+ * Astra is deeper, warmer at the core, and visibly glowing — you should be able to tell from the
+ * other side of the room that it reached for something expensive.
+ *
+ * Set `data-tier` on the orb: local | standard | heavy | frontier.
+ */
+.orb[data-tier="local"] {
+  --orb-sat: 0.32;
+  --orb-contrast: 0.94;
+  --orb-glow-size: 8px;
+  --orb-glow-a: 0.12;
+}
+.orb[data-tier="standard"] {
+  --orb-sat: 1;
+  --orb-contrast: 1;
+  --orb-glow-size: 22px;
+  --orb-glow-a: 0.28;
+}
+.orb[data-tier="heavy"] {
+  --orb-sat: 1.4;
+  --orb-contrast: 1.06;
+  --orb-glow-size: 44px;
+  --orb-glow-a: 0.40;
+}
+/* Opus / Astra. The most vivid state the interface has — reserved, so it means something. */
+.orb[data-tier="frontier"] {
+  --orb-sat: 1.55;
+  --orb-contrast: 1.12;
+  --orb-glow-size: 72px;
+  --orb-glow-a: 0.52;
+}
+
+/* NOTE ON `brightness()`. The first version of this scaled brightness with the tier, and the
+ * frontier orb washed out of the palette entirely — a deep teal became electric cyan, which is the
+ * OLD HUD accent and reads as a different theme rather than a richer one. Richness is saturation
+ * and contrast, plus how far the glow throws; luminance is what destroys the hue. */
+.orb {
+  --orb-sat: 1;
+  --orb-contrast: 1;
+  --orb-glow-size: 22px;
+  --orb-glow-a: 0.28;
+  border-radius: 50%;
+  position: relative;
+  background:
+    radial-gradient(circle at 34% 30%, var(--orb-core), transparent 46%),
+    radial-gradient(circle at 50% 50%, var(--orb-mid) 20%, var(--orb-rim) 72%);
+  filter: saturate(var(--orb-sat)) contrast(var(--orb-contrast));
+  box-shadow:
+    0 0 var(--orb-glow-size) color-mix(in srgb, var(--orb-rim) calc(var(--orb-glow-a) * 100%), transparent),
+    inset 0 -10% 22% color-mix(in srgb, var(--orb-rim) 55%, transparent);
+  transition: filter .6s ease, box-shadow .6s ease;
+}
+
+/* The heavier tiers get a second, wider halo — the thing you notice from across the room. */
+.orb[data-tier="heavy"]::after,
+.orb[data-tier="frontier"]::after {
+  content: '';
+  position: absolute;
+  inset: -22%;
+  border-radius: 50%;
+  background: radial-gradient(circle, color-mix(in srgb, var(--orb-rim) 18%, transparent) 40%, transparent 70%);
+  pointer-events: none;
+}
+.orb[data-tier="frontier"]::after { inset: -38%; }
+
+@media (prefers-reduced-motion: reduce) {
+  .orb { transition: none; }
+}

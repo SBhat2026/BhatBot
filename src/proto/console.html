@@ -1,0 +1,643 @@
+<!doctype html>
+<html lang="en" data-theme="day">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BhatBot — console prototype</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Newsreader:opsz,wght@6..72,300;6..72,400;6..72,500&display=swap">
+<link rel="stylesheet" href="../theme.css">
+<style>
+/* ── PROTOTYPE ONLY ───────────────────────────────────────────────────────────────────────────────
+ * Layout from direction C (elevation, radius, spacing), palette from A, typography from B.
+ * Everything colour-related comes from ../theme.css — nothing is hardcoded here, which is the point:
+ * switching the theme switches all three palettes with no other change.
+ */
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; }
+body {
+  background: var(--bg); color: var(--text);
+  font-family: var(--font-ui); font-size: var(--step-0);
+  display: grid; grid-template-rows: 46px 1fr 56px;
+  transition: background .5s ease, color .5s ease;
+  overflow: hidden;
+}
+
+/* ── titlebar ── */
+#titlebar {
+  display: flex; align-items: center; gap: 12px; padding: 0 16px;
+  border-bottom: 1px solid var(--line-soft); background: var(--surface);
+}
+.brand { font-family: var(--font-mono); font-weight: 600; letter-spacing: .2em; font-size: 12px; }
+.livedot { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 3px var(--ok-soft); }
+.spacer { flex: 1; }
+.chip {
+  font-family: var(--font-mono); font-size: 11px; letter-spacing: .06em;
+  padding: 4px 10px; border-radius: 99px; background: var(--surface-2);
+  color: var(--text-dim); border: 1px solid var(--line-soft);
+}
+.chip.on { color: var(--accent-ink); border-color: var(--accent-line); background: var(--accent-soft); }
+.seg { display: flex; gap: 2px; background: var(--surface-sunk); padding: 3px; border-radius: 99px; }
+.seg button {
+  font-family: var(--font-mono); font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase;
+  border: 0; background: transparent; color: var(--text-dim); padding: 5px 11px; border-radius: 99px; cursor: pointer;
+}
+.seg button[aria-pressed="true"] { background: var(--surface); color: var(--accent-ink); box-shadow: var(--shadow-1); }
+.seg button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* ── main ── */
+#main { display: grid; grid-template-columns: 148px 1fr; min-height: 0; position: relative; }
+
+#rail { padding: 12px 8px; display: flex; flex-direction: column; gap: 2px; border-right: 1px solid var(--line-soft); }
+#rail .lbl { font-family: var(--font-mono); font-size: 9.5px; letter-spacing: .16em; text-transform: uppercase; color: var(--text-dim2); padding: 4px 10px 8px; }
+#rail button {
+  text-align: left; font-family: var(--font-mono); font-size: 11px; letter-spacing: .09em; text-transform: uppercase;
+  border: 0; background: transparent; color: var(--text-dim); padding: 8px 10px; border-radius: var(--radius-sm); cursor: pointer;
+}
+#rail button:hover { background: var(--surface-2); color: var(--text); }
+#rail button[aria-current="true"] { background: var(--accent-soft); color: var(--accent-ink); font-weight: 500; }
+#rail .grow { flex: 1; }
+
+#views { min-width: 0; min-height: 0; overflow: hidden; position: relative; }
+.view { position: absolute; inset: 0; padding: 18px; overflow: auto; display: none; }
+.view[data-active] { display: block; }
+
+/* ── voice stage ── */
+#voice-view { display: none; place-items: center; }
+#voice-view[data-active] { display: grid; }
+.stage { display: flex; flex-direction: column; align-items: center; gap: 18px; width: min(680px, 100%); }
+
+.orbwrap { position: relative; width: 210px; height: 210px; display: grid; place-items: center; }
+#ring { position: absolute; inset: 0; width: 210px; height: 210px; }
+#orb {
+  width: 118px; height: 118px; position: relative; z-index: 1;
+  animation: breathe 5.5s ease-in-out infinite;
+}
+#orb[data-state="listening"] { animation: none; }
+#orb[data-state="thinking"] { animation: pulse 1.5s ease-in-out infinite; }
+@keyframes breathe { 0%,100% { transform: scale(1); } 50% { transform: scale(1.035); } }
+@keyframes pulse { 0%,100% { transform: scale(1); opacity: .9; } 50% { transform: scale(1.06); opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { #orb { animation: none !important; } }
+
+.statebar { display: flex; align-items: center; gap: 10px; }
+#state { font-family: var(--font-mono); font-size: 11px; letter-spacing: .2em; text-transform: uppercase; color: var(--accent-ink); }
+#tierchip { font-family: var(--font-mono); font-size: 10px; letter-spacing: .1em; text-transform: uppercase; color: var(--text-dim2); border: 1px solid var(--line); border-radius: 99px; padding: 2px 8px; }
+
+/* what he SAYS — the serif */
+#caption {
+  font-family: var(--font-speech); font-size: var(--step-2); font-weight: 400; line-height: 1.45;
+  text-align: center; color: var(--text); min-height: 2.6em; max-width: 34ch; text-wrap: balance;
+}
+#voice-view[data-state="idle"] #caption:empty::after { content: 'Say something, or press the mic.'; color: var(--text-dim2); font-size: var(--step-1); }
+
+/* ── the thinking stream — what it is considering, while it considers it ── */
+#thinking { width: min(560px, 100%); display: flex; flex-direction: column; gap: 7px; min-height: 96px; transition: min-height .4s ease; }
+#thinking:empty { min-height: 0; }
+#thinking .tl {
+  display: flex; gap: 10px; align-items: baseline;
+  font-family: var(--font-speech); font-size: var(--step-0); color: var(--text-dim);
+  opacity: 0; transform: translateY(4px); animation: rise .45s ease forwards;
+}
+#thinking .tl .k {
+  font-family: var(--font-mono); font-size: 9.5px; letter-spacing: .12em; text-transform: uppercase;
+  color: var(--text-dim2); flex: 0 0 62px; text-align: right; padding-top: 2px;
+}
+#thinking .tl.done { color: var(--text); }
+#thinking .tl.done .k { color: var(--accent-ink); }
+@keyframes rise { to { opacity: 1; transform: none; } }
+
+/* ── loops view ── */
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(268px, 1fr)); gap: 14px; }
+.loop { display: flex; flex-direction: column; gap: 8px; }
+.loop .top { display: flex; align-items: center; gap: 9px; }
+.loop h3 { font-family: var(--font-mono); font-size: 11.5px; letter-spacing: .1em; text-transform: uppercase; font-weight: 500; }
+.loop .desc { font-family: var(--font-speech); font-size: var(--step-0); color: var(--text-dim); line-height: 1.5; }
+.pill { font-family: var(--font-mono); font-size: 9.5px; letter-spacing: .09em; text-transform: uppercase; padding: 2px 8px; border-radius: 99px; margin-left: auto; }
+.pill.live { background: var(--ok-soft); color: var(--ok); }
+.pill.down { background: var(--err-soft); color: var(--err); }
+.pill.park { background: var(--warn-soft); color: var(--warn); }
+.bar { height: 3px; border-radius: 99px; background: var(--surface-sunk); overflow: hidden; }
+.bar i { display: block; height: 100%; background: var(--accent); border-radius: 99px; }
+.viewhead { display: flex; align-items: baseline; gap: 12px; margin-bottom: 16px; }
+.viewhead h2 { font-family: var(--font-mono); font-size: 12px; letter-spacing: .16em; text-transform: uppercase; font-weight: 500; color: var(--text-dim); }
+.viewhead .n { font-family: var(--font-mono); font-size: 11px; color: var(--text-dim2); margin-left: auto; }
+
+/* ── parked sidebar ── */
+#parked {
+  position: absolute; top: 0; right: 0; bottom: 0; width: 330px; z-index: 5;
+  background: var(--surface); box-shadow: var(--shadow-3); border-left: 1px solid var(--line-soft);
+  transform: translateX(100%); transition: transform .32s cubic-bezier(.32,.72,0,1);
+  display: flex; flex-direction: column; padding: 16px; gap: 12px; overflow: auto;
+}
+#parked[data-open] { transform: none; }
+#parked .ph { display: flex; align-items: center; gap: 10px; }
+#parked h2 { font-family: var(--font-mono); font-size: 11px; letter-spacing: .16em; text-transform: uppercase; color: var(--text-dim); font-weight: 500; }
+#parked .close { margin-left: auto; border: 0; background: transparent; color: var(--text-dim2); cursor: pointer; font-size: 17px; line-height: 1; padding: 2px 6px; border-radius: var(--radius-sm); }
+#parked .close:hover { background: var(--surface-2); color: var(--text); }
+.park-item { display: flex; flex-direction: column; gap: 6px; }
+.park-item .q { font-family: var(--font-speech); font-size: var(--step-0); line-height: 1.45; }
+.park-item .meta { font-family: var(--font-mono); font-size: 10px; letter-spacing: .06em; color: var(--text-dim2); }
+.park-item .acts { display: flex; gap: 6px; margin-top: 2px; }
+.park-item button {
+  font-family: var(--font-mono); font-size: 10px; letter-spacing: .08em; text-transform: uppercase;
+  border: 1px solid var(--line); background: var(--surface-2); color: var(--text-dim);
+  padding: 5px 10px; border-radius: var(--radius-sm); cursor: pointer;
+}
+.park-item button:hover { border-color: var(--accent-line); color: var(--accent-ink); background: var(--accent-soft); }
+
+/* The parked panel is a side drawer, not a modal — a heavy scrim makes the view behind it
+   look broken rather than backgrounded. Just enough to pull focus. */
+#scrim { position: absolute; inset: 0; background: rgba(0,0,0,.05); opacity: 0; pointer-events: none; transition: opacity .3s ease; z-index: 4; }
+#scrim[data-on] { opacity: 1; pointer-events: auto; }
+
+/* ── input bar ── */
+#inputbar { display: flex; align-items: center; gap: 10px; padding: 0 16px; border-top: 1px solid var(--line-soft); background: var(--surface); }
+#inputbar input {
+  flex: 1; border: 0; background: transparent; color: var(--text); font-family: var(--font-ui); font-size: var(--step-0); outline: none; padding: 10px 0;
+}
+#inputbar input::placeholder { color: var(--text-dim2); }
+.iconbtn {
+  border: 1px solid var(--line); background: var(--surface-2); color: var(--text-dim);
+  width: 34px; height: 30px; border-radius: var(--radius-sm); cursor: pointer; display: grid; place-items: center; font-size: 13px;
+}
+.iconbtn:hover { border-color: var(--accent-line); color: var(--accent-ink); }
+.iconbtn[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent-ink); border-color: var(--accent-line); }
+.hint { font-family: var(--font-mono); font-size: 10px; color: var(--text-dim2); letter-spacing: .04em; }
+
+/* ── the at-rest rail: informs an idle screen, recedes during a turn ──────────────────────────────
+ * The brief was "fit the loops summary alongside, but do not clutter it". The resolution is not
+ * less information, it is TIMING: full presence at rest, dimmed and non-interactive the moment a
+ * turn begins, so it never competes with the thing you are listening to.
+ */
+#restrail {
+  position: absolute; top: 18px; right: 18px; width: 172px;
+  display: flex; flex-direction: column; gap: 5px;
+  opacity: 1; transition: opacity .45s ease, transform .45s ease;
+}
+#voice-view[data-state="thinking"] #restrail,
+#voice-view[data-state="speaking"] #restrail { opacity: .22; transform: translateX(5px); pointer-events: none; }
+#restrail .rr-h { font-family: var(--font-mono); font-size: 9px; letter-spacing: .17em; text-transform: uppercase; color: var(--text-dim2); margin-bottom: 3px; }
+#restrail .rr-row { display: flex; align-items: center; gap: 7px; font-family: var(--font-mono); font-size: 10.5px; color: var(--text-dim); }
+#restrail .rr-row span { flex: 1; }
+#restrail .rr-row b { font-weight: 500; color: var(--text); font-variant-numeric: tabular-nums; }
+.dot { width: 6px; height: 6px; border-radius: 50%; flex: 0 0 auto; }
+.dot.live { background: var(--ok); }
+.dot.down { background: var(--err); opacity: .55; }
+#restrail .rr-park {
+  font-family: var(--font-mono); font-size: 10px; letter-spacing: .06em; text-align: left;
+  border: 1px solid var(--warn); background: var(--warn-soft); color: var(--warn);
+  padding: 6px 9px; border-radius: var(--radius-sm); cursor: pointer;
+}
+
+/* ── call ── */
+.callbar { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
+.callbar input { flex: 1; border: 0; background: transparent; outline: none; font-family: var(--font-ui); font-size: var(--step-0); color: var(--text); }
+.callbar input::placeholder { color: var(--text-dim2); }
+.granted { font-family: var(--font-mono); font-size: 9.5px; letter-spacing: .09em; text-transform: uppercase; color: var(--ok); background: var(--ok-soft); padding: 3px 9px; border-radius: 99px; }
+.clist { display: grid; grid-template-columns: repeat(auto-fill, minmax(258px, 1fr)); gap: 10px; }
+.contact { display: flex; align-items: center; gap: 11px; padding: 10px 12px; }
+.contact .av { width: 30px; height: 30px; border-radius: 50%; background: var(--accent-soft); color: var(--accent-ink); display: grid; place-items: center; font-family: var(--font-mono); font-size: 11px; flex: 0 0 auto; }
+.contact .who { flex: 1; min-width: 0; }
+.contact .nm { font-family: var(--font-speech); font-size: var(--step-0); }
+.contact .nu { font-family: var(--font-mono); font-size: 10px; color: var(--text-dim2); }
+.contact .go { border: 1px solid var(--line); background: var(--surface-2); color: var(--text-dim); border-radius: var(--radius-sm); width: 28px; height: 26px; cursor: pointer; }
+.contact .go:hover { border-color: var(--accent-line); color: var(--accent-ink); background: var(--accent-soft); }
+
+/* ── permissions ── */
+.permlede { font-family: var(--font-speech); font-size: var(--step-1); color: var(--text-dim); max-width: 58ch; margin-bottom: 20px; line-height: 1.5; }
+.permgroup { margin-bottom: 22px; }
+.permgroup h3 { font-family: var(--font-mono); font-size: 10px; letter-spacing: .17em; text-transform: uppercase; color: var(--text-dim2); font-weight: 500; margin-bottom: 9px; }
+.perm { display: flex; align-items: center; gap: 13px; padding: 11px 14px; margin-bottom: 7px; }
+.perm .pn { font-family: var(--font-mono); font-size: 11.5px; letter-spacing: .04em; flex: 0 0 168px; }
+.perm .pw { flex: 1; font-family: var(--font-speech); font-size: var(--step-0); color: var(--text-dim); min-width: 0; }
+.perm .ps { font-family: var(--font-mono); font-size: 9.5px; letter-spacing: .09em; text-transform: uppercase; padding: 3px 9px; border-radius: 99px; white-space: nowrap; }
+.perm .ps.on { background: var(--ok-soft); color: var(--ok); }
+.perm .ps.off { background: var(--surface-sunk); color: var(--text-dim2); }
+.perm .ps.need { background: var(--warn-soft); color: var(--warn); }
+.perm button.grant {
+  font-family: var(--font-mono); font-size: 9.5px; letter-spacing: .09em; text-transform: uppercase;
+  border: 1px solid var(--accent-line); background: var(--accent-soft); color: var(--accent-ink);
+  padding: 5px 11px; border-radius: var(--radius-sm); cursor: pointer; white-space: nowrap;
+}
+.perm button.grant:hover { background: var(--accent); color: var(--surface); }
+@media (max-width: 880px) { .perm { flex-wrap: wrap; } .perm .pn { flex-basis: 100%; } }
+</style>
+</head>
+<body>
+
+<div id="titlebar">
+  <span class="livedot"></span>
+  <span class="brand">BHATBOT</span>
+  <span class="chip" id="modechip">day</span>
+  <span class="spacer"></span>
+  <div class="seg" role="group" aria-label="Model tier">
+    <button data-tier="local">local</button>
+    <button data-tier="standard" aria-pressed="true">sonnet</button>
+    <button data-tier="heavy">opus</button>
+    <button data-tier="frontier">astra</button>
+  </div>
+  <div class="seg" role="group" aria-label="Theme">
+    <button data-theme="day" aria-pressed="true">day</button>
+    <button data-theme="standby">standby</button>
+    <button data-theme="night">night</button>
+  </div>
+</div>
+
+<div id="main">
+  <nav id="rail">
+    <span class="lbl">Navigation</span>
+    <button data-view="voice" aria-current="true">Voice</button>
+    <button data-view="loops">Loops</button>
+    <button data-view="manage">Manage</button>
+    <button data-view="call">Call</button>
+    <span class="grow"></span>
+    <button id="parkbtn">Parked · 2</button>
+    <button data-view="perms">Permissions</button>
+    <button>Settings</button>
+  </nav>
+
+  <div id="views">
+    <!-- VOICE -->
+    <section id="voice-view" class="view" data-active>
+      <!-- The at-rest summary. Present when nothing is happening, faded back the moment a turn
+           starts, so it informs an idle screen without competing with the answer. -->
+      <aside id="restrail" aria-label="At rest">
+        <span class="rr-h">Running</span>
+        <div class="rr-row"><i class="dot live"></i><span>Synapse</span><b>1,989</b></div>
+        <div class="rr-row"><i class="dot live"></i><span>Memory</span><b>292↓</b></div>
+        <div class="rr-row"><i class="dot live"></i><span>Scheduler</span><b>1 parked</b></div>
+        <div class="rr-row"><i class="dot down"></i><span>Weaver</span><b>633</b></div>
+        <div class="rr-row"><i class="dot down"></i><span>Triage</span><b>—</b></div>
+        <span class="rr-h" style="margin-top:14px">Waiting on you</span>
+        <button class="rr-park" id="restpark">2 questions parked</button>
+      </aside>
+      <div class="stage">
+        <div class="orbwrap">
+          <canvas id="ring" width="420" height="420" aria-hidden="true"></canvas>
+          <div id="orb" class="orb" data-tier="standard" data-state="idle"></div>
+        </div>
+        <div class="statebar">
+          <span id="state">Idle</span>
+          <span id="tierchip">sonnet</span>
+        </div>
+        <div id="caption" class="t-speech" aria-live="polite"></div>
+        <div id="thinking" aria-live="polite"></div>
+      </div>
+    </section>
+
+    <!-- LOOPS -->
+    <section id="loops-view" class="view">
+      <div class="viewhead">
+        <h2>Standing loops</h2>
+        <span class="n">4 live · 4 down · 1 parked</span>
+      </div>
+      <div class="grid" id="loopgrid"></div>
+    </section>
+
+    <!-- MANAGE — everything that left the rail, in one index -->
+    <section id="manage-view" class="view">
+      <div class="viewhead"><h2>Manage</h2><span class="n">everything else, in one place</span></div>
+      <div class="grid" id="managegrid"></div>
+    </section>
+
+    <!-- CALL -->
+    <section id="call-view" class="view">
+      <div class="viewhead"><h2>Call</h2><span class="n" id="callmeta">150 contacts · synced</span></div>
+      <div class="card callbar">
+        <input id="csearch" placeholder="Search contacts by name or number…" autocomplete="off">
+        <span class="granted">contacts granted</span>
+      </div>
+      <div class="clist" id="clist"></div>
+    </section>
+
+    <!-- PERMISSIONS -->
+    <section id="perms-view" class="view">
+      <div class="viewhead"><h2>What BhatBot may do</h2><span class="n" id="permmeta"></span></div>
+      <p class="permlede">Every capability it has, what that capability unlocks, and whether you have granted it. Nothing here is on unless you turned it on.</p>
+      <div id="permgroups"></div>
+    </section>
+
+    <div id="scrim"></div>
+
+    <aside id="parked" aria-label="Parked, waiting on you">
+      <div class="ph">
+        <h2>Waiting on you</h2>
+        <button class="close" aria-label="Close">×</button>
+      </div>
+      <div class="card park-item">
+        <span class="meta">Mission · m_mtg07 · 14 min ago</span>
+        <span class="q">You said “the second one” — which of the two binder designs did you mean?</span>
+        <div class="acts"><button>The first</button><button>The second</button><button>Answer…</button></div>
+      </div>
+      <div class="card park-item">
+        <span class="meta">Schedule · Morning brief · parked 6h</span>
+        <span class="q">Needs Mail and Gmail, which the background worker cannot reach. It is waiting for the app.</span>
+        <div class="acts"><button>Run now</button><button>Skip today</button></div>
+      </div>
+      <p class="meta" style="margin-top:4px">Nothing else is blocked.</p>
+    </aside>
+  </div>
+</div>
+
+<div id="inputbar">
+  <button class="iconbtn" id="micbtn" aria-pressed="false" title="Open a voice session">🎙</button>
+  <input id="entry" placeholder="Message BhatBot…  (or press the mic and just talk)">
+  <span class="hint" id="hint">mic off</span>
+  <button class="iconbtn" id="demobtn" title="Run a scripted turn">▶</button>
+</div>
+
+<script>
+/* ── PROTOTYPE BEHAVIOUR ──────────────────────────────────────────────────────────────────────────
+ * Two things here are real rather than mocked, because they are the two you asked to see:
+ *   1. the ring is driven by the actual microphone (Web Audio AnalyserNode), so the waveform is YOUR
+ *      voice, not an animation;
+ *   2. the orb's richness is driven by the model tier, through the tokens in theme.css.
+ * The conversation itself is scripted — this is a look-and-feel prototype, not the agent.
+ */
+const $ = (s) => document.querySelector(s);
+const orb = $('#orb'), ring = $('#ring'), ctx = ring.getContext('2d');
+const stateEl = $('#state'), capEl = $('#caption'), thinkEl = $('#thinking'), tierChip = $('#tierchip');
+
+let level = 0;              // 0..1 smoothed input level
+let bins = new Array(72).fill(0);
+let analyser = null, audioCtx = null, micOn = false;
+let state = 'idle';
+
+/* ── the ring: a real waveform when the mic is on, a calm idle drift when it is not ── */
+function draw() {
+  const W = ring.width, H = ring.height, cx = W / 2, cy = H / 2;
+  ctx.clearRect(0, 0, W, H);
+  const css = getComputedStyle(document.documentElement);
+  const accent = css.getPropertyValue('--accent').trim();
+  const rim = css.getPropertyValue('--orb-rim').trim();
+
+  if (analyser) {
+    const buf = new Uint8Array(analyser.frequencyBinCount);
+    analyser.getByteTimeDomainData(buf);
+    let peak = 0;
+    for (let i = 0; i < buf.length; i++) peak = Math.max(peak, Math.abs(buf[i] - 128) / 128);
+    level += (peak - level) * 0.28;                      // smooth, so it reads as speech not static
+  } else {
+    // No mic: a slow idle breath so the shape is still legible in a screenshot.
+    const idleTarget = state === 'speaking' ? 0.36 + Math.sin(Date.now() / 150) * 0.18
+      : state === 'listening' ? 0.20 + Math.sin(Date.now() / 260) * 0.10
+      : state === 'thinking' ? 0.13 + Math.sin(Date.now() / 520) * 0.05
+      : 0.09;
+    level += (idleTarget - level) * 0.08;
+  }
+
+  const base = 84, reach = 46;
+  for (let i = 0; i < bins.length; i++) {
+    // Each bar drifts toward the current level with its own phase, so the ring moves like a voice
+    // rather than a rigid bar graph.
+    const phase = Math.sin(Date.now() / 420 + i * 0.7) * 0.5 + 0.5;
+    const target = level * (0.45 + phase * 0.75);
+    bins[i] += (target - bins[i]) * 0.22;
+    const a = (i / bins.length) * Math.PI * 2 - Math.PI / 2;
+    const r0 = base, r1 = base + Math.max(4, bins[i] * reach);
+    ctx.beginPath();
+    ctx.moveTo(cx + Math.cos(a) * r0, cy + Math.sin(a) * r0);
+    ctx.lineTo(cx + Math.cos(a) * r1, cy + Math.sin(a) * r1);
+    ctx.strokeStyle = rim || accent;
+    ctx.globalAlpha = 0.34 + Math.min(0.60, bins[i] * 1.6);
+    ctx.lineWidth = 3;
+    ctx.lineCap = 'round';
+    ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+  requestAnimationFrame(draw);
+}
+draw();
+
+/* ── mic ── */
+async function toggleMic() {
+  if (micOn) {
+    try { audioCtx && audioCtx.close(); } catch {}
+    analyser = null; audioCtx = null; micOn = false;
+    $('#micbtn').setAttribute('aria-pressed', 'false');
+    $('#hint').textContent = 'mic off';
+    setState('idle');
+    return;
+  }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const src = audioCtx.createMediaStreamSource(stream);
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 1024; analyser.smoothingTimeConstant = 0.6;
+    src.connect(analyser);
+    micOn = true;
+    $('#micbtn').setAttribute('aria-pressed', 'true');
+    $('#hint').textContent = 'session open · no wake word needed';
+    setState('listening');
+    capEl.textContent = '';
+  } catch (e) {
+    $('#hint').textContent = 'mic blocked — ' + e.name;
+  }
+}
+$('#micbtn').addEventListener('click', toggleMic);
+
+/* ── state ── */
+function setState(s) {
+  state = s;
+  orb.dataset.state = s;
+  document.querySelector('#voice-view').dataset.state = s;
+  stateEl.textContent = s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+/* ── tier: the orb gets richer as the thing thinking gets heavier ── */
+const TIER_LABEL = { local: 'local · qwen', standard: 'sonnet', heavy: 'opus', frontier: 'astra' };
+function setTier(t) {
+  orb.dataset.tier = t;
+  tierChip.textContent = TIER_LABEL[t] || t;
+  document.querySelectorAll('[data-tier]').forEach((b) => {
+    if (b.tagName === 'BUTTON') b.setAttribute('aria-pressed', String(b.dataset.tier === t));
+  });
+}
+document.querySelectorAll('.seg button[data-tier]').forEach((b) => b.addEventListener('click', () => setTier(b.dataset.tier)));
+
+/* ── theme ── */
+function setTheme(t) {
+  document.documentElement.dataset.theme = t;
+  $('#modechip').textContent = t;
+  $('#modechip').classList.toggle('on', t === 'standby');
+  document.querySelectorAll('.seg button[data-theme]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.theme === t)));
+}
+document.querySelectorAll('.seg button[data-theme]').forEach((b) => b.addEventListener('click', () => setTheme(b.dataset.theme)));
+
+/* ── views ── */
+document.querySelectorAll('#rail button[data-view]').forEach((b) => b.addEventListener('click', () => {
+  document.querySelectorAll('#rail button').forEach((x) => x.removeAttribute('aria-current'));
+  b.setAttribute('aria-current', 'true');
+  document.querySelectorAll('.view').forEach((v) => v.removeAttribute('data-active'));
+  $('#' + b.dataset.view + '-view').setAttribute('data-active', '');
+}));
+
+/* ── parked sidebar ── */
+const openParked = (on) => { $('#parked').toggleAttribute('data-open', on); $('#scrim').toggleAttribute('data-on', on); };
+$('#parkbtn').addEventListener('click', () => openParked(true));
+$('#parked .close').addEventListener('click', () => openParked(false));
+$('#scrim').addEventListener('click', () => openParked(false));
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') openParked(false); });
+
+/* ── the thinking stream ── */
+function think(kind, text, done) {
+  const d = document.createElement('div');
+  d.className = 'tl' + (done ? ' done' : '');
+  d.innerHTML = `<span class="k"></span><span class="v"></span>`;
+  d.querySelector('.k').textContent = kind;
+  d.querySelector('.v').textContent = text;
+  thinkEl.appendChild(d);
+  while (thinkEl.children.length > 5) thinkEl.removeChild(thinkEl.firstChild);
+}
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/* ── a scripted turn, so the states are watchable without talking ── */
+async function demo() {
+  thinkEl.innerHTML = ''; capEl.textContent = '';
+  setState('listening'); setTier('local');
+  await wait(1400);
+
+  setState('thinking');
+  think('route', 'Action-shaped. Not chat.');
+  await wait(700);
+  think('tools', 'science + make — 9 of 85 on the wire');
+  await wait(800);
+  setTier('standard');
+  think('model', 'Sonnet. Routine tool work.');
+  await wait(900);
+  think('reading', 'the binder design notes, 3 files');
+  await wait(1000);
+  setTier('frontier');
+  think('escalating', 'This needs the frontier tier — a moment longer.');
+  await wait(1500);
+  think('plan', 'Rank by ipTM, then check expression.', true);
+  await wait(1100);
+
+  setState('speaking');
+  capEl.textContent = 'Four candidates clear the gate, sir. The second one is the only one that also expresses.';
+  await wait(4200);
+  setState(micOn ? 'listening' : 'idle');
+}
+setState('idle');   // establish data-state on load, otherwise the idle hint never matches
+$('#demobtn').addEventListener('click', demo);
+$('#entry').addEventListener('keydown', (e) => { if (e.key === 'Enter') { demo(); e.target.value = ''; } });
+
+/* ── loops view content ── */
+const LOOPS = [
+  ['Synapse hydrate', 'live', 'Every 30 minutes. 1,989 nodes, 660 edges — last pass four seconds.', 92],
+  ['Memory maintenance', 'live', 'Gardener ran this morning: 292 decayed, one pruned.', 78],
+  ['Scheduler', 'live', 'Morning brief parked six hours — it needs the app for Mail.', 40],
+  ['Wakefulness', 'live', 'Assertion held only during a cycle. 1.3% duty.', 12],
+  ['Weaver', 'down', 'Lives in the Electron process. 633 links still unexplained.', 5],
+  ['Mail triage', 'down', 'Lives in the Electron process. Nothing classified since 2 September.', 0],
+  ['Patrol', 'down', 'Configured at five minutes. Has not ticked in eighteen days.', 0],
+  ['Backlog worker', 'down', 'Last ran 3 September. Fourteen items tried, none finished.', 0],
+];
+$('#loopgrid').innerHTML = LOOPS.map(([name, st, desc, pct]) => `
+  <div class="card loop">
+    <div class="top">
+      <h3>${name}</h3>
+      <span class="pill ${st}">${st}</span>
+    </div>
+    <div class="desc">${desc}</div>
+    <div class="bar"><i style="width:${pct}%"></i></div>
+  </div>`).join('');
+
+/* ── MANAGE — the views that left the rail ──────────────────────────────────────────────────────
+ * Dropping them from the rail does not mean losing them. Manage is the index, so the rail stays
+ * four items long and nothing becomes unreachable.
+ */
+const MANAGE = [
+  ['Fleet', 'Drones, ensembles and the shared blackboard. Nothing deployed.'],
+  ['Health', 'Garmin biometrics, plus the governor\u2019s thermal and memory ladder.'],
+  ['Synapse', '1,989 nodes, 660 edges. 633 links still unexplained.'],
+  ['Projects', '53 indexed, 2,214 files. Most active: Codex, math-learn.'],
+  ['Code', 'Self-fix, self-heal and the verify gate. Self-heal idle since 22 Aug.'],
+  ['Jobs', 'Background jobs and delegated projects. None running.'],
+  ['Schedules', 'One daily brief, parked six hours pending the app.'],
+  ['Costs', '4 cents today. Synapse capped at $0.25/day.'],
+];
+document.querySelector('#managegrid').innerHTML = MANAGE.map(([n, d]) => `
+  <div class="card loop"><div class="top"><h3>${n}</h3></div><div class="desc">${d}</div></div>`).join('');
+
+/* ── CALL ────────────────────────────────────────────────────────────────────────────────────────
+ * The real view reads ~/.bhatbot/contacts.json — 150 entries of {name, phones[], emails[]}, already
+ * synced. The names below are PLACEHOLDERS on purpose: this file is committed to a public repo, and
+ * putting real contacts and phone numbers in it would publish them.
+ */
+const CONTACTS = [
+  ['Amrita Bhat', '+1 609 ··· ··21'], ['Dev Raman', '+1 908 ··· ··40'],
+  ['Princeton Admissions', '+1 609 ··· ··30'], ['Dr. Vasquez', '+1 215 ··· ··77'],
+  ['Adaptyv Support', '+41 21 ··· ··09'], ['Mum', '+1 609 ··· ··12'],
+  ['Coach Ellery', '+1 856 ··· ··55'], ['Nikhil S.', '+1 732 ··· ··84'],
+  ['Lab — Front Desk', '+1 609 ··· ··02'], ['Dad', '+1 609 ··· ··13'],
+];
+function renderContacts(q = '') {
+  const t = q.trim().toLowerCase();
+  const rows = CONTACTS.filter(([n, p]) => !t || n.toLowerCase().includes(t) || p.includes(t));
+  document.querySelector('#clist').innerHTML = rows.map(([n, num]) => `
+    <div class="card contact">
+      <span class="av">${n.split(' ').map((w) => w[0]).slice(0, 2).join('')}</span>
+      <span class="who"><span class="nm">${n}</span><br><span class="nu">${num}</span></span>
+      <button class="go" title="Call">\u260E</button>
+    </div>`).join('') || '<p class="nu" style="color:var(--text-dim2)">No match.</p>';
+}
+renderContacts();
+document.querySelector('#csearch').addEventListener('input', (e) => renderContacts(e.target.value));
+
+/* ── PERMISSIONS ─────────────────────────────────────────────────────────────────────────────────
+ * One place to see everything BhatBot can reach and turn each of them on or off. Every row is a
+ * real capability in the codebase, not an illustrative one: the macOS grants come from
+ * ensurePermissions() and AUTOMATION_APPS, the accounts from the CRED_REF_* handles in config.json.
+ */
+const PERMS = [
+  ['macOS', [
+    ['Microphone', 'Wake word, voice sessions, the live waveform.', 'on'],
+    ['Screen Recording', 'screen_parse, ui_inspect and vision_click \u2014 seeing any app that has no DOM.', 'on'],
+    ['Accessibility', 'system_control and vision_click \u2014 actually driving those apps.', 'on'],
+    ['Automation \u00b7 Mail', 'Reading the unified inbox across every local account.', 'on'],
+    ['Automation \u00b7 Calendar', 'Reading and writing events.', 'on'],
+    ['Automation \u00b7 Contacts', 'The 150 contacts behind Call and text.', 'on'],
+    ['Automation \u00b7 Reminders', 'Creating and reading reminders.', 'on'],
+    ['Automation \u00b7 Notes', 'Reading and appending notes.', 'need'],
+    ['Automation \u00b7 Music', 'Spotify and Music playback control.', 'on'],
+    ['Automation \u00b7 System Events', 'Driving any app via AppleScript.', 'on'],
+  ]],
+  ['Accounts', [
+    ['Google', 'Gmail, Calendar and Drive. OAuth, refresh token held in the vault.', 'on'],
+    ['Twilio', 'Placing calls and sending SMS as you.', 'on'],
+    ['Telegram', 'Reaching you when you are away from the machine.', 'on'],
+    ['Notion', 'The shared memory bank.', 'on'],
+    ['Spotify', 'Playback and playlists.', 'on'],
+    ['ElevenLabs', 'The voice.', 'on'],
+    ['Anthropic', 'Sonnet and Opus.', 'on'],
+    ['OpenAI', 'Terra, Astra, embeddings, Whisper.', 'on'],
+    ['1Password', 'Credential lookup via the op CLI.', 'off'],
+  ]],
+  ['What it may do on its own', [
+    ['Act without asking', 'Skip the Custodian\u2019s pause and let it decide when a request is ambiguous.', 'off'],
+    ['Edit its own code', 'self_fix and self_heal, verify-gated, never pushed.', 'need'],
+    ['Spend money', 'Image, video and 3D generation. Capped at $0.25/day for the brain.', 'on'],
+    ['Send on your behalf', 'Email, SMS and calls without confirming each one.', 'off'],
+    ['Run background loops', 'Weaver, triage, patrol and the backlog worker while you are away.', 'on'],
+  ]],
+];
+const BADGE = { on: ['on', 'granted'], off: ['off', 'not granted'], need: ['need', 'needs you'] };
+document.querySelector('#permgroups').innerHTML = PERMS.map(([g, rows]) => `
+  <div class="permgroup"><h3>${g}</h3>${rows.map(([n, w, st]) => `
+    <div class="card perm">
+      <span class="pn">${n}</span>
+      <span class="pw">${w}</span>
+      <span class="ps ${BADGE[st][0]}">${BADGE[st][1]}</span>
+      ${st === 'on' ? '<button class="grant">Revoke</button>' : '<button class="grant">Grant</button>'}
+    </div>`).join('')}</div>`).join('');
+const total = PERMS.reduce((n, [, r]) => n + r.length, 0);
+const granted = PERMS.reduce((n, [, r]) => n + r.filter((x) => x[2] === 'on').length, 0);
+document.querySelector('#permmeta').textContent = `${granted} of ${total} granted`;
+
+document.querySelector('#restpark').addEventListener('click', () => openParked(true));
+</script>
+</body>
+</html>
