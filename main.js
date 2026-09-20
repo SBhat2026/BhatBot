@@ -9834,7 +9834,16 @@ async function maybeRenderAcks() {
   _ackRendering = true;
   try {
     fs.mkdirSync(ACKS_DIR, { recursive: true });
-    const lines = [...new Set([...ACKS, ...HOLDING])];
+    // The VOICE SESSION register library joins the ack lines here. Every one of them is a fixed
+    // phrase said at a known moment in a conversation — a greeting, a half-beat after being
+    // interrupted, a sign-off — so they are exactly the same shape as an ack: worth rendering once
+    // in the real voice rather than synthesizing live, and worth rendering in the ElevenLabs voice
+    // rather than falling back to Kokoro. The demo makes the difference audible; four of these were
+    // already on disk because they overlap the ack list, and the rest sounded like a different
+    // person. Rendering is incremental (existing files are skipped), so this costs one short
+    // catch-up at the next boot and nothing thereafter.
+    const registerLines = Object.values(require('./lib/voicesession').REGISTERS).flat();
+    const lines = [...new Set([...ACKS, ...HOLDING, ...registerLines])];
     let rendered = 0;
     for (const line of lines) {
       const f = ackFilePath(line);

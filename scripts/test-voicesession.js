@@ -229,6 +229,45 @@ function exchange(r, { text = 'what is on my calendar', reply = 'Two things, sir
   ok('the sign-off knows whether work happened, and an empty session closes in silence');
 }
 
+// ── ...and a timeout says nothing at all, because nobody is there ─────────────────────────────────
+{
+  // The demo caught this live: the session timed out after the user wandered off, and he announced
+  // "Done, sir." to an empty room. A sign-off is for someone who is listening.
+  const r = rig({ idleNudgeMs: 5000, idleCloseMs: 10000 });
+  r.sess.open({ via: 'tap' });
+  exchange(r);
+  r.sess.noteWork(true);                       // work DID happen — still no sign-off
+  const before = r.fx.spoken.length;
+
+  r.advance(6000); r.sess.tick();              // nudge
+  r.advance(6000); r.sess.tick();              // close by timeout
+
+  assert.strictEqual(r.sess.state(), vs.CLOSED);
+  const after = r.fx.spoken.slice(before);
+  assert.ok(after.every((x) => x.kind !== 'close' && x.kind !== 'closeDone'),
+    `a timed-out session must not sign off, got ${after.map((x) => x.kind).join(',')}`);
+  assert.strictEqual(r.fx.wakeRequired.at(-1), true, 'but it still hands the wake word back');
+  ok('a session that timed out closes in silence — he does not sign off to an empty room');
+}
+
+// ── close() only kills playback when something is playing ─────────────────────────────────────────
+{
+  const quiet = rig();
+  quiet.sess.open({ via: 'tap' });
+  exchange(quiet);                             // ends in LISTENING, nothing playing
+  const before = quiet.fx.stopped;
+  quiet.sess.close({ via: 'user' });
+  assert.strictEqual(quiet.fx.stopped, before, 'closing from listening must not report killing playback');
+
+  const loud = rig();
+  loud.sess.open({ via: 'tap' });
+  loud.sess.speechStart({ ms: 400 }); loud.sess.endpoint({ text: 'go' }); loud.sess.firstAudio();
+  const b2 = loud.fx.stopped;
+  loud.sess.close({ via: 'user' });
+  assert.strictEqual(loud.fx.stopped, b2 + 1, 'but closing mid-sentence does kill it');
+  ok('playback is killed only when there is playback — the log stops reporting a thing that did not happen');
+}
+
 // ── the register library is written for the ear ───────────────────────────────────────────────────
 {
   for (const [kind, lines] of Object.entries(vs.REGISTERS)) {

@@ -178,11 +178,15 @@ function note(text) { console.log(`${stamp()}  ${C.grey('·  ' + text)}`); }
 function reply(text) { console.log(`${stamp()}  ${C.grey('   reply: ' + text)}`); }
 
 /** One ordinary exchange, with realistic timing. */
-async function exchange({ said, replyText, thinkMs = 900, speakMs = 1400, work = false }) {
+async function exchange({ said, replyText, thinkMs = 900, speakMs = 1400, work = false, ack = false }) {
   user(said);
   session.speechStart({ ms: 600 });
   await sleep(250);
   session.endpoint({ text: said });
+  // An action that will take a beat gets acknowledged before the work starts, rather than leaving a
+  // silence. These are the lines that are already rendered in the ElevenLabs voice, so this is also
+  // where the demo stops being Kokoro and starts being the real one.
+  if (ack) session.say('ack');
   await drain();
   await sleep(thinkMs);
   session.firstAudio();
@@ -215,8 +219,14 @@ async function conversation() {
 
   // 3. Another — still no wake word. This is the felt difference.
   await exchange({
-    said: 'move the webinar to the afternoon', work: true,
+    said: 'move the webinar to the afternoon', work: true, ack: true, thinkMs: 1500,
     replyText: 'Moved to two o\'clock. I have not told anyone yet; say the word.',
+  });
+
+  // 3b. A second action, so the pre-rendered library gets a proper airing.
+  await exchange({
+    said: 'and put the standings on the second screen', work: true, ack: true, thinkMs: 1400,
+    replyText: 'Up. Argentina still top, if you were wondering.',
   });
 
   // 4. He starts a long answer and you cut him off.
@@ -275,7 +285,8 @@ async function conversation() {
   console.log(`\n  ${C.bold('state')}      ${STATE_COLOUR[session.state()](session.state())}`);
   console.log(`  ${C.bold('audio')}      ${usedPrerendered} pre-rendered · ${usedKokoro} kokoro · ${usedNothing} silent`);
   console.log(`  ${C.bold('cost')}       ${C.green('$0.00')} ${C.grey('— nothing left the machine')}`);
-  console.log(`\n  ${C.grey('The wake word was needed once, at the very top, and never again.')}\n`);
+  console.log(`\n  ${C.grey('The wake word was needed once, at the very top, and never again.')}`);
+  console.log(`  ${C.grey('The timeout closed in silence — there was nobody left to sign off to.')}\n`);
 }
 
 async function registers() {
