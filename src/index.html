@@ -1011,6 +1011,71 @@
 
   #set-theme-row { gap: 6px; flex-wrap: wrap; }
   .theme-btn[aria-pressed="true"] { border-color: var(--accent); color: var(--accent-ink, var(--accent)); background: var(--accent-soft); }
+  /* ── THE ORB ON PAPER ───────────────────────────────────────────────────────────────────────────
+   * The orb is a layered instrument — notch ring, four concentric rings, two hexes, a glow and a
+   * core — and every layer of it was built as ADDITIVE LIGHT on a near-black ground. Additive light
+   * on white is nothing: the alphas that read as a bright instrument at .22–.55 over #090d13 are
+   * almost invisible over #EEF2F5, and the core's `inset 0 0 14px rgba(255,255,255,.55)` actively
+   * washes it out further. Rendered on the light palettes unchanged, it disappears.
+   *
+   * So on paper it stops being a glow and becomes a SOLID OBJECT: a real sphere with a specular
+   * highlight and a contact shadow, inside rings dark enough to read as drawn lines rather than as
+   * light. Night keeps the original treatment exactly — this whole block is scoped away from it.
+   *
+   * This matters more than any other surface here, because the orb is where the model tier is
+   * visible. An indicator you cannot see indicates nothing.
+   */
+  :root[data-theme="day"] #orb .ticks,
+  :root[data-theme="standby"] #orb .ticks {
+    background: repeating-conic-gradient(from 0deg, rgba(var(--accent-rgb), .55) 0deg 1.4deg, transparent 1.4deg 9deg);
+  }
+  :root[data-theme="day"] #orb .ring,
+  :root[data-theme="standby"] #orb .ring { border-color: rgba(var(--accent-rgb), .42); }
+  :root[data-theme="day"] #orb .ring.r2,
+  :root[data-theme="standby"] #orb .ring.r2 { border-color: rgba(var(--accent-rgb), .58); }
+  :root[data-theme="day"] #orb .ring.r3,
+  :root[data-theme="standby"] #orb .ring.r3 { border-color: rgba(var(--accent-rgb), .70); }
+  :root[data-theme="day"] #orb .ring.r4,
+  :root[data-theme="standby"] #orb .ring.r4 {
+    border-top-color: rgba(var(--accent-rgb), .95);
+    border-right-color: rgba(var(--accent-rgb), .62);
+  }
+  :root[data-theme="day"] #orb[data-state="thinking"] .ring.r3,
+  :root[data-theme="standby"] #orb[data-state="thinking"] .ring.r3 { border-color: rgba(var(--accent-rgb), .95); }
+
+  /* The hexes are a conic gradient alternating transparent and accent, blurred. Over black that
+     reads as a spinning facet; over white the transparent half exposes the ground and the whole
+     shape greys out into a smudge. Lower alpha and no blur keeps them as facets rather than haze. */
+  :root[data-theme="day"] #orb .hex,
+  :root[data-theme="standby"] #orb .hex {
+    background: conic-gradient(from 0deg, rgba(var(--accent-rgb), 0), rgba(var(--accent-rgb), .40),
+                rgba(var(--accent-rgb), 0), rgba(var(--accent-rgb), .40), rgba(var(--accent-rgb), 0));
+    filter: none;
+  }
+  :root[data-theme="day"] #orb .hex.hex2,
+  :root[data-theme="standby"] #orb .hex.hex2 { opacity: .5; }
+
+  /* The glow becomes a soft tint UNDER the sphere rather than light emitted from it. */
+  :root[data-theme="day"] #orb .glow,
+  :root[data-theme="standby"] #orb .glow {
+    background: radial-gradient(circle, rgba(var(--accent-rgb), .18), transparent 72%);
+  }
+
+  /* A real sphere: lit from upper-left, deepening to the rim, sitting on a contact shadow. The
+     white inner shadow is replaced by a dark one, which is what gives it volume on a light ground. */
+  :root[data-theme="day"] #orb .core,
+  :root[data-theme="standby"] #orb .core {
+    background: radial-gradient(circle at 38% 32%,
+      color-mix(in srgb, var(--orb-core) 88%, #fff) 0%,
+      var(--orb-core) 18%,
+      var(--orb-mid) 52%,
+      var(--orb-rim) 88%);
+    box-shadow:
+      0 8px 24px -6px rgba(var(--accent-rgb), .42),
+      inset 0 -8px 18px -4px rgba(0, 0, 0, .28),
+      inset 0 4px 10px -4px rgba(255, 255, 255, .55);
+  }
+
   /* ── THE ORB SHOWS WHAT IS THINKING ─────────────────────────────────────────────────────────────
    * The orb's richness is the one place the model tier is visible without opening a panel: the
    * harder the thing working on your request, the more saturated it is and the further its glow
