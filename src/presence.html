@@ -110,6 +110,7 @@ const _hemi = new THREE.HemisphereLight(0x9fc4e0, 0x0a1420, 0.6); scene.add(_hem
 const _rim = new THREE.PointLight(0x4a7bd6, 0.7, 80); _rim.position.set(-8, 5, -8); scene.add(_rim);
 const rim = _rim;
 const _officeMats = [];                                      // every office material, for the light themes
+let _officeRoot = null;                                      // the loaded office scene, for measurement
 
 // ---- adaptive framing -----------------------------------------------------
 // ASPECT-AWARE. The old version derived the orbit radius from the room's footprint alone, ignoring
@@ -167,6 +168,17 @@ function solveRadius() {
   radius = d * 0.78;
   camera.near = Math.max(0.01, radius / 200); camera.far = radius * 12;
   camera.updateProjectionMatrix();
+}
+// The box that actually matters: every anchor an agent can occupy, padded so nobody stands on the
+// edge of frame. Falls back to the given box when the asset has no anchors.
+function poiBox(fallback) {
+  if (!pois.length) return fallback;
+  const b = new THREE.Box3();
+  for (const p of pois) b.expandByPoint(p.pos);
+  const pad = Math.max(1.2, charTargetH * 1.1);
+  b.expandByVector(new THREE.Vector3(pad, 0, pad));
+  b.max.y = Math.max(b.max.y, b.min.y + charTargetH * 2);
+  return b;
 }
 function frame(box) {
   box.getCenter(focus);
@@ -254,12 +266,24 @@ function route(from, to) {
   return path;
 }
 /** Claim a free anchor of the requested kind, preferring the one nearest the agent. */
+// `near` given  → the CLOSEST free anchor of that kind (a state change should read as a short walk).
+// `near` null    → the anchor FARTHEST from everyone already standing somewhere.
+//
+// That second case is a spawn, and it used to score every candidate 0 and take the first one in
+// model order. The first few `poi-idle-*` nodes happen to sit in one corner of office.glb, so an
+// arriving fleet packed into a heap there, nameplates overlapping, and then never left: a retarget
+// only ever moves an agent to its NEAREST anchor of the new kind, which was also in that corner. The
+// room looked like four people sharing a chair. Farthest-point spawning spreads them across the
+// floor plan, and the nearest-anchor rule then keeps each one's movement local and readable.
 function claimPoi(kind, near, agentId) {
   let best = -1, bestD = Infinity;
+  const occupied = near ? null : pois.filter((p) => p.taken && p.taken !== agentId).map((p) => p.pos);
   for (let i = 0; i < pois.length; i++) {
     const p = pois[i];
     if (p.kind !== kind || (p.taken && p.taken !== agentId)) continue;
-    const d = near ? p.pos.distanceToSquared(near) : 0;
+    // Both branches minimise, so the spread case minimises the NEGATED clearance around a candidate.
+    const d = near ? p.pos.distanceToSquared(near)
+      : -(occupied.length ? Math.min(...occupied.map((o) => p.pos.distanceToSquared(o))) : 0);
     if (d < bestD) { bestD = d; best = i; }
   }
   if (best < 0) {                                       // that kind is full → fall back to any free spot
@@ -633,6 +657,25 @@ renderer.domElement.addEventListener('click', (ev) => {
   setTimeout(() => { a.group.scale.setScalar(charScale); }, 160);
 });
 
+// ── A READABLE VIEW OF WHAT THE ROOM BELIEVES ────────────────────────────────────────────────────
+// Everything above lives in module scope, so from outside the frame the scene is a black box: you
+// can see a picture of it, and a picture cannot tell you whether the figure on the left is the agent
+// the log says is working. This exposes the scene's own state so a run can be CHECKED rather than
+// admired — it is what the fan-out experiment scores its "the office tells the truth" hypothesis
+// against, and what to read first when a character is in the wrong place.
+window.presenceDebug = () => ({
+  camera: { focus: focus.toArray().map((n) => +n.toFixed(2)), fitR: +fitR.toFixed(2), radius: +radius.toFixed(2), azimuth: +azimuth.toFixed(2), elevation: +elevation.toFixed(2) },
+  pois: pois.length,
+  poiExtent: pois.length ? (() => { const b = new THREE.Box3(); for (const p of pois) b.expandByPoint(p.pos); return { min: b.min.toArray().map((n) => +n.toFixed(2)), max: b.max.toArray().map((n) => +n.toFixed(2)) }; })() : null,
+  charScale: +charScale.toFixed(3), charTargetH: +charTargetH.toFixed(2), floorY: +floorY.toFixed(2),
+  officeSize: _officeRoot ? new THREE.Box3().setFromObject(_officeRoot).getSize(new THREE.Vector3()).toArray().map((n) => +n.toFixed(2)) : null,
+  agents: [...agents.values()].map((a) => ({
+    id: a.id, name: a.name, state: a.state, status: a.status, step: a.step,
+    pos: a.group.position.toArray().map((n) => +n.toFixed(2)),
+    walking: !!(a.path && a.path.length), clip: a.clip || null, poi: a.poi,
+  })),
+});
+
 // popup (IPC preload) OR iframe (postMessage) — support both mounts.
 if (window.presence && window.presence.onUpdate) window.presence.onUpdate(ingest);
 
@@ -684,7 +727,7 @@ function applyPalette(t) {
   // Scene lighting. On a light ground the room needs to be lit, not atmospheric: more ambient, a
   // warmer key, and fog pushed far enough back that it reads as depth rather than as murk.
   if (scene.fog) { scene.fog.color = hex(light ? PALETTE.bg : '#070b12'); scene.fog.density = light ? 0.008 : 0.03; }
-  if (_amb) { _amb.color = hex(light ? '#ffffff' : '#8298b0'); _amb.intensity = light ? 1.15 : 0.7; }
+  if (_amb) { _amb.color = hex(light ? '#ffffff' : '#8298b0'); _amb.intensity = light ? 0.85 : 0.7; }
   if (_key) { _key.color = hex(light ? '#fff6ec' : '#bfe4ff'); _key.intensity = light ? 1.7 : 1.4; }
   if (_hemi) { _hemi.color = hex(light ? '#ffffff' : '#9fc4e0'); _hemi.groundColor = hex(light ? PALETTE.surface : '#0a1420'); _hemi.intensity = light ? 0.9 : 0.6; }
   if (_rim) { _rim.color = hex(PALETTE.accent); _rim.intensity = light ? 0.35 : 0.7; }
@@ -692,11 +735,15 @@ function applyPalette(t) {
 
   // The room itself. On a light theme every office material is lifted toward the app's surface
   // colour — enough that the room reads as lit, not so far that the model's own shading is lost.
+  // 0.72 was too far: at that blend the desks, the sofa and the counter all converged on the same
+  // near-white and the room became a flat sheet with characters standing on it. 0.5 keeps the
+  // palette's cast while leaving the asset's own values far enough apart to read as furniture.
   for (const m of _officeMats) {
     const base = m.userData.__base || m.color;
-    m.color.copy(light ? base.clone().lerp(hex(PALETTE.surface), 0.72) : base);
+    m.color.copy(light ? base.clone().lerp(hex(PALETTE.surface), 0.5) : base);
+    if (light && m.userData.__isFloor) m.color.multiplyScalar(0.88);   // keep the ground under them
     if ('metalness' in m) m.metalness = light ? 0.04 : 0.4;
-    if ('roughness' in m) m.roughness = light ? 0.92 : 0.5;
+    if ('roughness' in m) m.roughness = light ? 0.86 : 0.5;
   }
   // Repaint every nameplate so labels re-read against the new ground.
   PLATE_INK = PALETTE.text;
@@ -744,6 +791,7 @@ Promise.all([ load('./vendor/presence3d/models/office.glb').catch(() => null),
 .then(([office, character]) => {
   if (office) {
     const poiNodes = [], toHide = [];
+    _officeRoot = office.scene;
     office.scene.traverse((o) => {
       const n = o.name || '';
       if (n === 'navMesh') { toHide.push(o); if (o.isMesh) buildNav(o); }
@@ -754,7 +802,14 @@ Promise.all([ load('./vendor/presence3d/models/office.glb').catch(() => null),
         // alone is not enough: these materials are authored dark, and a dark material under a bright
         // key reads as grey clay rather than as a lit room.
         for (const m of (Array.isArray(o.material) ? o.material : [o.material])) {
-          if (m && m.color && !_officeMats.includes(m)) { m.userData.__base = m.color.clone(); _officeMats.push(m); }
+          if (m && m.color && !_officeMats.includes(m)) {
+            m.userData.__base = m.color.clone();
+            // The floor is tagged because it is the one surface that must NOT match the page behind
+            // the canvas: when it does, the room loses its ground and the characters look like they
+            // are standing on the window itself.
+            m.userData.__isFloor = /floor/i.test(o.name || '');
+            _officeMats.push(m);
+          }
         }
       }
     });
@@ -777,7 +832,13 @@ Promise.all([ load('./vendor/presence3d/models/office.glb').catch(() => null),
     buildGraph();
     const box = new THREE.Box3().setFromObject(office.scene);
     floorY = box.min.y;
-    frame(box);
+    // FRAME THE PEOPLE, NOT THE BUILDING. office.glb's bounding box includes the whole shell — outer
+    // walls, the far end nobody works in — and the anchors the artist placed sit in one corner of it.
+    // Framing the shell therefore put four characters small and off-centre against a large empty
+    // floor, which is the opposite of why they are here. So the camera fits the POI cloud (padded by
+    // one character height so heads and nameplates are not clipped) and falls back to the shell only
+    // if the asset ever ships without anchors.
+    frame(poiBox(box));
   } else {
     const grid = new THREE.GridHelper(24, 24, 0x16324a, 0x0e2033); grid.material.transparent = true; grid.material.opacity = 0.3; scene.add(grid);
     frame(new THREE.Box3(new THREE.Vector3(-6,0,-6), new THREE.Vector3(6,3,6)));
@@ -792,7 +853,23 @@ Promise.all([ load('./vendor/presence3d/models/office.glb').catch(() => null),
     for (const c of (character.animations || [])) clips[c.name] = c;
     const cb = new THREE.Box3().setFromObject(character.scene);
     const chH = Math.max(0.001, cb.getSize(new THREE.Vector3()).y);
-    const targetH = office ? Math.min(2, (new THREE.Box3().setFromObject(office.scene).getSize(new THREE.Vector3()).y) * 0.5) : 1.7;
+    // DON'T RESCALE A MATCHED PAIR. office.glb and character.glb ship together in The Delegation and
+    // are modelled at one scale — the office is in real metres (desk 1.35m, chair 0.75m, floor 10.2m)
+    // and the character stands 1.31 units, which is a correct stylised adult beside a 0.75m chair.
+    //
+    // The old rule derived a person's height from the office's BOUNDING-BOX HEIGHT. That box has no
+    // ceiling and no walls, so its 1.31 was just the tallest cabinet, and half of it gave targetH
+    // 0.65: half-metre dolls in a ten-metre room, which is why the characters read as scenery rather
+    // than as the point of the scene. The asset's own height is the answer.
+    //
+    // The footprint rule survives only as a GUARD, for a future asset whose character is not authored
+    // to its room: a figure taller than a quarter of the floor, or shorter than a twentieth, is
+    // rescaled to roughly six-to-a-room. A matched pair never reaches it.
+    const footprint = office
+      ? (() => { const sz = new THREE.Box3().setFromObject(office.scene).getSize(new THREE.Vector3()); return Math.min(sz.x, sz.z); })()
+      : 10;
+    const mismatched = chH > footprint * 0.25 || chH < footprint * 0.05;
+    const targetH = mismatched ? Math.max(0.9, Math.min(2.2, footprint * 0.17)) : chH;
     charScale = targetH / chH; charTargetH = targetH;
   }
   // Anything spawned before the models landed is a fallback capsule — drop those and REBUILD from

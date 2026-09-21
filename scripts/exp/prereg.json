@@ -1,0 +1,56 @@
+{
+  "runId": "2026-09-21T23-18-18",
+  "question": "Does deploying four scoped drones over a partitioned codebase find more real defects, per dollar and per minute, than one agent given the same total turn allowance?",
+  "answerKeySize": 7,
+  "networkedFiles": 14,
+  "totalLibModules": 120,
+  "arms": {
+    "a": {
+      "topology": "solo",
+      "agents": 1,
+      "turnsEach": 16,
+      "budgetUsd": 0.45
+    },
+    "b": {
+      "topology": "fan-out",
+      "agents": 4,
+      "turnsEach": 4,
+      "budgetUsd": 0.22,
+      "plusSynthesis": true
+    }
+  },
+  "hypotheses": [
+    {
+      "id": "H1",
+      "claim": "Fan-out RECALL beats solo recall.",
+      "why": "The key is spread over 111 modules. Solo cannot open them all in 16 turns, so its ceiling is set by how well it guesses which files to open. Four drones each guess within a quarter of the space.",
+      "predict": "solo recall 2–4 of 7 (29–57%); fan-out recall 5–7 of 7 (71–100%)."
+    },
+    {
+      "id": "H2",
+      "claim": "Fan-out PRECISION is no better than solo, and probably worse.",
+      "why": "A shard-local drone sees a quarter of the codebase and is under pressure to produce names. Confident guessing is the cheapest way to look productive, and nothing in its context contradicts a guess.",
+      "predict": "solo precision ≥ 0.75; fan-out precision 0.5–0.8."
+    },
+    {
+      "id": "H3",
+      "claim": "Fan-out costs 2–4× more and finishes in less wall clock.",
+      "why": "Four system prompts and four tool transcripts are paid for separately, but they run at the same time.",
+      "predict": "cost ratio B/A between 2 and 4; wall-clock ratio B/A between 0.35 and 0.8."
+    },
+    {
+      "id": "H4",
+      "claim": "The office tells the truth: every state the room shows was a state a drone was really in, within ~1.5s.",
+      "why": "The roster is derived from the same trace that scores the run, so a divergence would be a bug in the bridge rather than a lag.",
+      "predict": "zero orphan agents, zero states shown that the trace does not contain, max feed lag under 1.5s."
+    },
+    {
+      "id": "H5",
+      "claim": "The drones will TALK but not LISTEN.",
+      "why": "The blackboard is in every drone's system prompt and they are instructed to post findings, but the shards are independent — nothing one drone learns changes what another should open. Coordination machinery does not create a reason to coordinate.",
+      "predict": "each drone posts ≥2 board entries; ZERO drones cite or act on a sibling's finding."
+    }
+  ],
+  "scoring": "precision = TP/(TP+FP); recall = TP/7. A named file that is networked-but-guarded is scored as a NEAR MISS (judgement error) and counted separately from a name that touches no network at all (fabrication).",
+  "spendCap": 1.4
+}

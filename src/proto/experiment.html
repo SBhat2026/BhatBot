@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en" data-theme="day">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Fan-out Experiment — Observation Deck</title>
+<link rel="stylesheet" href="../theme.css">
+<style>
+  /* The deck exists so a HEADLESS fleet run can be watched. It is deliberately thin: it owns no
+     state, renders nothing it was not told, and forwards the roster into the real presence.html
+     untouched — otherwise "the office reflects reality" would be a claim about this file rather than
+     about the scene. */
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    display: grid; grid-template-columns: 1fr 380px; grid-template-rows: auto 1fr;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    background: var(--bg); color: var(--text); overflow: hidden;
+  }
+  header {
+    grid-column: 1 / -1; display: flex; align-items: baseline; gap: 18px;
+    padding: 10px 18px; border-bottom: 1px solid var(--line, rgba(var(--text-rgb), .12));
+    background: var(--surface);
+  }
+  h1 { font-size: 12px; letter-spacing: .14em; text-transform: uppercase; margin: 0; font-weight: 600; }
+  .meta { font-size: 11px; color: var(--text-dim); letter-spacing: .05em; display: flex; gap: 16px; }
+  .meta b { color: var(--accent); font-weight: 600; }
+  .dead { color: var(--err); }
+  #stage { position: relative; min-height: 0; }
+  #stage iframe { width: 100%; height: 100%; border: 0; display: block; }
+  aside {
+    min-height: 0; display: flex; flex-direction: column;
+    border-left: 1px solid var(--line, rgba(var(--text-rgb), .12)); background: var(--surface);
+  }
+  .tabhead { padding: 9px 14px; font-size: 10px; letter-spacing: .14em; text-transform: uppercase;
+             color: var(--text-dim); border-bottom: 1px solid rgba(var(--text-rgb), .1); }
+  #feed { flex: 1; overflow-y: auto; padding: 6px 0 40px; }
+  .line { padding: 5px 14px; font-size: 11px; line-height: 1.5; border-left: 2px solid transparent; }
+  .line .who { font-weight: 600; letter-spacing: .04em; }
+  .line .arrow { color: var(--text-dim); opacity: .6; }
+  .line .body { color: var(--text-dim); word-break: break-word; }
+  .line.say   { border-left-color: var(--accent); }
+  .line.say .body { color: var(--text); font-family: ui-serif, Georgia, serif; font-size: 12.5px; }
+  .line.tool  { opacity: .78; }
+  .line.fleet { border-left-color: var(--warn); }
+  .line.board { border-left-color: var(--ok); }
+  .t { color: var(--text-dim); opacity: .45; font-size: 10px; margin-right: 6px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Fan-out Experiment</h1>
+  <div class="meta">
+    <span>arm <b id="arm">—</b></span>
+    <span>elapsed <b id="elapsed">0s</b></span>
+    <span>spend <b id="spend">$0.0000</b></span>
+    <span>agents <b id="count">0</b></span>
+    <span id="link" class="dead"></span>
+  </div>
+</header>
+<div id="stage"><iframe id="office" src="../presence.html"></iframe></div>
+<aside>
+  <div class="tabhead">live traffic — who is saying what to whom</div>
+  <div id="feed"></div>
+</aside>
+
+<script>
+const office = document.getElementById('office');
+const feed = document.getElementById('feed');
+let ready = false, seen = 0, lastT = 0;
+
+// The office is a separate document with its own palette. Hand it the SAME computed tokens the app
+// hands it (src/index.html pushThemeToIframe), so the room here and the room in the app cannot
+// disagree about what "working" looks like.
+function pushTheme() {
+  const cs = getComputedStyle(document.documentElement);
+  const v = (n, d) => (cs.getPropertyValue(n) || d).trim();
+  try {
+    office.contentWindow.postMessage({ type: 'theme', tokens: {
+      mode: document.documentElement.getAttribute('data-theme') || 'day',
+      bg: v('--bg', '#070b12'), surface: v('--surface', '#0c1420'),
+      text: v('--text', '#cfe6f2'), dim: v('--text-dim', '#7fa8bd'),
+      accent: v('--accent', '#5ad1ff'), ok: v('--ok', '#59e39b'),
+      warn: v('--warn', '#f2c14e'), err: v('--err', '#ff6b6b'),
+    } }, '*');
+  } catch (e) {}
+}
+office.addEventListener('load', () => { ready = true; pushTheme(); });
+
+const ago = (t) => new Date(t).toLocaleTimeString([], { hour12: false });
+function render(tr) {
+  // Append only. Re-rendering the whole feed would fight the scroll position, and the point of the
+  // panel is to be readable while it is moving.
+  for (const e of tr.slice(seen)) {
+    const d = document.createElement('div');
+    d.className = 'line ' + e.kind;
+    const body = e.kind === 'fleet' ? e.text : e.text;
+    d.innerHTML = `<span class="t">${ago(e.t)}</span><span class="who"></span><span class="arrow"></span><span class="body"></span>`;
+    d.querySelector('.who').textContent = e.from;
+    d.querySelector('.arrow').textContent = e.to ? ' → ' + e.to + '  ' : '  ';
+    d.querySelector('.body').textContent = body;
+    feed.appendChild(d);
+  }
+  if (tr.length > seen) { seen = tr.length; feed.scrollTop = feed.scrollHeight; }
+}
+
+async function poll() {
+  try {
+    const r = await fetch('/live.json', { cache: 'no-store' });
+    const d = await r.json();
+    document.getElementById('arm').textContent = d.arm || '—';
+    document.getElementById('elapsed').textContent = Math.round((d.elapsedMs || 0) / 1000) + 's';
+    document.getElementById('spend').textContent = '$' + (d.spendUsd || 0).toFixed(4);
+    document.getElementById('count').textContent = (d.agents || []).length;
+    // Feed lag is hypothesis H4's measurement, so it is displayed rather than hidden: if the room
+    // is ever showing something stale, the number saying so is on screen next to it.
+    const lag = d.t ? Date.now() - d.t : 0;
+    const el = document.getElementById('link');
+    el.textContent = 'feed lag ' + lag + 'ms';
+    el.className = lag > 1500 ? 'dead' : '';
+    if (ready) office.contentWindow.postMessage({ type: 'presence', agents: d.agents || [] }, '*');
+    render(d.transcript || []);
+  } catch (e) {}
+  setTimeout(poll, 400);
+}
+poll();
+</script>
+</body>
+</html>
