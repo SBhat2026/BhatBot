@@ -99,22 +99,24 @@
   --text-dim: #5C5648;
   --text-dim2: #857D6C;
 
-  --accent: #8C3A1E;
-  --accent-soft: rgba(140, 58, 30, 0.09);
-  --accent-line: rgba(140, 58, 30, 0.30);
-  --accent-ink: #7A3018;          /* 7.4:1 on the warm ground */
-  --accent-dim: #B9A392;
-  --accent-rgb: 140, 58, 30;
+  /* BURGUNDY, not copper. The warm paper wanted a red that reads as ink rather than as metal —
+     copper sat too close to the ground's own warmth and the two competed. 8.3:1 on #F6F3EC. */
+  --accent: #7A2E3E;
+  --accent-soft: rgba(122, 46, 62, 0.09);
+  --accent-line: rgba(122, 46, 62, 0.30);
+  --accent-ink: #6B2333;          /* 9.9:1 on the warm ground */
+  --accent-dim: #BCA6A6;
+  --accent-rgb: 122, 46, 62;
   --bg-rgb: 246,243,236;
   --surface-rgb: 252,250,245;
   --text-rgb: 34,32,27;
 
   --ok: #4A6A2B;
   --warn: #8A5A06;
-  --err: #98301F;
+  --err: #A8422C;
   --ok-soft: rgba(74, 106, 43, 0.12);
   --warn-soft: rgba(138, 90, 6, 0.12);
-  --err-soft: rgba(152, 48, 31, 0.10);
+  --err-soft: rgba(168, 66, 44, 0.10);
 
   --line: #D8D0BF;
   --line-soft: #E6E0D3;
@@ -123,10 +125,13 @@
   --shadow-2: 0 1px 2px rgba(34, 32, 27, .06), 0 8px 24px -12px rgba(34, 32, 27, .18);
   --shadow-3: 0 2px 4px rgba(34, 32, 27, .07), 0 22px 56px -22px rgba(34, 32, 27, .26);
 
-  --orb-core: #E0B191;
-  --orb-mid: #B4552C;
-  --orb-rim: #8C3A1E;
-  --orb-glow: rgba(140, 58, 30, 0.26);
+  /* The gradient spends most of its AREA on --orb-mid, so that stop sets the sphere's read. A rose
+     mid made a pink ball regardless of how dark the rim was; the mid has to be the wine itself and
+     the light core stays a small specular, not half the surface. */
+  --orb-core: #C07A88;
+  --orb-mid: #7E2B3C;
+  --orb-rim: #4E1C27;
+  --orb-glow: rgba(122, 46, 62, 0.26);
   --orb-sat: 0.86;                /* standby is literally less vivid */
 }
 

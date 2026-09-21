@@ -1011,6 +1011,54 @@
 
   #set-theme-row { gap: 6px; flex-wrap: wrap; }
   .theme-btn[aria-pressed="true"] { border-color: var(--accent); color: var(--accent-ink, var(--accent)); background: var(--accent-soft); }
+  /* ── SPHERE, NOT RADAR (light palettes) ─────────────────────────────────────────────────────────
+   * The HUD orb is an instrument: a notch ring, four counter-rotating rings, two spinning hexes and
+   * a small bright core. That reads as radar, and radar is a night idiom — on paper the rotating
+   * apparatus is busy without being informative, and the thing you actually want to look at, the
+   * sphere, is the smallest element on screen.
+   *
+   * So the light palettes invert the emphasis: the core grows into a real sphere that dominates the
+   * stage, and the orbital machinery either goes or drops back to a single quiet ring that marks the
+   * boundary. Nothing is removed from the DOM — the layers are still there and still animate under
+   * `night`, which keeps the instrument exactly as designed.
+   *
+   * The sphere is also what carries the model tier, so making it the largest thing on the stage is
+   * what makes the tier readable at a glance instead of a detail you have to look for.
+   */
+  :root[data-theme="day"] #orb .ticks,
+  :root[data-theme="standby"] #orb .ticks,
+  :root[data-theme="day"] #orb .hex,
+  :root[data-theme="standby"] #orb .hex,
+  :root[data-theme="day"] #orb .ring.r1,
+  :root[data-theme="standby"] #orb .ring.r1,
+  :root[data-theme="day"] #orb .ring.r2,
+  :root[data-theme="standby"] #orb .ring.r2,
+  :root[data-theme="day"] #orb .ring.r4,
+  :root[data-theme="standby"] #orb .ring.r4 { display: none; }
+
+  /* One ring survives, as a horizon rather than as instrumentation: no spin, no dashes. */
+  :root[data-theme="day"] #orb .ring.r3,
+  :root[data-theme="standby"] #orb .ring.r3 {
+    inset: 18px; border-style: solid; border-width: 1px;
+    border-color: rgba(var(--accent-rgb), .20);
+    animation: none;
+  }
+  :root[data-theme="day"] #orb[data-state="thinking"] .ring.r3,
+  :root[data-theme="standby"] #orb[data-state="thinking"] .ring.r3 {
+    border-color: rgba(var(--accent-rgb), .34); animation: none;
+  }
+
+  /* THE SPHERE. inset 98px of a 232px orb left a ~36px bead; 34px leaves a ~164px sphere that is
+     unmistakably the subject of the stage. */
+  :root[data-theme="day"] #orb .core,
+  :root[data-theme="standby"] #orb .core { inset: 34px; }
+
+  :root[data-theme="day"] #orb .glow,
+  :root[data-theme="standby"] #orb .glow {
+    inset: 26px;
+    background: radial-gradient(circle, rgba(var(--accent-rgb), .14), transparent 68%);
+  }
+
   /* ── THE ORB ON PAPER ───────────────────────────────────────────────────────────────────────────
    * The orb is a layered instrument — notch ring, four concentric rings, two hexes, a glow and a
    * core — and every layer of it was built as ADDITIVE LIGHT on a near-black ground. Additive light
@@ -1065,11 +1113,11 @@
      white inner shadow is replaced by a dark one, which is what gives it volume on a light ground. */
   :root[data-theme="day"] #orb .core,
   :root[data-theme="standby"] #orb .core {
-    background: radial-gradient(circle at 38% 32%,
-      color-mix(in srgb, var(--orb-core) 88%, #fff) 0%,
-      var(--orb-core) 18%,
-      var(--orb-mid) 52%,
-      var(--orb-rim) 88%);
+    background: radial-gradient(circle at 36% 30%,
+      color-mix(in srgb, var(--orb-core) 70%, #fff) 0%,
+      var(--orb-core) 11%,
+      var(--orb-mid) 38%,
+      var(--orb-rim) 86%);
     box-shadow:
       0 8px 24px -6px rgba(var(--accent-rgb), .42),
       inset 0 -8px 18px -4px rgba(0, 0, 0, .28),
