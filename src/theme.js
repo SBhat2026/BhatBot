@@ -162,6 +162,40 @@
     read();
   }
 
+
+  /* ── the settings control ────────────────────────────────────────────────────────────────────────
+   * Wired from here rather than from the renderer so that script stays untouched. "Auto" is a real
+   * option, not the absence of one: unpinning is the state people want back after trying a palette,
+   * and a row of three buttons with no way out cannot express it.
+   */
+  function wireSettings() {
+    var row = document.getElementById('set-theme-row');
+    if (!row) return;
+    var msg = document.getElementById('set-theme-msg');
+    var paint = function () {
+      var want = pinned || 'auto';
+      row.querySelectorAll('[data-theme-set]').forEach(function (b) {
+        b.setAttribute('aria-pressed', String(b.getAttribute('data-theme-set') === want));
+      });
+      if (msg) {
+        var st = window.bhatbotTheme.status();
+        var sunset = st.sunset ? st.sunset.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '—';
+        msg.textContent = pinned
+          ? 'Pinned to ' + pinned + '.'
+          : 'Auto — showing ' + current + '. Sunset today at ' + sunset + '.';
+      }
+    };
+    row.addEventListener('click', function (e) {
+      var b = e.target.closest('[data-theme-set]');
+      if (!b) return;
+      var v = b.getAttribute('data-theme-set');
+      window.bhatbotTheme.set(v === 'auto' ? null : v);
+      paint();
+    });
+    try { HTML.addEventListener('bhatbot-theme', paint); } catch (e) {}
+    paint();
+  }
+
   /* ── public surface ── */
   window.bhatbotTheme = {
     /** Pin a palette. set(null) hands control back to the automatic rule. */
@@ -205,7 +239,7 @@
   });
 
   apply(resolve(), 'boot');
-  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', function () { watchOrb(); watchModel(); });
-  else { watchOrb(); watchModel(); }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', function () { watchOrb(); watchModel(); wireSettings(); });
+  else { watchOrb(); watchModel(); wireSettings(); }
   setInterval(tick, 30000);
 })();

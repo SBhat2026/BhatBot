@@ -625,8 +625,13 @@
   .set-row { display: flex; gap: 8px; align-items: center; }
   .set-input { flex: 1; background: rgba(var(--surface-rgb), .7); color: var(--text); border: 1px solid rgba(var(--accent-rgb), .28); border-radius: 8px; padding: 9px 11px; font-size: 13px; font-family: var(--font-data); }
   .set-input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px rgba(var(--accent-rgb), .15); }
-  .set-btn { background: var(--ok); color: #fff; border: none; border-radius: 8px; padding: 9px 18px; font-size: 13px; font-weight: 600; cursor: pointer; }
-  .set-btn:hover { background: var(--ok); } .set-btn:disabled { opacity: .5; cursor: default; }
+  /* A PRIMARY ACTION button, not a status. It was #1f8f4e, which the token sweep read as green and
+     therefore as --ok; that both flattened the hover shade and gave every Save button the semantics
+     of "success". Semantic colour has to stay reserved for saying something, so this takes the
+     accent. `color: var(--bg)` inverts correctly in all three palettes — dark ink on the light
+     teal, near-black on night's cyan — without a per-theme override. */
+  .set-btn { background: var(--accent); color: var(--bg); border: none; border-radius: 8px; padding: 9px 18px; font-size: 13px; font-weight: 600; cursor: pointer; transition: filter .15s ease; }
+  .set-btn:hover { filter: brightness(1.12) saturate(1.1); } .set-btn:disabled { opacity: .5; cursor: default; }
   .set-msg { font-size: 12.5px; margin-top: 10px; min-height: 16px; }
   .set-msg.ok { color: var(--ok); } .set-msg.bad { color: var(--err); }
   /* D — JARVIS voice tuning popover */
@@ -1004,6 +1009,8 @@
   .cv-card .cv-rz { position: absolute; right: 0; bottom: 0; width: 16px; height: 16px; cursor: nwse-resize;
     background: linear-gradient(135deg, transparent 50%, var(--accent-dim) 50%); }
 
+  #set-theme-row { gap: 6px; flex-wrap: wrap; }
+  .theme-btn[aria-pressed="true"] { border-color: var(--accent); color: var(--accent-ink, var(--accent)); background: var(--accent-soft); }
   /* ── THE ORB SHOWS WHAT IS THINKING ─────────────────────────────────────────────────────────────
    * The orb's richness is the one place the model tier is visible without opening a panel: the
    * harder the thing working on your request, the more saturated it is and the further its glow
@@ -1276,7 +1283,17 @@
   <div id="settings-panel" class="stage-panel">
     <div class="panel-head"><b>⚙ SETTINGS</b><span style="flex:1"></span><span class="panel-back" data-back>← Command</span></div>
     <div id="settings-body">
-      <div class="set-sec">Anthropic API key</div>
+      <div class="set-sec">Appearance</div>
+      <div class="set-hint">Three palettes. <b>Day</b> is what you work in. <b>Standby</b> is what it wears when it is idling or running in the background, so you can tell across a room whether it is working for you or ticking over on its own. <b>Night</b> is the original HUD. Auto follows that rule — standby beats the clock, and it switches to night after sunset, computed locally from your location. <b>⌘⇧U</b> cycles it.</div>
+      <div class="set-row" id="set-theme-row">
+        <button class="set-btn theme-btn" data-theme-set="auto">Auto</button>
+        <button class="set-btn theme-btn" data-theme-set="day">Day</button>
+        <button class="set-btn theme-btn" data-theme-set="standby">Standby</button>
+        <button class="set-btn theme-btn" data-theme-set="night">Night</button>
+      </div>
+      <div id="set-theme-msg" class="set-msg"></div>
+
+      <div class="set-sec" style="margin-top:22px">Anthropic API key</div>
       <div class="set-hint">Powers all reasoning. Stored encrypted in your local vault (never written as plaintext, never leaves this machine). Enter it here to fix “invalid x-api-key”.</div>
       <div id="set-key-status" class="set-status">checking…</div>
       <div class="set-row">
