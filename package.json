@@ -134,7 +134,8 @@
     "demo:voice:registers": "node scripts/demo-voicesession.js --registers",
     "test:commentary": "node scripts/test-commentary.js",
     "test:custodian": "node scripts/test-custodian.js",
-    "test:pairing": "node scripts/test-wire-pairing.js"
+    "test:pairing": "node scripts/test-wire-pairing.js",
+    "test:turnloop": "node scripts/test-turnloop-live.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
