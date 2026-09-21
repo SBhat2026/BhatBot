@@ -131,6 +131,37 @@
     read();
   }
 
+
+  /* ── MODEL TIER ──────────────────────────────────────────────────────────────────────────────────
+   * Derived by OBSERVATION, not integration. The renderer already writes the live model into
+   * #railmodel on every `provider_used` event ("CLAUDE · SONNET-5"), so the tier can be read from
+   * the DOM without touching the 2,900-line renderer script or adding an IPC listener.
+   *
+   * Unrecognised models fall to 'standard' rather than to a guess: a wrong tier is a lie about how
+   * hard the machine is working, and the neutral middle is the honest default.
+   */
+  function tierFor(model) {
+    var m = String(model || '').toLowerCase();
+    if (!m) return null;
+    if (/qwen|gemma|llama|mistral|phi|ollama|local/.test(m)) return 'local';
+    if (/astra|gpt-6|opus/.test(m)) return /astra|gpt-6/.test(m) ? 'frontier' : 'heavy';
+    if (/haiku/.test(m)) return 'local';
+    if (/sonnet|terra|gpt-5/.test(m)) return 'standard';
+    return 'standard';
+  }
+
+  function watchModel() {
+    var rail = document.getElementById('railmodel');
+    var orb = document.getElementById('orb');
+    if (!rail || !orb || typeof MutationObserver === 'undefined') return;
+    var read = function () {
+      var t = tierFor(rail.textContent.replace(/^CLAUDE\s*·\s*/i, ''));
+      if (t) orb.setAttribute('data-tier', t);
+    };
+    new MutationObserver(read).observe(rail, { childList: true, characterData: true, subtree: true });
+    read();
+  }
+
   /* ── public surface ── */
   window.bhatbotTheme = {
     /** Pin a palette. set(null) hands control back to the automatic rule. */
@@ -152,6 +183,7 @@
       return current;
     },
     current: function () { return current; },
+    tierFor: tierFor,
     status: function () {
       var t = sunTimes(new Date(), cfg.lat, cfg.lon);
       return {
@@ -173,7 +205,7 @@
   });
 
   apply(resolve(), 'boot');
-  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', watchOrb);
-  else watchOrb();
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', function () { watchOrb(); watchModel(); });
+  else { watchOrb(); watchModel(); }
   setInterval(tick, 30000);
 })();

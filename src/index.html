@@ -1003,6 +1003,88 @@
     background: linear-gradient(0deg, rgba(var(--bg-rgb), .88), transparent); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none; }
   .cv-card .cv-rz { position: absolute; right: 0; bottom: 0; width: 16px; height: 16px; cursor: nwse-resize;
     background: linear-gradient(135deg, transparent 50%, var(--accent-dim) 50%); }
+
+  /* ── THE ORB SHOWS WHAT IS THINKING ─────────────────────────────────────────────────────────────
+   * The orb's richness is the one place the model tier is visible without opening a panel: the
+   * harder the thing working on your request, the more saturated it is and the further its glow
+   * throws. A local model is muted and cool; Opus or Astra is unmistakable from across the room.
+   *
+   * #orb already sets `filter: drop-shadow(...)`, so the tier rules scale that same property — id +
+   * attribute outranks the bare id, and nothing else about the orb's composition changes.
+   *
+   * Note what is NOT here: brightness. Scaling luminance with the tier washes the hue out of the
+   * palette entirely — a deep teal turns electric cyan, which reads as a different THEME rather than
+   * a richer one. Richness is saturation and how far the glow reaches.
+   */
+  #orb { transition: filter .7s ease; }
+  #orb[data-tier="local"]    { filter: saturate(.35) drop-shadow(0 0 10px rgba(var(--accent-rgb), .12)); }
+  #orb[data-tier="standard"] { filter: saturate(1)   drop-shadow(0 0 22px rgba(var(--accent-rgb), .22)); }
+  #orb[data-tier="heavy"]    { filter: saturate(1.35) drop-shadow(0 0 40px rgba(var(--accent-rgb), .36)); }
+  #orb[data-tier="frontier"] { filter: saturate(1.55) drop-shadow(0 0 62px rgba(var(--accent-rgb), .50)); }
+  /* Probation is a safety state and outranks any tier — it must stay the quietest thing on screen. */
+  #orb.probation[data-tier] { filter: drop-shadow(0 0 26px rgba(242,193,78,.34)); }
+
+  /* ── ELEVATION LAYER (light palettes only) ──────────────────────────────────────────────────────
+   * The Soft Studio half of the redesign: containers lift off the ground with a shadow instead of
+   * being outlined, so hierarchy comes from depth rather than from fourteen identical 1px borders
+   * all claiming equal importance.
+   *
+   * ADDITIVE ON PURPOSE. Every rule below is appended rather than edited, and every one is scoped to
+   * the two light palettes, so `night` keeps the outlines it was designed with — on a dark ground a
+   * drop shadow is invisible and a border is the only thing that reads as an edge. Nothing here can
+   * change the HUD, which is what makes it safe to land without being able to run the app.
+   *
+   * Controls are deliberately excluded: a button, an input and a select still need a visible edge to
+   * read as interactive, and elevating them would make the whole surface look like it floats.
+   */
+  :root[data-theme="day"] .hcard,
+  :root[data-theme="standby"] .hcard,
+  :root[data-theme="day"] .job-card,
+  :root[data-theme="standby"] .job-card,
+  :root[data-theme="day"] .pj-item,
+  :root[data-theme="standby"] .pj-item,
+  :root[data-theme="day"] .pj-conn,
+  :root[data-theme="standby"] .pj-conn,
+  :root[data-theme="day"] .hl-card,
+  :root[data-theme="standby"] .hl-card,
+  :root[data-theme="day"] #sy-inbox,
+  :root[data-theme="standby"] #sy-inbox,
+  :root[data-theme="day"] #sy-detail,
+  :root[data-theme="standby"] #sy-detail,
+  :root[data-theme="day"] #sy-suggest,
+  :root[data-theme="standby"] #sy-suggest {
+    border-color: transparent;
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-1);
+  }
+
+  /* #media-card carries an id-level HUD treatment — a coloured edge and an 18px inner glow — which
+     outranks the class rule above. On a dark ground that glow is the "holo" affordance; on paper it
+     reads as a smudge, so the light palettes replace it with the same elevation as its siblings. */
+  :root[data-theme="day"] #media-card,
+  :root[data-theme="standby"] #media-card {
+    border-color: transparent;
+    box-shadow: var(--shadow-1);
+  }
+
+  /* The drawers and overlays sit above everything, so they get the deepest elevation. */
+  :root[data-theme="day"] .panel,
+  :root[data-theme="standby"] .panel,
+  :root[data-theme="day"] #confirm-overlay,
+  :root[data-theme="standby"] #confirm-overlay {
+    box-shadow: var(--shadow-3);
+  }
+
+  /* The left border that marks a running job stays — it is information, not decoration. */
+  :root[data-theme="day"] .job-card,
+  :root[data-theme="standby"] .job-card { border-left: 3px solid var(--accent-line); }
+
+  /* Scanlines, corner brackets and the glitch treatment are night-only affordances: on paper they
+     read as damage rather than as a HUD. */
+  :root[data-theme="day"] .corner,
+  :root[data-theme="standby"] .corner,
+  :root[data-theme="day"] .brand.glitch::after,
+  :root[data-theme="standby"] .brand.glitch::after { display: none; }
 </style>
 </head>
 <body>
