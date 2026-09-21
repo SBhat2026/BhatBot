@@ -1,8 +1,8 @@
 {
-  "runId": "2026-09-21T23-32-02",
+  "runId": "2026-09-21T23-35-56",
   "question": "Does deploying four scoped drones over a partitioned codebase find more real defects, per dollar and per minute, than one agent given the same total turn allowance?",
-  "answerKeySize": 7,
-  "networkedFiles": 14,
+  "answerKeySize": 8,
+  "networkedFiles": 17,
   "totalLibModules": 120,
   "arms": {
     "a": {

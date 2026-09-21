@@ -8,8 +8,16 @@
 // ~111 files so no single agent can read them all, and it is decidable from the source text, which
 // is what makes it scorable at all.
 //
+// THE KEY WAS WRONG ONCE ALREADY, and it is worth saying how. The first version matched the literal
+// token `fetch(`. lib/imagesearch.js takes its fetch as a PARAMETER — `fetchFn(u, …)` — so the key
+// scored it as touching no network at all, and both experiment arms that named it were marked down
+// for a fabrication they had not committed. They had read the file; the regex had not. Injected
+// fetches are matched now. The lesson is not that regexes are bad: it is that an answer key is a
+// measuring instrument and gets checked against reality like any other.
+//
 // DECISION RULE (applied identically to every file, so agents and key are judged the same way):
-//   networked  := the file contains `fetch(` or `https.request(` or `http.request(` or `axios`
+//   networked  := the file contains `fetch(` / `https.request(` / `http.request(` / `axios`,
+//                 or calls an INJECTED fetch (`fetchFn(`, `doFetch(`, `fetchImpl(`, `_fetch(`)
 //   guarded    := that file also contains AbortSignal.timeout | signal: | setTimeout(...abort
 //                 | timeout: | req.setTimeout | .destroy() on a timer
 //   HIT        := networked AND NOT guarded
@@ -17,7 +25,7 @@ const fs = require('fs');
 const path = require('path');
 const LIB = path.join(__dirname, '..', '..', 'lib');
 
-const NET = /\bfetch\s*\(|https?\.request\s*\(|require\(['"]axios['"]\)/;
+const NET = /\bfetch\s*\(|https?\.request\s*\(|require\(['"]axios['"]\)|\b(?:fetchFn|doFetch|fetchImpl|_fetch)\s*\(/;
 const GUARD = /AbortSignal\.timeout|AbortController|\bsignal\s*:|setTimeout\([^)]*abort|\btimeout\s*:|\btimeoutMs\b|setTimeout\([^)]*destroy|req\.setTimeout/;
 
 function scan(dir, prefix = '') {

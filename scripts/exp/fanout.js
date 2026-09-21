@@ -132,6 +132,15 @@ function flush() {
   try { fs.mkdirSync(path.dirname(LIVE), { recursive: true }); fs.writeFileSync(LIVE, JSON.stringify(payload)); } catch {}
 }
 
+// A HEARTBEAT, because "nothing has been written for 8 seconds" and "the room is out of date" are
+// different statements and the deck could not tell them apart. A model call takes 5–10s during which
+// there is genuinely nothing new to say — the agent really is thinking, and the office really is
+// showing that — but the payload's timestamp froze, so the lag indicator accused the room of lying.
+// Re-stamping once a second makes the indicator mean what it claims to mean.
+let _beat = null;
+function startBeat() { if (!_beat) { _beat = setInterval(flush, 1000); _beat.unref && _beat.unref(); } }
+function stopBeat() { if (_beat) { clearInterval(_beat); _beat = null; } }
+
 function say(from, to, kind, text, extra = {}) {
   transcript.push({ t: Date.now(), from, to, kind, text: String(text || '').slice(0, 500), ...extra });
   flush();
@@ -191,6 +200,7 @@ async function runFanout(apiKey) {
     + '\nfile outside it even if you are sure about it.';
 
   const t0 = Date.now();
+  startBeat();
   const out = await fleet.runFleet(specs, {
     agentRun, board,
     onEvent: (e) => say('FLEET', 'Siddhant', 'fleet', JSON.stringify(e)),
@@ -199,6 +209,7 @@ async function runFanout(apiKey) {
     taskFor: (drone) => ({ goal: goalFor(specs.findIndex((x) => x.id === drone.id)) }),
   });
 
+  stopBeat();
   for (const r of out.results || []) setAgent(r.persona, { state: r.status === 'failed' ? 'error' : 'done', status: r.status, step: '' });
   return { out, trace, board, ms: Date.now() - t0 };
 }
@@ -224,7 +235,9 @@ async function runSolo(apiKey) {
   }, { agentRun: makeAgentRun({ apiKey, onTrace }) });
   setAgent('Marlowe', { state: 'idle', status: 'deployed', task: 'audit all of lib/' });
   const t0 = Date.now();
+  startBeat();
   const r = await d.run({ goal: MISSION });
+  stopBeat();
   setAgent('Marlowe', { state: r.status === 'failed' ? 'error' : 'done', status: r.status, step: '' });
   return { result: r, trace, ms: Date.now() - t0 };
 }
