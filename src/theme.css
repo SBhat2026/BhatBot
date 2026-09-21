@@ -48,6 +48,15 @@
   --accent-soft: rgba(11, 110, 140, 0.10);
   --accent-line: rgba(11, 110, 140, 0.34);
   --accent-ink: #085468;          /* accent as text on a light ground: 7.1:1 */
+  --accent-dim: #7FA9BA;
+  /* ⚠ LOAD-BEARING. src/index.html carries ~80 literal `rgba(0,200,255,α)` values from when cyan was
+   * the only accent there would ever be. Each becomes `rgba(var(--accent-rgb), α)`, which keeps every
+   * alpha exactly as it was and makes the whole stylesheet theme-aware in one mechanical pass. In
+   * night this resolves to the original 0,200,255, so the dark theme is unchanged by construction. */
+  --accent-rgb: 11, 110, 140;
+  --bg-rgb: 238,242,245;
+  --surface-rgb: 250,252,253;
+  --text-rgb: 18,34,44;
 
   /* ── semantic, separate from the accent on purpose ── */
   --ok: #17724A;
@@ -94,6 +103,11 @@
   --accent-soft: rgba(140, 58, 30, 0.09);
   --accent-line: rgba(140, 58, 30, 0.30);
   --accent-ink: #7A3018;          /* 7.4:1 on the warm ground */
+  --accent-dim: #B9A392;
+  --accent-rgb: 140, 58, 30;
+  --bg-rgb: 246,243,236;
+  --surface-rgb: 252,250,245;
+  --text-rgb: 34,32,27;
 
   --ok: #4A6A2B;
   --warn: #8A5A06;
@@ -134,6 +148,11 @@
   --accent-soft: rgba(0, 200, 255, 0.10);
   --accent-line: rgba(0, 200, 255, 0.34);
   --accent-ink: #4fd8ff;
+  --accent-dim: #0a4a63;
+  --accent-rgb: 0, 200, 255;
+  --bg-rgb: 9,13,19;
+  --surface-rgb: 13,21,32;
+  --text-rgb: 200,214,229;
 
   --ok: #2fe08a;
   --warn: #ffb02e;
