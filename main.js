@@ -1639,6 +1639,24 @@ function applyReasoning(body) {
 }
 
 async function anthropicRequest(body, apiKey, { retries = 5 } = {}) {
+  // ⚠ THE PAIRING GUARANTEE LIVES HERE, not in capTokens.
+  //
+  // capTokens carried this repair and a comment claiming it made "EVERY wire path pairing-safe by
+  // construction". That was only true of paths that go THROUGH capTokens, and two do not:
+  //   • the drone loop sends `hist.slice(-24)` — a raw window that can cut between a tool_use and
+  //     its tool_result, leaving the tool_use unanswered at the slice boundary;
+  //   • the clipped-response continuation sends `[...body.messages, ...cont]`, appending after the
+  //     validation that ran upstream.
+  // Both reach the wire through this function, which is the actual chokepoint — every Anthropic call
+  // in the process passes here. So the repair belongs here, where "every path" is a fact about the
+  // call graph rather than a claim in a comment.
+  //
+  // validateHistory is idempotent and O(messages), so paths that already validated pay nothing
+  // measurable, and a caller can no longer produce the "tool_use ids were found without tool_result
+  // blocks" 400 by assembling messages in a new way. Observed 2026-09-21: the morning brief failed
+  // with exactly that, at messages.4, on a path that never touched capTokens.
+  try { if (Array.isArray(body && body.messages)) body = { ...body, messages: validateHistory(body.messages) }; } catch {}
+
   // Add the conversation cache breakpoint when the payload is big enough to be worth a cache write
   // (small one-off judge/plan calls skip it — the write premium would outweigh a prefix that never
   // repeats). Gated by config.convoCache (default on). Failure here must never block the call.
@@ -3869,7 +3887,7 @@ async function droneAgentRun(ctx, task) {
     // taskBudget hands the drone its own remaining loop allowance so it paces itself instead of
     // getting silently reaped mid-thought by the fleet supervisor's stall watchdog — it's a no-op on
     // Sonnet (which has no task-budget surface) and activates automatically if drones move to Opus.
-    try { resp = await pacedSubagentRequest({ model, max_tokens: 3072, system: ctx.system, tools: toolDefs, messages: hist.slice(-24),
+    try { resp = await pacedSubagentRequest({ model, max_tokens: 3072, system: ctx.system, tools: toolDefs, messages: validateHistory(hist.slice(-24)),   // a raw window can cut a tool_use/result pair at its boundary
       _reason: { subagent: true, taskBudget: maxTurns * 3072 * 4 } }, getApiKey()); }
     catch (e) { return { status: finalText ? 'partial' : 'failed', summary: finalText || ('drone model error: ' + e.message) }; }
     const content = resp.content || [];

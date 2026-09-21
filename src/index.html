@@ -212,7 +212,15 @@
   /* Hover explanation — shared by the 2D canvas and the 3D constellation. A label alone answers
      "what is this called"; the two questions you actually have are what KIND of thing it is and
      whether it is load-bearing, so the tooltip leads with those. */
-  #synapse-panel { position: relative; }
+  /* ⚠ `#synapse-panel { position: relative }` used to live here, and it collapsed the whole panel.
+     `.stage-panel` is `position:absolute; inset:0` — that is what gives it the stage's full height.
+     Overriding it to `relative` made the panel size to its CONTENT, which is just the 47px header;
+     #sy-body (flex:1, min-height:0) then resolved to 0, and size() clamped the canvas to 1px tall.
+     The graph drew into a one-pixel strip, so the panel looked empty and the Command view showed
+     through underneath it — "SYNAPSE looks the same as COMMAND".
+     It was not needed in the first place: .sy-tip and #sy-canvas position against #sy-body, which
+     has its own `position: relative`. The identical mistake is documented for the FLEET panel at the
+     top of this stylesheet, with the same consequence. */
   #synapse-panel .sy-tip { position: absolute; z-index: 40; pointer-events: none; max-width: 300px;
     background: rgba(var(--bg-rgb), .96); border: 1px solid var(--line); border-radius: 9px; padding: 9px 11px;
     box-shadow: 0 10px 34px rgba(0,0,0,.55); font-size: 11.5px; line-height: 1.5; }
