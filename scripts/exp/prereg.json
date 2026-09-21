@@ -1,5 +1,5 @@
 {
-  "runId": "2026-09-21T23-18-18",
+  "runId": "2026-09-21T23-32-02",
   "question": "Does deploying four scoped drones over a partitioned codebase find more real defects, per dollar and per minute, than one agent given the same total turn allowance?",
   "answerKeySize": 7,
   "networkedFiles": 14,
@@ -8,15 +8,15 @@
     "a": {
       "topology": "solo",
       "agents": 1,
-      "turnsEach": 16,
-      "budgetUsd": 0.45
+      "turnsEach": 24,
+      "budgetUsd": 0.6
     },
     "b": {
       "topology": "fan-out",
       "agents": 4,
-      "turnsEach": 4,
-      "budgetUsd": 0.22,
-      "plusSynthesis": true
+      "turnsEach": 6,
+      "budgetUsd": 0.15,
+      "plusSynthesis": false
     }
   },
   "hypotheses": [
@@ -51,6 +51,7 @@
       "predict": "each drone posts ≥2 board entries; ZERO drones cite or act on a sibling's finding."
     }
   ],
+  "amendment": "Run 1 (2026-09-21T23:29) was VOID — an instrument failure, not a result. Every agent in both arms hit its cap mid-audit and returned \"(out of budget before reporting)\", so no arm produced an answer to score. Two causes, both in the runner rather than in either topology: a tool loop re-sends its whole transcript, so cost grew with the square of the turn count; and running out of budget during a tool call ended the drone with its work unreported. Fixed by pruning old tool results and by forcing one final tool-free wrap-up turn. Budgets re-cut for PARITY: 24 turns and $0.60 per arm either way. The five hypotheses and their predicted ranges are UNCHANGED from the pre-run commit.",
   "scoring": "precision = TP/(TP+FP); recall = TP/7. A named file that is networked-but-guarded is scored as a NEAR MISS (judgement error) and counted separately from a name that touches no network at all (fabrication).",
   "spendCap": 1.4
 }

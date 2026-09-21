@@ -53,6 +53,11 @@ const MISSION = [
   'You have list_directory and read_file only. There is no grep and no shell, so you must choose',
   'which files are worth opening. Reading every file is not possible inside your budget.',
   '',
+  'YOUR CONTEXT IS PRUNED. Only the last two rounds of file contents stay visible; older ones are',
+  'replaced by a stub. So in the SAME message in which you read a file, write one line recording your',
+  'verdict on it — "maps.js: fetch, no guard → HIT" or "brain.js: no network → skip". Those lines are',
+  'the only memory you have. Batch several read_file calls per turn; you have few turns.',
+  '',
   'REPORT, as the last thing you say, a single line of exactly this form and nothing after it:',
   'ANSWER: file1.js, file2.js, file3.js',
   'using paths relative to lib/ (e.g. "maps.js", "integrations/trellis.js"). List ONLY files you',
@@ -77,8 +82,8 @@ const PREREG = {
   networkedFiles: truth.networked.length,
   totalLibModules: null,   // filled at prereg time
   arms: {
-    a: { topology: 'solo', agents: 1, turnsEach: 16, budgetUsd: 0.45 },
-    b: { topology: 'fan-out', agents: 4, turnsEach: 4, budgetUsd: 0.22, plusSynthesis: true },
+    a: { topology: 'solo', agents: 1, turnsEach: 24, budgetUsd: 0.60 },
+    b: { topology: 'fan-out', agents: 4, turnsEach: 6, budgetUsd: 0.15, plusSynthesis: false },
   },
   hypotheses: [
     { id: 'H1', claim: 'Fan-out RECALL beats solo recall.',
@@ -97,6 +102,14 @@ const PREREG = {
       why: 'The blackboard is in every drone\'s system prompt and they are instructed to post findings, but the shards are independent — nothing one drone learns changes what another should open. Coordination machinery does not create a reason to coordinate.',
       predict: 'each drone posts ≥2 board entries; ZERO drones cite or act on a sibling\'s finding.' },
   ],
+  amendment: 'Run 1 (2026-09-21T23:29) was VOID — an instrument failure, not a result. Every agent in '
+           + 'both arms hit its cap mid-audit and returned "(out of budget before reporting)", so no '
+           + 'arm produced an answer to score. Two causes, both in the runner rather than in either '
+           + 'topology: a tool loop re-sends its whole transcript, so cost grew with the square of '
+           + 'the turn count; and running out of budget during a tool call ended the drone with its '
+           + 'work unreported. Fixed by pruning old tool results and by forcing one final tool-free '
+           + 'wrap-up turn. Budgets re-cut for PARITY: 24 turns and $0.60 per arm either way. The '
+           + 'five hypotheses and their predicted ranges are UNCHANGED from the pre-run commit.',
   scoring: 'precision = TP/(TP+FP); recall = TP/7. A named file that is networked-but-guarded is '
          + 'scored as a NEAR MISS (judgement error) and counted separately from a name that touches '
          + 'no network at all (fabrication).',
@@ -145,9 +158,12 @@ async function runFanout(apiKey) {
     if (ev.kind === 'tool') {
       setAgent(ev.drone, { state: 'working', status: 'reading', step: ev.tool + ' ' + ev.text, tool: ev.tool });
       say(ev.drone, 'tools', 'tool', ev.tool + '  ' + ev.text);
-      liveSpend += ev.usd || 0;
     } else if (ev.kind === 'thinking') {
       setAgent(ev.drone, { state: 'thinking', status: ev.text, step: '' });
+    } else if (ev.kind === 'turn') {
+      // Cost is charged per TURN. The header used to add it once per TOOL CALL, which made a turn
+      // with four parallel reads look four times as expensive as it was.
+      liveSpend += ev.usd || 0;
     } else if (ev.kind === 'say') {
       setAgent(ev.drone, { state: 'thinking', status: 'reporting' });
       say(ev.drone, 'Siddhant', 'say', ev.text);
@@ -195,7 +211,8 @@ async function runSolo(apiKey) {
   const trace = [];
   const onTrace = (ev) => {
     trace.push({ t: Date.now(), ...ev });
-    if (ev.kind === 'tool') { setAgent(ev.drone, { state: 'working', status: 'reading', step: ev.tool + ' ' + ev.text, tool: ev.tool }); say(ev.drone, 'tools', 'tool', ev.tool + '  ' + ev.text); liveSpend += ev.usd || 0; }
+    if (ev.kind === 'tool') { setAgent(ev.drone, { state: 'working', status: 'reading', step: ev.tool + ' ' + ev.text, tool: ev.tool }); say(ev.drone, 'tools', 'tool', ev.tool + '  ' + ev.text); }
+    else if (ev.kind === 'turn') liveSpend += ev.usd || 0;
     else if (ev.kind === 'thinking') setAgent(ev.drone, { state: 'thinking', status: ev.text });
     else if (ev.kind === 'say') { setAgent(ev.drone, { state: 'thinking', status: 'reporting' }); say(ev.drone, 'Siddhant', 'say', ev.text); }
   };
