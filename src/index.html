@@ -2449,8 +2449,27 @@ function pushPresenceToIframe(snap) {
   try { if (f && f.contentWindow) f.contentWindow.postMessage({ type: 'presence', agents: (snap && snap.agents) || [] }, '*'); } catch {}
 }
 window.bhatbot.onPresenceUpdate && window.bhatbot.onPresenceUpdate((snap) => { _lastPresence = snap; pushPresenceToIframe(snap); });
+// The office is an iframe on file://, so it cannot read the app's CSS variables. Push them in, on
+// load and on every theme change, or it stays the dark scene it was authored as while the rest of
+// the window is light — which is exactly how it looked: a gloomy hole in a bright page.
+function pushThemeToIframe() {
+  const f = document.getElementById('fleet3d');
+  if (!f || !f.contentWindow) return;
+  const cs = getComputedStyle(document.documentElement);
+  const v = (n, d) => (cs.getPropertyValue(n) || d).trim();
+  try {
+    f.contentWindow.postMessage({ type: 'theme', tokens: {
+      mode: document.documentElement.getAttribute('data-theme') || 'day',
+      bg: v('--bg', '#070b12'), surface: v('--surface', '#0c1420'),
+      text: v('--text', '#cfe6f2'), dim: v('--text-dim', '#7fa8bd'),
+      accent: v('--accent', '#5ad1ff'), ok: v('--ok', '#59e39b'),
+      warn: v('--warn', '#f2c14e'), err: v('--err', '#ff6b6b'),
+    } }, '*');
+  } catch {}
+}
+try { document.documentElement.addEventListener('bhatbot-theme', () => setTimeout(pushThemeToIframe, 30)); } catch {}
 // Replay the latest snapshot once the iframe has (re)loaded so it isn't blank on first open.
-document.getElementById('fleet3d') && document.getElementById('fleet3d').addEventListener('load', () => { if (_lastPresence) pushPresenceToIframe(_lastPresence); });
+document.getElementById('fleet3d') && document.getElementById('fleet3d').addEventListener('load', () => { pushThemeToIframe(); if (_lastPresence) pushPresenceToIframe(_lastPresence); });
 // Click-to-inspect from the 3D office: clicking a character focuses that agent's steer-card
 // (scroll + flash + focus its input) and opens its live monitor window.
 //

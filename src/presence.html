@@ -53,10 +53,10 @@
   </div>
   <div id="hud"><span>BhatBot · <b>Fleet Presence</b></span><span id="tally">—</span></div>
   <div id="legend">
-    <div><span class="dot" style="background:#3a4a5a"></span>idle</div>
-    <div><span class="dot" style="background:#f2c14e"></span>thinking</div>
-    <div><span class="dot" style="background:#5ad1ff"></span>working</div>
-    <div><span class="dot" style="background:#59e39b"></span>done</div>
+    <div><span class="dot" data-legend="idle" style="background:#3a4a5a"></span>idle</div>
+    <div><span class="dot" data-legend="thinking" style="background:#f2c14e"></span>thinking</div>
+    <div><span class="dot" data-legend="working" style="background:#5ad1ff"></span>working</div>
+    <div><span class="dot" data-legend="done" style="background:#59e39b"></span>done</div>
     <div style="margin-top:6px;color:#5a7688;">hover to read · click to steer · drag to look</div>
   </div>
 
@@ -100,11 +100,16 @@ renderer.shadowMap.enabled = true; renderer.shadowMap.type = THREE.PCFShadowMap;
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 stage.appendChild(renderer.domElement);
 
-scene.add(new THREE.AmbientLight(0x8298b0, 0.7));
-const key = new THREE.DirectionalLight(0xbfe4ff, 1.4); key.position.set(6, 12, 7); key.castShadow = true;
-key.shadow.mapSize.set(1024, 1024); scene.add(key);
-scene.add(new THREE.HemisphereLight(0x9fc4e0, 0x0a1420, 0.6));
-const rim = new THREE.PointLight(0x4a7bd6, 0.7, 80); rim.position.set(-8, 5, -8); scene.add(rim);
+// Named rather than anonymous so applyPalette() can relight the room when the app's theme changes.
+// The values here stay the original dark-scene ones; they are the fallback when no theme arrives.
+const _amb = new THREE.AmbientLight(0x8298b0, 0.7); scene.add(_amb);
+const _key = new THREE.DirectionalLight(0xbfe4ff, 1.4); _key.position.set(6, 12, 7); _key.castShadow = true;
+_key.shadow.mapSize.set(1024, 1024); scene.add(_key);
+const key = _key;                                            // existing references keep working
+const _hemi = new THREE.HemisphereLight(0x9fc4e0, 0x0a1420, 0.6); scene.add(_hemi);
+const _rim = new THREE.PointLight(0x4a7bd6, 0.7, 80); _rim.position.set(-8, 5, -8); scene.add(_rim);
+const rim = _rim;
+const _officeMats = [];                                      // every office material, for the light themes
 
 // ---- adaptive framing -----------------------------------------------------
 // ASPECT-AWARE. The old version derived the orbit radius from the room's footprint alone, ignoring
@@ -330,7 +335,7 @@ function nameplate(text, task, colorCss) {
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     ctx.shadowColor = 'rgba(0,0,0,0.95)'; ctx.shadowBlur = 10;
     ctx.font = '600 34px -apple-system, Segoe UI, Roboto, sans-serif';
-    ctx.fillStyle = 'rgba(214,238,250,0.97)';
+    ctx.fillStyle = PLATE_INK || 'rgba(214,238,250,0.97)';   // follows the theme; pale blue is invisible on paper
     const hasTask = !!String(doing || '').trim();
     ctx.fillText(String(name || '').slice(0, 22), PLATE_W / 2, hasTask ? 30 : PLATE_H / 2);
     if (hasTask) {
@@ -363,7 +368,16 @@ function makeAvatar(label) {
   if (!charTemplate) return { group: fallbackAvatar(), mixer: null, actions: {} };
   const group = skeletonClone(charTemplate);
   group.scale.setScalar(charScale);
-  group.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.frustumCulled = false; } });
+  // ⚠ SkeletonUtils.clone SHARES materials with the template, so every avatar in the office pointed
+  // at the same material instances. Per-agent tinting then had all of them writing to one object,
+  // each lerping toward a different state colour — and what you saw was their average: a uniform
+  // muddy brown, on every character, no matter what any of them was doing. The colour-coding was
+  // running correctly and cancelling itself out. Give each avatar its own materials.
+  group.traverse((o) => {
+    if (!o.isMesh) return;
+    o.castShadow = true; o.frustumCulled = false;
+    o.material = Array.isArray(o.material) ? o.material.map((m) => m.clone()) : o.material.clone();
+  });
   const mixer = new THREE.AnimationMixer(group);
   // Pre-build one action per clip so state changes are a crossfade, not a rebuild.
   const actions = {};
@@ -381,7 +395,7 @@ function makeAvatar(label) {
   orb.add(glow);
   // Raised a little to clear the taller two-line plate.
   const plate = nameplate(label, '', null); plate.position.y = (charTargetH + 0.74) * inv; plate.scale.multiplyScalar(inv); group.add(plate);
-  group.userData.tintTargets = tintTargetsOf(group).slice(0, 2);
+  group.userData.tintTargets = tintTargetsOf(group).slice(0, 4);   // body + head, not just the first two
   return { group, mixer, actions, aura, orb, glow, plate };
 }
 
@@ -621,6 +635,87 @@ renderer.domElement.addEventListener('click', (ev) => {
 
 // popup (IPC preload) OR iframe (postMessage) — support both mounts.
 if (window.presence && window.presence.onUpdate) window.presence.onUpdate(ingest);
+
+// ── THE OFFICE FOLLOWS THE APP'S PALETTE ─────────────────────────────────────────────────────────
+// This scene was authored dark and hardcoded: a near-black radial ground, blue fog, cold lights.
+// Against the light themes it read as a gloomy hole punched in the middle of a bright window. The
+// parent posts its live tokens on load and on every theme change, and everything that carries the
+// palette — ground, fog, the four lights, the floor material and the status colours — is rebuilt
+// from them. With no message the original dark values stand, so this degrades to what shipped.
+// A MATERIAL colour is not a TEXT colour. On the light palettes the semantic tokens are ink — a
+// dark teal, a dark green — which is right against paper and wrong on a lit 3D surface: tinting a
+// character with them produced silhouettes instead of coloured figures. Indicators (dots, auras,
+// nameplates) keep the exact token so the legend stays true; materials get this lightened variant.
+function surfaceOf(colorLike, light) {
+  const c = new THREE.Color(colorLike);
+  return light ? c.lerp(new THREE.Color('#ffffff'), 0.55) : c;
+}
+const STATE_SURFACE = {};
+let PLATE_INK = null;            // nameplate text colour, set from the app's --text
+
+const PALETTE_DEFAULT = {
+  bg: '#070b12', surface: '#0c1420', text: '#cfe6f2', dim: '#7fa8bd',
+  accent: '#5ad1ff', ok: '#59e39b', warn: '#f2c14e', err: '#ff6b6b', mode: 'night',
+};
+let PALETTE = { ...PALETTE_DEFAULT };
+const hex = (c) => new THREE.Color(c);
+
+function applyPalette(t) {
+  PALETTE = { ...PALETTE_DEFAULT, ...(t || {}) };
+  const light = PALETTE.mode === 'day' || PALETTE.mode === 'standby';
+
+  // The page ground behind the canvas.
+  document.body.style.background = light
+    ? `radial-gradient(120% 90% at 50% 10%, ${PALETTE.surface} 0%, ${PALETTE.bg} 70%)`
+    : `radial-gradient(120% 90% at 50% 10%, ${PALETTE.surface} 0%, ${PALETTE.bg} 62%, #04060a 100%)`;
+  document.documentElement.style.setProperty('--accent', PALETTE.accent);
+  document.body.style.color = PALETTE.dim;
+
+  // Status colours come from the app's own semantic tokens, so the legend in the office and the
+  // pills elsewhere in the UI cannot disagree about what "working" looks like.
+  STATE_CSS.thinking = PALETTE.warn; STATE_CSS.working = PALETTE.accent;
+  STATE_CSS.done = PALETTE.ok;       STATE_CSS.error = PALETTE.err;
+  STATE_CSS.idle = light ? '#9aa8b4' : '#3a4a5a';
+  for (const k of Object.keys(STATE_CSS)) {
+    STATE_COLOR[k] = hex(STATE_CSS[k]).getHex();
+    STATE_SURFACE[k] = surfaceOf(STATE_CSS[k], light);
+  }
+
+  // Scene lighting. On a light ground the room needs to be lit, not atmospheric: more ambient, a
+  // warmer key, and fog pushed far enough back that it reads as depth rather than as murk.
+  if (scene.fog) { scene.fog.color = hex(light ? PALETTE.bg : '#070b12'); scene.fog.density = light ? 0.008 : 0.03; }
+  if (_amb) { _amb.color = hex(light ? '#ffffff' : '#8298b0'); _amb.intensity = light ? 1.15 : 0.7; }
+  if (_key) { _key.color = hex(light ? '#fff6ec' : '#bfe4ff'); _key.intensity = light ? 1.7 : 1.4; }
+  if (_hemi) { _hemi.color = hex(light ? '#ffffff' : '#9fc4e0'); _hemi.groundColor = hex(light ? PALETTE.surface : '#0a1420'); _hemi.intensity = light ? 0.9 : 0.6; }
+  if (_rim) { _rim.color = hex(PALETTE.accent); _rim.intensity = light ? 0.35 : 0.7; }
+  if (renderer) renderer.setClearColor(hex(PALETTE.bg), light ? 1 : 0);
+
+  // The room itself. On a light theme every office material is lifted toward the app's surface
+  // colour — enough that the room reads as lit, not so far that the model's own shading is lost.
+  for (const m of _officeMats) {
+    const base = m.userData.__base || m.color;
+    m.color.copy(light ? base.clone().lerp(hex(PALETTE.surface), 0.72) : base);
+    if ('metalness' in m) m.metalness = light ? 0.04 : 0.4;
+    if ('roughness' in m) m.roughness = light ? 0.92 : 0.5;
+  }
+  // Repaint every nameplate so labels re-read against the new ground.
+  PLATE_INK = PALETTE.text;
+  for (const el of document.querySelectorAll('[data-legend]')) {
+    el.style.background = STATE_CSS[el.getAttribute('data-legend')] || el.style.background;
+  }
+  // Re-target every LIVE agent. Without this the palette only applies to agents that arrive after
+  // the theme does, which is the wrong way round — the roster is usually already on screen.
+  for (const a of agents.values()) {
+    a.target = new THREE.Color(STATE_COLOR[a.state] ?? STATE_COLOR.idle);
+    for (const m of (a.tint || [])) if (m.color && m.userData.__base) m.color.copy(m.userData.__base);
+  }
+  for (const a of agents.values()) if (a.plate && a.plate.userData.redraw) {
+    a.plate.userData.redraw(a.name, a.doing || '', STATE_CSS[a.state] || STATE_CSS.idle);
+  }
+}
+window.addEventListener('message', (e) => { if (e.data && e.data.type === 'theme') applyPalette(e.data.tokens); });
+window.__applyPalette = applyPalette;   // testability seam
+
 window.addEventListener('message', (e) => { if (e.data && e.data.type === 'presence') ingest(e.data); });
 
 // Testability seam for scripts/shoot-presence.js: where each agent currently is, in screen pixels,
@@ -653,7 +748,15 @@ Promise.all([ load('./vendor/presence3d/models/office.glb').catch(() => null),
       const n = o.name || '';
       if (n === 'navMesh') { toHide.push(o); if (o.isMesh) buildNav(o); }
       else if (n.startsWith('poi-')) { poiNodes.push(o); toHide.push(o); }
-      else if (o.isMesh) { o.receiveShadow = true; o.castShadow = true; }
+      else if (o.isMesh) {
+        o.receiveShadow = true; o.castShadow = true;
+        // Keep every office material so applyPalette can lift the room on a light theme. Relighting
+        // alone is not enough: these materials are authored dark, and a dark material under a bright
+        // key reads as grey clay rather than as a lit room.
+        for (const m of (Array.isArray(o.material) ? o.material : [o.material])) {
+          if (m && m.color && !_officeMats.includes(m)) { m.userData.__base = m.color.clone(); _officeMats.push(m); }
+        }
+      }
     });
     scene.add(office.scene);
     office.scene.updateMatrixWorld(true);
@@ -780,9 +883,22 @@ const _tmp = new THREE.Vector3();
       a.glow.material.color.lerp(tgt, 0.1);
       a.glow.material.opacity = a.state==='idle' ? 0.16 : 0.3 + (a.state==='working' ? Math.sin(t*6+a.phase)*0.12 : 0);
     }
-    for (const m of a.tint) if (m.emissive) {
-      m.emissive.lerp(tgt, 0.05);
-      m.emissiveIntensity = a.state==='working' ? 0.5 + Math.sin(t*7+a.phase)*0.2 : a.state==='done' ? 0.4 : a.state==='thinking' ? 0.35 : 0.15;
+    // COLOUR-CODED BY STATE, on the body and not only the glow. This used to lerp `emissive` alone
+    // at 0.05, which left the characters reading as grey clay with a faint halo — the legend said
+    // four colours and the office showed one. Tinting the base colour toward the state is what makes
+    // "who is working" answerable from across the room, which is the whole reason the office exists.
+    // The base keeps some of its own material so they still look like figures rather than blobs.
+    const surf = STATE_SURFACE[a.state] || tgt;   // lit-surface variant, not the ink token
+    for (const m of a.tint) {
+      if (m.color) {
+        if (!m.userData.__base) m.userData.__base = m.color.clone();
+        const want = m.userData.__base.clone().lerp(surf, a.state === 'idle' ? 0.16 : 0.55);
+        m.color.lerp(want, 0.12);
+      }
+      if (m.emissive) {
+        m.emissive.lerp(tgt, 0.08);
+        m.emissiveIntensity = a.state==='working' ? 0.5 + Math.sin(t*7+a.phase)*0.2 : a.state==='done' ? 0.4 : a.state==='thinking' ? 0.35 : 0.12;
+      }
     }
   }
   renderer.render(scene, camera);
