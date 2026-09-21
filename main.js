@@ -9200,6 +9200,23 @@ function ensureStudioWatcher() {
 ipcMain.on('pty-start', (_e, { cols, rows }) => startPty(cols, rows));
 ipcMain.on('pty-input', (_e, data) => { try { ptyProc && ptyProc.write(data); } catch {} });
 ipcMain.on('pty-resize', (_e, { cols, rows }) => { try { ptyProc && ptyProc.resize(cols, rows); } catch {} });
+// CAPABILITIES — what BhatBot can do, derived from the LIVE catalogue rather than a hand-written
+// list. Two consumers share it and therefore cannot drift: the Manage → Capabilities page, and the
+// spoken answer to "what can you do". A capability page that lies is worse than not having one.
+ipcMain.handle('get-capabilities', () => {
+  try {
+    const cats = toolcatalog.CATEGORIES;
+    const live = new Set(fullCatalog().map((t) => t.name));
+    const out = [];
+    for (const [key, c] of Object.entries(cats)) {
+      const tools = c.tools.filter((n) => live.has(n));
+      if (tools.length) out.push({ key, label: c.label, summary: c.summary, tools });
+    }
+    const { unsorted } = toolcatalog.groupTools(fullCatalog());
+    if (unsorted.length) out.push({ key: 'other', label: 'Other', summary: 'Connector tools, added at runtime.', tools: unsorted });
+    return { categories: out, total: live.size };
+  } catch (e) { return { categories: [], total: 0, error: e.message }; }
+});
 ipcMain.handle('get-voice-config', () => {
   const c = loadConfig();
   const ttsProvider = c.ttsProvider || (kokoroAvailable() ? 'kokoro' : (c.elevenLabsKey ? 'elevenlabs' : (c.openaiKey ? 'openai' : (c.piperBin ? 'piper' : null))));

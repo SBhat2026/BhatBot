@@ -25,6 +25,43 @@ deleting it, not by leaving a ✅ behind — a list of completed work is what th
 
 ## Open
 
+### Broken right now (found 2026-09-21)
+- ⚠ **Playwright browsers were never installed.** `~/Library/Caches/ms-playwright/` does not exist, and
+  `main.js` calls `chromium.launchPersistentContext` with no `channel`, so five tools are dead on this
+  machine: `browser`, `browser_workflow`, `browser_observe`, `browser_devtools`, `smart_login`. Nothing
+  reports it until you ask it to browse. Fix: `npx playwright install chromium` (~150MB), or pin
+  `channel: 'chrome'` since Chrome is installed. **Decide which — a pinned channel means no 150MB
+  download but ties the browser stack to whatever Chrome ships.**
+- ⚠ **Worker spend is unmetered.** `scripts/synapse-worker.js` goes through `lib/llm.js`, which never
+  writes `costs.json`. The ledger's last entry is 3 Sep; the worker has actually spent $1.06 lifetime.
+  Every cost readout is therefore wrong by however much the worker has done.
+- ⚠ **A config edit during app boot is silently reverted.** Writing `~/.bhatbot/config.json` while
+  Electron is starting gets clobbered by its own `saveConfig` merge. Observed: `selfHeal.enabled:false`
+  written pre-launch came back `true`. Anything scripting a config change has to do it with the app
+  down, or after it has settled.
+- ⚠ **Fleet presence: characters can spawn on top of each other.** Two agents landing on adjacent POIs
+  overlap their labels so one is unreadable. Cosmetic, but the office is there for the visual read.
+
+### Optimise the tools that cost money
+Ordered by spend per call. Each one is a real lever, not a micro-optimisation:
+- ⬜ **`visual_build` (video) — the most expensive call in the system.** Priced per second of output
+  × resolution; a 10s 1080p clip is ~$3.20. No confirmation gate today. Add a cost estimate in the
+  confirm card before it fires, and default `resolution` to 720p rather than inheriting.
+- ⬜ **`generate_image` — cheapest big win.** `flux-fast` is $0.003 vs `openai` at $0.04 medium /
+  $0.08 high — a 13–27× spread. Route the default by intent: drafts and thumbnails to flux-fast,
+  only final assets to the high tier.
+- ⬜ **`generate_3d` / `make_asset`** — $0.10 a call through Replicate, and `make_asset` can chain
+  image → 3D → STL, so one call is three billable stages. Make the chain resumable so a failure at
+  the STL stage does not re-bill the image.
+- ⬜ **Fleet and drone fan-out** — N agents multiply every per-turn cost by N. The admission ledger
+  paces them against the rate window but does not cap total spend; `envelopeUsd` exists and is not
+  enforced as a hard wall (`lib/admission.js` admits on timeout by design, which is right for a
+  convoy stall and wrong for a budget).
+- ⬜ **Kill the ack/keep-alive spend when idle.** `cacheKeepAlive` refreshes the prompt cache every
+  ~4 min within 30 min of activity. Correct for a bursty session; pure waste if the machine is
+  standing alone in standby, which it now knows it is.
+
+
 ### Split main.js (the long-running one)
 `main.js` is **696KB**. The 150KB target from the old split plan is not realistic as stated, but the
 extraction itself still pays: steps 1–7 landed (`lib/pure.js`, `lib/audit.js`, `lib/shell.js`,

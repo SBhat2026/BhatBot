@@ -1011,6 +1011,27 @@
 
   #set-theme-row { gap: 6px; flex-wrap: wrap; }
   .theme-btn[aria-pressed="true"] { border-color: var(--accent); color: var(--accent-ink, var(--accent)); background: var(--accent-soft); }
+  /* ── MANAGE · CAPABILITIES ───────────────────────────────────────────────────────────────────────
+   * The same fourteen categories lib/toolcatalog.js resolves against, rendered for a person. It is
+   * deliberately generated FROM the catalogue rather than hand-listed: a hand-listed page drifts the
+   * first time a tool is added, and a capability page that lies is worse than none.
+   */
+  .mg-tab { cursor: pointer; }
+  .mg-tab[data-on] { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+  .caps-bar { display: flex; align-items: center; gap: 10px; padding: 10px 12px 12px; }
+  #caps-q { flex: 1; background: var(--surface); border: 1px solid var(--line); border-radius: 7px;
+    padding: 7px 10px; color: var(--text); font-family: var(--font-ui); font-size: 13px; outline: none; }
+  #caps-q:focus { border-color: var(--accent-line, var(--accent)); }
+  #caps-list { padding: 0 12px 16px; }
+  .caps-cat { margin-bottom: 16px; }
+  .caps-cat > h4 { font-family: var(--font-system); font-size: 10.5px; letter-spacing: .16em;
+    text-transform: uppercase; color: var(--accent); margin-bottom: 4px; font-weight: 500; }
+  .caps-cat > .sum { font-size: 12.5px; color: var(--text-dim); margin-bottom: 8px; }
+  .caps-t { display: flex; gap: 10px; align-items: baseline; padding: 5px 0; border-bottom: 1px solid var(--line-soft, var(--line)); }
+  .caps-t:last-child { border-bottom: 0; }
+  .caps-t b { font-family: var(--font-data); font-size: 12px; color: var(--text); flex: 0 0 172px; font-weight: 500; }
+  .caps-t span { font-size: 12.5px; color: var(--text-dim); }
+  .caps-none { color: var(--text-dim2); font-size: 12.5px; padding: 8px 0; }
   /* ── SPHERE, NOT RADAR (light palettes) ─────────────────────────────────────────────────────────
    * The HUD orb is an instrument: a notch ring, four counter-rotating rings, two spinning hexes and
    * a small bright core. That reads as radar, and radar is a night idiom — on paper the rotating
@@ -1380,8 +1401,19 @@
 
   <!-- Manage — live snapshot of every background service + active work so you always know it's working -->
   <div id="manage-panel" class="stage-panel">
-    <div class="panel-head"><b>▦ MANAGEMENT · OPS & PROJECTS</b><span style="flex:1"></span><span id="ops-summary" class="hl-dim"></span><span class="panel-back" data-back style="margin-left:8px">← Command</span></div>
+    <div class="panel-head"><b>▦ MANAGEMENT · OPS &amp; PROJECTS</b><span style="flex:1"></span><span id="ops-summary" class="hl-dim"></span>
+      <span class="tag mg-tab" data-mg="ops" data-on="1">Ops</span><span class="tag mg-tab" data-mg="caps">Capabilities</span>
+      <span class="panel-back" data-back style="margin-left:8px">← Command</span></div>
     <div id="ops-body"><div class="hl-empty">Loading status…</div></div>
+    <!-- CAPABILITIES — every tool it has, grouped the way the runtime resolver groups them. This is
+         also what `what can you do` reads from, so the spoken answer and the page can never drift. -->
+    <div id="caps-body" hidden>
+      <div class="caps-bar">
+        <input id="caps-q" placeholder="Filter capabilities…" autocomplete="off" spellcheck="false" />
+        <span id="caps-count" class="hl-dim"></span>
+      </div>
+      <div id="caps-list"></div>
+    </div>
   </div>
 
   <!-- Voice — tune the JARVIS voice live (character sliders, voice picker, presets, preview) -->
@@ -2350,6 +2382,58 @@ document.addEventListener('keydown', (e) => {
 // itself via open-nexus/open-studio IPC + focusBrowser()); the panels + showPanel wiring remain.
 // Main process can request a panel (e.g. studio_write surfaces Studio).
 window.bhatbot.onShowPanel && window.bhatbot.onShowPanel((id) => showPanel(id));
+// ── MANAGE · CAPABILITIES ───────────────────────────────────────────────────────────────────────
+// Rendered from the live tool catalogue over IPC, so adding a tool updates this page with no edit
+// here. One-line summaries live next to the category so the page is skimmable rather than a
+// reference dump — the reference lives in the artifact.
+const CAPS_BLURB = {
+  files: 'Read, write and patch files; convert images, merge PDFs, transcode media — all locally.',
+  shell: 'Run commands, isolate anything untrusted in Docker, hand coding work to Claude Code.',
+  web: 'Search, fetch, drive a real browser, record and replay browser macros, search papers.',
+  vision: 'See the screen, map it into clickable elements, and click them — any app, DOM or not.',
+  desktop: 'Drive any Mac app, Spotify, DaVinci Resolve, your iPhone, and this window itself.',
+  mail: 'Gmail, Calendar and Drive — plus an exact undo for anything it did to the inbox.',
+  ask: 'Reach you out-of-band, or ask with a real card instead of a wall of text.',
+  make: 'Images, Blender models, printable STLs, data-accurate figures, video, design canvases.',
+  science: 'Simulations, quantitative modelling, multi-step maths, molecules, protein function.',
+  memory: 'Durable facts, a knowledge graph, the Notion bank, and living project summaries.',
+  agents: 'Specialists, parallel teams, scoped drones, durable missions that survive a restart.',
+  self: 'Its own code and state, the background services, and your Garmin biometrics.',
+  creds: 'Keychain and 1Password lookups, 2FA codes, signing in — without ever seeing the secret.',
+  info: 'Live data, proactive schedules, ambient watching, other models, connectors and plugins.',
+};
+let _caps = null;
+async function loadCaps() {
+  if (_caps) return _caps;
+  try { _caps = await window.bhatbot.getCapabilities(); } catch { _caps = { categories: [], total: 0 }; }
+  return _caps;
+}
+function renderCaps(filter) {
+  const q = String(filter || '').trim().toLowerCase();
+  const list = document.getElementById('caps-list');
+  const count = document.getElementById('caps-count');
+  if (!list || !_caps) return;
+  let shown = 0;
+  const html = _caps.categories.map((c) => {
+    const tools = c.tools.filter((n) => !q || n.includes(q) || c.label.toLowerCase().includes(q) || (CAPS_BLURB[c.key] || '').toLowerCase().includes(q));
+    if (!tools.length) return '';
+    shown += tools.length;
+    return `<div class="caps-cat"><h4>${c.label}</h4><div class="sum">${CAPS_BLURB[c.key] || c.summary || ''}</div>` +
+      tools.map((n) => `<div class="caps-t"><b>${n}</b></div>`).join('') + `</div>`;
+  }).join('');
+  list.innerHTML = html || '<div class="caps-none">Nothing matches that.</div>';
+  if (count) count.textContent = q ? `${shown} of ${_caps.total}` : `${_caps.total} tools · ${_caps.categories.length} groups`;
+}
+document.querySelectorAll('.mg-tab').forEach((t) => t.addEventListener('click', async () => {
+  const which = t.getAttribute('data-mg');
+  document.querySelectorAll('.mg-tab').forEach((x) => x.removeAttribute('data-on'));
+  t.setAttribute('data-on', '1');
+  const ops = document.getElementById('ops-body'), caps = document.getElementById('caps-body');
+  if (which === 'caps') { ops.hidden = true; caps.hidden = false; await loadCaps(); renderCaps(document.getElementById('caps-q').value); }
+  else { caps.hidden = true; ops.hidden = false; }
+}));
+document.getElementById('caps-q') && document.getElementById('caps-q').addEventListener('input', (e) => renderCaps(e.target.value));
+
 // Forward live fleet state into the 3D presence iframe (the-delegation office in the FLEET tab).
 let _lastPresence = null;
 function pushPresenceToIframe(snap) {
