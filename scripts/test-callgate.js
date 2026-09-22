@@ -68,6 +68,24 @@ console.log('[callgate]');
   ok('the daily window rolls — yesterday does not silence today');
 }
 {
+  // THE LIVELOCK. The ledger records refusals as well as calls — it should, that is the audit trail
+  // — but counting them against the caps means every refusal pushes the cooldown out by another
+  // fifteen minutes, and anything that keeps trying keeps the gate shut forever. Caught within
+  // minutes of this gate shipping, by trying to place a single test call three times.
+  const blocked = (min) => ({ at: T - min * 60000, ok: false, blocked: true, reason: 'cooldown' });
+  const r = decide({ history: [ago(600), blocked(10), blocked(5), blocked(1)], now: T });
+  assert.strictEqual(r.allow, true, 'refusals must not extend the cooldown: ' + r.reason);
+  ok('a blocked attempt never rang the phone, so it does not count against the caps');
+}
+{
+  // ...and it must not trip the consecutive-failure brake either — those are attempts that never
+  // reached the network, so they are no evidence about whether the channel works.
+  const blocked = (min) => ({ at: T - min * 60000, ok: false, blocked: true });
+  const r = decide({ history: [ago(700, true), blocked(30), blocked(25)], now: T });
+  assert.strictEqual(r.allow, true, 'two refusals are not two failures: ' + r.reason);
+  ok('refusals do not trip the two-consecutive-failures brake');
+}
+{
   const r = decide({ history: [], now: T, config: { maxPerDay: 0 } });
   assert.strictEqual(r.allow, false, 'maxPerDay 0 is a way to turn calling off entirely');
   ok('config can disable calling outright');
