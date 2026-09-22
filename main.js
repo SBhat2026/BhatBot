@@ -4386,6 +4386,21 @@ function applyEdit(input) {
   return { success: true, path: fp, replacements: input.replace_all ? count : 1, diff: editFileDiff(oldStr, newStr) };
 }
 
+// An `account` selector that matches nothing is an ERROR, not a reason to use the primary. The
+// selector is usually the model's paraphrase of something Siddhant said ("my school mail"), and the
+// cost of guessing wrong is a draft written from, or a label applied in, the wrong mailbox.
+function badAccount(sel) {
+  if (!sel || sel === 'all' || sel === 'primary') return null;
+  try {
+    if (typeof google.accountFor !== 'function') return null;
+    if (google.accountFor(sel)) return null;
+    const known = (google.accounts() || []).map((a) => a.email || a.label);
+    return { success: false, error: `No connected Google account matches "${sel}".`
+      + (known.length ? ` Connected: ${known.join(', ')}.` : ' No accounts are connected — run `npm run google:auth`.')
+      + ' Use google_accounts to see them; do not guess.' };
+  } catch { return null; }
+}
+
 async function executeTool(name, input) {
   let result;
   const __auditT0 = Date.now();
@@ -4728,11 +4743,35 @@ async function executeTool(name, input) {
         result = await notion.logActivity(input); break;
       case 'gmail': {
         const a = input.action;
-        if (a === 'search') result = await google.gmailSearch(input.query, { limit: input.limit });
-        else if (a === 'read') result = await google.gmailRead(input.id);
+        // An account the model INVENTED must not fall through to the primary — "draft that from my
+        // work address", mistyped, would otherwise send from the personal one. Refuse and list what
+        // exists, which is both safer and more useful than a silent substitution.
+        const bad = badAccount(input.account);
+        if (bad) { result = bad; break; }
+        const acct = input.account ? { account: input.account } : {};
+        if (a === 'search') result = await google.gmailSearch(input.query, { limit: input.limit, ...acct });
+        else if (a === 'read') result = await google.gmailRead(input.id, acct);
         else if (a === 'draft') result = await google.gmailDraft(input);
-        else if (a === 'label') result = await google.gmailLabel(input.id, { add: input.add || [], remove: input.remove || [] });
+        else if (a === 'label') result = await google.gmailLabel(input.id, { add: input.add || [], remove: input.remove || [], account: input.account });
         else result = { success: false, error: 'Unknown gmail action: ' + a };
+        break;
+      }
+      // Which mailboxes exist, and which of them still work. The model cannot guess an address, and
+      // when a Google call fails this is what turns "Google is broken" into "your school account
+      // needs re-authorising".
+      case 'google_accounts': {
+        const list = (typeof google.accounts === 'function') ? google.accounts() : [];
+        result = {
+          success: true,
+          count: list.length,
+          accounts: list.map((x) => ({
+            email: x.email || '(address unknown)', label: x.label,
+            primary: x.primary, triage: x.triage,
+            status: x.usable ? 'ok' : 'needs re-auth (token did not decrypt)',
+          })),
+          ...(list.length ? {} : { hint: 'No Google accounts connected. Run `npm run google:auth` — once per mailbox.' }),
+          ...(list.some((x) => !x.usable) ? { hint: 'Run `npm run google:auth` for each account marked "needs re-auth".' } : {}),
+        };
         break;
       }
       // FILE TOOLS — the local utility belt (prompted by thetoolbus.ai, but done on-device).
@@ -4818,6 +4857,8 @@ async function executeTool(name, input) {
       }
       case 'calendar': {
         const a = input.action;
+        const bad = badAccount(input.account);
+        if (bad) { result = bad; break; }
         if (a === 'list') result = await google.calendarList(input);
         else if (a === 'create') result = await google.calendarCreate(input);
         else if (a === 'update') result = await google.calendarUpdate(input.id, input);
@@ -4827,8 +4868,10 @@ async function executeTool(name, input) {
       }
       case 'drive': {
         const a = input.action;
-        if (a === 'search') result = await google.driveSearch(input.query, { limit: input.limit });
-        else if (a === 'read') result = await google.driveRead(input.id);
+        const bad = badAccount(input.account);
+        if (bad) { result = bad; break; }
+        if (a === 'search') result = await google.driveSearch(input.query, { limit: input.limit, account: input.account });
+        else if (a === 'read') result = await google.driveRead(input.id, { account: input.account });
         else if (a === 'create') result = await google.driveCreate(input);
         else result = { success: false, error: 'Unknown drive action: ' + a };
         break;

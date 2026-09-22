@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 'use strict';
-// One-time Google OAuth for BhatBot. Mints a refresh token and stores it. Run: `npm run google:auth`
+// Google OAuth for BhatBot. Mints a refresh token for ONE account and appends it to the account
+// list. Run: `npm run google:auth` — once per mailbox you want connected, and again for any mailbox
+// whose token has expired (matching is by address, so a re-auth replaces rather than duplicates).
 //
 // RUNS UNDER ELECTRON, and must. The client secret is kept in the vault as a `CRED_REF_*` handle,
 // and those only decrypt through Electron's safeStorage. The previous version of this script read
@@ -153,25 +155,73 @@ async function main() {
   }
   finish(true);
 
+  // WHICH MAILBOX DID WE JUST CONNECT? Ask, before storing anything. An account list where the
+  // entries are distinguishable only by position is unusable — you cannot say "search my school
+  // mail" to a list of anonymous refresh tokens, and you cannot tell which one to re-auth when one
+  // of them expires. The address comes from the token we just minted, so it cannot be wrong.
+  let email = '';
+  try {
+    oauth2.setCredentials(tokens);
+    const { google } = require('googleapis');
+    const prof = await google.gmail({ version: 'v1', auth: oauth2 }).users.getProfile({ userId: 'me' });
+    email = String((prof.data && prof.data.emailAddress) || '').toLowerCase();
+  } catch (e) { console.warn('⚠ Could not read the account address:', e.message); }
+
   // Store the refresh token in the VAULT when we can, so it never lands on disk in plaintext.
   let stored = tokens.refresh_token;
   let vaulted = false;
   if (electron && credentials.canStore()) {
-    try { stored = credentials.store('refreshToken', 'google', '', tokens.refresh_token); vaulted = true; } catch {}
+    const handleName = 'refreshToken' + (email ? '_' + email.replace(/[^a-z0-9]+/g, '_') : '');
+    try { stored = credentials.store(handleName, 'google', '', tokens.refresh_token); vaulted = true; } catch {}
   }
+
+  // ── APPEND, DO NOT REPLACE ─────────────────────────────────────────────────────────────────────
+  // This used to overwrite `config.google.refreshToken`, so connecting a second mailbox silently
+  // disconnected the first. Accounts are a list now. Re-running for an address already in the list
+  // REPLACES that entry — which is exactly what a re-auth after an expiry should do, and is why the
+  // match is on the address rather than on the token.
+  const prior = Array.isArray(g.accounts) ? g.accounts.slice() : [];
+  // A pre-multi-account config carried one token at the top level; carry it in as account one.
+  if (!prior.length && g.refreshToken) prior.push({ email: g.email || '', refreshToken: g.refreshToken, primary: true });
+
+  const at = email ? prior.findIndex((a) => String(a.email || '').toLowerCase() === email) : -1;
+  const entry = {
+    email,
+    label: (at >= 0 && prior[at].label) || email || ('account ' + (prior.length + 1)),
+    refreshToken: stored,
+    // The first mailbox connected becomes the one writes go to. Later ones do not take that over —
+    // silently moving where drafts are sent from is not something a re-auth should ever do.
+    primary: at >= 0 ? !!prior[at].primary : prior.length === 0,
+    // Triage is opt-in per account and a new account does not get it. Connecting an inbox for search
+    // and calendar must not, by itself, enrol it in something that proposes to archive mail.
+    triage: at >= 0 ? prior[at].triage === true : false,
+  };
+  if (at >= 0) prior[at] = entry; else prior.push(entry);
+  if (!prior.some((a) => a.primary)) prior[0].primary = true;
+
   // Keep the clientSecret exactly as it was (handle or literal) — never downgrade a vaulted secret.
-  config.google = { ...g, clientId: g.clientId || clientId, redirectUri: REDIRECT, refreshToken: stored };
+  config.google = { ...g, clientId: g.clientId || clientId, redirectUri: REDIRECT, accounts: prior };
+  delete config.google.refreshToken;      // migrated into accounts[]; leaving it would shadow the list
+  delete config.google.email;
   saveConfig(config);
 
-  console.log(`✓ Google connected. refresh_token ${vaulted ? 'stored in the vault' : 'saved (PLAINTEXT — run inside the app to vault it)'}.`);
+  console.log(`\n✓ Connected ${email || '(address unknown)'}${entry.primary ? '  [primary — writes go here]' : ''}.`);
+  console.log(`  refresh_token ${vaulted ? 'stored in the vault' : 'saved (PLAINTEXT — run inside the app to vault it)'}.`);
   console.log('  Scopes:', SCOPES.map((s) => s.split('/auth/')[1]).join(', '));
+  console.log(`\n  ${prior.length} account${prior.length === 1 ? '' : 's'} connected:`);
+  for (const a of prior) {
+    console.log(`    ${a.primary ? '●' : '○'} ${a.email || a.label}${a.primary ? '  (primary)' : ''}${a.triage ? '  · triage on' : ''}`);
+  }
+  console.log('\n  Run this again to add another. Mail triage is OFF for new accounts —');
+  console.log('  turn it on per account with config.google.accounts[].triage = true.\n');
 
-  // Prove it end-to-end rather than trusting the exchange.
+  // Prove it end-to-end rather than trusting the exchange. Verifies THIS account specifically:
+  // a fan-out that succeeded on a different mailbox would be a false pass.
   try {
     const gl = require(path.join(ROOT, 'lib', 'google'));
-    const r = await gl.gmailSearch('in:inbox', { limit: 1 });
-    if (r && r.success) console.log(`✓ Verified: Gmail responded (${r.count} message read back).`);
-    else console.warn('⚠ Saved, but the verification call failed:', (r && r.error) || 'unknown');
+    const r = await gl.gmailSearchOne('in:inbox', { limit: 1, account: email || 'primary' });
+    if (r && r.success) console.log(`✓ Verified: ${email || 'the account'} responded (${r.count} message read back).`);
+    else console.warn('⚠ Saved, but the verification call failed:', (r && r.error) || (r && r.reason) || 'unknown');
   } catch (e) { console.warn('⚠ Saved, but verification threw:', e.message); }
 
   if (process.versions.electron) { try { require('electron').app.exit(0); } catch {} }
