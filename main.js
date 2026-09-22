@@ -5969,6 +5969,51 @@ function getPublicHost() {
   return '';
 }
 
+/**
+ * Is that host actually reachable FROM OUTSIDE? A Tailscale MagicDNS name resolves perfectly inside
+ * the tailnet and not at all from Twilio's servers, and getPublicHost() returns it either way. That
+ * gap is what played "An application error has occurred" down the phone seven or eight times on
+ * 2026-09-21: the webhook URL was well-formed, pointed at a real machine, and could not be fetched
+ * by the one party that needed to fetch it.
+ *
+ * `tailscale funnel status` is the authority — it said "No serve config" the whole time. Cached for
+ * a minute so a burst of notifications does not shell out repeatedly.
+ */
+let _funnelCache = { at: 0, ok: false, why: '' };
+function publicHostReachable() {
+  const now = Date.now();
+  if (now - _funnelCache.at < 60000) return _funnelCache;
+  let ok = false, why = 'funnel not published — run `tailscale funnel 8788`';
+  try {
+    const out = require('child_process').execSync('tailscale funnel status 2>&1', { timeout: 4000 }).toString();
+    // "No serve config" is the literal string it prints when nothing is published.
+    if (!/no serve config/i.test(out) && /https:\/\//.test(out)) { ok = true; why = 'funnel published'; }
+  } catch (e) { why = 'could not read funnel status: ' + ((e && e.message) || e); }
+  _funnelCache = { at: now, ok, why };
+  if (!ok) console.warn('[voice] public webhook host is NOT reachable — ' + why);
+  return _funnelCache;
+}
+
+// ── THE CALL LEDGER ──────────────────────────────────────────────────────────────────────────────
+// A phone call was the only action with real-world consequences and no durable record: rstate.event
+// wrote into a state SNAPSHOT, so after the fact "why did it call me eight times" was unanswerable.
+// This is an append-only log, and it is also what the rate gate reads.
+const CALL_LOG = path.join(os.homedir(), '.bhatbot', 'calls.jsonl');
+function callHistory({ withinMs = 86400000 } = {}) {
+  try {
+    const cutoff = Date.now() - withinMs;
+    return fs.readFileSync(CALL_LOG, 'utf8').trim().split('\n')
+      .map((l) => { try { return JSON.parse(l); } catch { return null; } })
+      .filter((x) => x && x.at >= cutoff);
+  } catch { return []; }
+}
+function recordCall(entry) {
+  try {
+    fs.mkdirSync(path.dirname(CALL_LOG), { recursive: true });
+    fs.appendFileSync(CALL_LOG, JSON.stringify({ at: Date.now(), ...entry }) + '\n');
+  } catch {}
+}
+
 // ---------------------------------------------------------------------------
 // Fast planning preamble. For a non-trivial action request, BhatBot quickly drafts a short
 // plan, SPEAKS a one-line summary of it (read-out), shows the full checklist in the activity
@@ -7654,19 +7699,37 @@ function endVoiceCall(callSid) { if (callSid) voiceCalls.delete(callSid); }
 // `to` defaults to Siddhant's own phone (every existing caller relies on that). Passing an explicit
 // number is what lets the call button ring someone in his contacts instead — the conversation webhook
 // is identical either way, so a call to a third party is still a real two-way JARVIS conversation.
-async function twilioCall(message, { to, name } = {}) {
+async function twilioCall(message, { to, name, bypassGate = false } = {}) {
   const c = loadConfig();
   const target = to || c.myPhone;
   if (!c.twilioSid || !c.twilioToken || !c.twilioFrom || !target) {
     return { sent: false, error: 'Twilio not configured (twilioSid/twilioToken/twilioFrom/myPhone)' };
   }
+
+  // THE GATE. Seven or eight calls in one day, all of them broken, is the thing this prevents — and
+  // it refuses EARLY, on two consecutive failures, because a channel that just failed twice is
+  // broken rather than unheard. A refusal is not a silence: the caller downgrades to SMS/Telegram.
+  // bypassGate is for a call Siddhant asked for by name, which is not the runaway case.
+  if (!bypassGate) {
+    const gate = callgate.decide({ history: callHistory(), now: Date.now(), config: (c.calls || {}) });
+    if (!gate.allow) {
+      recordCall({ to: target, name: name || null, ok: false, blocked: true, reason: gate.reason });
+      console.warn('[call] refused — ' + gate.reason);
+      return { sent: false, blocked: true, downgrade: gate.downgrade || 'sms', error: 'call gate: ' + gate.reason };
+    }
+  }
+
   let twilio;
   try { twilio = require('twilio'); } catch { return { sent: false, error: 'twilio package not installed (npm i twilio)' }; }
   const client = twilio(c.twilioSid, c.twilioToken);
   const greeting = String(message).slice(0, 600);
   const host = getPublicHost();
+  // A host we cannot prove is reachable is worse than no host at all, because the two-way branch
+  // SKIPS the one-shot fallback — which needs no webhook and would have delivered every one of
+  // those eight messages perfectly.
+  const reach = host ? publicHostReachable() : { ok: false, why: 'no public host' };
   try {
-    if (host && c.mcpToken) {
+    if (host && c.mcpToken && reach.ok) {
       // Two-way: point Twilio at our webhook, which plays the JARVIS voice + gathers speech.
       // machineDetection=DetectMessageEnd → if voicemail answers, the webhook fires at the
       // BEEP with AnsweredBy=machine_end_*, and /voice/incoming leaves a JARVIS-voice
@@ -7677,14 +7740,22 @@ async function twilioCall(message, { to, name } = {}) {
         machineDetection: 'DetectMessageEnd', machineDetectionTimeout: 30,
         statusCallback: `https://${host}/voice/${c.mcpToken}/status`, statusCallbackEvent: ['completed']
       });
+      recordCall({ to: target, name: name || null, ok: true, via: 'twilio-conversation', sid: call.sid });
       return { sent: true, via: 'twilio-conversation', sid: call.sid, to: target, name: name || null };
     }
-    // Fallback: one-shot announcement (no public host to host the conversation webhook).
+    // ONE-SHOT ANNOUNCEMENT. The message is embedded in the TwiML, so Twilio never has to fetch
+    // anything from us — which is exactly why it works when the funnel is down, and why taking this
+    // branch is the fix rather than the degradation. It is one-way: he hears it, he cannot reply.
     const safe = greeting.replace(/[<>&]/g, ' ');
     const twiml = '<Response><Say voice="Google.en-US-Neural2-D">' + safe + '</Say></Response>';
     const call = await client.calls.create({ twiml, to: target, from: c.twilioFrom });
-    return { sent: true, via: 'twilio', sid: call.sid, to: target, name: name || null };
-  } catch (e) { return { sent: false, error: e.message }; }
+    recordCall({ to: target, name: name || null, ok: true, via: 'twilio', sid: call.sid, oneWay: true, why: reach.why });
+    return { sent: true, via: 'twilio', sid: call.sid, to: target, name: name || null,
+      oneWay: true, note: host ? `one-way announcement — two-way needs the funnel up (${reach.why})` : 'one-way announcement — no public host' };
+  } catch (e) {
+    recordCall({ to: target, name: name || null, ok: false, error: e.message });
+    return { sent: false, error: e.message };
+  }
 }
 
 // phone_mirror tool backend — operate Siddhant's iPhone via macOS iPhone Mirroring. The actual
@@ -7896,7 +7967,16 @@ async function notifyUser(message, urgency, opts = {}) {
       return done(s.sent ? { ...s, downgraded: 'quiet-hours' } : { sent: true, via: 'telegram', smsError: s.error, downgraded: 'quiet-hours' });
     }
     const r = await twilioCall(msg);
-    telegramNotify((r.sent ? '📞 (called you) ' : '📞 (call failed → ') + msg + (r.sent ? '' : ') ' + (r.error || '')));
+    if (r.blocked) {
+      // REFUSED, NOT SILENCED. The gate exists to stop a broken channel being redialled, not to
+      // withhold an urgent message — so it goes out by the next loudest channel and SAYS it was
+      // meant to be a call, which is the part that would otherwise be lost.
+      const s = await twilioSMS('🔴 (BhatBot tried to CALL you; ' + r.error + ') ' + msg);
+      telegramNotify('📵 (call gated → SMS) ' + msg + '  [' + r.error + ']');
+      return done(s.sent ? { ...s, downgraded: 'call-gate' } : { sent: true, via: 'telegram', smsError: s.error, downgraded: 'call-gate' });
+    }
+    // A one-way announcement got through but he cannot answer it, so the written copy still matters.
+    telegramNotify((r.sent ? (r.oneWay ? '📞 (called you — one-way announcement) ' : '📞 (called you) ') : '📞 (call failed → ') + msg + (r.sent ? '' : ') ' + (r.error || '')));
     return done(r.sent ? r : { sent: true, via: 'telegram', callError: r.error });
   }
 
@@ -8067,6 +8147,7 @@ const { createCommands } = require('./lib/commands');
 const commands = createCommands({ log: (m) => console.log(m) });
 const { createWeaver } = require('./lib/weaver');
 const { createTriageRun } = require('./lib/triagerun');
+const callgate = require('./lib/callgate');
 let _triageRun = null;
 function triageRunner() {
   if (!_triageRun) _triageRun = createTriageRun({ google, actionLog, config: triageCfg(), log: (m) => console.log(m) });
@@ -10756,7 +10837,9 @@ ipcMain.handle('place-call', async (_e, { to, name, message } = {}) => {
     : `Hello${name ? ', ' + String(name).split(/\s+/)[0] : ''}. This is BhatBot, calling on behalf of Siddhant. How can I help?`);
   sendToActivity('tool-update', { type: 'thinking', text: `📞 calling ${name || target}…` });
   try {
-    const r = await twilioCall(greeting, { to: target, name });
+    // Siddhant pressed CALL, or named someone to ring. That is not the runaway case the gate guards
+    // against, and refusing a call he explicitly asked for would be the gate overreaching.
+    const r = await twilioCall(greeting, { to: target, name, bypassGate: true });
     if (!r.sent) { sendToActivity('tool-update', { type: 'thinking', text: `📞 call failed: ${r.error}` }); return { ok: false, error: r.error }; }
     try { rstate.event('call', { to: target, name: name || null, via: r.via, sid: r.sid, self: isSelf }); } catch {}
     sendToActivity('tool-update', { type: 'thinking', text: `📞 ringing ${name || target} (${r.via === 'twilio-conversation' ? 'two-way' : 'announcement only'})` });

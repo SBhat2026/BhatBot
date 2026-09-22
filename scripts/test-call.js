@@ -85,13 +85,41 @@ ok(digitsOf(null) === '', 'digitsOf: null → ""');
 // ---- twilioCall targeting ----
 {
   const fn = main.slice(main.indexOf('async function twilioCall('), main.indexOf('// phone_mirror tool backend'));
-  ok(/async function twilioCall\(message, \{ to, name \} = \{\}\)/.test(fn), 'twilioCall: accepts an explicit target');
+  ok(/async function twilioCall\(message, \{ to, name[^)]*\} = \{\}\)/.test(fn), 'twilioCall: accepts an explicit target');
+
+  // ── THE SEVEN-CALL DAY ──────────────────────────────────────────────────────────────────────
+  // 2026-09-21: seven or eight calls, every one playing "An application error has occurred."
+  // The policy itself is tested in test-callgate.js; these assert it is actually WIRED here, since
+  // a gate nothing calls is decoration.
+  ok(/callgate\.decide\(/.test(fn), 'twilioCall: consults the rate gate before dialling');
+  ok(/bypassGate/.test(fn), 'twilioCall: a call Siddhant explicitly asked for can bypass the gate');
+  ok(/recordCall\(/.test(fn), 'twilioCall: every outcome is written to the durable call ledger');
+
+  // THE ROOT CAUSE. The two-way branch is taken only when the host is PROVEN reachable. A Tailscale
+  // MagicDNS name resolves inside the tailnet and not from Twilio, and taking that branch on an
+  // unreachable host skips the one-shot fallback — which needs no webhook and works.
+  ok(/publicHostReachable\(\)/.test(fn), 'twilioCall: proves the webhook host is reachable from outside');
+  ok(/if \(host && c\.mcpToken && reach\.ok\)/.test(fn),
+    'twilioCall: two-way requires a REACHABLE host, not merely a hostname');
+  ok(/oneWay: true/.test(fn), 'twilioCall: the announcement fallback says it is one-way');
+
   ok(/const target = to \|\| c\.myPhone/.test(fn), 'twilioCall: DEFAULTS to myPhone (every existing caller depends on this)');
   ok(!/to: c\.myPhone/.test(fn), 'twilioCall: no longer hardcodes myPhone as the dialed number');
   // Both real dial sites — the conversation webhook path and the one-shot announcement fallback.
   const dialSites = (fn.match(/calls\.create\(\{[\s\S]{0,200}?to: target/g) || []).length;
   ok(dialSites === 2, `twilioCall: BOTH dial paths use the target (found ${dialSites})`);
   ok(/machineDetection/.test(fn), 'twilioCall: voicemail detection is preserved on the two-way path');
+
+  const gph = main.slice(main.indexOf('function publicHostReachable('), main.indexOf('const CALL_LOG'));
+  ok(/no serve config/i.test(gph), 'publicHostReachable: reads tailscale funnel status, which is the authority');
+}
+
+// ---- the gate is consulted by the notify path, and a refusal still delivers ----
+{
+  const n = main.slice(main.indexOf("if (urgency === 'call')"), main.indexOf("if (urgency === 'high'"));
+  ok(/r\.blocked/.test(n), 'notifyUser: handles a gated call rather than treating it as sent');
+  ok(/twilioSMS\(/.test(n) && /downgraded: 'call-gate'/.test(n),
+    'notifyUser: a gated call DOWNGRADES to SMS — the gate is a cap, never a mute');
 }
 
 // ---- the place-call handler ----
