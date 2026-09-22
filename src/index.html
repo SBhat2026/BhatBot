@@ -205,6 +205,10 @@
   #synapse-panel .sy-btn { background: var(--surface); border: 1px solid var(--line); color: var(--text-dim); border-radius: 7px; padding: 4px 10px; font-size: 11.5px; cursor: pointer; }
   #synapse-panel .sy-btn:hover { color: var(--text); border-color: var(--accent-dim); }
   #sy-body { position: relative; flex: 1; min-height: 0; }
+  #sy-empty { position: absolute; inset: 0; display: none; align-items: center; justify-content: center;
+    text-align: center; padding: 0 32px; color: var(--text-dim); font-size: 12.5px; letter-spacing: .04em; pointer-events: none; }
+  #sy-empty b { color: var(--accent); font-weight: 600; }
+  #sy-body.is-empty #sy-empty { display: flex; }
   #sy-canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; cursor: grab; }
   #sy-3d { position: absolute; inset: 0; display: none; }
   #synapse-panel.mode3d #sy-canvas { display: none; }
@@ -436,11 +440,18 @@
   body.convo #dot { box-shadow: 0 0 10px var(--accent); }
 
   /* ===== voice stage (center column of the COMMAND grid) ===== */
-  #vstage { display: none; flex: 1; min-height: 0; flex-direction: column; align-items: center;
+  #vstage { display: flex; flex: 1; min-height: 0; flex-direction: column; align-items: center;
     justify-content: center; gap: 18px; padding: 14px 16px; position: relative; }
+  /* When the transcript is up the orb yields the room but does not leave it: it keeps the top of
+     the column at a size where the rings and the waveform still read, and the text scrolls beneath.
+     The orb is what tells you what the machine is DOING; a transcript that replaces it costs you
+     that at exactly the moment you are reading about it. */
+  #cmd-center.with-transcript #vstage { flex: 0 0 auto; gap: 10px; padding: 10px 12px 6px; }
+  #cmd-center.with-transcript #orb { width: 132px; height: 132px; }
+  #cmd-center.with-transcript #vhint { display: none; }
+  #cmd-center.with-transcript #chat { flex: 1; min-height: 0; border-top: 1px solid var(--line); }
   #vstage::before { content: ''; position: absolute; inset: 0; pointer-events: none;
     background: radial-gradient(circle at 50% 42%, rgba(var(--accent-rgb), .10), transparent 60%); }
-  #cmdstage.l2 #orb { transform: scale(.82); margin: -18px 0; }
   #txbtn { display: none; }
   body.voicefirst #txbtn { display: flex; }
   body.voicefirst.show-transcript #txbtn { color: var(--accent); border-color: var(--accent); }
@@ -709,8 +720,22 @@
      bottom telemetry). Same DOM, grid-areas swap. Agent can refocus a column via hud_control.
      ============================================================================================ */
   #cmdstage { flex: 1; min-height: 0; padding: 14px 16px; display: grid; gap: 14px; }
-  #cmdstage.l1 { grid-template: "cleft ccenter cright" 1fr / 290px minmax(0,1fr) 330px; }
-  #cmdstage.l2 { grid-template: "ccenter cright" 1fr "cleft cleft" auto / 320px minmax(0,1fr); }
+  /* THE CENTRE IS THE SUBJECT OF THIS SCREEN, so it stops being the column that pays for the
+     others. With fixed 290px and 330px flanks, everything the window lost came out of the middle:
+     at 824px wide the orb's column was 144px and the orb — 232px across — had nowhere to be, which
+     is why the centre of the COMMAND view was empty. The flanks may now shrink to their own legible
+     minimum first, and the centre holds a full orb plus its margins before anything else gives. */
+  #cmdstage.l1 { grid-template-areas: "cleft ccenter cright";
+                 grid-template-columns: minmax(196px, 290px) minmax(300px, 1.3fr) minmax(212px, 330px);
+                 grid-template-rows: 1fr; }
+  /* Below this the three columns cannot all be honest, so the flanks stack under the stage rather
+     than crushing it. The orb keeps the full width; vitals, jobs, feed and fleet share the row. */
+  @media (max-width: 1080px) {
+    #cmdstage.l1 { grid-template-areas: "ccenter ccenter" "cleft cright";
+                   grid-template-columns: 1fr 1fr; grid-template-rows: minmax(300px, 1fr) auto; }
+    #cmd-left, #cmd-right { flex-direction: row; }
+    #cmd-left > .hcard, #cmd-right > .hcard { flex: 1; min-height: 128px; }
+  }
   /* agent focus: enlarge one column (coarse, layout-01 basis; 02 keeps its shape) */
   #cmdstage.l1.focus-media { grid-template-columns: 240px minmax(0,.8fr) minmax(0,1.1fr); }
   #cmdstage.l1.focus-jobs  { grid-template-columns: 420px minmax(0,1fr) 260px; }
@@ -718,9 +743,6 @@
   #cmd-left   { grid-area: cleft;   display: flex; flex-direction: column; gap: 14px; min-height: 0; min-width: 0; }
   #cmd-center { grid-area: ccenter; display: flex; flex-direction: column; min-height: 0; min-width: 0; position: relative; }
   #cmd-right  { grid-area: cright;  display: flex; flex-direction: column; gap: 14px; min-height: 0; min-width: 0; }
-  #cmdstage.l2 #cmd-left { flex-direction: row; }
-  #cmdstage.l2 #cmd-left > .hcard { flex: 1; min-height: 132px; }
-  #cmdstage.l2 #cmd-center { border: 1px solid var(--line); border-radius: 6px; background: var(--surface); overflow: hidden; }
   /* HUD cards */
   .hcard { border: 1px solid var(--line); border-radius: 6px; background: var(--surface); padding: 13px 14px;
     display: flex; flex-direction: column; min-height: 0; }
@@ -776,12 +798,18 @@
   #cmd-layouts .cl-seg span { padding: 4px 11px; cursor: pointer; color: var(--text-dim); transition: .12s; }
   #cmd-layouts .cl-seg span + span { border-left: 1px solid var(--accent-dim); }
   #cmd-layouts .cl-seg span.on { background: rgba(var(--accent-rgb), .10); color: var(--accent); }
-  /* waveform strip under the caption (cosmetic; brightens while listening/speaking) */
+  /* Waveform strip under the caption. It has TWO modes and the distinction matters: while the mic
+     analyser is running the bars are the actual signal (class `live`, heights written per frame from
+     the VAD buffer), and the CSS animation is switched off so the two cannot fight. Without a mic —
+     no permission, window hidden, VAD unavailable — it falls back to the idle animation, which is
+     decoration and is dimmer on purpose. A waveform that moves when nothing is being said is a lie
+     about whether you are being heard. */
   #wavebars { display: flex; align-items: flex-end; gap: 3px; height: 26px; opacity: .3; transition: opacity .4s; flex-shrink: 0; }
-  #wavebars[data-state="speaking"], #wavebars[data-state="listening"] { opacity: 1; }
+  #wavebars[data-state="speaking"], #wavebars[data-state="listening"], #wavebars.live { opacity: 1; }
   #wavebars span { width: 3px; height: 5px; background: var(--accent); border-radius: 2px;
     box-shadow: 0 0 6px var(--accent); animation: bbwave 1.1s ease-in-out infinite; }
   #wavebars[data-state="idle"] span { animation-play-state: paused; }
+  #wavebars.live span { animation: none; transition: height .05s linear; }
   @keyframes bbwave { 0%,100% { height: 5px; opacity: .5; } 50% { height: 24px; opacity: 1; } }
 
   /* (old voice-first hover rail + drawers removed — the permanent #rail + stage panels replaced them) */
@@ -1303,10 +1331,6 @@
       <div id="command-home">
         <div class="stage-head">
           <span class="sh-t">⚛ COMMAND · VOICE INTERFACE</span>
-          <div id="cmd-layouts">
-            <span class="cl-lab">LAYOUT</span>
-            <div class="cl-seg"><span id="cl-1" class="on" title="Symmetric flanking panels">01</span><span id="cl-2" title="Wide hologram stage">02</span></div>
-          </div>
         </div>
         <div id="cmdstage" class="l1">
           <div id="cmd-left">
@@ -1497,7 +1521,13 @@
       </span>
       <span class="panel-back" data-back>← Command</span>
     </div>
-    <div id="sy-body">
+    <div id="sy-body" class="is-empty">
+      <!-- An empty graph and a broken graph look identical: a blank field. SYNAPSE draws nothing
+           until the second brain has nodes, and the second brain is built by a background worker
+           that can silently not be running — which is exactly how it went unnoticed for weeks that
+           ~/.bhatbot/brain/ did not exist at all. So the empty case says what it is and what to do,
+           the way the office says "no agents deployed" rather than showing an empty room. -->
+      <div id="sy-empty"><span>Nothing in the second brain yet — press <b>⟳ Build</b> to import memory and find connections.</span></div>
       <canvas id="sy-canvas"></canvas>
       <div id="sy-3d"></div>
       <div id="sy-suggest" class="empty">
@@ -1596,6 +1626,33 @@
 
 
 <script>
+/* ── THE PRELOAD BRIDGE, WHEN THERE ISN'T ONE ─────────────────────────────────────────────────────
+ * This file is ~3,000 lines of renderer script hanging off `window.bhatbot`, the preload bridge.
+ * Outside Electron that object does not exist, and the FIRST unguarded `window.bhatbot.onX(...)` —
+ * line 1947, `onToolUpdate` — throws and takes every initializer after it with it. Silently: no
+ * visible error, just a HUD with pieces missing. That is how the waveform's 30 bars came to be
+ * never created, and how the empty centre panel went unnoticed long enough to be reported as a
+ * design complaint rather than as a crash.
+ *
+ * So: when the bridge is entirely absent, stand in for it. `on*` handlers register nothing, every
+ * other call resolves to null, and the layout renders — which is what makes it possible to open
+ * src/index.html in a plain browser and SEE the interface, instead of reasoning about CSS by
+ * reading it. Installed only when `window.bhatbot` is missing altogether, never over a real bridge
+ * that is merely missing a method, and it says so in the console so a preload that failed to load
+ * inside Electron can never be mistaken for this.
+ */
+if (typeof window.bhatbot === 'undefined') {
+  console.warn('[bhatbot] no preload bridge — running in VIEW-ONLY mode. Layout and theming are real; nothing is wired to the app.');
+  window.bhatbot = new Proxy({}, {
+    get: (_t, k) => {
+      if (k === 'then' || typeof k === 'symbol') return undefined;   // never look like a thenable
+      return /^on[A-Z]/.test(String(k)) ? () => {} : async () => null;
+    },
+    has: () => true,
+  });
+  document.documentElement.setAttribute('data-viewonly', '1');
+}
+
 /* ── CANVAS COLOUR ────────────────────────────────────────────────────────────────────────────────
  * Canvas takes CSS colour STRINGS, not custom properties: `rgba(${accentRGB()}, .5)` is simply an
  * unparseable colour and the draw throws. These canvases used to hardcode the cyan, which is why
@@ -2264,14 +2321,22 @@ let curPanel = 'chat';
 // Centralized so it cooperates with the panel switcher's inline display writes.
 function applyStageVisibility() {
   const onChat = curPanel === 'chat';
-  const vf = voiceFirst && !document.body.classList.contains('show-transcript');
-  // Voice-first: the orb stage is the persistent HOME and stays visible BEHIND any summoned drawer.
-  // A non-chat panel (except the docked Code terminal) opens as a drawer over it → body.drawer-open.
-  const drawer = vf && !onChat && curPanel !== 'code';
+  // THE ORB IS ALWAYS THERE. It used to be shown only when `voiceFirst` was on — and voiceFirst
+  // defaults to off — so the centre column of the COMMAND view was empty on a fresh install and the
+  // orb was a mode you had to know to switch into. Whether replies are SPOKEN or PRINTED is a
+  // different question from whether the machine shows you what it is doing, and only the first of
+  // those is what voiceFirst is for.
+  //
+  // So: the orb stage is the centre panel. The transcript shares the column with it whenever there
+  // is text to read — which is any time replies are printed, or any time 📄 is pressed — and the orb
+  // shrinks to make room rather than disappearing.
+  const wantTranscript = !voiceFirst || document.body.classList.contains('show-transcript');
+  const drawer = !onChat && curPanel !== 'code';
   document.body.classList.toggle('drawer-open', drawer);
-  const showStage = vf;                                   // orb always shown in voice-first
-  $('#vstage').style.display = showStage ? 'flex' : 'none';
-  $('#chat').style.display = (onChat && !showStage) ? 'flex' : 'none';
+  const center = document.getElementById('cmd-center');
+  if (center) center.classList.toggle('with-transcript', wantTranscript);
+  $('#vstage').style.display = 'flex';
+  $('#chat').style.display = wantTranscript ? 'flex' : 'none';
 }
 // OpenAI key: SET is not the same question as WORKS. `Test` runs a real embedding call and reports
 // which backend answered, so a silently-dead key is visible instead of inferred.
@@ -2514,6 +2579,9 @@ window.bhatbot.onStudioReload && window.bhatbot.onStudioReload(() => reloadStudi
     reheat(0.5);   // graph changed → nudge the layout, don't restart it
     G.nodes = (g.nodes || []).map((n) => { const p = prev[n.id] || {}; const node = { ...n, x: p.x != null ? p.x : (Math.random() * 400 - 200), y: p.y != null ? p.y : (Math.random() * 300 - 150), vx: 0, vy: 0 }; byId[n.id] = node; return node; });
     G.edges = (g.edges || []).filter((e) => byId[e.from] && byId[e.to]);
+    // An empty graph draws nothing, which is indistinguishable from a panel that failed to load.
+    // Say which, on every ingest, so the answer is never inferred from a blank canvas.
+    try { document.getElementById('sy-body').classList.toggle('is-empty', !G.nodes.length); } catch {}
     recomputeDegree();          // hover explains a node's ROLE, which is degree-relative
     invalidate();               // new data always earns one repaint, settled or not
 
@@ -4309,12 +4377,14 @@ async function startVad() {
       if (vadCalibrating) vadCalib.push(rms);
       userSpeaking = rms > noiseFloor * margin + 0.002;
       if (userSpeaking) lastUserSpeechTs = Date.now();
+      paintWave(vadBuf);                        // the same samples the gate reads — one mic, one truth
       vadRAF = requestAnimationFrame(loop);
     };
     loop();
   } catch { /* VAD is best-effort; endpointing falls back to the Web-Speech timer */ }
 }
 function stopVad() {
+  try { resetWave(); } catch {}          // the bars must not freeze mid-syllable when the mic closes
   if (vadRAF) cancelAnimationFrame(vadRAF); vadRAF = 0;
   if (vadStream) { try { vadStream.getTracks().forEach((t) => t.stop()); } catch {} vadStream = null; }
   if (vadCtx) { try { vadCtx.close(); } catch {} vadCtx = null; }
@@ -4409,11 +4479,39 @@ function initWake() {
   tick(); setInterval(tick, 1000);
 })();
 
-// Waveform strip under the caption — 30 bars with staggered delays (cosmetic; state set by setOrbState).
+// ── THE WAVEFORM ─────────────────────────────────────────────────────────────────────────────────
+// 30 bars. While the mic analyser is running they are the SIGNAL, not an animation: paintWave is
+// called from the VAD's existing requestAnimationFrame loop with the same Float32 buffer the speech
+// gate reads, so what you see on screen and what the endpointer believes you said are the same
+// samples. No second getUserMedia — a mic opened twice is a mic the OS shows as in use twice.
+//
+// Bars are peak-per-segment rather than RMS-per-segment. RMS across 34 samples flattens speech into
+// an almost-constant bar and looks synthetic; peak keeps the consonants.
+let wbBars = [];
 (() => {
   const wb = $('#wavebars'); if (!wb) return;
   for (let i = 0; i < 30; i++) { const s = document.createElement('span'); s.style.animationDelay = (i * 0.06).toFixed(2) + 's'; wb.appendChild(s); }
+  wbBars = [...wb.children];
 })();
+function paintWave(buf) {
+  const wb = $('#wavebars');
+  if (!wb || !wbBars.length || !buf || !buf.length) return;
+  if (!wb.classList.contains('live')) wb.classList.add('live');
+  const seg = Math.floor(buf.length / wbBars.length);
+  for (let i = 0; i < wbBars.length; i++) {
+    let peak = 0;
+    for (let j = i * seg; j < (i + 1) * seg; j++) { const v = buf[j] < 0 ? -buf[j] : buf[j]; if (v > peak) peak = v; }
+    // × 6 because conversational speech peaks around 0.15–0.25 and a bar that never leaves the floor
+    // tells you nothing. Clamped, so a door slam does not blow the strip out of its 26px row.
+    wbBars[i].style.height = (5 + Math.min(1, peak * 6) * 19).toFixed(1) + 'px';
+  }
+}
+/** Hand the strip back to its idle animation — called when the analyser stops. */
+function resetWave() {
+  const wb = $('#wavebars'); if (!wb) return;
+  wb.classList.remove('live');
+  for (const b of wbBars) b.style.height = '';
+}
 
 // Live system vitals → COMMAND gauges + status-bar telemetry line. Cheap poll; skipped while hidden.
 (() => {
@@ -4439,33 +4537,31 @@ function initWake() {
   poll(); setInterval(poll, 3000);
 })();
 
-// COMMAND layout 01/02 (persisted) + agent-driven focus (hud_control tool).
+// COMMAND focus (hud_control tool). There used to be a 01/02 layout toggle here as well; layout 02
+// folded the flanking panels into a row under a wide stage, which is the same information in a worse
+// arrangement, and having two answers to "where do things live" meant neither could be tuned. The
+// triple panel is the layout. `focus` remains, because narrowing the columns toward whichever one
+// matters right now is a different thing from having a second floor plan.
 const cmdStage = $('#cmdstage');
-function setCmdLayout(n) {
-  if (!cmdStage) return;
-  n = n === 2 ? 2 : 1;
-  cmdStage.classList.toggle('l1', n === 1); cmdStage.classList.toggle('l2', n === 2);
-  const b1 = $('#cl-1'), b2 = $('#cl-2');
-  if (b1) b1.classList.toggle('on', n === 1); if (b2) b2.classList.toggle('on', n === 2);
-  try { localStorage.setItem('cmdLayout', String(n)); } catch {}
-}
 function setCmdFocus(f) {
   if (!cmdStage) return;
   cmdStage.classList.remove('focus-media', 'focus-jobs', 'focus-orb');
   if (f && f !== 'reset') cmdStage.classList.add('focus-' + f);
 }
-$('#cl-1') && $('#cl-1').addEventListener('click', () => setCmdLayout(1));
-$('#cl-2') && $('#cl-2').addEventListener('click', () => setCmdLayout(2));
-try { setCmdLayout(Number(localStorage.getItem('cmdLayout')) || 1); } catch { setCmdLayout(1); }
+try { localStorage.removeItem('cmdLayout'); } catch {}   // a persisted 2 must not resurrect a layout that no longer exists
 
 // hud_control tool → the agent reshapes the HUD to fit the work (panel / layout / focus).
-window.bhatbot.onHudCommand && window.bhatbot.onHudCommand((c) => {
+// `window.bhatbot &&` and not just `window.bhatbot.onHudCommand &&`: the guard was reading a
+// property OFF an object that does not exist outside Electron, so it threw rather than short-
+// circuited, and everything later in this script block — including the waveform's own bars — never
+// ran. That is invisible in the app and total anywhere else, which is precisely the combination
+// that makes it worth one extra term.
+window.bhatbot && window.bhatbot.onHudCommand && window.bhatbot.onHudCommand((c) => {
   if (!c) return;
   try {
-    if (c.layout) setCmdLayout(Number(c.layout));
-    if (c.focus) setCmdFocus(c.focus);
+    if (c.focus) setCmdFocus(c.focus);   // c.layout is accepted and ignored — there is one layout now
     if (c.panel) showPanel(c.panel);
-    actLog('🖥 hud: ' + [c.panel && 'panel→' + c.panel, c.layout && 'layout→' + c.layout, c.focus && 'focus→' + c.focus].filter(Boolean).join(' · '));
+    actLog('🖥 hud: ' + [c.panel && 'panel→' + c.panel, c.focus && 'focus→' + c.focus].filter(Boolean).join(' · '));
   } catch {}
 });
 
