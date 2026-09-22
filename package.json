@@ -136,7 +136,8 @@
     "test:custodian": "node scripts/test-custodian.js",
     "test:pairing": "node scripts/test-wire-pairing.js",
     "test:turnloop": "node scripts/test-turnloop-live.js",
-    "test:multiaccount": "node scripts/test-multiaccount.js"
+    "test:multiaccount": "node scripts/test-multiaccount.js",
+    "google:probe": "electron scripts/google-probe.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
