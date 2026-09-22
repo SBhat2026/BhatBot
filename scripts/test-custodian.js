@@ -8,6 +8,8 @@
 // permanently on day two, and then it is protecting nothing.
 
 const assert = require('assert');
+const fs = require('fs');
+const path = require('path');
 const cd = require('../lib/custodian');
 
 let pass = 0;
@@ -242,6 +244,24 @@ async function main() {
   }
   ok(`all ${Object.keys(cd.TRIGGERS).length} triggers explain themselves in plain words`);
 }
+
+
+  // ── IS IT ACTUALLY WIRED? ──────────────────────────────────────────────────────────────────────
+  // It was not. The Custodian was built, tested and committed, and required by nothing — which made
+  // it an idea rather than a check, and left every fleet deliverable going back to Siddhant with
+  // nobody having asked whether it answered the question. These assert the SEAM, because a unit test
+  // of a module nothing calls passes forever while the feature does not exist.
+  {
+    const main = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
+    assert.ok(/require\('\.\/lib\/custodian'\)/.test(main), 'main.js must actually require it');
+    const fleet = main.slice(main.indexOf("case 'deploy_drones'"), main.indexOf("case 'find_papers'"));
+    assert.ok(/custodian\.review\(/.test(fleet), 'the review runs on the fan-out path, where deliverables come back');
+    assert.ok(/custodian: custody/.test(fleet),
+      'the verdict is RETURNED to the model — a check whose result the decider never sees is not a check');
+    assert.ok(/synthesis, synthesisError,/.test(fleet),
+      'the deliverable still goes back alongside the verdict, never replaced by it');
+    ok('the Custodian is wired onto the fleet deliverable path and its verdict reaches the model');
+  }
 
   console.log(`\n✅ custodian: ${pass} groups passed`);
 }

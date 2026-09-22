@@ -5148,12 +5148,45 @@ async function executeTool(name, input) {
           }
         }
         sendToActivity('tool-update', { type: 'thinking', text: `🛩 fleet back: ${out.launched} launched, ${out.reaped} reaped, $${out.totalSpend.toFixed(3)}` });
+
+        // ── THE CUSTODIAN ──────────────────────────────────────────────────────────────────────
+        // The last thing between a fan-out and Siddhant being told it is done. lib/custodian.js has
+        // existed, tested, for as long as the fleet has — and was wired into nothing, which made it
+        // an idea rather than a check. This is the seam it was written for: a mission went out,
+        // something came back, and the question "does this actually answer what was asked?" has to
+        // be asked by someone before the answer is presented as one.
+        //
+        // It degrades the right way. With no judge it runs only its deterministic checks and accepts
+        // anything it cannot disprove, because a reviewer that blocks when it cannot think is worse
+        // than no reviewer. Its verdict is ATTACHED, never substituted: the drone reports and the
+        // synthesis go back either way, and a SENDBACK or ASK rides alongside them as a caveat.
+        let custody = null;
+        try {
+          const contradictions = out.results
+            .filter((r) => r.status === 'ok' && r.summary)
+            .map((r) => r.summary);
+          custody = await custodian.review({
+            prompt: mission,
+            deliverable: synthesis || out.results.map((r) => r.summary).filter(Boolean).join('\n\n'),
+            trace: out.results.map((r) => `${r.persona}: ${r.status}`),
+            autonomous: true,          // a tool call has nobody waiting at a prompt to answer a question
+            contradictions: contradictions.length >= 2 && input.overlaps ? contradictions : [],
+          });
+          if (custody && custody.verdict !== custodian.ACCEPT) {
+            sendToActivity('tool-update', { type: 'thinking', text: `🔍 custodian: ${custody.verdict} — ${custody.reason || custody.question || ''}` });
+            try { board.post({ agent: 'CUSTODIAN', kind: 'need', text: `${custody.verdict}: ${custody.reason || custody.question || ''}`.slice(0, 280) }); } catch {}
+          }
+        } catch (e) { custody = { verdict: 'error', reason: 'custodian threw: ' + e.message }; }
+
         try { speakDesktop(`<speak>The fleet's back — summary on screen.</speak>`); } catch {}
         result = {
           success: true, mission, board_file: board.file, run_file: out.runFile || null,
           drones: out.results.map((r) => ({ persona: r.persona, status: r.status, summary: r.summary, spend: r.spend, reaped: !!r.reaped })),
           totalSpend: out.totalSpend, launched: out.launched, reaped: out.reaped, envelopeExceeded: out.envelopeExceeded,
           synthesis, synthesisError,
+          // The model sees the verdict and must relay a non-ACCEPT rather than presenting the
+          // synthesis as settled. A check whose result is not shown to the decider is not a check.
+          custodian: custody ? { verdict: custody.verdict, reason: custody.reason || null, question: custody.question || null, missing: custody.missing || null } : null,
         };
         break;
       }
@@ -8173,6 +8206,13 @@ const commands = createCommands({ log: (m) => console.log(m) });
 const { createWeaver } = require('./lib/weaver');
 const { createTriageRun } = require('./lib/triagerun');
 const callgate = require('./lib/callgate');
+const { createCustodian } = require('./lib/custodian');
+// Deterministic checks only for now: no judge is injected, so it accepts anything it cannot
+// disprove for free. Wiring a judge is a separate decision with a per-review cost attached.
+const custodian = createCustodian({
+  log: (m) => console.log('[custodian] ' + m),
+  onEvent: (e) => { try { sendToActivity('tool-update', { type: 'thinking', text: '🔍 ' + (e && e.text ? e.text : JSON.stringify(e)) }); } catch {} },
+});
 const voicepreflight = require('./lib/voicepreflight');
 let _triageRun = null;
 function triageRunner() {
