@@ -84,9 +84,15 @@ check('file_tools', 'image op through the python belt', async () => {
   execFileSync(py, ['-c', `from PIL import Image; Image.new("RGB",(400,300),(11,110,140)).save("${src}")`], { timeout: 60000 });
   execFileSync(py, ['-c', `from PIL import Image; im=Image.open("${src}"); im.resize((100,75)).save("${dst}")`], { timeout: 60000 });
   const sz = fs.statSync(dst).size;
-  // The tool itself resolves a bare `python3`; say so when that differs from the one that works.
-  const bare = pythonWith('PIL') === 'python3';
-  return { evidence: `400x300 → 100x75 (${sz}B) via ${path.basename(py)}${bare ? '' : ' — NOTE: lib/filetools.js calls a bare `python3`'}` };
+
+  // AND THE TOOL MUST PICK THE SAME ONE. This check used to prove only that SOME interpreter on the
+  // machine could do the work, then note in passing that lib/filetools.js asked for a bare `python3`
+  // — which it flagged on every run for weeks without ever failing. Proving the tool resolves an
+  // interpreter that can actually import PIL is the assertion that was missing.
+  const ft = require(path.join(ROOT, 'lib', 'filetools'));
+  const chosen = ft.pythonBin();
+  if (!chosen.proven) throw new Error(`lib/filetools.js resolved ${chosen.bin}, which cannot import PIL (${chosen.why || 'unproven'})`);
+  return { evidence: `400x300 → 100x75 (${sz}B) — filetools resolves ${path.basename(chosen.bin)}, PIL proven` };
 });
 
 // ── the container lane ────────────────────────────────────────────────────────────────────────────
