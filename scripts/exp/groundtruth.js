@@ -22,6 +22,7 @@
 //                 | timeout: | req.setTimeout | .destroy() on a timer
 //   HIT        := networked AND NOT guarded
 const fs = require('fs');
+const vm = require('vm');
 const path = require('path');
 const LIB = path.join(__dirname, '..', '..', 'lib');
 
@@ -35,19 +36,29 @@ function scan(dir, prefix = '') {
     if (!d.name.endsWith('.js')) continue;
     const rel = prefix + d.name;
     const src = fs.readFileSync(path.join(dir, d.name), 'utf8');
+    // PARSE BEFORE JUDGING. This is a grep, and a grep will happily report a file as "guarded"
+    // because the word AbortSignal appears in a comment that a bad edit dropped into the middle of a
+    // template literal. That happened on 2026-09-21 while fixing these very files: two modules did
+    // not compile and this script said 0 unguarded. vm.Script parses without executing, so the
+    // number now means what it claims.
+    let parses = true;
+    try { new vm.Script(src, { filename: rel }); } catch { parses = false; }
     const networked = NET.test(src);
     if (!networked) continue;
-    out.push({ file: rel, guarded: GUARD.test(src) });
+    out.push({ file: rel, guarded: parses && GUARD.test(src), parses });
   }
   return out;
 }
 
 const all = scan(LIB);
+const broken = all.filter((x) => !x.parses).map((x) => x.file);
 const hits = all.filter((x) => !x.guarded).map((x) => x.file).sort();
 module.exports = { hits, networked: all.map((x) => x.file).sort(), all };
 
 if (require.main === module) {
   console.log(`lib/ modules that touch the network: ${all.length}`);
+  if (broken.length) console.log(`⚠ ${broken.length} DO NOT PARSE and are counted as unguarded: ${broken.join(', ')}`);
   console.log(`of those, UNGUARDED (the answer key): ${hits.length}\n`);
   for (const h of hits) console.log('  ' + h);
+  if (!hits.length) console.log('  (none — every networked module in lib/ has a deadline)');
 }

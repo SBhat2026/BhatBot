@@ -111,6 +111,7 @@ const _rim = new THREE.PointLight(0x4a7bd6, 0.7, 80); _rim.position.set(-8, 5, -
 const rim = _rim;
 const _officeMats = [];                                      // every office material, for the light themes
 let _officeRoot = null;                                      // the loaded office scene, for measurement
+const WHITE = new THREE.Color(0xffffff);                     // the neutral end of the room tint
 
 // ---- adaptive framing -----------------------------------------------------
 // ASPECT-AWARE. The old version derived the orbit radius from the room's footprint alone, ignoring
@@ -746,10 +747,19 @@ function applyPalette(t) {
   //
   // A TEXTURED material is therefore left at its authored white and lit rather than painted; only an
   // UNTEXTURED one — authored dark, and dark under a bright key reads as grey clay — gets lifted.
+  // THE ROOM BELONGS TO THE PALETTE. A textured material must not be painted (see above), but it can
+  // be TINTED: a light multiplier close to white keeps every value the atlas encodes and still casts
+  // the whole room toward the active accent, so the office reads as part of the day / standby / night
+  // identity instead of being the one neutral surface in all three. 0.14 is the most it takes before
+  // the grid starts looking dyed rather than lit — the accent is a strong colour and the texture is
+  // near-white, so a little of it goes a long way.
+  const TINT = 0.14;
+  const roomTint = hex(PALETTE.accent).clone().lerp(WHITE, 1 - TINT);      // ≈ white, faintly accented
   for (const m of _officeMats) {
     const base = m.userData.__base || m.color;
     const textured = !!m.map;
-    m.color.copy(light && !textured ? base.clone().lerp(hex(PALETTE.surface), 0.5) : base);
+    if (textured) m.color.copy(light ? roomTint : base);
+    else m.color.copy(light ? base.clone().lerp(hex(PALETTE.surface), 0.5) : base);
     if ('metalness' in m) m.metalness = light ? 0.04 : 0.4;
     if ('roughness' in m) m.roughness = light ? 0.86 : 0.5;
   }
