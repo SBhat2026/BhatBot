@@ -55,3 +55,22 @@ worked example — the same defect, fixed, after a 20s hang took the morning bri
 
 `groundtruth.js` counts a file as guarded once ANY of the guard tokens appear in it, so
 re-running it after a fix is a real check only if every call site in that file was fixed.
+
+---
+
+## Still open: Google OAuth
+
+`lib/google.js` reports `invalid_grant` — the Gmail/Calendar refresh token is dead. This blocks mail
+triage, calendar reads and Gmail search entirely, and it is not a code defect: it needs a browser
+sign-in that only Siddhant can perform.
+
+```bash
+npm run google:auth
+```
+
+Two things were fixed around it so that it cannot sit broken silently again:
+
+- `triage_mail action:'run'` used to return `{success:true}` unconditionally. A pass that died on
+  `scan-failed: invalid_grant` came back as "Ran one triage pass" and `stats` showed 0 — which reads
+  as a clean inbox, not as broken auth. It now returns what the pass actually did.
+- The agent surfaces the error verbatim and names the fix, rather than reporting an empty result.
