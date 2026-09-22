@@ -7,7 +7,7 @@
 
 let httpServer = null;
 
-async function startMcpServer({ port, token, runAgent, transcribe, synthesize, synthUlaw, summarize, media, voiceTurn, voiceBegin, voicePoll, endVoiceCall, getActivity, nexusUrl, ownerPhone, twilioAuthToken, jobs, control, screenshot, voice, biometrics, opsStatus }) {
+async function startMcpServer({ port, token, runAgent, transcribe, synthesize, synthUlaw, summarize, media, voiceTurn, voiceBegin, voicePoll, endVoiceCall, getActivity, nexusUrl, ownerPhone, twilioAuthToken, publicHost, jobs, control, screenshot, voice, biometrics, opsStatus }) {
   if (httpServer) return httpServer;
   const express = require('express');
   const fs = require('fs');
@@ -79,13 +79,35 @@ async function startMcpServer({ port, token, runAgent, transcribe, synthesize, s
     if (!twilioAuthToken) return true;                 // can't verify → don't hard-block (Serve-only setups)
     try {
       const sig = req.get('x-twilio-signature') || '';
-      const url = `https://${req.get('host')}${req.originalUrl}`;
+      if (!sig) return false;
+      // THE URL IS PART OF THE SIGNATURE, so getting it wrong fails exactly like a forgery.
+      //
+      // Behind the Tailscale funnel this request arrives proxied to 127.0.0.1:8788, and whether the
+      // ORIGINAL Host survives that hop is not ours to assume. If it does not, `req.get('host')`
+      // yields a string Twilio never signed, every real call is rejected with <Reject/>, and the
+      // symptom — the call simply not working — is indistinguishable from the funnel being down.
+      //
+      // So both representations are checked: the Host header as received, and the public host we
+      // ourselves handed to Twilio when placing the call. This weakens nothing — each is a full
+      // HMAC comparison against the same secret, and a forger still cannot produce either.
+      const candidates = new Set([
+        `https://${req.get('host')}${req.originalUrl}`,
+        `https://${req.get('x-forwarded-host') || req.get('host')}${req.originalUrl}`,
+      ]);
+      const pub = (typeof publicHost === 'function' ? publicHost() : publicHost) || '';
+      if (pub) candidates.add(`https://${String(pub).replace(/^https?:\/\//, '').replace(/\/+$/, '')}${req.originalUrl}`);
+
       const params = req.body || {};
-      let data = url;
-      for (const k of Object.keys(params).sort()) data += k + params[k];
-      const expected = crypto.createHmac('sha1', twilioAuthToken).update(Buffer.from(data, 'utf-8')).digest('base64');
-      const a = Buffer.from(sig), b = Buffer.from(expected);
-      return a.length === b.length && crypto.timingSafeEqual(a, b);
+      const sigBuf = Buffer.from(sig);
+      for (const url of candidates) {
+        let data = url;
+        for (const k of Object.keys(params).sort()) data += k + params[k];
+        const expected = crypto.createHmac('sha1', twilioAuthToken).update(Buffer.from(data, 'utf-8')).digest('base64');
+        const b = Buffer.from(expected);
+        if (sigBuf.length === b.length && crypto.timingSafeEqual(sigBuf, b)) return true;
+      }
+      console.warn('[twilio] signature did not match any candidate URL: ' + [...candidates].join(' | '));
+      return false;
     } catch { return false; }
   };
 

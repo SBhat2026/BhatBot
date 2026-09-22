@@ -7480,7 +7480,8 @@ async function initMcpServer() {
       port, token, runAgent: runAgentHeadless, transcribe: transcribeAudio,
       synthesize: synthesizeSpeech, synthUlaw: synthesizeUlaw, summarize: summarizeForSpeech, media: mediaBytesToBlocks,
       voiceTurn, voiceBegin, voicePoll, endVoiceCall, getActivity, nexusUrl: NEXUS_URL, ownerPhone: c.myPhone,
-      twilioAuthToken: c.twilioToken, jobs: jobsBus, control: phoneControl, screenshot: captureScreenJpeg,
+      twilioAuthToken: c.twilioToken, publicHost: getPublicHost,   // the host we hand Twilio, for signature checking behind a proxy
+      jobs: jobsBus, control: phoneControl, screenshot: captureScreenJpeg,
       biometrics: () => { try { return biometricPortrait(); } catch { return { error: 'unavailable' }; } },   // Health screen on the phone
       opsStatus: () => { try { return opsSnapshot(); } catch { return { error: 'unavailable' }; } },           // Manage view on the phone
       // Phone-call speech-recognition tuning (see gatherTwiml). All optional in config.json.
