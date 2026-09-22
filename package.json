@@ -140,7 +140,8 @@
     "google:probe": "electron scripts/google-probe.js",
     "test:callgate": "node scripts/test-callgate.js",
     "test:highcare": "node scripts/test-highcare.js",
-    "test:pythonbin": "node scripts/test-pythonbin.js"
+    "test:pythonbin": "node scripts/test-pythonbin.js",
+    "triage:preview": "electron scripts/triage-preview.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

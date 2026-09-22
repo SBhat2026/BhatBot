@@ -6,6 +6,7 @@
 // the URL path gates access: https://<machine>.<tailnet>.ts.net/mcp/<token>
 
 let httpServer = null;
+let _shuttingDown = false;   // distinguishes an intentional stop from a listener that vanished
 
 async function startMcpServer({ port, token, runAgent, transcribe, synthesize, synthUlaw, summarize, media, voiceTurn, voiceBegin, voicePoll, endVoiceCall, getActivity, nexusUrl, ownerPhone, twilioAuthToken, publicHost, jobs, control, screenshot, voice, biometrics, opsStatus }) {
   if (httpServer) return httpServer;
@@ -512,7 +513,30 @@ self.addEventListener('fetch', (e) => {
     } catch (e) { reply(`<Message>Error: ${xmlEsc(String(e && e.message || e)).slice(0, 300)}</Message>`); }
   });
 
-  await new Promise((resolve) => { httpServer = app.listen(port, '127.0.0.1', resolve); });
+  _shuttingDown = false;   // a fresh start re-arms the vanished-listener warning
+  // A LISTEN THAT FAILS MUST NOT HANG. `app.listen(port, host, cb)` calls cb only on SUCCESS; an
+  // EADDRINUSE arrives as an 'error' EVENT, so the old one-armed promise never settled and boot
+  // simply stopped there — no error, no log, no server, and an app that looks like it started.
+  httpServer = await new Promise((resolve, reject) => {
+    const srv = app.listen(port, '127.0.0.1', () => resolve(srv));
+    srv.once('error', reject);
+  });
+
+  // ...AND A LISTENER THAT GOES AWAY MUST SAY SO. Observed 2026-09-22: the process was alive and
+  // healthy, `[mcp] listening` had been printed, and nothing was bound to the port — every tool call
+  // failed with "app not reachable" while the app itself looked fine. Whatever closed it, the
+  // silence was the real problem: a server that stops serving should be as loud as one that never
+  // started. This re-binds and logs rather than leaving the next person to discover it with lsof.
+  httpServer.on('close', () => {
+    if (_shuttingDown) return;                       // an intentional stop is not an incident
+    console.error('[mcp] the HTTP server CLOSED without being asked to — rebinding on ' + port);
+    setTimeout(() => {
+      try {
+        httpServer = app.listen(port, '127.0.0.1', () => console.log('[mcp] rebound on ' + port));
+        httpServer.once('error', (e) => console.error('[mcp] rebind failed: ' + ((e && e.message) || e)));
+      } catch (e) { console.error('[mcp] rebind threw: ' + ((e && e.message) || e)); }
+    }, 1000).unref?.();
+  });
 
   // -------------------------------------------------------------------------
   // Twilio Media Streams WebSocket (opt-in real-time voice). Twilio connects to
@@ -540,6 +564,6 @@ self.addEventListener('fetch', (e) => {
   return httpServer;
 }
 
-function stopMcpServer() { try { httpServer && httpServer.close(); } catch {} httpServer = null; }
+function stopMcpServer() { _shuttingDown = true; try { httpServer && httpServer.close(); } catch {} httpServer = null; }
 
 module.exports = { startMcpServer, stopMcpServer };

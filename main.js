@@ -4870,7 +4870,15 @@ async function executeTool(name, input) {
               ? { success: false, error: 'Gmail access has expired (invalid_grant) — run `npm run google:auth` to restore mail triage.', scanned: r.scanned, errors: r.errors }
               : { success: r.errors.length === 0, mode: tcfg.mode, scanned: r.scanned, urgent: r.urgent.length,
                   acted: r.acted.length, proposed: r.proposed.length, skipped: r.skipped, errors: r.errors,
-                  result: `Scanned ${r.scanned} in ${tcfg.mode} mode — ${r.urgent.length} urgent, ${r.proposed.length} proposed, ${r.acted.length} acted.` };
+                  // WHICH MAILBOX did what. The run has always computed this; not returning it made a
+                  // three-account pass indistinguishable from a one-account pass that read more mail.
+                  accounts: r.accounts || [],
+                  // A run where everything was SKIPPED is not a quiet inbox — it is a repeat pass over
+                  // mail this process already handled, and reporting "0 proposed" without saying so
+                  // reads as "nothing to do".
+                  ...(r.skipped && r.skipped >= r.scanned ? { note: `all ${r.skipped} already handled earlier in this process — nothing new since the last pass` } : {}),
+                  result: `Scanned ${r.scanned} in ${tcfg.mode} mode — ${r.urgent.length} urgent, ${r.proposed.length} proposed, ${r.acted.length} acted`
+                        + (r.skipped ? `, ${r.skipped} already seen` : '') + '.' };
           }
         } else if (a === 'pin') {
           // A rescue is a permanent correction: this sender is never auto-archived again.
