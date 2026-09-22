@@ -72,7 +72,12 @@ async function main() {
   const oauth2 = new google.auth.OAuth2(clientId, clientSecret, REDIRECT);
   // access_type=offline + prompt=consent is what makes Google return a REFRESH token. Without the
   // forced consent, re-authorizing an already-approved app returns only an access token.
-  const url = oauth2.generateAuthUrl({ access_type: 'offline', prompt: 'consent', scope: SCOPES });
+  // `select_account` MATTERS NOW THAT THERE ARE SEVERAL. With `consent` alone Google silently reuses
+  // whichever account the browser is already signed in as, so "add my school mail" hands back the
+  // personal one, the address matches an existing entry, and the run reports success having
+  // connected nothing new. Asking for the chooser every time costs one extra click and removes an
+  // entire class of "I ran it twice and still only have one account".
+  const url = oauth2.generateAuthUrl({ access_type: 'offline', prompt: 'select_account consent', scope: SCOPES });
 
   // A CONSENT FLOW THAT IS NEVER COMPLETED MUST NOT OUTLIVE THE TERMINAL IT WAS STARTED IN.
   //
@@ -212,7 +217,9 @@ async function main() {
   delete config.google.email;
   saveConfig(config);
 
-  console.log(`\n✓ Connected ${email || '(address unknown)'}${entry.primary ? '  [primary — writes go here]' : ''}.`);
+  const readded = at >= 0;
+  console.log(`\n✓ ${readded ? 'Re-connected' : 'Connected'} ${email || '(address unknown)'}${entry.primary ? '  [primary — writes go here]' : ''}.`);
+  if (readded) console.log('  (this address was already connected — its token was refreshed, not duplicated)');
   console.log(`  refresh_token ${vaulted ? 'stored in the vault' : 'saved (PLAINTEXT — run inside the app to vault it)'}.`);
   console.log('  Scopes:', SCOPES.map((s) => s.split('/auth/')[1]).join(', '));
   console.log(`\n  ${prior.length} account${prior.length === 1 ? '' : 's'} connected:`);
