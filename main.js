@@ -1638,6 +1638,29 @@ function applyReasoning(body) {
   }
 }
 
+// ── WHEN A PAIRING 400 STILL GETS THROUGH ─────────────────────────────────────────────────────────
+// The API names the offending index — "messages.8: tool_use ids were found without tool_result
+// blocks" — and until now nothing in this process read that index back. Three separate hunts for
+// this bug were spent guessing which call path had produced the payload. The answer was always
+// sitting in the payload. This prints the shape around the named index (roles and block types only,
+// never content) and says which function sent it, so the fourth occurrence is a two-line read
+// instead of an afternoon.
+function explainPairing400(text, messages, where) {
+  try {
+    const m = String(text || '').match(/messages\.(\d+): `?tool_use`? ids were found/);
+    if (!m || !Array.isArray(messages)) return;
+    const i = Number(m[1]);
+    const shape = (mm) => !mm ? '(none)'
+      : `${mm.role}:[${(Array.isArray(mm.content) ? mm.content : [{ type: 'text' }]).map((b) => b.type + (b.id ? '#' + String(b.id).slice(-6) : '') + (b.tool_use_id ? '→' + String(b.tool_use_id).slice(-6) : '')).join(' ')}]`;
+    console.error(`[pairing-400] ${where} sent an unpaired tool_use at messages.${i} of ${messages.length}`);
+    for (let k = Math.max(0, i - 1); k <= Math.min(messages.length - 1, i + 1); k++) {
+      console.error(`[pairing-400]   ${k === i ? '→' : ' '} ${k}  ${shape(messages[k])}`);
+    }
+    console.error('[pairing-400] validateHistory ran on this payload and did not repair it, OR the '
+      + 'payload was mutated after validation. Both are bugs in ' + where + ', not in lib/history.js.');
+  } catch {}
+}
+
 async function anthropicRequest(body, apiKey, { retries = 5 } = {}) {
   // ⚠ THE PAIRING GUARANTEE LIVES HERE, not in capTokens.
   //
@@ -1703,6 +1726,7 @@ async function anthropicRequest(body, apiKey, { retries = 5 } = {}) {
       attempt++; continue;
     }
     const bodyText = await res.text().catch(() => '');
+    if (res.status === 400) explainPairing400(bodyText, body.messages, 'anthropicRequest');
     if (res.status === 429) throw new Error("Rate limit reached (per-model ITPM/OTPM cap). I waited and retried but it's still busy — give it a minute, or raise rateLimits in config / your Anthropic tier.");
     if (res.status === 529) throw new Error('Anthropic is overloaded right now. Try again shortly.');
     throw new Error(`API ${res.status}: ${bodyText.slice(0, 300)}`);
@@ -1891,6 +1915,15 @@ async function callClaude(messages, apiKey, model) {
 // ~0.5s instead of waiting ~full generation), then returns the SAME assembled shape as
 // anthropicRequest so the tool loop is unchanged. Used on the desktop chat path.
 async function anthropicStream(body, apiKey, onText, { retries = 3, onThinking = null } = {}) {
+  // THE SAME PAIRING GUARANTEE AS anthropicRequest, because this is a SECOND wire path, not a
+  // wrapper around the first. anthropicRequest's comment claimed it was "the actual chokepoint —
+  // every Anthropic call in the process passes here". It is not: this function POSTs to
+  // /v1/messages itself, and it is the DESKTOP CHAT path, i.e. the one a person is actually looking
+  // at. Observed live 2026-09-21: a calendar turn failed with "tool_use ids were found without
+  // tool_result blocks" at messages.8 while anthropicRequest was already repairing correctly.
+  // scripts/test-wire-pairing.js now asserts this for every call site that POSTs to the endpoint,
+  // rather than for one function by name, which is how this one stayed uncovered.
+  try { if (Array.isArray(body && body.messages)) body = { ...body, messages: validateHistory(body.messages) }; } catch {}
   const shaped = applyReasoning(body);
   body = shaped.body;
   const betaHeader = shaped.betas.length ? shaped.betas.join(',') : null;
@@ -1916,6 +1949,7 @@ async function anthropicStream(body, apiKey, onText, { retries = 3, onThinking =
         await sleep(waitMs + Math.random() * 400); attempt++; continue;
       }
       const t = await res.text().catch(() => '');
+      if (res.status === 400) explainPairing400(t, body.messages, 'anthropicStream');
       if (res.status === 429) throw new Error("Rate limit reached (per-model ITPM/OTPM cap). I waited and retried but it's still busy — give it a minute, or raise rateLimits in config / your Anthropic tier.");
       if (res.status === 529) throw new Error('Anthropic is overloaded right now. Try again shortly.');
       throw new Error(`API ${res.status}: ${t.slice(0, 300)}`);
@@ -4747,8 +4781,26 @@ async function executeTool(name, input) {
         } else if (a === 'undo_all') {
           result = await actionLog.undoAll({ since: input.since });
         } else if (a === 'run') {
-          await triageTick();
-          result = { success: true, result: 'Ran one triage pass. Use `stats` to see what it did.' };
+          // Report what the pass ACTUALLY did. This used to `await triageTick()` and then claim
+          // success unconditionally, so a run that died on `scan-failed: invalid_grant` came back as
+          // "Ran one triage pass" and `stats` showed 0 — which reads as a clean inbox, not as broken
+          // auth. Observed live on 2026-09-21. A pass that could not reach Gmail must say so here,
+          // where the caller is, and not only in a log line nobody is tailing.
+          const tcfg = triageCfg();
+          if (!tcfg.enabled) {
+            result = { success: false, error: 'Mail triage is disabled — set config.triage.enabled to turn it on.' };
+          } else if (!google.isConfigured()) {
+            const un = google.unresolvedRefs ? google.unresolvedRefs() : [];
+            result = { success: false, error: 'Google is not usable: ' + (un.length ? 'unresolved credential refs ' + un.join(', ') : 'not configured') + ' — run `npm run google:auth`.' };
+          } else {
+            const r = await triageRunner().runOnce(tcfg);
+            const expired = r.errors.some((e) => /invalid_grant/.test(e));
+            result = expired
+              ? { success: false, error: 'Gmail access has expired (invalid_grant) — run `npm run google:auth` to restore mail triage.', scanned: r.scanned, errors: r.errors }
+              : { success: r.errors.length === 0, mode: tcfg.mode, scanned: r.scanned, urgent: r.urgent.length,
+                  acted: r.acted.length, proposed: r.proposed.length, skipped: r.skipped, errors: r.errors,
+                  result: `Scanned ${r.scanned} in ${tcfg.mode} mode — ${r.urgent.length} urgent, ${r.proposed.length} proposed, ${r.acted.length} acted.` };
+          }
         } else if (a === 'pin') {
           // A rescue is a permanent correction: this sender is never auto-archived again.
           const addr = String(input.sender || '').toLowerCase().trim();

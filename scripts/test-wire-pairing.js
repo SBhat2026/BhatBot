@@ -40,6 +40,15 @@ function unpaired(msgs) {
       ? new Set(n.content.filter((b) => b.type === 'tool_result').map((b) => b.tool_use_id)) : new Set();
     for (const id of ids) if (!answered.has(id)) bad.push(`msg ${i}: ${id}`);
   });
+  // The THIRD half of the rule, and the one that took three hunts to find: tool_result blocks must
+  // come FIRST in their user message. The API reports a trailing tool_result with the SAME text as a
+  // missing one, so a test that only checked presence passed while the wire kept 400ing.
+  msgs.forEach((m, i) => {
+    if (m.role !== 'user' || !Array.isArray(m.content)) return;
+    const firstResult = m.content.findIndex((b) => b.type === 'tool_result');
+    if (firstResult <= 0) return;
+    bad.push(`msg ${i}: tool_result at position ${firstResult}, must lead`);
+  });
   // The other half of the rule: a tool_result with no tool_use before it is equally rejected.
   msgs.forEach((m, i) => {
     if (m.role !== 'user' || !Array.isArray(m.content)) return;
@@ -65,6 +74,11 @@ function unpaired(msgs) {
     ['a plain-string user message after a tool_use', [U(T('a')), A(tu('t1')), { role: 'user', content: 'plain' }]],
     ['an orphan result with no tool_use at all', [U(T('a')), U(tr('ghost')), A(T('b'))]],
     ['the shape that failed live — unanswered at index 4', [U(T('a')), A(T('b')), U(T('c')), A(tu('t1'), tu('t2')), U(tr('t1')), A(T('z'))]],
+    // 2026-09-21, live, three times: the result was PRESENT and the API still rejected it, because a
+    // text block sat in front of it. Every earlier repair read the error literally, looked for a
+    // missing result, found the result, and left the message exactly as it was.
+    ['a tool_result that does not lead its user turn', [U(T('a')), A(tu('t1')), { role: 'user', content: [T('typed while it was working'), tr('t1')] }]],
+    ['text, then two results out of order', [U(T('a')), A(tu('t1'), tu('t2')), { role: 'user', content: [T('note'), tr('t1'), T('more'), tr('t2')] }]],
   ];
   for (const [name, h] of CASES) {
     const out = validateHistory(h);
@@ -89,21 +103,52 @@ function unpaired(msgs) {
   ok(`every slice(-1..-30) of a tool conversation is repaired (raw slices broke ${worst ? 'as expected' : 'never'})`);
 }
 
-// ── 3. THE STRUCTURAL ONE — the repair is on the real chokepoint ──────────────────────────────────
+// ── 3. THE STRUCTURAL ONE — EVERY wire path validates, found by enumeration ────────────────────────
+//
+// The previous version of this section asserted that `anthropicRequest` validates, on the strength
+// of a comment calling it "the actual chokepoint — every Anthropic call in the process passes here".
+// That was false, and the test could not tell, because it went looking for one function by name.
+// main.js has a SECOND path — anthropicStream, the desktop chat path — that POSTs to /v1/messages
+// itself, and on 2026-09-21 it produced the identical 400 at messages.8 while anthropicRequest was
+// repairing correctly a few lines above.
+//
+// So this no longer names anything. It ENUMERATES every POST to the messages endpoint across the
+// whole repo and demands that the function containing it validated first. A fourth path added next
+// year fails this test on the day it is written, which is the only version of this assertion worth
+// having.
 {
-  const main = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
-  const start = main.indexOf('async function anthropicRequest(');
-  assert.ok(start > 0, 'located anthropicRequest');
-  const head = main.slice(start, start + 2600);
-  assert.ok(/validateHistory\(body\.messages\)/.test(head),
-    'anthropicRequest MUST validate body.messages itself — every Anthropic call in the process ' +
-    'passes through it, which is what makes "every path is safe" a fact rather than a claim');
+  const FILES = ['main.js', 'lib/llm.js'];
+  // Matches whatever the call site named its fetch — `fetch`, `doFetch`, an injected `fetchImpl` —
+  // because lib/llm.js takes its fetch as a parameter and a regex anchored on the literal word
+  // `fetch(` walks straight past `doFetch(`. Same class of miss as the experiment's answer key.
+  const ENDPOINT = /[A-Za-z_$][\w$]*\s*\(\s*(?:API_URL|['"]https:\/\/api\.anthropic\.com\/v1\/messages['"])/g;
+  const sites = [];
 
-  // ...and it must happen before the body is handed onward, not after some other mutation.
-  const vIdx = head.indexOf('validateHistory(body.messages)');
-  const cIdx = head.indexOf('tagLastBlockForCache');
-  assert.ok(vIdx > 0 && cIdx > vIdx, 'validation must run before the cache breakpoint is tagged');
-  ok('anthropicRequest validates its own messages, before anything else touches them');
+  for (const rel of FILES) {
+    const src = fs.readFileSync(path.join(__dirname, '..', rel), 'utf8');
+    let m;
+    ENDPOINT.lastIndex = 0;
+    while ((m = ENDPOINT.exec(src))) {
+      // Walk back to the enclosing `function name(` / `const name = async (` declaration.
+      const before = src.slice(0, m.index);
+      const decl = [...before.matchAll(/(?:async\s+)?function\s+(\w+)\s*\(/g)].pop();
+      const fn = decl ? decl[1] : '(anonymous)';
+      const body = before.slice(decl ? decl.index : Math.max(0, m.index - 4000));
+      sites.push({ file: rel, fn, validates: /validateHistory\(/.test(body) });
+    }
+  }
+
+  assert.ok(sites.length >= 3,
+    `expected at least 3 POSTs to the messages endpoint across ${FILES.join(', ')}, found ${sites.length} — ` +
+    'if the call sites moved, this test stopped checking anything');
+
+  const unguarded = sites.filter((s2) => !s2.validates).map((s2) => `${s2.file}:${s2.fn}`);
+  assert.deepStrictEqual(unguarded, [],
+    'these functions POST to api.anthropic.com/v1/messages WITHOUT calling validateHistory first: '
+    + unguarded.join(', ') + '. Every wire path must repair its own messages — an unanswered '
+    + 'tool_use is a hard 400, and a background job has nobody to notice it.');
+
+  ok(`all ${sites.length} wire paths validate before POSTing (${sites.map((s2) => s2.fn).join(', ')})`);
 }
 
 // ── 4. the two callers that bypassed capTokens ────────────────────────────────────────────────────
