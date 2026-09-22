@@ -161,5 +161,29 @@ ok(digitsOf(null) === '', 'digitsOf: null → ""');
 }
 
 try { fs.rmSync(TMP, { recursive: true, force: true }); } catch {}
+
+// ---- the two-way path must be PROVEN, not assumed ----
+{
+  const fn = main.slice(main.indexOf('async function twilioCall('), main.indexOf('// phone_mirror tool backend'));
+  // "The funnel is up" was never the question. The funnel was up, the host was right, the signature
+  // was valid, and the call still failed — the webhook answered 200 with "Unauthorized" because the
+  // owner check read `From`, which on an outbound call is the Twilio number. Every layer reported
+  // success and the phone played an error. Only an end-to-end probe settles it.
+  ok(/voicepreflight\.check\(/.test(fn), 'twilioCall: runs the end-to-end preflight before choosing two-way');
+  ok(/reach\.ok && pre\.ok/.test(fn), 'twilioCall: two-way requires the preflight to PASS, not just a reachable host');
+  ok(/falling back to a one-way announcement/.test(fn), 'twilioCall: a failed preflight degrades instead of dialling into an error');
+
+  const mcp = fs.readFileSync(path.join(__dirname, '..', 'mcp-server.js'), 'utf8');
+  ok(/const ownerParty = \(req\) =>/.test(mcp), 'voice webhook: the owner party is derived, not assumed to be From');
+  ok(/outbound \? \(req\.body\.To \|\| ''\) : \(req\.body\.From \|\| ''\)/.test(mcp),
+    'voice webhook: OUTBOUND authorises on To — the bug that refused every call BhatBot placed');
+  ok(!/if \(ownerPhone && from && from !== ownerPhone\)/.test(mcp),
+    'voice webhook: the old From-only check is gone from every route');
+  // A config entry typed as (609) 480-6321 must not silently refuse every call.
+  ok(/const samePhone =/.test(mcp) && /replace\(\/\\D\/g, ''\)/.test(mcp),
+    'voice webhook: numbers compare on digits, so formatting cannot cause a refusal');
+}
+
+
 console.log(`\n${fail ? '❌' : '✅'} ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

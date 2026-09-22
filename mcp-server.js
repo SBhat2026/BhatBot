@@ -76,6 +76,29 @@ async function startMcpServer({ port, token, runAgent, transcribe, synthesize, s
   // Twilio webhook authenticity: verify X-Twilio-Signature (HMAC-SHA1 of the full URL +
   // sorted POST params, keyed by the Twilio auth token). Blocks spoofed webhook POSTs even
   // from someone who learned the token URL. Skipped only if no auth token is configured.
+  // ── WHO IS THE OWNER ON THIS CALL? ──────────────────────────────────────────────────────────────
+  // On an INBOUND call Siddhant is `From` — he dialled us. On an OUTBOUND call he is `To` — we
+  // dialled him, and `From` is the Twilio number. Checking `From` unconditionally therefore refuses
+  // every outbound call with "Unauthorized", which is exactly what happened: the call connected, the
+  // webhook answered, and he heard a failure instead of BhatBot. The direction decides which party
+  // to authorise.
+  //
+  // Numbers are compared on DIGITS. +16094806321, 16094806321 and (609) 480-6321 are one phone, and
+  // a string comparison makes a config entry typed in a human format silently refuse every call.
+  const digits = (v) => String(v || '').replace(/\D/g, '').replace(/^1(?=\d{10}$)/, '');
+  const samePhone = (a, b) => { const x = digits(a), y = digits(b); return !!x && !!y && x === y; };
+  /** The party who must be the owner for this webhook to proceed, or '' when there is nobody to check. */
+  const ownerParty = (req) => {
+    const outbound = /^outbound/i.test(String(req.body.Direction || ''));
+    return outbound ? (req.body.To || '') : (req.body.From || '');
+  };
+  const ownerOk = (req) => {
+    if (!ownerPhone) return true;                       // nothing configured → nothing to enforce
+    const party = ownerParty(req);
+    if (!party) return true;                            // Twilio did not say → do not invent a refusal
+    return samePhone(party, ownerPhone);
+  };
+
   const twilioVerified = (req) => {
     if (!twilioAuthToken) return true;                 // can't verify → don't hard-block (Serve-only setups)
     try {
@@ -401,7 +424,7 @@ self.addEventListener('fetch', (e) => {
     try {
       if (!twilioVerified(req)) return res.status(403).type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Reject/></Response>');
       const from = req.body.From || '';
-      if (ownerPhone && from && from !== ownerPhone) return res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Say>Unauthorized.</Say><Hangup/></Response>');
+      if (!ownerOk(req)) { console.warn(`[voice] refused ${String(req.body.Direction || '?')} call — ${ownerParty(req)} is not the owner`); return res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Say>Unauthorized.</Say><Hangup/></Response>'); }
       const callSid = req.body.CallSid || '';
       const answeredBy = String(req.body.AnsweredBy || '');
       const greeting = req.query.msg || 'Good evening, sir. How may I help?';
@@ -434,7 +457,7 @@ self.addEventListener('fetch', (e) => {
     try {
       if (!twilioVerified(req)) return res.status(403).type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Reject/></Response>');
       const from = req.body.From || '';
-      if (ownerPhone && from && from !== ownerPhone) return res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Say>Unauthorized.</Say><Hangup/></Response>');
+      if (!ownerOk(req)) { console.warn(`[voice] refused ${String(req.body.Direction || '?')} call — ${ownerParty(req)} is not the owner`); return res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Say>Unauthorized.</Say><Hangup/></Response>'); }
       const callSid = req.body.CallSid || '';
       const speech = req.body.SpeechResult || '';
       if (!speech.trim()) {
@@ -505,7 +528,7 @@ self.addEventListener('fetch', (e) => {
       if (!twilioVerified(req)) return res.status(403).end();
       const text = String(req.body.Body || '').trim();
       const from = req.body.From || '';
-      if (ownerPhone && from && from !== ownerPhone) return reply(`<Message>Unauthorized.</Message>`);
+      if (!ownerOk(req)) return reply(`<Message>Unauthorized.</Message>`);
       if (!text) return res.status(204).end();
       const r = runAgent ? await runAgent('[SMS] ' + text, {}) : { text: 'Agent unavailable.' };
       const out = (r.error ? ('Error: ' + r.error) : (r.text || '(no output)')).replace(/<\/?speak>/gi, '').trim().slice(0, 1500);

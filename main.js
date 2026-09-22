@@ -7736,9 +7736,24 @@ async function twilioCall(message, { to, name, bypassGate = false } = {}) {
   // A host we cannot prove is reachable is worse than no host at all, because the two-way branch
   // SKIPS the one-shot fallback — which needs no webhook and would have delivered every one of
   // those eight messages perfectly.
+  //
+  // But `the funnel is published` was never the question either. The funnel was up, the host was
+  // right, the signature was valid, and the call STILL failed — because the webhook answered 200
+  // with "Unauthorized" (the owner check read `From`, which on an outbound call is the Twilio
+  // number, not Siddhant). Every layer reported success and the phone played an error.
+  //
+  // So the two-way branch is now gated on the only thing that actually settles it: a signed request,
+  // shaped like the call we are about to place, coming back with TwiML that speaks AND listens.
+  // If that fails we take the one-shot announcement, which works without a webhook at all.
   const reach = host ? publicHostReachable() : { ok: false, why: 'no public host' };
+  let pre = { ok: false, detail: 'not checked' };
+  if (host && c.mcpToken && reach.ok) {
+    pre = await voicepreflight.check({ host, token: c.mcpToken, authToken: c.twilioToken, ownerPhone: target })
+      .catch((e) => ({ ok: false, stage: 'preflight', detail: String((e && e.message) || e) }));
+    if (!pre.ok) console.warn(`[call] two-way path is not usable (${pre.stage}: ${pre.detail}) — falling back to a one-way announcement`);
+  }
   try {
-    if (host && c.mcpToken && reach.ok) {
+    if (host && c.mcpToken && reach.ok && pre.ok) {
       // Two-way: point Twilio at our webhook, which plays the JARVIS voice + gathers speech.
       // machineDetection=DetectMessageEnd → if voicemail answers, the webhook fires at the
       // BEEP with AnsweredBy=machine_end_*, and /voice/incoming leaves a JARVIS-voice
@@ -7749,7 +7764,7 @@ async function twilioCall(message, { to, name, bypassGate = false } = {}) {
         machineDetection: 'DetectMessageEnd', machineDetectionTimeout: 30,
         statusCallback: `https://${host}/voice/${c.mcpToken}/status`, statusCallbackEvent: ['completed']
       });
-      recordCall({ to: target, name: name || null, ok: true, via: 'twilio-conversation', sid: call.sid });
+      recordCall({ to: target, name: name || null, ok: true, via: 'twilio-conversation', sid: call.sid, preflight: pre.stage });
       return { sent: true, via: 'twilio-conversation', sid: call.sid, to: target, name: name || null };
     }
     // ONE-SHOT ANNOUNCEMENT. The message is embedded in the TwiML, so Twilio never has to fetch
@@ -7758,9 +7773,10 @@ async function twilioCall(message, { to, name, bypassGate = false } = {}) {
     const safe = greeting.replace(/[<>&]/g, ' ');
     const twiml = '<Response><Say voice="Google.en-US-Neural2-D">' + safe + '</Say></Response>';
     const call = await client.calls.create({ twiml, to: target, from: c.twilioFrom });
-    recordCall({ to: target, name: name || null, ok: true, via: 'twilio', sid: call.sid, oneWay: true, why: reach.why });
+    const why = !reach.ok ? reach.why : (pre.ok ? 'no public host' : `${pre.stage}: ${pre.detail}`);
+    recordCall({ to: target, name: name || null, ok: true, via: 'twilio', sid: call.sid, oneWay: true, why });
     return { sent: true, via: 'twilio', sid: call.sid, to: target, name: name || null,
-      oneWay: true, note: host ? `one-way announcement — two-way needs the funnel up (${reach.why})` : 'one-way announcement — no public host' };
+      oneWay: true, note: `one-way announcement — two-way unavailable (${why})` };
   } catch (e) {
     recordCall({ to: target, name: name || null, ok: false, error: e.message });
     return { sent: false, error: e.message };
@@ -8157,6 +8173,7 @@ const commands = createCommands({ log: (m) => console.log(m) });
 const { createWeaver } = require('./lib/weaver');
 const { createTriageRun } = require('./lib/triagerun');
 const callgate = require('./lib/callgate');
+const voicepreflight = require('./lib/voicepreflight');
 let _triageRun = null;
 function triageRunner() {
   if (!_triageRun) _triageRun = createTriageRun({ google, actionLog, config: triageCfg(), log: (m) => console.log(m) });
