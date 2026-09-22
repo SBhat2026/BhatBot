@@ -50,7 +50,12 @@ console.log('[multiaccount]');
   assert.strictEqual(a[0].refreshToken, 'tok-old');
   assert.ok(a[0].primary, 'the single legacy token is the primary, so writes still have a home');
   assert.strictEqual(google.accountFor(undefined, legacy).refreshToken, 'tok-old');
-  ok('a pre-multi-account config is presented as one primary account, unchanged');
+  // ...AND IT KEEPS TRIAGING. Before multi-account there was one mailbox and one switch, so the
+  // legacy token is the account triage was already configured against. Giving it the new-account
+  // default of `triage: false` switched a running subsystem off on nothing but a config shape.
+  assert.strictEqual(a[0].triage, true, 'the legacy account inherits the triage it already had');
+  assert.deepStrictEqual(google.triageAccounts(legacy).map((x) => x.refreshToken), ['tok-old']);
+  ok('a pre-multi-account config is presented as one primary account, still triaging');
 }
 
 // ── selection ─────────────────────────────────────────────────────────────────────────────────────

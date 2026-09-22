@@ -4817,9 +4817,36 @@ async function executeTool(name, input) {
         const a = input.action;
         if (a === 'recent') {
           const rows = actionLog.recent({ limit: input.limit || 30, since: input.since });
-          result = { success: true, count: rows.length, entries: rows.map((r) => ({ id: r.id, ts: r.ts, from: r.from, subject: r.subject, class: r.class, rule: r.rule, action: r.action, undone: r.undone })) };
+          // `action` carries a "proposed:" prefix and nothing else distinguished a proposal from a
+          // performed action. The model duly compressed "proposed:mark_read_archive" to "archived"
+          // and told Siddhant his LinkedIn mail was being auto-archived while propose mode had in
+          // fact touched nothing. During a review week the ONLY question is what would have happened
+          // versus what did, so it gets its own boolean and its own sentence rather than a prefix
+          // the reader has to notice.
+          const shape = (r) => {
+            const proposed = String(r.action).startsWith('proposed:');
+            return {
+              id: r.id, ts: r.ts, from: r.from, subject: r.subject, class: r.class, rule: r.rule,
+              action: r.action, undone: r.undone,
+              performed: !proposed && !r.undone,
+              status: proposed ? 'PROPOSED ONLY — this was not done, nothing in the mailbox changed'
+                    : r.undone ? 'performed, then undone' : 'PERFORMED — the mailbox was changed',
+            };
+          };
+          const entries = rows.map(shape);
+          const nProposed = entries.filter((e) => !e.performed && String(e.action).startsWith('proposed:')).length;
+          result = {
+            success: true, count: entries.length, entries,
+            summary: `${entries.length} ledger entr${entries.length === 1 ? 'y' : 'ies'}: `
+              + `${nProposed} proposed only (nothing changed), ${entries.filter((e) => e.performed).length} actually performed.`,
+          };
         } else if (a === 'stats') {
-          result = { success: true, ...actionLog.stats({ since: input.since }) };
+          const st = actionLog.stats({ since: input.since });
+          const byAction = st.byAction || {};
+          const proposed = Object.entries(byAction).filter(([k]) => k.startsWith('proposed:')).reduce((n, [, v]) => n + v, 0);
+          const performed = Object.entries(byAction).filter(([k]) => !k.startsWith('proposed:')).reduce((n, [, v]) => n + v, 0);
+          result = { success: true, ...st, proposed, performed,
+            summary: `${proposed} proposed (nothing changed), ${performed} performed.` };
         } else if (a === 'undo') {
           result = await actionLog.undo(input.id);
         } else if (a === 'undo_all') {
