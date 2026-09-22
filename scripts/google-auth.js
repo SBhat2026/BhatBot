@@ -72,7 +72,17 @@ async function main() {
   // forced consent, re-authorizing an already-approved app returns only an access token.
   const url = oauth2.generateAuthUrl({ access_type: 'offline', prompt: 'consent', scope: SCOPES });
 
-  let server;
+  // A CONSENT FLOW THAT IS NEVER COMPLETED MUST NOT OUTLIVE THE TERMINAL IT WAS STARTED IN.
+  //
+  // This server has exactly one job — catch one redirect — and it used to wait for it forever. Close
+  // the browser tab, or walk away, and the process stayed alive holding :4137. The next run then
+  // failed with a bare `EADDRINUSE: address already in use :::4137`, which names neither the port's
+  // owner nor the fact that the owner is a previous copy of this very script. Observed 2026-09-22:
+  // an abandoned run from 00:19 blocked the retry eleven hours later.
+  //
+  // So: it gives up after ten minutes, and if the port is taken it says who has it.
+  const CONSENT_TIMEOUT_MS = 10 * 60 * 1000;
+  let server, giveUp;
   const code = await new Promise((resolve, reject) => {
     server = http.createServer((req, res) => {
       if (!req.url.startsWith('/oauth2callback')) { res.writeHead(404); res.end(); return; }
@@ -88,12 +98,35 @@ async function main() {
       // "connected" before we know that it is. `res` is handed to the caller via the closure below.
       resolve({ code: c, res });
     });
-    server.on('error', reject);
+    server.on('error', (e) => {
+      if (e && e.code === 'EADDRINUSE') {
+        // Almost always an abandoned run of this same script. Name it, and name the way out, rather
+        // than leaving a port number and a shrug.
+        exec("lsof -nP -iTCP:4137 -sTCP:LISTEN -t", (_e, out) => {
+          const pids = String(out || '').trim().split(/\s+/).filter(Boolean);
+          reject(new Error(
+            'port 4137 is already in use' + (pids.length ? ' by PID ' + pids.join(', ') : '') + '.\n'
+            + '  That is almost certainly a previous `npm run google:auth` whose browser tab was never\n'
+            + '  completed — it waits for the redirect and holds the port.\n'
+            + (pids.length ? '  Free it with:  kill ' + pids.join(' ') + '\n' : '')
+            + '  Then run this again.'));
+        });
+        return;
+      }
+      reject(e);
+    });
     server.listen(4137, () => {
       console.log('→ Opening browser for Google consent…\n  If it does not open, visit:\n ', url, '\n');
       exec(`open "${url}"`);
+      giveUp = setTimeout(() => {
+        try { server.close(); } catch {}
+        reject(new Error('timed out after 10 minutes waiting for the Google consent redirect. '
+          + 'Nothing was changed; run it again when you can finish the flow in the browser.'));
+      }, CONSENT_TIMEOUT_MS);
+      giveUp.unref && giveUp.unref();
     });
   });
+  clearTimeout(giveUp);
 
   const finish = (ok, msg) => {
     try {
