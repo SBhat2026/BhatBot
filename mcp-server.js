@@ -76,6 +76,11 @@ async function startMcpServer({ port, token, runAgent, transcribe, synthesize, s
   // Twilio webhook authenticity: verify X-Twilio-Signature (HMAC-SHA1 of the full URL +
   // sorted POST params, keyed by the Twilio auth token). Blocks spoofed webhook POSTs even
   // from someone who learned the token URL. Skipped only if no auth token is configured.
+  // Why BhatBot rang, held until he has said he can talk. Bounded — a call that never reaches its
+  // second turn must not leak an entry.
+  const pendingReason = new Map();
+  const timeGreeting = () => { const h = new Date().getHours(); return h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening'; };
+
   // ── WHO IS THE OWNER ON THIS CALL? ──────────────────────────────────────────────────────────────
   // On an INBOUND call Siddhant is `From` — he dialled us. On an OUTBOUND call he is `To` — we
   // dialled him, and `From` is the Twilio number. Checking `From` unconditionally therefore refuses
@@ -427,9 +432,9 @@ self.addEventListener('fetch', (e) => {
       if (!ownerOk(req)) { console.warn(`[voice] refused ${String(req.body.Direction || '?')} call — ${ownerParty(req)} is not the owner`); return res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Say>Unauthorized.</Say><Hangup/></Response>'); }
       const callSid = req.body.CallSid || '';
       const answeredBy = String(req.body.AnsweredBy || '');
-      const greeting = req.query.msg || 'Good evening, sir. How may I help?';
+      const reason = String(req.query.msg || '').trim();
       if (/^(machine|fax)/.test(answeredBy)) {
-        const vm = `Good evening, sir. BhatBot here — you missed my call. ${greeting} The details are also in writing on your phone. That is all. Goodbye.`;
+        const vm = `Good evening, sir. BhatBot here — you missed my call. ${reason} The details are also in writing on your phone. That is all. Goodbye.`;
         const play = await sayElement(req, vm);
         if (endVoiceCall) endVoiceCall(callSid);
         return res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?><Response>${play}<Hangup/></Response>`);
@@ -444,9 +449,23 @@ self.addEventListener('fetch', (e) => {
           `<Parameter name="callSid" value="${xmlEsc(callSid)}"/>` +
           `</Stream></Connect></Response>`);
       }
-      const r = voiceTurn ? await voiceTurn(callSid, '', greeting) : { text: greeting };
-      const play = await sayElement(req, r.text);
-      res.type('text/xml').send(gatherTwiml(req, play, r.hangup));
+      // ── THE OPENER MUST BE INSTANT ─────────────────────────────────────────────────────────────
+      // Twilio abandons a webhook after ~15 SECONDS and plays "An application error has occurred".
+      // This used to run a full agent turn here — voiceTurn(), an LLM round-trip — and then wait on
+      // TTS synthesis on top. On anything but a trivial turn that blows through the limit, which is
+      // why three rounds of "the call connected and then errored": the call was fine, we were late.
+      //
+      // So the first thing said on the line is CANNED. No model, no agent, nothing that can be slow.
+      // It is also better manners, and it is what Siddhant asked for: do not open by silently
+      // waiting for him to talk, and do not launch into the reason before knowing he can listen.
+      // Ask whether now is a good time, then say why on the next turn once he has answered.
+      //
+      // The reason is stashed against the callSid rather than spoken, so the agent picks it up when
+      // the conversation actually starts.
+      if (reason && voiceBegin) { try { pendingReason.set(callSid, reason); } catch {} }
+      const opener = `${timeGreeting()}, sir. BhatBot here — is now a good time?`;
+      const play = await sayElement(req, opener);
+      res.type('text/xml').send(gatherTwiml(req, play, false));
     } catch (e) {
       res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?><Response><Say>System error.</Say><Hangup/></Response>`);
     }
@@ -465,6 +484,28 @@ self.addEventListener('fetch', (e) => {
         const play = await sayElement(req, 'I am still here, sir. Go on.');
         return res.type('text/xml').send(gatherTwiml(req, play, false));
       }
+      // ── HE HAS ANSWERED "IS NOW A GOOD TIME?" ──────────────────────────────────────────────────
+      // The opener asked; this is the reply. If he said yes, say WHY we rang — the reason stashed
+      // when the call was placed — and hand him the floor. If he said no, apologise and get off the
+      // phone rather than pressing on, because the whole point of asking was to respect the answer.
+      //
+      // Both branches are canned and therefore instant, which matters as much as the manners: this
+      // is still inside Twilio's ~15s webhook budget, and a model call here would risk the same
+      // "application error" the opener used to cause.
+      if (pendingReason.has(callSid)) {
+        const reason = pendingReason.get(callSid);
+        pendingReason.delete(callSid);
+        const no = /\b(no|not now|can'?t|busy|later|bad time|call back|another time)\b/i.test(speech);
+        if (no) {
+          const bye = await sayElement(req, 'Understood, sir. I will try later. Goodbye.');
+          if (endVoiceCall) endVoiceCall(callSid);
+          return res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?><Response>${bye}<Hangup/></Response>`);
+        }
+        // Anything else is taken as "go ahead" — an ambiguous answer should not cost him the call.
+        const play = await sayElement(req, `${reason} What would you like to do?`);
+        return res.type('text/xml').send(gatherTwiml(req, play, false));
+      }
+
       // Two-tier path: simple turns answer immediately; complex turns return 'thinking' →
       // play a "let me think" filler and poll /await while the reply streams in the background.
       if (voiceBegin) {
@@ -510,6 +551,9 @@ self.addEventListener('fetch', (e) => {
   });
 
   app.post('/voice/:token/status', guard, form, (req, res) => {
+    // A call that never reached its second turn still has a reason held for it. Twilio tells us when
+    // the call is over; that is the moment to let go of it.
+    try { const sid = req.body.CallSid; if (sid) pendingReason.delete(sid); } catch {}
     if (!twilioVerified(req)) return res.status(403).end();
     try { if (endVoiceCall && (req.body.CallStatus === 'completed' || req.body.CallStatus === 'failed')) endVoiceCall(req.body.CallSid); } catch {}
     res.status(204).end();

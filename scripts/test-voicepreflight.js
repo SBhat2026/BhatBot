@@ -103,5 +103,26 @@ console.log('[voicepreflight]');
     assert.notStrictEqual(sig, twilioSignature('other', 'https://h/x', { a: '1', b: '2' }));
     ok('the signature matches Twilio\'s scheme and depends on the secret');
   }
+  {
+    // THE ONE NOBODY MEASURED. Twilio abandons a webhook at ~15s and plays "An application error has
+    // occurred". Three rounds of debugging checked reachability, signatures, authorisation and TwiML
+    // shape — every one of them passed — while the handler was running an LLM round-trip before
+    // replying. A slow handler must be reported as SLOW, not as a network fault, or the next person
+    // is sent to the funnel while the real cause sits in the request path.
+    const r = await check({ ...OPTS, timeoutMs: 50, fetchImpl: async () => { const e = new Error('The operation was aborted due to timeout'); e.name = 'TimeoutError'; throw e; } });
+    assert.strictEqual(r.ok, false);
+    assert.strictEqual(r.stage, 'slow', 'a timeout is its own diagnosis: ' + r.detail);
+    assert.match(r.detail, /model|15s|application error/i);
+    ok('a webhook slower than the deadline is reported as SLOW, not as a dead funnel');
+  }
+  {
+    // ...and a healthy call reports how close to the limit it ran, because 14s passes today and
+    // fails on a slower day.
+    const r = await check({ ...OPTS, fetchImpl: reply('<Response><Say>x</Say><Gather input="speech"/></Response>') });
+    assert.ok(r.ok);
+    assert.strictEqual(typeof r.ms, 'number', 'the timing is reported even on success');
+    assert.match(r.detail, /budget/);
+    ok('a passing check still reports its margin against the deadline');
+  }
   console.log(`[voicepreflight] ${pass} assertions passed`);
 })();
