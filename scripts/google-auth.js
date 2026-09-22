@@ -77,7 +77,17 @@ async function main() {
   // personal one, the address matches an existing entry, and the run reports success having
   // connected nothing new. Asking for the chooser every time costs one extra click and removes an
   // entire class of "I ran it twice and still only have one account".
-  const url = oauth2.generateAuthUrl({ access_type: 'offline', prompt: 'select_account consent', scope: SCOPES });
+  // `login_hint` pre-selects an address in the chooser. It is a convenience, not an access change:
+  // Google still applies the test-user list, the publishing status and any Workspace admin policy
+  // exactly as before — it only saves picking the account out of a list.
+  //
+  //   npm run google:auth -- me@princeton.edu
+  const hint = process.argv.slice(2).find((a) => /@/.test(a) && !a.startsWith('-')) || '';
+  const url = oauth2.generateAuthUrl({
+    access_type: 'offline', prompt: 'select_account consent', scope: SCOPES,
+    ...(hint ? { login_hint: hint } : {}),
+  });
+  if (hint) console.log(`  (pre-selecting ${hint} in the chooser)`);
 
   // A CONSENT FLOW THAT IS NEVER COMPLETED MUST NOT OUTLIVE THE TERMINAL IT WAS STARTED IN.
   //
@@ -151,6 +161,18 @@ async function main() {
     finish(false, m);
     console.error('✗ Token exchange failed:', m);
     if (/invalid_client/.test(String(m))) console.error('  → clientId/clientSecret are wrong or unresolved.');
+    // TWO BLOCKS THAT LOOK ALIKE AND ARE NOT. One is yours to fix in thirty seconds; the other
+    // belongs to a Workspace administrator and no setting on this machine touches it. Saying which
+    // is the difference between a minute's work and a week of guessing.
+    if (/access_denied|admin|policy|org/i.test(String(m))) {
+      console.error('\n  This can be either of two different refusals:');
+      console.error('   • "developer-approved testers" / unverified app → YOURS to fix: add that');
+      console.error('     address under Google Cloud Console → OAuth consent screen → Test users,');
+      console.error('     then run this again. (Publishing the app also ends the 7-day token expiry.)');
+      console.error('   • a message naming an administrator or your organization → that is the');
+      console.error('     Workspace tenant blocking unconfigured third-party apps. Nothing here can');
+      console.error('     change it; the client ID has to be allowlisted by that domain\'s IT.');
+    }
     process.exit(1);
   }
   if (!tokens.refresh_token) {
