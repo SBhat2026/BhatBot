@@ -83,6 +83,13 @@ async function main() {
   //
   //   npm run google:auth -- me@princeton.edu
   const hint = process.argv.slice(2).find((a) => /@/.test(a) && !a.startsWith('-')) || '';
+  // A placeholder pasted out of an example is a real way to lose two minutes: login_hint does not
+  // restrict anything, so Google happily opens the chooser and the mistake only surfaces later as
+  // "why did it connect the wrong mailbox".
+  if (/^(your|my|someone|user|netid|name|email)[^@]*@/i.test(hint)) {
+    console.error(`✗ "${hint}" looks like a placeholder, not your address. Re-run with the real one.`);
+    process.exit(2);
+  }
   const url = oauth2.generateAuthUrl({
     access_type: 'offline', prompt: 'select_account consent', scope: SCOPES,
     ...(hint ? { login_hint: hint } : {}),
@@ -242,6 +249,12 @@ async function main() {
   const readded = at >= 0;
   console.log(`\n✓ ${readded ? 'Re-connected' : 'Connected'} ${email || '(address unknown)'}${entry.primary ? '  [primary — writes go here]' : ''}.`);
   if (readded) console.log('  (this address was already connected — its token was refreshed, not duplicated)');
+  // Asked for one mailbox and got another. Google's chooser is free to hand back whichever account
+  // the browser is signed in as, and silently connecting the wrong one is how you end up believing
+  // an account is connected when it is not.
+  if (hint && email && hint.toLowerCase() !== email) {
+    console.warn(`\n⚠ You asked for ${hint} but ${email} was authorised — pick the other account in the chooser and run this again.`);
+  }
   console.log(`  refresh_token ${vaulted ? 'stored in the vault' : 'saved (PLAINTEXT — run inside the app to vault it)'}.`);
   console.log('  Scopes:', SCOPES.map((s) => s.split('/auth/')[1]).join(', '));
   console.log(`\n  ${prior.length} account${prior.length === 1 ? '' : 's'} connected:`);
