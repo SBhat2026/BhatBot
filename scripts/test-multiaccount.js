@@ -156,4 +156,25 @@ console.log('[multiaccount]');
   ok('isConfigured is true only with app credentials AND at least one usable account');
 }
 
+// ── a rejected grant is not the same as an undecryptable one ──────────────────────────────────────
+{
+  // A revoked token decrypts perfectly and then fails every call. Reporting it as "ok" is the same
+  // class of lie as isConfigured() returning true while every CRED_REF was still a handle — which is
+  // how Google sat broken for weeks. The two states must be separately visible.
+  google.setConfigResolver(() => ({ google: CFG }));
+  const before = google.accounts().find((a) => a.email === 'sb@school.edu');
+  assert.ok(before.usable, 'the token decrypts');
+  assert.strictEqual(before.rejected, null, 'nothing known against it yet');
+
+  google.noteRejection('tok-school', 'invalid_grant: Token has been expired or revoked.');
+  const after = google.accounts().find((a) => a.email === 'sb@school.edu');
+  assert.ok(after.usable, 'it still DECRYPTS — that fact has not changed');
+  assert.ok(after.rejected && /invalid_grant/.test(after.rejected.reason), 'but Google has refused it, and we remember which one');
+
+  const others = google.accounts().filter((a) => a.email !== 'sb@school.edu');
+  assert.ok(others.every((a) => !a.rejected), 'one dead grant says nothing about the other accounts');
+  google.setConfigResolver(null);
+  ok('a grant Google refused is remembered per account, separately from a decrypt failure');
+}
+
 console.log(`[multiaccount] ${pass} groups passed`);

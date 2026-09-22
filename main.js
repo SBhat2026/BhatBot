@@ -4767,10 +4767,15 @@ async function executeTool(name, input) {
           accounts: list.map((x) => ({
             email: x.email || '(address unknown)', label: x.label,
             primary: x.primary, triage: x.triage,
-            status: x.usable ? 'ok' : 'needs re-auth (token did not decrypt)',
+            // Three distinct states, because two of them look identical from the outside and only
+            // one of them is fine. A token can fail to decrypt (vault problem), decrypt and be
+            // refused by Google (expired grant — the common one), or actually work.
+            status: !x.usable ? 'needs re-auth (token did not decrypt from the vault)'
+                  : x.rejected ? `needs re-auth (Google refused it: ${String(x.rejected.reason).slice(0, 80)})`
+                  : 'ok',
           })),
           ...(list.length ? {} : { hint: 'No Google accounts connected. Run `npm run google:auth` — once per mailbox.' }),
-          ...(list.some((x) => !x.usable) ? { hint: 'Run `npm run google:auth` for each account marked "needs re-auth".' } : {}),
+          ...(list.some((x) => !x.usable || x.rejected) ? { hint: 'Run `npm run google:auth` for each account marked "needs re-auth" — once per mailbox, from ~/bhatbot.' } : {}),
         };
         break;
       }

@@ -181,8 +181,15 @@ async function main() {
   // REPLACES that entry — which is exactly what a re-auth after an expiry should do, and is why the
   // match is on the address rather than on the token.
   const prior = Array.isArray(g.accounts) ? g.accounts.slice() : [];
-  // A pre-multi-account config carried one token at the top level; carry it in as account one.
-  if (!prior.length && g.refreshToken) prior.push({ email: g.email || '', refreshToken: g.refreshToken, primary: true });
+  // A pre-multi-account config carried one token at the top level; carry it in as account one — and
+  // carry its TRIAGE setting with it. Triage is off by default for a new account, but the account
+  // being migrated is the one triage was already configured against, and a migration that silently
+  // switches a working subsystem off is not a migration.
+  if (!prior.length && g.refreshToken) {
+    const wasTriaging = !!(config.triage && config.triage.enabled);
+    prior.push({ email: g.email || '', refreshToken: g.refreshToken, primary: true, triage: wasTriaging });
+    if (wasTriaging) console.log('  (carried the existing mail-triage opt-in onto the first account)');
+  }
 
   const at = email ? prior.findIndex((a) => String(a.email || '').toLowerCase() === email) : -1;
   const entry = {
