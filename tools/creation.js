@@ -276,11 +276,23 @@ module.exports = function makeCreation(ctx = {}) {
       const outPath = path.join(outDir, `${fname}.glb`);
       fs.writeFileSync(outPath, gbuf);
       if (input.preview !== false) openInteractive3D(outPath);
+      // WHAT IS ACTUALLY IN THE FILE. "3.01 MB" says nothing — a featureless blob, a single
+      // untextured quad and a faithful reconstruction are all files of roughly that size. Reading
+      // the container costs a millisecond and turns the result into something a caller can judge.
+      let mesh = null;
+      try {
+        const glb = require(path.join(__dirname, '..', 'lib', 'glbcheck'));
+        const i = glb.inspect(outPath);
+        const v = glb.verdict(i, { minTriangles: 2000 });
+        mesh = { vertices: i.vertices, triangles: i.triangles, textured: i.images > 0 && i.texBytes > 20000,
+          hasUV: i.hasUV, boundingBox: i.size, ...(v.ok ? {} : { problems: v.problems }) };
+      } catch { /* an unreadable GLB is still a delivered file — report it, do not fail on it */ }
+
       // The busyness warning rides WITH the success, because the dangerous case is a valid file of
       // the wrong object — nothing downstream can tell, so the doubt has to travel with the result.
       const busy = busyness != null && busyness > 0.18;
       return { success: true, path: outPath, size_mb: (gbuf.length / 1048576).toFixed(2), seconds: tries * 3,
-        inputBusyness: busyness,
+        mesh, inputBusyness: busyness,
         ...(busy ? { warning: `The source image is visually dense (edge density ${busyness}). TRELLIS is unreliable above roughly 0.18: measured on one subject, it reconstructed an entirely different object at that level while still producing a structurally valid GLB. CHECK THIS MODEL LOOKS LIKE THE SUBJECT before building on it — a simpler, cleaner silhouette reconstructs far better than a busy one.` } : {}),
         message: `3D model → ${outPath}. Opened an interactive 3D preview. Import into Blender, Unity, or Three.js (or run make_printable mode convert to get a printable STL).` };
     } catch (e) { return { success: false, error: 'GLB download error: ' + e.message }; }
