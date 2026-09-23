@@ -3935,7 +3935,7 @@ async function droneAgentRun(ctx, task) {
     if (!tus.length || resp.stop_reason === 'end_turn' || (step && step.budgetLeft === false) || (step && step.terminated)) break;
     for (const b of tus) if (_droneTrace.length < 40) _droneTrace.push(b.name);
     const runOne = async (tu) => {
-      const r = (ctx.tools || []).includes(tu.name) ? await executeTool(tu.name, tu.input) : { success: false, error: `tool "${tu.name}" is not permitted for this drone` };
+      const r = (ctx.tools || []).includes(tu.name) ? await executeTool(tu.name, tu.input, { hermetic: !!ctx.hermetic }) : { success: false, error: `tool "${tu.name}" is not permitted for this drone` };
       return { type: 'tool_result', tool_use_id: tu.id, content: JSON.stringify(r).slice(0, 16 * 1024), is_error: r && r.success === false };
     };
     // Same read-burst throughput win as the main loop: independent read-only tools this turn run
@@ -4401,9 +4401,20 @@ function badAccount(sel) {
   } catch { return null; }
 }
 
-async function executeTool(name, input) {
+// `opts.hermetic` marks a call made ON BEHALF OF a drone that was told its code runs sandboxed.
+// lib/drone.js puts that promise in the drone's own system prompt — "Any code you GENERATE runs only
+// in the sandbox (scrubbed env — no secrets, no network)" — and until now nothing enforced it:
+// drones call this same executeTool, so a hermetic drone's run_shell ran with BhatBot's full
+// environment, ANTHROPIC_API_KEY included. lib/sandboxexec.js, the wall that was supposed to stop
+// that, was required by nothing. A security claim the code does not back is worse than no claim.
+async function executeTool(name, input, opts = {}) {
   let result;
   const __auditT0 = Date.now();
+  // The observer voice sees the tool go out. It is a pure local filter — most tools are simply not
+  // news, and it returns null for those — so this costs microseconds and never awaits. A drone's
+  // call is not narrated: the fleet has its own commentary and nine drones each announcing a
+  // read_file is the noise this layer exists to prevent.
+  if (!opts.hermetic) remark({ kind: 'tool', name, input });
   // Resolve CRED_REF_* handles to real secrets just before the tool runs. The audit log
   // (below) records `input` with the handles intact, never the decrypted secret.
   const auditInput = input;
@@ -4475,6 +4486,23 @@ async function executeTool(name, input) {
           .map((e) => ({ name: e.name, type: e.isDirectory() ? 'dir' : 'file' })) }; break;
       case 'run_shell': {
         if (HARD_BLOCKED.some((re) => re.test(input.command))) { result = { success: false, error: 'Blocked: destructive command' }; break; }
+        // A HERMETIC DRONE GETS THE WALL IT WAS PROMISED. Scrubbed env (allow-list, so a new secret
+        // is excluded by construction), a throwaway HOME (no ~/.ssh, no ~/.bhatbot vault), and on
+        // macOS a sandbox-exec profile that denies network. Same spawn, different environment — no
+        // measurable cost, and it only applies to drones that asked to be hermetic.
+        //
+        // The confirm gate is deliberately NOT consulted here: an unattended drone has nobody to
+        // answer it, and the isolation is what makes that acceptable rather than a prompt nobody sees.
+        if (opts.hermetic) {
+          const sbx = require('./lib/sandboxexec');
+          const r = await sbx.run('/bin/sh', ['-c', String(input.command || '')], {
+            timeoutMs: 120000, cwd: input.cwd, allowNetwork: false,
+          });
+          result = { success: r.code === 0 && !r.timedOut, exitCode: r.code, timedOut: !!r.timedOut,
+            lane: r.lane, sandboxed: true,
+            stdout: String(r.stdout || '').slice(-6000), stderr: String(r.stderr || '').slice(-3000) };
+          break;
+        }
         const gate = CONFIRM_PATTERNS.find((g) => g.re.test(input.command));
         if (gate) {
           const approved = await requestConfirm(input.command, gate.reason);
@@ -5131,7 +5159,11 @@ async function executeTool(name, input) {
         };
         let out;
         try {
-          out = await runFleet(specs, { board, agentRun: droneAgentRun, admission, onEvent, log: (t) => sendToActivity('tool-update', { type: 'thinking', text: t }) },
+          out = await runFleet(specs, { board, agentRun: droneAgentRun, admission,
+            // The fleet's own events are exactly what the observer register is for: "second drone's
+            // back, two still out" is the household report, not a log line to go and find.
+            onEvent: (e) => { try { onEvent(e); } catch {} remark({ kind: 'agent', ...(e || {}) }); },
+            log: (t) => sendToActivity('tool-update', { type: 'thinking', text: t }) },
             { wsDir, mission, hardCap, envelopeUsd: input.budgetUsd || 2, staleMs: input.staleMs || 90000, nudgeGraceMs: 15000, taskFor: (d) => taskMap[d.id] || { goal: mission } });
         } catch (e) { try { fleetDone(); } catch {}; result = { success: false, error: 'fleet error: ' + e.message }; break; }
         try { fleetDone(); } catch {}
@@ -8206,6 +8238,29 @@ const commands = createCommands({ log: (m) => console.log(m) });
 const { createWeaver } = require('./lib/weaver');
 const { createTriageRun } = require('./lib/triagerun');
 const callgate = require('./lib/callgate');
+
+// ── THE OBSERVER VOICE ───────────────────────────────────────────────────────────────────────────
+// lib/commentary.js is the second of the two registers Siddhant asked for: first person when taking
+// an order, a bystander describing the household when explaining what is happening. It was written,
+// tested, and required by nothing — so the only way to find out what BhatBot was doing remained
+// reading ~/.bhatbot/logs, which is the exact thing it was built to replace.
+//
+// TWO RULES MAKE IT SAFE TO PUT ON THE HOT PATH:
+//   • It NEVER interrupts. speakDesktop() begins with stopDesktopTTS(), so an unguarded observer
+//     line would cut BhatBot off mid-answer. `isSpeaking` is the real TTS flag, and commentary
+//     declines rather than talks over.
+//   • It NEVER blocks. observe() is pure local string work that returns null for most events, and
+//     the speech it does produce is fired and forgotten — no await anywhere on a tool's path.
+const { createCommentary } = require('./lib/commentary');
+const commentary = createCommentary({
+  isSpeaking: () => ttsActive,
+  speak: (line) => { try { speakDesktop(`<speak>${line}</speak>`); } catch {} },   // deliberately not awaited
+  log: (m) => console.log('[commentary] ' + m),
+});
+/** Fire-and-forget: a commentary failure must never surface as a tool failure.
+ *  Named `remark` rather than `narrate` because lib/narrate.js is already the FIRST-PERSON voice —
+ *  the actor describing its own desires. This is the other register entirely. */
+function remark(event) { try { commentary.observe(event); } catch {} }
 const { createCustodian } = require('./lib/custodian');
 // Deterministic checks only for now: no judge is injected, so it accepts anything it cannot
 // disprove for free. Wiring a judge is a separate decision with a per-review cost attached.

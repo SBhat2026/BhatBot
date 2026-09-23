@@ -45,6 +45,26 @@ ok(Object.keys(env).every((k) => !/key|token|secret|password|auth/i.test(k)), 's
 
   fs.rmSync(home, { recursive: true, force: true });
   delete process.env.BHATBOT_CANARY_SECRET;
+
+  // ── THE WALL MUST BE LOAD-BEARING ──────────────────────────────────────────────────────────────
+  // lib/drone.js tells every hermetic drone, in its own system prompt, that "Any code you GENERATE
+  // runs only in the sandbox (scrubbed env — no secrets, no network)". That was false: drones call
+  // the same executeTool as the main agent, so a hermetic drone's run_shell ran with BhatBot's full
+  // environment, ANTHROPIC_API_KEY included — and this module, the wall meant to stop it, was
+  // required by nothing. A security claim the code does not back is worse than no claim, so the
+  // wiring is asserted here rather than only the module's own behaviour.
+  {
+    const main = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
+    ok(/async function executeTool\(name, input, opts = \{\}\)/.test(main),
+      'executeTool knows whether it is acting for a hermetic drone');
+    ok(/executeTool\(tu\.name, tu\.input, \{ hermetic: !!ctx\.hermetic \}\)/.test(main),
+      'the drone runner passes its hermetic flag through');
+    const shell = main.slice(main.indexOf("case 'run_shell': {"), main.indexOf("case 'fetch_url': {"));
+    ok(/opts\.hermetic/.test(shell) && /sandboxexec/.test(shell),
+      'run_shell routes a hermetic call through the wall');
+    ok(/allowNetwork: false/.test(shell), 'and denies it the network, as the prompt promises');
+  }
+
   console.log(`\n${fail ? '❌' : '✅'} ${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })().catch((e) => { console.error('crashed:', e); process.exit(1); });

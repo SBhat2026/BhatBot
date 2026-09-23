@@ -238,4 +238,42 @@ function rig(config = {}, { speaking = false } = {}) {
   ok(`summarize answers the question directly: "${s}"`);
 }
 
+
+// ── IS IT WIRED, AND IS IT FREE? ─────────────────────────────────────────────────────────────────
+// This module was written, tested, and required by nothing — so the only way to learn what BhatBot
+// was doing remained reading ~/.bhatbot/logs, which is the exact thing it exists to replace. It now
+// sits on the tool path, and two properties are what make that safe rather than reckless.
+{
+  const fs = require('fs');
+  const path = require('path');
+  const main = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
+  assert.ok(/createCommentary\(/.test(main), 'main.js constructs the commentary layer');
+  assert.ok(/function remark\(event\)/.test(main), 'with a fire-and-forget wrapper');
+  assert.ok(/isSpeaking: \(\) => ttsActive/.test(main),
+    'fed the REAL tts flag — speakDesktop() begins with stopDesktopTTS(), so an unguarded line would cut him off mid-answer');
+  const exec = main.slice(main.indexOf('async function executeTool(name, input, opts'));
+  assert.ok(/remark\(\{ kind: 'tool', name, input \}\)/.test(exec.slice(0, 2000)),
+    'and it observes the tool path, which is where the news actually is');
+  assert.ok(!/await remark\(/.test(main), 'NEVER awaited — a narration must not sit in a tool\'s latency');
+  ok('the commentary layer is wired to the tool path, non-blocking, and cannot interrupt');
+}
+{
+  // IT MUST NOT INTERRUPT. The rule the whole integration rests on.
+  let said = [];
+  const c = cm.createCommentary({ speak: (l) => said.push(l), isSpeaking: () => true });
+  for (let i = 0; i < 5; i++) c.observe({ kind: 'tool', name: 'write_file', input: {} });
+  assert.strictEqual(said.length, 0, 'it stays silent while he is already speaking');
+  ok('commentary declines rather than talking over an answer in progress');
+}
+{
+  // IT MUST BE FREE. It runs on every tool call, so anything measurable here is a latency
+  // regression on the hot path — and reducing latency is a standing requirement, not a nicety.
+  const c = cm.createCommentary({ speak: () => {}, isSpeaking: () => false });
+  const t0 = process.hrtime.bigint();
+  for (let i = 0; i < 10000; i++) c.observe({ kind: 'tool', name: 'read_file', input: { path: '/x' } });
+  const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+  assert.ok(ms < 200, `10k observations took ${ms.toFixed(1)}ms — too slow for the tool path`);
+  ok(`10,000 observations in ${ms.toFixed(1)}ms — free at the per-call scale it runs at`);
+}
+
 console.log(`\n✅ commentary: ${pass} groups passed`);
