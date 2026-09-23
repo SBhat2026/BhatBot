@@ -4765,6 +4765,39 @@ async function executeTool(name, input, opts = {}) {
       // Which mailboxes exist, and which of them still work. The model cannot guess an address, and
       // when a Google call fails this is what turns "Google is broken" into "your school account
       // needs re-authorising".
+      // Each area maps to the script that already exists — the diagnostics are not reimplemented
+      // here, because two copies of a check drift and the wrong one is always the one that ran.
+      case 'self_check': {
+        const AREAS = {
+          voice:  { cmd: ['electron', 'scripts/voice-doctor.js'],   what: 'whether Twilio can actually reach the voice webhook from the public internet' },
+          speech: { cmd: ['node', 'scripts/speech-doctor.js'],      what: 'what BhatBot actually says out loud, transcribed back' },
+          visual: { cmd: ['node', 'scripts/visual-doctor.js'],      what: 'what the interface actually renders — geometry and contrast' },
+          tools:  { cmd: ['node', 'scripts/toolcheck.js'],          what: 'every tool runtime' },
+          code:   { cmd: ['node', 'scripts/deadcode.js'],           what: 'modules nothing requires' },
+        };
+        const area = String((input && input.area) || 'code');
+        const pick = area === 'all' ? Object.keys(AREAS) : [area];
+        if (pick.some((a) => !AREAS[a])) { result = { success: false, error: `unknown area "${area}" — one of ${Object.keys(AREAS).join(', ')}, or all` }; break; }
+        const out = {};
+        for (const a of pick) {
+          const { cmd, what } = AREAS[a];
+          sendToActivity('tool-update', { type: 'thinking', text: `🩺 self-check: ${what}…` });
+          try {
+            const bin = cmd[0] === 'electron' ? path.join(__dirname, 'node_modules', '.bin', 'electron') : 'node';
+            const r = await runShell(`"${bin}" ${JSON.stringify(path.join(__dirname, cmd[1]))} 2>&1`, __dirname);
+            const text = String((r && (r.stdout || r.output || r.result)) || '').replace(/\x1b\[[0-9;]*m/g, '');
+            // The last few lines carry the verdict in every one of these scripts; the rest is detail
+            // the model does not need and should not be asked to summarise.
+            const tail = text.trim().split('\n').slice(-12).join('\n');
+            const bad = /✗|✘|\bbroken\b|[1-9]\d* error\(s\)|unreachable|did NOT/i.test(tail);
+            out[a] = { ok: !bad, what, report: tail.slice(0, 1200) };
+          } catch (e) { out[a] = { ok: false, what, error: String((e && e.message) || e).slice(0, 200) }; }
+        }
+        const failed = Object.entries(out).filter(([, v]) => !v.ok).map(([k]) => k);
+        result = { success: failed.length === 0, checked: pick, failing: failed, results: out,
+          summary: failed.length ? `${failed.join(', ')} ${failed.length === 1 ? 'is' : 'are'} not healthy — see the report for the stage that broke.` : `${pick.join(', ')} all healthy.` };
+        break;
+      }
       case 'google_accounts': {
         const list = (typeof google.accounts === 'function') ? google.accounts() : [];
         result = {
