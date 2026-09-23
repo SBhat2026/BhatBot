@@ -5201,18 +5201,28 @@ async function executeTool(name, input, opts = {}) {
         break;
       }
       case 'find_papers': {
-        // FORGE Phase 6 — scholarly search across arXiv (keyless) + Semantic Scholar (key optional),
-        // merged + deduped into normalized records. The research-depth pipeline builds on this.
+        // FORGE Phase 6 — scholarly search across arXiv + PubMed (both keyless) + Semantic Scholar
+        // (key optional), merged + deduped into normalized records.
+        //
+        // PUBMED WAS ADDED BECAUSE THE OTHER TWO MISS SIDDHANT'S FIELD. arXiv has ZERO papers on
+        // uricase — biochemistry is published in journals, not preprint servers — and Semantic
+        // Scholar answers 429 without a key. PubMed has 414 on the same term, keyless, and expands
+        // to MeSH on the way in. Searching for "protein binder design" it returns RFdiffusion,
+        // BindCraft and the deep-learning binder papers; arXiv alone returned a battery-electrode
+        // paper about a "binder-conductive additive" at rank one.
         const q = String(input.query || '').trim();
         if (!q) { result = { success: false, error: 'query required' }; break; }
         const max = Math.max(1, Math.min(input.max || 8, 25));
         const c = loadConfig();
-        const [ax, ss] = await Promise.all([
+        const [ax, ss, pm] = await Promise.all([
           scholar.arxiv(q, { max }),
           scholar.semanticScholar(q, { max, key: c.semanticScholarKey }).catch(() => ({ results: [] })),
+          scholar.pubmed(q, { max }).catch(() => ({ results: [] })),
         ]);
-        const merged = scholar.mergeDedupe(ax.results, ss.results).slice(0, max);
-        const notes = [ax.error && ('arxiv: ' + ax.error), ss.error && ('semanticscholar: ' + ss.error)].filter(Boolean);
+        const merged = scholar.mergeDedupe(ax.results, ss.results, pm.results).slice(0, max);
+        // Which source answered is worth reporting: an empty arXiv on a biochemistry query is normal
+        // and an empty PubMed on a machine-learning one is too, and neither is a failure.
+        const notes = [ax.error && ('arxiv: ' + ax.error), ss.error && ('semanticscholar: ' + ss.error), pm.error && ('pubmed: ' + pm.error)].filter(Boolean);
         result = { success: merged.length > 0 || notes.length === 0, query: q, count: merged.length,
           papers: merged.map((p) => ({ title: p.title, authors: (p.authors || []).slice(0, 6), year: p.year, source: p.source, citations: p.citations, pdfUrl: p.pdfUrl, url: p.url, abstract: (p.abstract || '').slice(0, 400) })),
           notes: notes.length ? notes : undefined };

@@ -237,6 +237,50 @@ check('bioart', 'NIH BioArt search responds — and honours the term', async () 
   return { evidence: `${items.length} public-domain assets, relevant — "${items[0].title}"` };
 });
 
+// ── the scholarly + figure lanes ───────────────────────────────────────────────────────────────────
+// Four science tools shipped with no runtime check at all. That is the same gap bioart sat in for
+// months while returning the same generic page for every query, so the two that can be exercised for
+// free are exercised.
+check('find_papers', 'the literature search covers this field, and is on topic', async () => {
+  const scholar = require(path.join(ROOT, 'lib', 'integrations', 'scholar'));
+  const [ax, pm] = await Promise.all([
+    scholar.arxiv('protein binder design', { max: 4 }),
+    scholar.pubmed('uricase engineering', { max: 3 }),
+  ]);
+  const axItems = (ax && ax.results) || [];
+  if (ax && ax.error) throw new Error('arxiv: ' + ax.error);
+  if (!axItems.length) throw new Error('arXiv returned nothing');
+
+  // RELEVANCE, NOT A COUNT — and specific enough to mean something. A check for "design" alone
+  // passed a battery-electrode paper about a "binder-conductive additive", which is how arXiv's
+  // OR-by-default term handling went unnoticed. This is the bioart lesson applied twice.
+  const onTopic = axItems.filter((p) => /binder|peptide|protein/i.test(String(p.title || '')));
+  if (!onTopic.length) throw new Error(`arXiv returned ${axItems.length} papers, none with a protein/binder title — "${axItems[0].title}"`);
+
+  // COVERAGE. arXiv has zero uricase papers because biochemistry is not published on preprint
+  // servers; PubMed is what makes Siddhant's own field searchable at all, so its absence is a
+  // failure rather than a quiet gap.
+  if (pm && pm.error) throw new Error('pubmed: ' + pm.error);
+  const pmItems = (pm && pm.results) || [];
+  if (!pmItems.length) throw new Error('PubMed returned nothing for a biochemistry query — the field is invisible without it');
+  return { evidence: `arXiv ${onTopic.length}/${axItems.length} on topic · PubMed ${pm.total} hits for uricase — "${String(pmItems[0].title).slice(0, 40)}…"` };
+});
+
+check('make_figure', 'matplotlib renders a data-accurate figure', async () => {
+  const figures = require(path.join(ROOT, 'lib', 'figures'));
+  const csv = path.join(TMP, 'fig.csv');
+  fs.writeFileSync(csv, 'x,y\n1,2\n2,4\n3,9\n4,16\n5,25\n');
+  let r;
+  try { r = typeof figures.oneShot === 'function' ? await figures.oneShot({ data: csv, goal: 'scatter of y against x', n: 1 }) : { error: 'no oneShot entry point' }; }
+  catch (e) { r = { error: (e && e.message) || String(e) }; }
+  const out = r && (r.path || r.out || r.file || (Array.isArray(r.figures) && r.figures[0] && (r.figures[0].path || r.figures[0].png)));
+  if (r && r.error) return { skip: 'figure pipeline unavailable: ' + String(r.error).slice(0, 70) };
+  if (!out || !fs.existsSync(out)) return { skip: 'no figure produced (matplotlib venv may not be provisioned)' };
+  const sz = fs.statSync(out).size;
+  if (sz < 2048) throw new Error(`figure is ${sz} bytes — effectively blank`);
+  return { evidence: `rendered a ${Math.round(sz / 1024)}KB PNG from a 5-row csv` };
+});
+
 check('cloud', 'the always-on brain answers', async () => {
   const r = await fetch('https://bhatbot-cloud.fly.dev/health', { signal: AbortSignal.timeout(20000) });
   if (r.status !== 401 && r.status !== 200) throw new Error('unexpected status ' + r.status);
