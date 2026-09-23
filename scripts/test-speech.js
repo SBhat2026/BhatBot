@@ -45,5 +45,26 @@ eq('forSpeech emoji+punct', speech.forSpeech('Done ✅!!!'), 'Done done!');
 eq('forSpeech idempotent on clean', speech.forSpeech('all set.'), 'all set.');
 ok('forSpeech strips all emoji', !speech.hasEmoji(speech.forSpeech('mixed 🔥 message 🎯 here 🤔')));
 
+// ── MARKUP IS NOT SPEECH ─────────────────────────────────────────────────────────────────────────
+// Four call sites hand speakDesktop a <speak>…</speak> wrapper and the default local voice has no
+// SSML parser, so BhatBot was saying "speak, Mail's open, slash speak" out loud. The string is
+// perfect at every point you can inspect; only the audio was wrong, which is why it survived until
+// something transcribed its own output.
+{
+  const sp = require('../lib/speech');
+  for (const [raw, want] of [
+    ['<speak>Mail is open.</speak>', 'Mail is open.'],
+    ['<speak>The fleet is back.</speak>', 'The fleet is back.'],
+    ['<break time="0.2s"/>then this', 'then this'],
+    ['<prosody rate="slow">careful</prosody>', 'careful'],
+  ]) {
+    const got = sp.forSpeech(raw);
+    ok(`SSML stripped before synthesis: ${JSON.stringify(raw)} → ${JSON.stringify(got)}`, got === want);
+  }
+  // ...and nothing that is not markup is touched.
+  ok('a bare < is not treated as a tag', sp.forSpeech('He scored 3 < 5 points') === 'He scored 3 < 5 points');
+  ok('ordinary text passes through untouched', sp.forSpeech('plain sentence, untouched') === 'plain sentence, untouched');
+}
+
 console.log(`\n${fail === 0 ? '✅' : '❌'} ${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);

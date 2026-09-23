@@ -8233,8 +8233,23 @@ const costledger = require('./lib/costledger');
 const { createCommentary } = require('./lib/commentary');
 const commentary = createCommentary({
   isSpeaking: () => ttsActive,
-  speak: (line) => { try { speakDesktop(`<speak>${line}</speak>`); } catch {} },   // deliberately not awaited
-  log: (m) => console.log('[commentary] ' + m),
+  // MOST COMMENTARY IS READ, NOT HEARD. The first wiring spoke every NOTABLE line, so opening Mail
+  // announced itself out loud — "Mail's open." — which is precisely the running narration this layer
+  // was supposed to be an alternative to. An observer who comments on every errand is not informative,
+  // he is talking.
+  //
+  // So the registers split by SALIENCE, which the module already reports: ALWAYS is spoken, because
+  // those are the events that need you to look up — a fleet going out, a login, self-heal acting,
+  // triage touching the inbox. Everything else goes to the activity feed, where it is available at a
+  // glance and costs nothing to ignore. `commentaryVoice: 'all'` in config restores the spoken
+  // running commentary for anyone who wants it.
+  speak: (line, meta = {}) => {
+    const mode = (loadConfig().commentaryVoice || 'notable-only');
+    const spoken = mode === 'all' || meta.salience === 'always';
+    try { sendToActivity('tool-update', { type: 'thinking', text: '· ' + line }); } catch {}
+    if (spoken) { try { speakDesktop(`<speak>${line}</speak>`); } catch {} }   // deliberately not awaited
+  },
+  log: (m) => console.log(m),   // the module already prefixes its own lines; prefixing again gave "[commentary] [commentary] …"
 });
 /** Fire-and-forget: a commentary failure must never surface as a tool failure.
  *  Named `remark` rather than `narrate` because lib/narrate.js is already the FIRST-PERSON voice —
