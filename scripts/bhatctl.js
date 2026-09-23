@@ -124,7 +124,16 @@ async function send(args) {
   const dt = ((Date.now() - t0) / 1000).toFixed(1);
   console.log('');
   if (res.error) console.log(C.red('✗ ' + res.error));
-  else console.log(C.green('BHATBOT ') + (res.text || res.reply || '(no text)'));
+  else if (res.text || res.reply) console.log(C.green('BHATBOT ') + (res.text || res.reply));
+  else {
+    // "(no text)" told us nothing for three separate occurrences — a long turn that answered with an
+    // empty string, and no way to tell whether the agent produced nothing, the field moved, or the
+    // request was cut short. Print what actually came back, so the next one diagnoses itself.
+    console.log(C.red('✗ the turn returned no text.') + C.dim(' Response shape: ' + JSON.stringify(Object.fromEntries(
+      Object.entries(res).map(([k, v]) => [k, typeof v === 'string' ? `"${v.slice(0, 60)}"` : Array.isArray(v) ? `[${v.length}]` : typeof v])
+    ))));
+    if (res.stop_reason) console.log(C.dim('  stop_reason: ' + res.stop_reason));
+  }
   console.log(C.dim(`  (${dt}s)`));
 }
 
