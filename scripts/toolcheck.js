@@ -153,9 +153,20 @@ check('sci_compute', 'numpy/pandas in the scicompute venv', async () => {
 check('predict_function', 'FABLE endpoint answers with predictions', async () => {
   const pf = require(path.join(ROOT, 'lib', 'protfunc'))();
   const seq = 'MKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQAPILSRVGDGTQDNLSGAEKAVQVKVKALPDAQFEVVHSLAKWKR';
-  const r = await pf.predict({ sequence: seq });
-  if (!r || typeof r.length !== 'number') throw new Error('unexpected response shape');
-  return { evidence: `len ${r.length}, taxon ${r.taxonApplied || '—'}, ${(r.predictions || []).length} prediction(s)` };
+  try {
+    const r = await pf.predict({ sequence: seq });
+    if (!r || typeof r.length !== 'number') throw new Error('unexpected response shape');
+    return { evidence: `len ${r.length}, taxon ${r.taxonApplied || '—'}, ${(r.predictions || []).length} prediction(s)` };
+  } catch (e) {
+    // ASLEEP IS NOT BROKEN. The backend idles down and answers the first request with a 503 that
+    // names its own remedy. lib/protfunc.js already retries that twice; when it is STILL cold after
+    // those, the honest report is "not awake yet", not a red cross next to a service that works.
+    // A harness that cannot tell a cold start from an outage teaches you to ignore it.
+    if (/waking up|cold start/i.test(String(e.message || ''))) {
+      return { skip: 'FABLE backend still cold after 2 retries (~45s) — asleep, not broken; re-run once it is warm' };
+    }
+    throw e;
+  }
 });
 
 // ── making ────────────────────────────────────────────────────────────────────────────────────────
