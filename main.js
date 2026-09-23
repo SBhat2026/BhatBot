@@ -1248,41 +1248,19 @@ function costOf(model, u) {
   if (!u) return 0;
   return pricing.usd(model || MODEL_HAIKU, u);
 }
+// ONE LEDGER, ONE IMPLEMENTATION. This logic lived here, inside Electron, which is why the headless
+// worker — unattended, every thirty minutes, paying for embeddings and rationales — could not write
+// to it and recorded its spend to a runtime snapshot instead. The daily total was silently low and
+// overBudget() could not see the one subsystem nobody is watching. lib/costledger.js is now the
+// single implementation; both processes append to the same file, tagged by source.
 function recordCost(model, usage) {
-  try {
-    const usd = costOf(model, usage); if (!usd) return;
-    let led = {}; try { led = JSON.parse(fs.readFileSync(COSTS_PATH, 'utf8')); } catch {}
-    const d = today();
-    led[d] = led[d] || { usd: 0, calls: 0, byModel: {} };
-    led[d].usd += usd; led[d].calls += 1;
-    const mk = (model || 'unknown').replace(/^claude-/, '');
-    led[d].byModel[mk] = (led[d].byModel[mk] || 0) + usd;
-    const cut = new Date(Date.now() - 60 * 864e5).toISOString().slice(0, 10);   // prune >60d
-    for (const k of Object.keys(led)) if (k < cut) delete led[k];
-    fs.mkdirSync(path.dirname(COSTS_PATH), { recursive: true });
-    fs.writeFileSync(COSTS_PATH, JSON.stringify(led));
-  } catch {}
+  const usd = costOf(model, usage); if (!usd) return;
+  costledger.record({ usd, model, source: 'app' });
 }
-function costToday() {
-  try { const led = JSON.parse(fs.readFileSync(COSTS_PATH, 'utf8')); return led[today()] || { usd: 0, calls: 0, byModel: {} }; }
-  catch { return { usd: 0, calls: 0, byModel: {} }; }
-}
+function costToday() { return costledger.todayTotal(); }
 // Per-TOOL spend (paid generation tools) folded into the SAME daily ledger so the cost number is
 // the whole picture — model tokens + FLUX/TRELLIS/image-gen — not just the LLM.
-function recordToolCost(tool, usd) {
-  try {
-    if (!usd) return;
-    let led = {}; try { led = JSON.parse(fs.readFileSync(COSTS_PATH, 'utf8')); } catch {}
-    const d = today();
-    led[d] = led[d] || { usd: 0, calls: 0, byModel: {} };
-    led[d].usd += usd;
-    led[d].toolUsd = (led[d].toolUsd || 0) + usd;
-    led[d].byTool = led[d].byTool || {};
-    led[d].byTool[tool] = (led[d].byTool[tool] || 0) + usd;
-    fs.mkdirSync(path.dirname(COSTS_PATH), { recursive: true });
-    fs.writeFileSync(COSTS_PATH, JSON.stringify(led));
-  } catch {}
-}
+function recordToolCost(tool, usd) { costledger.recordTool(tool, usd); }
 function overBudget() { const c = loadConfig(); return !!(c.dailyBudgetUsd && costToday().usd >= c.dailyBudgetUsd); }
 
 // --- Learned-router telemetry (#13) — log each routing decision so routing can be tuned with
@@ -8238,6 +8216,7 @@ const commands = createCommands({ log: (m) => console.log(m) });
 const { createWeaver } = require('./lib/weaver');
 const { createTriageRun } = require('./lib/triagerun');
 const callgate = require('./lib/callgate');
+const costledger = require('./lib/costledger');
 
 // ── THE OBSERVER VOICE ───────────────────────────────────────────────────────────────────────────
 // lib/commentary.js is the second of the two registers Siddhant asked for: first person when taking

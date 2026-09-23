@@ -41,6 +41,8 @@ const pidlock = require(path.join(ROOT, 'lib', 'pidlock'));
 const llm = require(path.join(ROOT, 'lib', 'llm'));
 const miniagent = require(path.join(ROOT, 'lib', 'miniagent'));
 const failkind = require(path.join(ROOT, 'lib', 'failkind'));
+const costledger = require(path.join(ROOT, 'lib', 'costledger'));
+let _ledgered = 0;   // worker spend already folded into the daily ledger, so a cycle records only its delta
 const { createSynapse } = require(path.join(ROOT, 'lib', 'synapse'));
 
 const LOCK = 'synapse-worker';
@@ -138,6 +140,18 @@ async function runCycleInner(synapse, { force = false } = {}) {
     await pushCloudReplica(synapse);
     log(`cycle done in ${Math.round((Date.now() - t0) / 1000)}s — ${st.nodes} nodes / ${st.edges} edges · $${b.spent.toFixed(3)} of $${b.limit.toFixed(2)}${out.paidSkipped ? ` · paid pass skipped (${out.paidSkipped})` : ''}`);
     rstate.event('synapse-tick', { nodes: st.nodes, edges: st.edges, spendUsd: +b.spent.toFixed(4), ms: Date.now() - t0, paidSkipped: out.paidSkipped || null });
+
+    // THE WORKER'S SPEND BELONGS IN THE DAILY LEDGER. It used to land only in the runtime-state
+    // snapshot above, so ~/.bhatbot/costs.json — the number the app reports and the number
+    // overBudget() reads — was silently and always low, and the one subsystem nobody watches was
+    // also the one the budget cap did not apply to. `_ledgered` is the running total already
+    // recorded, so a cycle folds in only what it newly spent rather than the cumulative figure.
+    try {
+      const spent = Number(b.spent) || 0;
+      const delta = spent - _ledgered;
+      if (delta > 0) { costledger.record({ usd: delta, model: llm.DEFAULT_MODEL, source: 'worker' }); _ledgered = spent; }
+      else if (spent < _ledgered) { _ledgered = spent; }   // the budget window rolled over
+    } catch {}
     return out;
   } catch (e) {
     log('✗ cycle failed: ' + e.message);
