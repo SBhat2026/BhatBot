@@ -7768,6 +7768,31 @@ async function twilioCall(message, { to, name, bypassGate = false } = {}) {
     return { sent: false, error: 'Twilio not configured (twilioSid/twilioToken/twilioFrom/myPhone)' };
   }
 
+  // ── IS HE IN A LECTURE? ────────────────────────────────────────────────────────────────────────
+  // callgate answers "how OFTEN", never "is this a good moment". The calendar answers the second.
+  // It fails OPEN by design — an unreachable calendar is not evidence that he is busy, and the cost
+  // of a call during a seminar is embarrassment while the cost of silence during an emergency is
+  // the thing calling exists for.
+  if (!bypassGate && (c.calls || {}).respectCalendar !== false) {
+    try {
+      const avail = await availability.check({
+        // Reads every connected calendar — his Princeton teaching schedule is not on the personal
+        // account, and checking only one would be worse than not checking at all.
+        listEvents: async ({ timeMin, timeMax }) => {
+          const r = await google.calendarList({ timeMin, timeMax, limit: 20 });
+          return (r && (r.events || r.results)) || [];
+        },
+        now: Date.now(),
+      });
+      if (!avail.free) {
+        recordCall({ to: target, name: name || null, ok: false, blocked: true, reason: 'busy: ' + avail.reason });
+        console.warn('[call] not calling — he is busy with ' + avail.reason);
+        return { sent: false, blocked: true, busy: true, downgrade: 'telegram',
+          error: `he is busy — ${avail.reason}`, until: avail.until || null };
+      }
+    } catch { /* the check itself must never block a call */ }
+  }
+
   // THE GATE. Seven or eight calls in one day, all of them broken, is the thing this prevents — and
   // it refuses EARLY, on two consecutive failures, because a channel that just failed twice is
   // broken rather than unheard. A refusal is not a silence: the caller downgrades to SMS/Telegram.
@@ -8049,6 +8074,14 @@ async function notifyUser(message, urgency, opts = {}) {
       // REFUSED, NOT SILENCED. The gate exists to stop a broken channel being redialled, not to
       // withhold an urgent message — so it goes out by the next loudest channel and SAYS it was
       // meant to be a call, which is the part that would otherwise be lost.
+      //
+      // A CALENDAR block goes to Telegram rather than SMS: he is sitting in a lecture, and a text
+      // buzzing his phone is most of the interruption a call would have been. Telegram is the quiet
+      // channel and it keeps the written record, which is what he asked for.
+      if (r.busy) {
+        telegramNotify(`📅 (did not call — you are busy: ${r.error.replace(/^he is busy — /, '')}) ${msg}`);
+        return done({ sent: true, via: 'telegram', downgraded: 'busy', until: r.until || null });
+      }
       const s = await twilioSMS('🔴 (BhatBot tried to CALL you; ' + r.error + ') ' + msg);
       telegramNotify('📵 (call gated → SMS) ' + msg + '  [' + r.error + ']');
       return done(s.sent ? { ...s, downgraded: 'call-gate' } : { sent: true, via: 'telegram', smsError: s.error, downgraded: 'call-gate' });
@@ -8226,6 +8259,7 @@ const commands = createCommands({ log: (m) => console.log(m) });
 const { createWeaver } = require('./lib/weaver');
 const { createTriageRun } = require('./lib/triagerun');
 const callgate = require('./lib/callgate');
+const availability = require('./lib/availability');   // is he in a lecture right now?
 const costledger = require('./lib/costledger');
 
 // ── THE OBSERVER VOICE ───────────────────────────────────────────────────────────────────────────

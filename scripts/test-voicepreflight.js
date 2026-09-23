@@ -19,7 +19,9 @@ const { check, twilioSignature } = require(path.join(__dirname, '..', 'lib', 'vo
 
 let pass = 0;
 const ok = (m) => { console.log('  ✓ ' + m); pass++; };
-const OPTS = { host: 'h.example.com', token: 'tok', authToken: 'secret', ownerPhone: '+16095550100' };
+// externalProbe:false — these cases exercise the HANDLER, and a unit test must not depend on two
+// third-party proxies being up. Reachability has its own cases below, with a fake fetch.
+const OPTS = { host: 'h.example.com', token: 'tok', authToken: 'secret', ownerPhone: '+16095550100', externalProbe: false };
 const reply = (body, status = 200) => async () => ({ ok: status >= 200 && status < 300, status, text: async () => body });
 
 console.log('[voicepreflight]');
@@ -123,6 +125,39 @@ console.log('[voicepreflight]');
     assert.strictEqual(typeof r.ms, 'number', 'the timing is reported even on success');
     assert.match(r.detail, /budget/);
     ok('a passing check still reports its margin against the deadline');
+  }
+  // ── REACHABILITY, WHICH IS THE QUESTION THAT WAS NEVER ASKED ─────────────────────────────────
+  // The old preflight fetched the webhook from THIS machine. On a Tailscale node that hostname
+  // resolves to the tailnet address, so the request never left the laptop — it reported "✓ TWO-WAY"
+  // in 328ms while every real call played an application error. A local success is not evidence.
+  const { reachableFromOutside } = require(path.join(__dirname, '..', 'lib', 'voicepreflight'));
+  {
+    const r = await reachableFromOutside('h.example.com', { fetchImpl: async () => ({ ok: true, status: 200, text: async () => '<html>hello</html>' }) });
+    assert.ok(r.ok, r.detail);
+    ok('an outside host that fetches the page proves reachability');
+  }
+  {
+    // THE SHAPE OF THE REAL FAILURE. Cloudflare 522 means the edge accepted the connection and could
+    // not reach the origin — a funnel that is advertised and not serving, which is precisely what
+    // Princeton's symmetric NAT produces.
+    const r = await reachableFromOutside('h.example.com', { fetchImpl: async () => ({ ok: true, status: 200, text: async () => 'error code: 522' }) });
+    assert.strictEqual(r.ok, false);
+    assert.match(r.detail, /522|origin unreachable/);
+    ok('a 200 carrying "error code: 522" is NOT reachability — the edge could not reach the origin');
+  }
+  {
+    // One proxy being down must not read as the funnel being down.
+    let n = 0;
+    const r = await reachableFromOutside('h.example.com', { fetchImpl: async () => (++n === 1 ? Promise.reject(new Error('proxy down')) : { ok: true, status: 200, text: async () => 'hello' }) });
+    assert.ok(r.ok, 'the second prober answers: ' + r.detail);
+    ok('a dead prober falls through to the other rather than failing the check');
+  }
+  {
+    const r = await check({ ...OPTS, externalProbe: async () => ({ ok: true, status: 200, text: async () => 'error code: 522' }), fetchImpl: reply('<Response><Say>x</Say><Gather/></Response>') });
+    assert.strictEqual(r.ok, false);
+    assert.strictEqual(r.stage, 'unreachable', r.detail);
+    assert.match(r.detail, /never leaves it|tailnet/);
+    ok('an unreachable host fails BEFORE the handler is judged — and says why a local check would lie');
   }
   console.log(`[voicepreflight] ${pass} assertions passed`);
 })();
