@@ -17,18 +17,24 @@ Status legend: ✅ exists · ⬜ to build · ⚠️ partial/refactor
 | Structured state `lib/state.js` + schemas | ✅ built, tested | enum transitions, applyUpdates, snapshot, digest |
 | Semantic memory `lib/memory.js` | ✅ built, tested | Ollama embed + lexical fallback, cosine top-k, dedup, rollup |
 | Protocol `lib/agents/protocol.js` | ✅ built, tested | task/result envelopes, applyResult, decisions log |
-| Router `lib/router.js` | ✅ built | local-first chains, escalation, cost governor; installed-model defaults |
-| Base + orchestrator + roles | ✅ built | plan→dispatch→integrate; **agent tool-execution not yet wired (see gap)** |
+| Router `lib/routermodel.js` | ✅ built, tested | learned text→tier router (shadow → active), degrades to regex; cost governor in `lib/governor.js` |
+| Base + orchestrator + roles | ✅ built, wired | plan→dispatch→integrate; agents run real tools via `lib/agents/exec.js` `runToolLoop`, fed `toolExec` from `orchestratorAdapters()` |
 | Context mgr `lib/context.js` | ✅ built, tested | checkpoint/resume/prune/summarize |
 | Wiring into `main.js` | ✅ `delegate_project` tool + `orchestratorAdapters()` | reuses app's model callers |
 | CLI `scripts/orchestrate.js` / `resume.js` | ✅ built | run/resume a goal without Electron |
 | Trellis `lib/integrations/trellis.js` | ✅ built (needs key) | PiAPI submit/poll/download |
-| **Gaps / next** | ⬜ | (1) give agents real tool execution in `base.js` (fs/shell/playwright per role) — today agents emit result envelopes but don't run tools; (2) `lib/inspect.js` vision dev-loop (P6); (3) `scripts/migrate-memory.js` flat memory.md → workspace; (4) parallel task dispatch; (5) image local pipeline |
+| **Gaps / next** | ⬜ | (1) ~~agent tool execution~~ — DONE: `base.js` runs `runToolLoop` against the app's real `executeTool`; (2) `lib/inspect.js` vision dev-loop (P6); (3) `scripts/migrate-memory.js` flat memory.md → workspace; (4) parallel task dispatch; (5) image local pipeline |
 
 The plumbing (plan → typed dispatch → structured integrate → persist → checkpoint) is
-end-to-end working. The remaining lift is wiring each role's *tools* into `base.js` so a
-Coding Agent actually edits files and a Browser Agent actually drives Playwright (the tool
-implementations already exist in `main.js` `executeTool` — they just need exposing per-role).
+end-to-end working, and so is tool execution: `lib/agents/base.js` hands each role's tool
+subset to `runToolLoop`, which calls the app's own `executeTool` through
+`orchestratorAdapters().toolExec`. A Coding Agent really does edit files and a Browser Agent
+really does drive Playwright.
+
+> This paragraph claimed the opposite until 2026-09-22 — that agents "emit result envelopes
+> but don't run tools" — long after `base.js:43` began calling `runToolLoop`. A document that
+> describes a gap which has been closed is not merely out of date: `ARCHITECTURE.md` is read
+> by self-drive and reflection, so a stale gap here is a task BhatBot may try to do again.
 
 ---
 
@@ -350,7 +356,7 @@ ctx.prune(workingSet);             // enforce MAX_WORKING
 | Image generation | local SD/ComfyUI | Replicate (✅) | local pipeline absent/fails |
 | Planning (orchestrator) | Qwen | Sonnet | goal complexity score > threshold |
 
-### Escalation criteria (concrete, in `lib/router.js`)
+### Escalation criteria (concrete, in `lib/routermodel.js`)
 
 A task escalates when **any** fires:
 - `attempts >= local_retry_limit` (default 2) and result `status != ok`.
