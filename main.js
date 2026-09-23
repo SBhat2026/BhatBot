@@ -7588,7 +7588,24 @@ async function initMcpServer() {
     console.log(`[mcp] listening on http://127.0.0.1:${port}/mcp/${token}`);
     console.log(`[app] phone PWA at  http://127.0.0.1:${port}/app/${token}`);
     { const h = getPublicHost(); if (h) console.log(`[sms] Twilio Messaging webhook → https://${h}/sms/${token}/incoming`); }
-    const host = getPublicHost();
+    // ── WHICH PUBLIC HOST CAN TWILIO ACTUALLY REACH? ───────────────────────────────────────────────
+  // Not this one. getPublicHost() returns the Tailscale name, and behind Princeton's symmetric NAT
+  // with no port mapping the funnel edge cannot reach in — two independent outside fetchers get
+  // HTTP 522. Every two-way call placed from here has played "an application error has occurred",
+  // while a local preflight passed, because on a tailnet node that hostname resolves to the laptop
+  // itself and the check never left the building.
+  //
+  // The cloud is the host that IS reachable, and cloud/src/twilio.js has carried the full
+  // conversation handler all along — its own first comment says "Twilio webhooks must hit a public
+  // URL". Its routes are live: a wrong token there returns a bare 404 from the token guard, where a
+  // genuinely absent route returns Express's 168-byte HTML. The Mac was simply never pointed at it.
+  //
+  // The Mac stays the executor — the cloud-bridge is already connected, so tools still run here.
+  // Only the webhook moves, to the one machine on the public internet.
+  const cloudHost = (c.cloudUrl && c.cloudToken && !/^CRED_REF/.test(String(c.cloudToken)))
+    ? String(c.cloudUrl).replace(/^https?:\/\//, '').replace(/\/+$/, '') : '';
+  const host = cloudHost || getPublicHost();
+  const viaCloud = !!cloudHost;
     if (host) console.log(`[app] open on phone:  https://${host}/app/${token}`);
     console.log(`[mcp] publish with:  tailscale funnel ${port}`);
   } catch (e) { console.error('[mcp] failed to start:', e.message); }
@@ -7864,19 +7881,24 @@ async function twilioCall(message, { to, name, bypassGate = false } = {}) {
     if (!pre.ok) console.warn(`[call] two-way path is not usable (${pre.stage}: ${pre.detail}) — falling back to a one-way announcement`);
   }
   try {
-    if (host && c.mcpToken && reach.ok && pre.ok) {
+    if (host && (viaCloud ? c.cloudToken : c.mcpToken) && (viaCloud || (reach.ok && pre.ok))) {
       // Two-way: point Twilio at our webhook, which plays the JARVIS voice + gathers speech.
       // machineDetection=DetectMessageEnd → if voicemail answers, the webhook fires at the
       // BEEP with AnsweredBy=machine_end_*, and /voice/incoming leaves a JARVIS-voice
       // voicemail instead of gathering. Humans resolve in ~3-5s and get the conversation.
-      const url = `https://${host}/voice/${c.mcpToken}/incoming?msg=${encodeURIComponent(greeting)}`;
+      // The cloud's outbound leg is `/outgoing` and it takes `purpose`; the Mac's is `/incoming`
+      // with `msg`. Same contract either way — Twilio fetches TwiML and the conversation begins.
+      const wtok = viaCloud ? c.cloudToken : c.mcpToken;
+      const url = viaCloud
+        ? `https://${host}/voice/${wtok}/outgoing?purpose=${encodeURIComponent(greeting)}`
+        : `https://${host}/voice/${wtok}/incoming?msg=${encodeURIComponent(greeting)}`;
       const call = await client.calls.create({
         url, method: 'POST', to: target, from: c.twilioFrom,
         machineDetection: 'DetectMessageEnd', machineDetectionTimeout: 30,
-        statusCallback: `https://${host}/voice/${c.mcpToken}/status`, statusCallbackEvent: ['completed']
+        statusCallback: `https://${host}/voice/${wtok}/status`, statusCallbackEvent: ['completed']
       });
-      recordCall({ to: target, name: name || null, ok: true, via: 'twilio-conversation', sid: call.sid, preflight: pre.stage });
-      return { sent: true, via: 'twilio-conversation', sid: call.sid, to: target, name: name || null };
+      recordCall({ to: target, name: name || null, ok: true, via: viaCloud ? 'cloud-conversation' : 'twilio-conversation', sid: call.sid, preflight: viaCloud ? 'cloud' : pre.stage });
+      return { sent: true, via: viaCloud ? 'cloud-conversation' : 'twilio-conversation', sid: call.sid, to: target, name: name || null, host };
     }
     // ONE-SHOT ANNOUNCEMENT. The message is embedded in the TwiML, so Twilio never has to fetch
     // anything from us — which is exactly why it works when the funnel is down, and why taking this

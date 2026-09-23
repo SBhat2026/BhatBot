@@ -32,7 +32,16 @@ const ROOT = path.join(__dirname, '..');
   console.log(`  twilio auth token: ${c.twilioToken ? (String(c.twilioToken).startsWith('CRED_REF') ? 'VAULTED — could not decrypt (run under electron)' : 'resolved') : 'MISSING'}`);
   console.log(`  mcp token        : ${c.mcpToken ? (String(c.mcpToken).startsWith('CRED_REF') ? 'VAULTED — could not decrypt' : 'resolved') : 'MISSING'}`);
 
-  const r = await preflight.check({ host: c.publicHost, token: c.mcpToken, authToken: c.twilioToken, ownerPhone: c.myPhone });
+  // CHECK THE HOST THAT WILL ACTUALLY BE USED. twilioCall prefers the cloud when it is configured,
+  // because the Tailscale funnel cannot be reached from outside this NAT — so a doctor that only
+  // ever examined publicHost would keep reporting a broken path that calls no longer take.
+  const cloudHost = (c.cloudUrl && c.cloudToken && !/^CRED_REF/.test(String(c.cloudToken)))
+    ? String(c.cloudUrl).replace(/^https?:\/\//, '').replace(/\/+$/, '') : '';
+  const useCloud = !!cloudHost;
+  console.log(`  webhook host     : ${useCloud ? cloudHost + '  (the cloud — reachable)' : c.publicHost + '  (this Mac via Tailscale funnel)'}`);
+  const r = useCloud
+    ? await preflight.check({ host: cloudHost, token: c.cloudToken, authToken: c.twilioToken, ownerPhone: c.myPhone, path: 'outgoing', param: 'purpose' })
+    : await preflight.check({ host: c.publicHost, token: c.mcpToken, authToken: c.twilioToken, ownerPhone: c.myPhone });
   console.log(`\n  stage: ${r.stage}${r.status ? ' (HTTP ' + r.status + ')' : ''}`);
   console.log(`  ${r.ok ? '✓' : '✗'} ${r.detail}`);
   if (r.twiml) console.log(`\n  TwiML returned:\n    ${String(r.twiml).replace(/></g, '>\n    <').slice(0, 600)}`);

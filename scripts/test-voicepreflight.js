@@ -132,28 +132,43 @@ console.log('[voicepreflight]');
   // in 328ms while every real call played an application error. A local success is not evidence.
   const { reachableFromOutside } = require(path.join(__dirname, '..', 'lib', 'voicepreflight'));
   {
-    const r = await reachableFromOutside('h.example.com', { fetchImpl: async () => ({ ok: true, status: 200, text: async () => '<html>hello</html>' }) });
+    const r = await reachableFromOutside('funnel.invalid', { fetchImpl: async () => ({ ok: true, status: 200, text: async () => '<html>hello</html>' }) });
     assert.ok(r.ok, r.detail);
     ok('an outside host that fetches the page proves reachability');
   }
   {
     // THE SHAPE OF THE REAL FAILURE. Cloudflare 522 means the edge accepted the connection and could
     // not reach the origin — a funnel that is advertised and not serving, which is precisely what
-    // Princeton's symmetric NAT produces.
-    const r = await reachableFromOutside('h.example.com', { fetchImpl: async () => ({ ok: true, status: 200, text: async () => 'error code: 522' }) });
-    assert.strictEqual(r.ok, false);
+    // Princeton's symmetric NAT produces. The prober must prove itself on a control first, so the
+    // fake answers the control normally and only fails on the target.
+    const proberUp = (targetBody) => async (u) => ({ ok: true, status: 200,
+      text: async () => (/quest=https%3A%2F%2Fexample|url=https%3A%2F%2Fexample/i.test(u) ? '<h1>Example Domain</h1>' : targetBody) });
+    const r = await reachableFromOutside('funnel.invalid', { fetchImpl: proberUp('error code: 522') });
+    assert.strictEqual(r.ok, false, r.detail);
     assert.match(r.detail, /522|origin unreachable/);
     ok('a 200 carrying "error code: 522" is NOT reachability — the edge could not reach the origin');
   }
   {
+    // AND AN UNUSABLE PROBER IS NOT A VERDICT. Both free proxies went down mid-session and this
+    // check declared bhatbot-cloud.fly.dev dead while a direct curl to it was answering 401.
+    // "I could not find out" has to be its own answer, or a broken instrument becomes a finding.
+    const proberDown = async () => ({ ok: true, status: 200, text: async () => 'error code: 522' });
+    const r2 = await reachableFromOutside('funnel.invalid', { fetchImpl: proberDown });
+    assert.strictEqual(r2.ok, null, 'inconclusive, not false: ' + r2.detail);
+    assert.match(r2.detail, /says nothing about/);
+    ok('when no prober can fetch a control, the result is INCONCLUSIVE rather than a failure');
+  }
+  {
     // One proxy being down must not read as the funnel being down.
     let n = 0;
-    const r = await reachableFromOutside('h.example.com', { fetchImpl: async () => (++n === 1 ? Promise.reject(new Error('proxy down')) : { ok: true, status: 200, text: async () => 'hello' }) });
+    const r = await reachableFromOutside('funnel.invalid', { fetchImpl: async (u) => (++n === 1 ? Promise.reject(new Error('proxy down')) : { ok: true, status: 200, text: async () => (/quest=https%3A%2F%2Fexample|url=https%3A%2F%2Fexample/i.test(u) ? 'Example Domain' : 'hello') }) });
     assert.ok(r.ok, 'the second prober answers: ' + r.detail);
     ok('a dead prober falls through to the other rather than failing the check');
   }
   {
-    const r = await check({ ...OPTS, externalProbe: async () => ({ ok: true, status: 200, text: async () => 'error code: 522' }), fetchImpl: reply('<Response><Say>x</Say><Gather/></Response>') });
+    const probe = async (u) => ({ ok: true, status: 200,
+      text: async () => (/quest=https%3A%2F%2Fexample|url=https%3A%2F%2Fexample/i.test(u) ? 'Example Domain' : 'error code: 522') });
+    const r = await check({ ...OPTS, externalProbe: probe, fetchImpl: reply('<Response><Say>x</Say><Gather/></Response>') });
     assert.strictEqual(r.ok, false);
     assert.strictEqual(r.stage, 'unreachable', r.detail);
     assert.match(r.detail, /never leaves it|tailnet/);
