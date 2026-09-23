@@ -258,8 +258,22 @@ self.addEventListener('fetch', (e) => {
       const { text, new_conversation, blocks } = req.body || {};
       const hasBlocks = Array.isArray(blocks) && blocks.length;
       if ((!text || !String(text).trim()) && !hasBlocks) return res.status(400).json({ error: 'empty text' });
+      const t0 = Date.now();
       const r = await runAgent(String(text || ''), { reset: !!new_conversation, blocks: hasBlocks ? blocks : [] });
-      res.json(r.error ? { error: r.error } : { text: r.text });
+      // A TURN THAT ANSWERS WITH NOTHING. Seen three times, always on a LONG turn, never reproducible
+      // on demand — and every time the only evidence was the caller printing "(no text)". That is the
+      // shape of a bug that costs days: intermittent, silent, and it destroys exactly the property
+      // that matters for unattended work, because a background job cannot notice it answered nobody.
+      //
+      // So it records ITSELF. The next occurrence arrives with its duration, its stop reason and the
+      // prompt that caused it, instead of three characters on a terminal nobody was watching.
+      if (!r.error && !String(r.text || '').trim()) {
+        const ms = Date.now() - t0;
+        console.warn(`[no-text] a turn produced no text after ${(ms / 1000).toFixed(1)}s`
+          + ` · stop_reason=${r.stop_reason || r.stopReason || '?'} · keys=${Object.keys(r).join(',') || 'none'}`
+          + ` · prompt="${String(text || '').slice(0, 80)}"`);
+      }
+      res.json(r.error ? { error: r.error } : { text: r.text, stop_reason: r.stop_reason || r.stopReason || null, ms: Date.now() - t0 });
     } catch (e) { res.status(500).json({ error: String(e && e.message ? e.message : e) }); }
   });
 
