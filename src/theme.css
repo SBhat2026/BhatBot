@@ -41,7 +41,7 @@
   /* ── ink ── */
   --text: #12222C;
   --text-dim: #4A626F;
-  --text-dim2: #6D8492;
+  --text-dim2: #556772;   /* AA 5.2:1 measured on the PAINTED bg; was #6D8492 at 3.64:1 */
 
   /* ── the instrument ── */
   --accent: #0B6E8C;
@@ -97,7 +97,7 @@
 
   --text: #22201B;
   --text-dim: #5C5648;
-  --text-dim2: #857D6C;
+  --text-dim2: #726c5d;   /* AA 4.68:1 on --bg; was #857D6C at 3.65:1 */
 
   /* BURGUNDY, not copper. The warm paper wanted a red that reads as ink rather than as metal —
      copper sat too close to the ground's own warmth and the two competed. 8.3:1 on #F6F3EC. */
@@ -147,7 +147,7 @@
 
   --text: #c8d6e5;
   --text-dim: #8199ae;            /* was #5b708a — raised to clear 4.5:1 on the near-black ground */
-  --text-dim2: #647d94;
+  --text-dim2: #678199;   /* AA 4.70:1 on --bg; was #647d94 at 4.45:1 */
 
   --accent: #00c8ff;
   --accent-soft: rgba(0, 200, 255, 0.10);
@@ -186,6 +186,11 @@
  * reporting data and the butler saying something, which is the same distinction the voice layer
  * makes between the command register and the commentary register.
  */
+/* --text-dim2 failed WCAG AA on ALL THREE palettes — 3.64, 3.65 and 4.45 against their own
+   backgrounds — which is the sort of thing that looks fine to whoever picked it and is unreadable to
+   everyone else. Found by scripts/visual-doctor.js, which measures contrast against the background a
+   run actually PAINTS rather than the one the markup implies. Hue kept, lightness moved; the numbers
+   are in the comments beside each so the next edit knows what it is trading against. */
 :root {
   --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
   --font-speech: 'Newsreader', 'Iowan Old Style', Georgia, 'Times New Roman', serif;
