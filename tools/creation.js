@@ -93,6 +93,36 @@ module.exports = function makeCreation(ctx = {}) {
     if (r.error) return { success: false, error: r.error, provider };
 
     const fname = (input.filename || `img_${Date.now()}`).replace(/[^\w.-]/g, '_');
+    // ── HOW BUSY IS THIS IMAGE? ────────────────────────────────────────────────────────────────────
+    // TRELLIS does not degrade gracefully as the subject gets more intricate — it degrades, then
+    // CONFABULATES, then crashes. Measured on one subject at three recursion depths:
+    //
+    //   edge density 1019 → 95,736 triangles, correct geometry
+    //   edge density 2195 → 27,727 triangles, and it reconstructed TWO BUILDINGS WITH A FACE
+    //                       instead of the fractal — a valid GLB of entirely the wrong object
+    //   edge density 5324 → spconv int32 overflow, no output at all
+    //
+    // The middle case is the dangerous one: it passes every structural check (geometry, UVs,
+    // textures, sane bounding box) and is simply not what was asked for. Nothing downstream can
+    // detect that, so the warning has to come from here, where the input is still visible.
+    let busyness = null;
+    try {
+      const { nativeImage } = require('electron');
+      const probe = nativeImage.createFromPath(input.image_path).resize({ width: 256, height: 256, quality: 'good' });
+      const bmp = probe.toBitmap();               // BGRA
+      let edges = 0, samples = 0;
+      const W = 256;
+      for (let y = 1; y < 256; y += 2) {
+        for (let x = 1; x < W; x += 2) {
+          const i = (y * W + x) * 4, j = (y * W + x - 1) * 4;
+          const a = (bmp[i] + bmp[i + 1] + bmp[i + 2]) / 3, b = (bmp[j] + bmp[j + 1] + bmp[j + 2]) / 3;
+          if (Math.abs(a - b) > 30) edges++;
+          samples++;
+        }
+      }
+      busyness = samples ? +(edges / samples).toFixed(4) : null;
+    } catch { /* not fatal — the warning is a courtesy, not a gate */ }
+
     const outDir = (cfg.imageOutputDir || '~/.bhatbot/generated').replace(/^~/, os.homedir());
     fs.mkdirSync(outDir, { recursive: true });
     const ext = r.mime === 'image/png' ? 'png' : 'jpg';
@@ -130,6 +160,36 @@ module.exports = function makeCreation(ctx = {}) {
       dataUrl = `data:${mime};base64,${fs.readFileSync(input.image_path).toString('base64')}`;
     }
 
+    // ── HOW BUSY IS THIS IMAGE? ────────────────────────────────────────────────────────────────────
+    // TRELLIS does not degrade gracefully as the subject gets more intricate — it degrades, then
+    // CONFABULATES, then crashes. Measured on one subject at three recursion depths:
+    //
+    //   edge density 1019 → 95,736 triangles, correct geometry
+    //   edge density 2195 → 27,727 triangles, and it reconstructed TWO BUILDINGS WITH A FACE
+    //                       instead of the fractal — a valid GLB of entirely the wrong object
+    //   edge density 5324 → spconv int32 overflow, no output at all
+    //
+    // The middle case is the dangerous one: it passes every structural check (geometry, UVs,
+    // textures, sane bounding box) and is simply not what was asked for. Nothing downstream can
+    // detect that, so the warning has to come from here, where the input is still visible.
+    let busyness = null;
+    try {
+      const { nativeImage } = require('electron');
+      const probe = nativeImage.createFromPath(input.image_path).resize({ width: 256, height: 256, quality: 'good' });
+      const bmp = probe.toBitmap();               // BGRA
+      let edges = 0, samples = 0;
+      const W = 256;
+      for (let y = 1; y < 256; y += 2) {
+        for (let x = 1; x < W; x += 2) {
+          const i = (y * W + x) * 4, j = (y * W + x - 1) * 4;
+          const a = (bmp[i] + bmp[i + 1] + bmp[i + 2]) / 3, b = (bmp[j] + bmp[j + 1] + bmp[j + 2]) / 3;
+          if (Math.abs(a - b) > 30) edges++;
+          samples++;
+        }
+      }
+      busyness = samples ? +(edges / samples).toFixed(4) : null;
+    } catch { /* not fatal — the warning is a courtesy, not a gate */ }
+
     const outDir = (cfg.imageOutputDir || '~/.bhatbot/generated').replace(/^~/, os.homedir());
     fs.mkdirSync(outDir, { recursive: true });
     const fname = (input.filename || `3d_${Date.now()}`).replace(/[^\w.-]/g, '_');
@@ -141,13 +201,26 @@ module.exports = function makeCreation(ctx = {}) {
       if (mr.ok) { const mj = await mr.json(); if (mj.latest_version && mj.latest_version.id) version = mj.latest_version.id; }
     } catch { /* offline → use pinned */ }
 
+    // ── THE DETAIL KNOBS WERE NAILED SHUT ──────────────────────────────────────────────────────────
+    // `mesh_simplify: 0.9` was hardcoded, and it is the single control that decides whether a
+    // complex subject survives reconstruction — TRELLIS DECIMATES by that fraction, so 0.9 throws
+    // most of the geometry away. Only `texture_size` was reachable from the tool, which meant a
+    // detailed object could be asked for at high texture resolution and still come back as a smooth
+    // lump, with no way to say otherwise.
+    //
+    // Defaults are UNCHANGED, so nothing that worked before moves. What changes is that a caller who
+    // knows the subject is intricate can now say so. Clamped because the remote model rejects
+    // out-of-range values with an opaque 422 rather than explaining itself.
+    const clamp = (v, lo, hi, dflt) => (v == null || !isFinite(v) ? dflt : Math.max(lo, Math.min(hi, Number(v))));
     const body = { version, input: {
       images: [dataUrl],
       texture_size: input.texture_size || 1024,
-      mesh_simplify: 0.9,
+      // LOWER means less decimation, i.e. more triangles kept.
+      mesh_simplify: clamp(input.mesh_simplify, 0.9, 0.98, 0.9),
       generate_color: true, generate_model: true, generate_normal: false,
       save_gaussian_ply: false, return_no_background: true,
-      ss_sampling_steps: 12, slat_sampling_steps: 12,
+      ss_sampling_steps: clamp(input.sampling_steps, 12, 50, 12),
+      slat_sampling_steps: clamp(input.sampling_steps, 12, 50, 12),
       ss_guidance_strength: 7.5, slat_guidance_strength: 3,
       randomize_seed: true,
     } };
@@ -178,7 +251,19 @@ module.exports = function makeCreation(ctx = {}) {
     }
     if (pred.status !== 'succeeded') {
       const logTail = (pred.logs || '').split('\n').filter(Boolean).slice(-3).join(' | ');
-      return { success: false, error: `3D ${pred.status || 'timeout'}: ${pred.error || logTail || 'no detail'}` };
+      const raw = String(pred.error || logTail || 'no detail');
+      // spconv's int32 assert is the hard ceiling on subject complexity, and it surfaces as a CUDA
+      // source path and a line number — unreadable, and it names no remedy. Say what it means.
+      // Measured: this subject crashed at edge density 0.21 and reconstructed the WRONG OBJECT at
+      // 0.18, so the advice is to simplify the image, and specifically NOT to touch texture_size.
+      if (/exceed int32 range|int_max assert/i.test(raw)) {
+        return { success: false, inputBusyness: busyness, raw: raw.slice(0, 200),
+          error: `The subject is too visually complex for TRELLIS — its sparse-convolution backend overflowed int32`
+               + `${busyness == null ? '' : ` (edge density ${busyness})`}. This is a hard ceiling, not a transient.`
+               + ` Simplify the image: fewer fine repeating details, a cleaner silhouette, less surface texture.`
+               + ` Lowering texture_size will NOT help — the limit is on geometry, not texture.` };
+      }
+      return { success: false, error: `3D ${pred.status || 'timeout'}: ${raw}`, inputBusyness: busyness };
     }
 
     const o = pred.output || {};
@@ -191,7 +276,13 @@ module.exports = function makeCreation(ctx = {}) {
       const outPath = path.join(outDir, `${fname}.glb`);
       fs.writeFileSync(outPath, gbuf);
       if (input.preview !== false) openInteractive3D(outPath);
-      return { success: true, path: outPath, size_mb: (gbuf.length / 1048576).toFixed(2), seconds: tries * 3, message: `3D model → ${outPath}. Opened an interactive 3D preview. Import into Blender, Unity, or Three.js (or run make_printable mode convert to get a printable STL).` };
+      // The busyness warning rides WITH the success, because the dangerous case is a valid file of
+      // the wrong object — nothing downstream can tell, so the doubt has to travel with the result.
+      const busy = busyness != null && busyness > 0.18;
+      return { success: true, path: outPath, size_mb: (gbuf.length / 1048576).toFixed(2), seconds: tries * 3,
+        inputBusyness: busyness,
+        ...(busy ? { warning: `The source image is visually dense (edge density ${busyness}). TRELLIS is unreliable above roughly 0.18: measured on one subject, it reconstructed an entirely different object at that level while still producing a structurally valid GLB. CHECK THIS MODEL LOOKS LIKE THE SUBJECT before building on it — a simpler, cleaner silhouette reconstructs far better than a busy one.` } : {}),
+        message: `3D model → ${outPath}. Opened an interactive 3D preview. Import into Blender, Unity, or Three.js (or run make_printable mode convert to get a printable STL).` };
     } catch (e) { return { success: false, error: 'GLB download error: ' + e.message }; }
   }
 
