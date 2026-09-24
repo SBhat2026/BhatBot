@@ -119,6 +119,25 @@ function fakeNotify(sink, r = { sent: true, via: 'call' }) {
     ok(guessed.alsoOpen.length >= 1, 'the caller is told what is still open, so it knows the guess might be wrong');
   }
 
+  // ── "THE MOST RECENT" HAS TO MEAN THE MOST RECENT ────────────────────────────────────────────────
+  // Two questions raised in the same millisecond — six agents hitting a wall at once, or anything on a
+  // fixed clock — tie on askedAt, and the tie used to fall through to fs.readdirSync order, which is
+  // the filesystem's business and not chronology. A bare "ok" was then attributed to the OLDER
+  // question while the result confidently reported it as the newest. A flaky test found it; in
+  // production it is a misrouted answer, which is the exact failure this attribution path exists to
+  // avoid. Run enough times that directory order cannot happen to be right by luck.
+  {
+    let mismatched = 0;
+    for (let i = 0; i < 30; i++) {
+      const E = createEscalations({ dir: TMP(), notify: fakeNotify([]), now: () => DAYTIME, opts: { maxPerHour: 99 } });
+      await E.ask({ question: 'the older one' });
+      const newer = await E.ask({ question: 'the newer one' });   // same millisecond, fixed clock
+      const r = E.answer('ok');                                   // nothing to disambiguate on
+      if (r.id !== newer.id) mismatched++;
+    }
+    ok(mismatched === 0, `a tie on askedAt still resolves to the genuinely newer question (${mismatched}/30 went to the older one)`);
+  }
+
   // ── wait() always returns ────────────────────────────────────────────────────────────────────────
   {
     const sent = [];
