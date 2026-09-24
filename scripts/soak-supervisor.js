@@ -247,8 +247,13 @@ const ITEM_BY_TEXT = new Map();
 
   const events = {};
   const rss = [];
+  // The custodian runs with no judge here (no API key in this harness), so it does only its
+  // deterministic checks — which is exactly the degraded mode a real unattended run falls into when
+  // the budget is gone, and therefore the mode worth soaking.
+  const custodian = require('../lib/custodian').createCustodian({});
   const sup = createSupervisor({
     missions, escalations, forge,
+    review: async ({ goal, deliverable, trace }) => custodian.review({ prompt: goal, deliverable, trace, autonomous: true }),
     runAgent: worker,
     decompose: async () => items.map((i) => i.text),
     onEvent: (e) => { events[e.type] = (events[e.type] || 0) + 1; },
@@ -292,6 +297,15 @@ const ITEM_BY_TEXT = new Map();
   log(`events: ${Object.entries(events).map(([k, v]) => k + '=' + v).join(' ')}`);
   log(`escalations: ${asked.length} asked, ${escalations.all().filter((e) => e.status === 'answered').length} answered, ${escalations.pending().length} still open`);
   log(`forged tools: ${forge.list().map((t) => `${t.name}(${t.calls} calls)`).join(', ') || '(none)'}`);
+  log(`custodian: ${report.custodian ? `${report.custodian.verdict}${report.custodian.reason ? ' — ' + String(report.custodian.reason).slice(0, 90) : ''}` : '(not asked)'}`);
+  // The blackboard is what makes three agents smarter than three agents in separate rooms. An hour of
+  // it is also the only way to find out whether it grows without bound.
+  let boardPosts = 0, boardMb = 0;
+  if (report.boardFile && fs.existsSync(report.boardFile)) {
+    boardPosts = fs.readFileSync(report.boardFile, 'utf8').trim().split('\n').filter(Boolean).length;
+    boardMb = fs.statSync(report.boardFile).size / 1048576;
+    log(`blackboard: ${boardPosts} posts, ${boardMb.toFixed(1)}MB`);
+  } else log('blackboard: MISSING');
   if (forgeFails.size) {
     log('forge refusals (what a small model gets wrong, and whether the message tells it how to fix):');
     for (const [k, n] of [...forgeFails].sort((a, b) => b[1] - a[1]).slice(0, 8)) log(`    ${String(n).padStart(3)}× ${k}`);
@@ -324,9 +338,22 @@ const ITEM_BY_TEXT = new Map();
   // A hot loop is the failure a wall-clock test is uniquely able to catch: correct, productive, and
   // burning a core doing nothing. Ticks are bounded by real work, so tens of thousands means spinning.
   if (report.ticks / Math.max(1, elapsedMin) > 4000) fails.push(`${Math.round(report.ticks / elapsedMin)} scheduling passes a minute — the loop is spinning rather than waiting`);
-  if (hadWorkLate && early >= 4 && late < early * 0.4) fails.push(`throughput collapsed: ${early} verified in the first half, ${late} in the second — and there was still work to do`);
+  // Only meaningful on a LONG run with a real sample. On a two-minute smoke the easy items finish in
+  // minute one and the stragglers remain, so throughput "collapses" every time — which measures the
+  // item mix, not stamina, and a metric that cries wolf on every short run is one nobody believes when
+  // it fires for real.
+  const degradeMeasurable = hadWorkLate && elapsedMin >= 20 && early >= 20;
+  if (degradeMeasurable && late < early * 0.4) fails.push(`throughput collapsed: ${early} verified in the first half, ${late} in the second — and there was still work to do`);
+  if (!degradeMeasurable && hadWorkLate) log('NOTE: too short a run to say anything about degradation — that needs 20+ minutes and 20+ completions in the first half.');
   if (stats.modelErrors > stats.modelCalls * 0.3) fails.push(`${stats.modelErrors}/${stats.modelCalls} model calls failed`);
   if (escalations.pending().length === 0 && asked.length === 0) fails.push('nothing ever escalated — the escalation path was not exercised at all');
+  if (!report.boardFile || !boardPosts) fails.push('the agents had no blackboard — parallel was only faster, not smarter');
+  // Two posts per item over an hour is a file, not a leak. This is the bound worth checking, because
+  // an append-only log inside a loop is the classic way a long run eats a disk.
+  if (boardMb > 50) fails.push(`the blackboard grew to ${boardMb.toFixed(0)}MB in an hour`);
+  if (!report.custodian) fails.push('nothing reviewed the result — the run reported "done" with nobody having asked whether it answered the goal');
+  const resumes = ((missions.attach(report.missionId) || {}).meta || {}).resumeCount || 0;
+  if (resumes > 0) fails.push(`the run spent ${resumes} of its resume allowance on internal waits — unpark() is not being used`);
 
   fs.writeFileSync(path.join(TMP, 'report.json'), JSON.stringify({ report, stats, events, rss, completionTimes, verified: verified.length, falseDone, elapsedMin }, null, 2));
   console.log('─'.repeat(78));
