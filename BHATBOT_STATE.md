@@ -3,6 +3,17 @@
 > Single-file, current-state briefing for any Claude/LLM session to get fully up to speed.
 > **Last updated: 2026-06-22** (commit `28040fc`). Supersedes the older `BHATBOT_CONTEXT.md`
 > (Jun 9) and `NEXT-PUSH.md` (Jun 16) for "what's true now." Read those for deeper history.
+>
+> ⚠ **THREE MONTHS STALE as of 2026-09-24, and it calls itself authoritative — so read this first.**
+> A briefing that describes a repo this is not is the exact failure ARCHITECTURE.md already had, and
+> there it was worse than misleading: `lib/introspect.js` and reflection READ these files, so a false
+> claim is not a stale note, it is an instruction. Nothing in code reads THIS file, which is why it
+> was allowed to drift — but a session that reads it will still be misled.
+>
+> For what is actually true now, in order: **`BACKLOG.md`** (the only open-debt list, and the one both
+> readers point at), **`ARCHITECTURE.md`** (updated 2026-09-23, including the autonomy lane), and
+> **`OVERNIGHT_2026-09-24.md`** (the hour-long `long_run` lane: supervisor, escalation, tool forge,
+> designations). Everything below §1 predates all of it.
 
 ---
 
