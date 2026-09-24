@@ -265,6 +265,28 @@ the phone. `self_check area:voice` will name the stage that broke if it fails.
 
 ---
 
+## Smaller things worth knowing
+
+- **Anything driving a local model starves local embeddings.** Ollama serialises: while the soak ran
+  qwen3, every `nomic-embed-text` call timed out. Semantic recall degrades to lexical so a live turn
+  survives it, but tool retrieval and episodic recall are quietly worse for the duration. Only a
+  test-environment problem today — it becomes real if a long run ever routes through the cheap local
+  tier. `OLLAMA_NUM_PARALLEL`, or a second instance on another port, is the fix if it starts to matter.
+- **Three entries came off the "broken right now" list and two of them were never broken.** Playwright
+  was claimed dead because a cache directory did not exist; it does, and both launch paths render a
+  page. The worker-spend entry outlived its own fix by two days. The third — a config edit during boot
+  being silently reverted — was real and is fixed: a patch to one nested key was erasing its siblings.
+- **`BHATBOT_STATE.md` calls itself the authoritative briefing and is three months stale.** Nothing in
+  code reads it, which is why it drifted, but a session that reads it will be misled. It now says so
+  at the top and points at the three documents that are current. Rewriting it is a separate job.
+- **The forge refusals turned out not to be a problem.** The backlog worried the error messages needed
+  work because a small model landed one forge in four. The soak answered it: every remaining refusal
+  in 237 attempts was the forge doing its job — the model's Roman-numeral tool genuinely disagreed
+  with its own declared expectation, and in one case the expectation carried a stray space while the
+  code was right. That entry is retired with the evidence rather than left open.
+
+---
+
 ## Questions
 
 1. **Budget.** A run defaults to `$2` for the whole job and auto-resume stops at `$5` total
