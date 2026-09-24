@@ -490,6 +490,17 @@ function rig(over = {}, opts = {}) {
     ok(posts.some((p) => p.kind === 'need' && /token is missing/.test(p.text)),
       'a blocked item posts a NEED — a wall a sibling is about to hit is a different signal from a lesson');
   }
+  {
+    // A partial is a lesson, not a wall. If it posted a need, "need" would mean "an item did not
+    // finish" — which the plan already says — and the signal that somebody is about to walk into
+    // something would be buried under it.
+    const { sup } = rig({ runAgent: async ({ goal }) => (goal === 'a' ? { status: 'partial', summary: 'got halfway, the schema is nested' } : { status: 'done', summary: 'ok' }) },
+      { maxItemAttempts: 1 });
+    const r = await sup.run({ goal: 'g', plan: ['a', 'b'] });
+    const posts = fs.readFileSync(r.boardFile, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+    const partial = posts.find((p) => /schema is nested/.test(p.text));
+    ok(partial && partial.kind === 'finding', 'a PARTIAL posts a finding — half-learned is still learned');
+  }
 
   // ── SOMEBODY ASKS WHETHER NINE DONE ITEMS ANSWER THE QUESTION ────────────────────────────────────
   // lib/custodian.js guarded the drone fan-out and nothing else, which left the biggest fan-out in the
