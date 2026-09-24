@@ -7,10 +7,11 @@ genuinely needs you, keep going on its own until the job is done, show the agent
 what they are doing, run for an hour without you, and reach you by phone unless your calendar says
 you are busy — in which case Telegram.
 
-Everything below is built, tested and wired, and none of it spent a cent of Anthropic budget — the
-endurance work ran against a local model on your own machine. **One thing is genuinely unproven**, it
-is flagged plainly at the bottom, and there is now a two-cent command that settles it. I did not run
-that command: you said you would not add budget, and two cents is small enough that spending it
+Everything below is built, tested and wired, and **none of it spent any Anthropic budget** — the
+endurance work ran against a local model on your own machine. (The ledger does show $0.09 on the 24th;
+that is the synapse worker daemon on its own schedule, not this.) **One thing is genuinely unproven**,
+it is flagged plainly at the bottom, and there is now a two-cent command that settles it. I did not
+run that command: you said you would not add budget, and two cents is small enough that spending it
 anyway is how a line stops meaning anything.
 
 ---
@@ -219,8 +220,8 @@ still drive a *browser*, which is what it is for.
 
 ## What is NOT proven
 
-**The hour-long lane has never run against Claude.** The Anthropic budget is spent
-($4.00/$4.00), so the 62-minute run above used a local qwen3. That proves the *supervisor* — the
+**The hour-long lane has never run against Claude.** The testing budget you set is spent, so the
+62-minute run above used a local qwen3. That proves the *supervisor* — the
 loop, the walls, the escalation path, the forge, the durability, the memory profile. What it does not
 touch is `supervisedWorker` in `main.js`, the Claude-backed runner: its loop, its envelope call and
 its tool scoping have only been exercised structurally.
