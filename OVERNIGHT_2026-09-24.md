@@ -124,6 +124,22 @@ Five bugs, each caught by something that went looking rather than by reading cod
    real go afterwards, which is the opposite of what forging is for. Asking had the same problem: the
    attempt was spent on the question, so the answer arrived for an item already out of tries.
 
+8. **And then that fix caused a livelock — which only a second full hour found.** Refunding an
+   attempt every time an item gets an answer means an agent that keeps asking the same question never
+   runs out. It escalates, the question dedupes onto an escalation that is already answered, the item
+   unblocks immediately, the attempt comes back, and it escalates again. Three items of eight hundred
+   seized all three worker slots and held them for half an hour — 591 journal entries across three
+   items while 779 never got a turn.
+
+   **The stall wall could not see it**, and that is the part worth knowing. The plan *was* changing on
+   every pass: blocked → todo → blocked. Progress by the letter of the definition this whole design
+   rests on, and a livelock by any other measure. The bound therefore cannot be another progress
+   heuristic — it is now a hard count nothing can give back: one refund per item, ever.
+
+   The first 62-minute run proved a supervisor that no longer existed; the custodian, the blackboard
+   and the refunds all landed after it started. Re-running the hour on the code that actually ships is
+   what caught this, and 84 unit assertions did not.
+
 ---
 
 ## The hour, actually run
