@@ -21,6 +21,12 @@ const ok = (c, m) => { if (c) { pass++; console.log('✅ ' + m); } else { fail++
 
 const TMP = () => fs.mkdtempSync(path.join(os.tmpdir(), 'esc-test-'));
 
+// 14:00 LOCAL, deliberately. Escalations behave differently at 3am (they stop ringing), and a suite
+// that used the wall clock would pass or fail depending on when it was run — which is how this file
+// first went red: written at 03:30, every fixture landed inside quiet hours at once.
+const DAYTIME = 1758600000000 + 14 * 3600 * 1000;
+const NIGHT = 1758600000000 + 3 * 3600 * 1000;      // 03:00 local
+
 // A fake notify that records what it was asked to send and how loudly. The real one (main.js
 // notifyUser) is what applies the calendar gate; this module must not second-guess it.
 function fakeNotify(sink, r = { sent: true, via: 'call' }) {
@@ -31,7 +37,7 @@ function fakeNotify(sink, r = { sent: true, via: 'call' }) {
   // ── it does not block ────────────────────────────────────────────────────────────────────────────
   {
     const sent = [];
-    let t = 1758600000000;
+    let t = DAYTIME;
     const E = createEscalations({ dir: TMP(), notify: fakeNotify(sent), now: () => t });
     const t0 = Date.now();
     const e = await E.ask({ question: 'Which Princeton account should the draft come from?', assumption: 'sb9699@princeton.edu', agent: 'VALE', options: ['sb9699', 'personal'] });
@@ -48,7 +54,7 @@ function fakeNotify(sink, r = { sent: true, via: 'call' }) {
   // ── dedupe: six agents, one interruption ─────────────────────────────────────────────────────────
   {
     const sent = [];
-    let t = 1758600000000;
+    let t = DAYTIME;
     const E = createEscalations({ dir: TMP(), notify: fakeNotify(sent), now: () => t });
     const q = 'What budget may I spend on the Replicate renders?';
     const first = await E.ask({ question: q, agent: 'VALE' });
@@ -65,7 +71,7 @@ function fakeNotify(sink, r = { sent: true, via: 'call' }) {
   // ── the interruption budget ──────────────────────────────────────────────────────────────────────
   {
     const sent = [];
-    let t = 1758600000000;
+    let t = DAYTIME;
     const E = createEscalations({ dir: TMP(), notify: fakeNotify(sent), now: () => t, opts: { maxPerHour: 2 } });
     await E.ask({ question: 'q one', assumption: 'a1' });
     await E.ask({ question: 'q two', assumption: 'a2' });
@@ -87,7 +93,7 @@ function fakeNotify(sink, r = { sent: true, via: 'call' }) {
   // ── attribution ──────────────────────────────────────────────────────────────────────────────────
   {
     const sent = [];
-    let t = 1758600000000;
+    let t = DAYTIME;
     const E = createEscalations({ dir: TMP(), notify: fakeNotify(sent), now: () => t, opts: { maxPerHour: 99 } });
 
     const a = await E.ask({ question: 'Should the slide deck use the Princeton branding?' });
@@ -116,7 +122,7 @@ function fakeNotify(sink, r = { sent: true, via: 'call' }) {
   // ── wait() always returns ────────────────────────────────────────────────────────────────────────
   {
     const sent = [];
-    const E = createEscalations({ dir: TMP(), notify: fakeNotify(sent), opts: { maxPerHour: 99 } });
+    const E = createEscalations({ dir: TMP(), notify: fakeNotify(sent), now: () => DAYTIME, opts: { maxPerHour: 99 } });
 
     const a = await E.ask({ question: 'blocking question', assumption: 'the safe default' });
     const to = await E.wait(a.id, 60);
@@ -131,15 +137,47 @@ function fakeNotify(sink, r = { sent: true, via: 'call' }) {
 
   }
 
+  // ── 3AM ──────────────────────────────────────────────────────────────────────────────────────────
+  // The calendar gate in notifyUser catches "he is in a seminar". It does not catch 3am, because
+  // nobody puts sleep in their calendar — and an unattended run is precisely the thing that is working
+  // at 3am. Without this, the first overnight run wakes him to ask which citation style to use.
+  {
+    const night = [];
+    const E = createEscalations({ dir: TMP(), notify: fakeNotify(night), now: () => NIGHT, opts: { maxPerHour: 99 } });
+    const e = await E.ask({ question: 'Which citation style?', assumption: 'APA', urgency: 'call' });
+
+    ok(night.length === 1 && night[0].urgency === 'low',
+      'a question at 3am goes out on the quiet channel — it is still asked, it just does not ring');
+    ok(e.quiet === true && E.get(e.id).sentUrgency === 'low', 'the escalation records that it was asked quietly');
+    ok(night[0].msg.includes('Which citation style'), 'the question itself is unchanged — the record is still there in the morning');
+
+    // And it must stop being a blocker: waiting until morning for an answer nobody is awake to give
+    // is not waiting, it is stopping.
+    ok(E.get(e.id).status === 'assumed' && E.get(e.id).answer === 'APA',
+      'with an assumption to fall back on, a 3am question does not block the run');
+
+    const noFallback = await E.ask({ question: 'Something with no safe default', urgency: 'call' });
+    ok(E.get(noFallback.id).status === 'open',
+      'without an assumption it stays open rather than inventing one — quiet hours change the VOLUME, not the standard');
+
+    const day = [];
+    const D = createEscalations({ dir: TMP(), notify: fakeNotify(day), now: () => DAYTIME, opts: { maxPerHour: 99 } });
+    await D.ask({ question: 'Same question at 2pm', assumption: 'APA', urgency: 'call' });
+    ok(day[0].urgency === 'call', 'the same question at 2pm rings, because that is when he asked to be called');
+
+    // The window wraps through midnight, which is the whole point of it.
+    ok(E.isQuiet(NIGHT) && !E.isQuiet(DAYTIME), 'the quiet window wraps midnight');
+  }
+
   // ── durability: an answer that arrives after a restart still lands ───────────────────────────────
   {
     const dir = TMP();
     const sent = [];
-    const E1 = createEscalations({ dir, notify: fakeNotify(sent), opts: { maxPerHour: 99 } });
+    const E1 = createEscalations({ dir, notify: fakeNotify(sent), now: () => DAYTIME, opts: { maxPerHour: 99 } });
     const a = await E1.ask({ question: 'survives a restart?', assumption: 'no' });
 
     // A completely fresh instance — this is what a relaunched app has.
-    const E2 = createEscalations({ dir, notify: fakeNotify(sent), opts: { maxPerHour: 99 } });
+    const E2 = createEscalations({ dir, notify: fakeNotify(sent), now: () => DAYTIME, opts: { maxPerHour: 99 } });
     ok(E2.pending().length === 1 && E2.pending()[0].id === a.id, 'a new process sees the outstanding question');
     const r = E2.answer('yes it does');
     ok(r.matched && r.id === a.id, 'and can answer it');
@@ -149,7 +187,7 @@ function fakeNotify(sink, r = { sent: true, via: 'call' }) {
     // answer delivered by another process (the cloud bridge, a second window) can ever reach it.
     const b = await E1.ask({ question: 'answered elsewhere' });
     const p = E1.wait(b.id, 80);
-    createEscalations({ dir, notify: fakeNotify(sent) }).answer('from the other process', { id: b.id });
+    createEscalations({ dir, notify: fakeNotify(sent), now: () => DAYTIME }).answer('from the other process', { id: b.id });
     const got = await p;
     ok(got.answered && got.answer === 'from the other process',
       'a waiter re-reads the file on timeout, so an answer delivered by another process is not lost');
@@ -157,7 +195,7 @@ function fakeNotify(sink, r = { sent: true, via: 'call' }) {
 
   // ── expiry ───────────────────────────────────────────────────────────────────────────────────────
   {
-    let t = 1758600000000;
+    let t = DAYTIME;
     const E = createEscalations({ dir: TMP(), notify: fakeNotify([]), now: () => t, opts: { expireMs: 1000, maxPerHour: 99 } });
     const a = await E.ask({ question: 'nobody will ever answer this' });
     t += 5000;
@@ -168,7 +206,7 @@ function fakeNotify(sink, r = { sent: true, via: 'call' }) {
 
   // ── it survives a broken channel ─────────────────────────────────────────────────────────────────
   {
-    const E = createEscalations({ dir: TMP(), notify: async () => { throw new Error('twilio is down'); }, opts: { maxPerHour: 99 } });
+    const E = createEscalations({ dir: TMP(), notify: async () => { throw new Error('twilio is down'); }, now: () => DAYTIME, opts: { maxPerHour: 99 } });
     const a = await E.ask({ question: 'asked while the phone line is down', assumption: 'the default' });
     ok(a.ok && a.notified === false, 'a dead notification channel does not throw out of ask() — the question is still recorded');
     ok(E.pending().length === 1, 'and it is still outstanding, so it can be re-sent or answered in the app');

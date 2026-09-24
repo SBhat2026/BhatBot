@@ -38,6 +38,42 @@ really does drive Playwright.
 
 ---
 
+## The autonomy lane (added 2026-09-23)
+
+The piece this document never described, because it did not exist: what happens when a job outlasts
+the conversation. Five modules, each doing one thing.
+
+| Piece | Status | Notes |
+|---|---|---|
+| `lib/supervisor.js` | ✅ built, tested, soaked | the loop that drives a plan for an hour. Four durable walls — clock, spend, ticks, consecutive failures — all in `mission.json`, so a crash-loop cannot reset them |
+| `lib/escalate.js` | ✅ built, tested | the one door to Siddhant. Asks and RETURNS; deduped; capped per hour; quiet after 23:00 |
+| `lib/toolforge.js` | ✅ built, tested | the 88th tool, built and proven in `lib/sandbox.js` before it counts |
+| `lib/designation.js` | ✅ built, tested | what an agent is doing, and the one colour that means it |
+| `long_run` / `forge_tool` tools | ✅ wired | `main.js`; found by the retriever from "while I'm asleep", "build a tool for it" |
+| `scripts/soak-supervisor.js` | ✅ built | an hour against a local Ollama model, free, with every item verified independently |
+
+**Progress is a change in the plan.** Not a tick, not a model reply, not an agent saying it is
+working. This is the load-bearing definition. Two subsystems here have already livelocked by
+counting the wrong thing — the call gate counted blocked attempts as calls, and the first fan-out
+run burned its budget because every turn looked like activity. An agent that answers beautifully
+while the plan stands still has done nothing, and the stall wall is what notices.
+
+**Ask, then keep working.** An escalation never blocks the loop. The item that needed the answer
+parks, everything else keeps moving, and only a genuinely idle run waits — with a timeout, after
+which it proceeds on the assumption the escalation stated and says so. A run that freezes for an
+hour because Siddhant is in a lecture is a run that did not work.
+
+**A tool is not a tool until it has been seen being right.** The forge's fourth wall is the one the
+other three need: expectations are declarative and judged by the forge, so generated code cannot
+ship its own passing verdict, and every case is re-run against a stub returning null. A case that
+still passes asserted nothing. That check runs FIRST, before any execution.
+
+**Hue is what, motion is how it is going.** `src/presence.html` reads the palette from the roster it
+is sent rather than keeping its own copy — it is an iframe on `file://` and cannot require the
+module, and a second palette growing there is how an office ends up with a legend that is a lie.
+
+---
+
 ## 0. Design principles (the whole thing in five lines)
 
 1. **State, not transcript.** The durable record is structured JSON, never chat history.

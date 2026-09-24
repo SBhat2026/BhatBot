@@ -155,6 +155,60 @@ const DURATION_TESTS = [
     ok(!escape.ok, 'code that requires fs WITHOUT declaring it cannot get it — the sandbox refuses the module, so the case fails');
   }
 
+  // ── MEETING THE CALLER WHERE THEY ARE ────────────────────────────────────────────────────────────
+  // Not hypothetical. In scripts/soak-supervisor.js a local qwen3 tried to forge a tool seventeen
+  // times in three minutes and was refused every single time, for two packaging reasons that say
+  // nothing about whether its tool was any good. A factory strict about the wrong things teaches
+  // callers to stop using it.
+  {
+    const { normalizeTest, normalizeCode } = forgeMod;
+
+    // 1. The obvious way to write a test case.
+    const t = normalizeTest({ input: 1994, expected: 'MCMXCIV' });
+    ok(t.expect && t.expect.equals === 'MCMXCIV' && t.expected === undefined,
+      "`expected: <value>` becomes `expect: { equals: <value> }` — the shape everyone writes first");
+    for (const alias of ['output', 'result', 'returns']) {
+      ok(normalizeTest({ input: {}, [alias]: 7 }).expect.equals === 7, `\`${alias}\` works the same way`);
+    }
+    ok(normalizeTest({ input: {}, expect: { equals: 3 } }).expect.equals === 3, 'an already-correct case is untouched');
+    // An object of PLAIN DATA is a value, not an expectation — only an object whose keys are all
+    // operators is read as one, or a tool returning { equals: 1 } could never be tested.
+    ok(JSON.stringify(normalizeTest({ input: {}, expect: { a: 1 } }).expect) === '{"equals":{"a":1}}',
+      'an object of plain data is the VALUE it should return, not a set of operators');
+
+    // 2. Code handed over as a whole function rather than as a body.
+    ok(/return await \(function/.test(normalizeCode('function (input) { return input * 2; }')),
+      'a whole `function (input) {…}` is unwrapped into a call — the sandbox wraps a BODY, so a bare function expression returns nothing');
+    ok(/return await \(\(input\)/.test(normalizeCode('(input) => input * 3')), 'an arrow function too');
+    ok(normalizeCode('return input * 2;') === 'return input * 2;', 'an actual body is left exactly as it was');
+    ok(normalizeCode('const x = 1; return x;') === 'const x = 1; return x;', 'and so is a multi-statement body — no double wrapping');
+
+    // End to end: the exact call that local model made, which the forge refused seventeen times.
+    const f = mk();
+    const r = await f.forge({
+      name: 'roman_numeral_converter',
+      purpose: 'Convert an integer to its Roman numeral equivalent.',
+      code: "function(input) { const R = [['M',1000],['CM',900],['D',500],['CD',400],['C',100],['XC',90],['L',50],['XL',40],['X',10],['IX',9],['V',5],['IV',4],['I',1]]; let n = input, out = ''; for (const [s, v] of R) { while (n >= v) { out += s; n -= v; } } return out; }",
+      tests: [{ input: 1994, expected: 'MCMXCIV' }],
+    });
+    ok(r.ok, 'the exact shape a small model produces now forges' + (r.ok ? '' : ' — ' + JSON.stringify(r.errors)));
+    const call = await f.run('roman_numeral_converter', 2026);
+    ok(call.success && call.result === 'MMXXVI', 'and the result is a working tool, called with a bare scalar');
+
+    // The wall is UNCHANGED. Absorbing the shape must not absorb the standard.
+    const vac = await f.forge({ name: 'vac2', purpose: 'p', code: 'return { a: 1 };', tests: [{ input: {}, expected: null }] });
+    ok(!vac.ok && vac.stage === 'vacuous',
+      '`expected: null` still normalises to a case that passes on null, and is still refused — the shape got friendlier, the standard did not move');
+
+    const wrong = await f.forge({ name: 'wrong2', purpose: 'p', code: 'return 3;', tests: [{ input: {}, expected: 4 }] });
+    ok(!wrong.ok && wrong.stage === 'tests', 'and a tool that is simply wrong still fails its case');
+
+    // The refusal has to TEACH. An error a model cannot act on is a dead end dressed as feedback.
+    const noExp = mk().validate({ name: 'x_tool', purpose: 'p', code: 'return 1;', tests: [{ input: {} }] });
+    ok(noExp.errors.join(' ').includes('expected') && noExp.errors.join(' ').includes('BROKEN'),
+      'a case with no expectation is told BOTH accepted shapes and reminded the case must be able to fail');
+  }
+
   // ── remove ───────────────────────────────────────────────────────────────────────────────────────
   {
     const f = mk();
