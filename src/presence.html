@@ -52,12 +52,13 @@
     <div id="hc-foot"></div>
   </div>
   <div id="hud"><span>BhatBot · <b>Fleet Presence</b></span><span id="tally">—</span></div>
+  <!-- TWO CHANNELS, TWO LEGENDS. Colour says WHAT an agent is doing and is built from whoever is
+       actually on the floor — a nine-row legend for three working agents is a legend nobody reads.
+       Motion says HOW IT IS GOING, and motion cannot be shown as a swatch, so it is described. -->
   <div id="legend">
-    <div><span class="dot" data-legend="idle" style="background:#3a4a5a"></span>idle</div>
-    <div><span class="dot" data-legend="thinking" style="background:#f2c14e"></span>thinking</div>
-    <div><span class="dot" data-legend="working" style="background:#5ad1ff"></span>working</div>
-    <div><span class="dot" data-legend="done" style="background:#59e39b"></span>done</div>
-    <div style="margin-top:6px;color:#5a7688;">hover to read · click to steer · drag to look</div>
+    <div id="legend-desig"></div>
+    <div id="legend-state" style="margin-top:6px;color:#5a7688;">pulsing = working · dim = idle · red = failed</div>
+    <div style="margin-top:4px;color:#5a7688;">hover to read · click to steer · drag to look</div>
   </div>
 
 <script type="importmap">
@@ -74,6 +75,45 @@ import { clone as skeletonClone } from 'three/addons/utils/SkeletonUtils.js';
 
 const STATE_COLOR = { idle:0x3a4a5a, thinking:0xf2c14e, working:0x5ad1ff, done:0x59e39b, error:0xff6b6b };
 const STATE_CSS   = { idle:'#3a4a5a', thinking:'#f2c14e', working:'#5ad1ff', done:'#59e39b', error:'#ff6b6b' };
+
+// ── HUE MEANS WHAT, MOTION MEANS HOW IT IS GOING ──────────────────────────────────────────────────
+// This office used to colour agents by STATE, which makes every agent in a busy fleet the same colour
+// and answers a question the activity log already answers. What you want to read across the room is
+// the DIVISION OF LABOUR — two on research, one writing code, one driving a browser.
+//
+// The palette ARRIVES WITH THE ROSTER (presenceSnapshot ships lib/designation.forRenderer()). It is
+// not defined here, and it must not be: this file is an iframe on file:// that cannot require() the
+// module, and a second copy of the palette growing here is exactly how an office ends up with a legend
+// that is a lie. scripts/test-designation.js fails if any designation colour appears in this file.
+//
+// Until a snapshot arrives every agent is grey, which is the honest answer: an unknown designation
+// must never borrow a real one's colour, because that asserts a division of labour nobody chose.
+const UNKNOWN_GREY = { id:'general', label:'General', glow:'#8fa6b8', ink:'#5c7386' };
+let DESIG = { byId: new Map(), order: [], error: null, unknown: UNKNOWN_GREY };
+function setDesignationPalette(p) {
+  if (!p || !Array.isArray(p.designations)) return;
+  DESIG = {
+    byId: new Map(p.designations.map((d) => [d.id, d])),
+    order: p.designations.map((d) => d.id),
+    error: p.error || null,
+    unknown: p.unknown || UNKNOWN_GREY,
+  };
+}
+function desigOf(id) { return DESIG.byId.get(String(id || '')) || DESIG.unknown; }
+/** The colour an agent's body, aura and orb take. Error wins over designation: a failing agent has to
+ *  read as failing, and "slightly different shade of research" does not. */
+function agentCss(a) {
+  if (a.state === 'error') return DESIG.error || STATE_CSS.error;
+  return desigOf(a.designation).glow;
+}
+// How strongly the body carries its designation, per state. This is the second channel: the hue does
+// not change as an agent works, its INTENSITY does, so both facts stay readable at once.
+// STATE_MIX is how much of the designation the body takes; STATE_DIM is how bright it is afterwards.
+// BOTH are needed, and the reason is the character model: its base material is near-white, so mixing
+// LESS hue into an idle agent makes it PALER, not dimmer — it came out almost pure white, which reads
+// as washed out rather than resting. Darkening is what makes "dim = idle" in the legend true.
+const STATE_MIX = { idle: 0.45, thinking: 0.50, working: 0.62, done: 0.55, error: 0.70 };
+const STATE_DIM = { idle: 0.62, thinking: 0.90, working: 1.00, done: 1.00, error: 1.00 };
 
 // state → which kind of POI this agent belongs at, and the clip it plays once seated/standing there.
 // The office asset NAMES its anchors `poi-<clip>-<n>` (poi-sit_work-3, poi-idle-spawn-2, …), i.e. the
@@ -386,7 +426,55 @@ function refreshPlate(a) {
   const doing = plateTask(a);
   if (doing === a._plateText) return;              // nothing changed → no repaint, no GPU upload
   a._plateText = doing;
-  a.plate.userData.redraw(a.name, doing, STATE_CSS[a.state] || STATE_CSS.idle);
+  // The task line under the name is tinted by designation too, so the label and the figure agree.
+  // On a light ground the glow variant is too pale to read, so the ink variant is used instead —
+  // the same distinction lib/designation draws, for the same reason.
+  const light = PALETTE.mode === 'day' || PALETTE.mode === 'standby';
+  const d = desigOf(a.designation);
+  a.plate.userData.redraw(a.name, doing, a.state === 'error' ? (DESIG.error || STATE_CSS.error) : (light ? d.ink : d.glow));
+}
+
+// ── LABELS THAT DO NOT SIT ON EACH OTHER ──────────────────────────────────────────────────────────
+// Two agents claiming adjacent anchors put their nameplates in the same few pixels, and one of them
+// became unreadable — which matters more here than it sounds, because the plate is the ONLY place the
+// office says what an agent is working on. Moving the characters would fight the authored layout
+// (poi-* anchors encode where the artist wanted people to sit), so the plates move instead.
+//
+// Screen space, not world space: two agents a metre apart look far apart from one angle and stacked
+// from another, and the whole problem is an angle-dependent one. Nearest-to-camera keeps its natural
+// height and anything colliding with an already-placed plate is lifted a tier, so the arrangement is
+// stable while the camera drifts instead of flickering between two equally valid solutions.
+const _plateV = new THREE.Vector3();
+function deoverlapPlates() {
+  const live = [];
+  for (const a of agents.values()) {
+    if (!a.plate) continue;
+    _plateV.copy(a.group.position); _plateV.y += a.plate.userData.baseY;
+    const d = camera.position.distanceTo(_plateV);
+    _plateV.project(camera);
+    if (_plateV.z >= 1) { a.plate.visible = false; continue; }      // behind the camera
+    a.plate.visible = true;
+    live.push({ a, d, x: (_plateV.x * 0.5 + 0.5) * innerWidth, y: (-_plateV.y * 0.5 + 0.5) * innerHeight });
+  }
+  if (live.length < 2) { for (const l of live) l.a.plate.position.y = l.a.plate.userData.baseY; return; }
+  live.sort((p, q) => p.d - q.d);
+
+  // A plate's on-screen size shrinks with distance, so the collision box has to as well — a fixed
+  // pixel box would spread far-away labels that were never touching.
+  const boxW = (l) => Math.max(40, 2600 / Math.max(1, l.d));
+  const boxH = (l) => Math.max(14, 700 / Math.max(1, l.d));
+
+  const placed = [];
+  for (const l of live) {
+    let tier = 0;
+    // Six tiers is more than the room's twelve anchors can ever need at once, and a bound means a
+    // pathological arrangement cannot spin here.
+    while (tier < 6 && placed.some((q) => Math.abs(q.x - l.x) < (boxW(l) + boxW(q)) / 2
+                                        && Math.abs((q.y - q.tier * 22) - (l.y - tier * 22)) < (boxH(l) + boxH(q)) / 2)) tier++;
+    l.tier = tier;
+    l.a.plate.position.y = l.a.plate.userData.baseY + tier * l.a.plate.userData.tierH;
+    placed.push(l);
+  }
 }
 
 function makeAvatar(label) {
@@ -420,6 +508,8 @@ function makeAvatar(label) {
   orb.add(glow);
   // Raised a little to clear the taller two-line plate.
   const plate = nameplate(label, '', null); plate.position.y = (charTargetH + 0.74) * inv; plate.scale.multiplyScalar(inv); group.add(plate);
+  plate.userData.baseY = plate.position.y;          // deoverlapPlates() stacks from here
+  plate.userData.tierH = 0.34 * inv;                // one tier ≈ one plate's own height
   group.userData.tintTargets = tintTargetsOf(group).slice(0, 4);   // body + head, not just the first two
   return { group, mixer, actions, aura, orb, glow, plate };
 }
@@ -576,7 +666,10 @@ function applyState(list) {
     a.tool = info.tool || null;
     a.since = info.since || a.since;
     a.steerable = info.steerable !== false;
-    a.target = new THREE.Color(STATE_COLOR[a.state] ?? STATE_COLOR.idle);
+    a.designation = info.designation || a.designation || 'general';
+    // Hue from the DESIGNATION (or the error colour), not from the state. The state is carried by
+    // STATE_MIX, the aura pulse and the orb — see the animation block at the bottom of this file.
+    a.target = new THREE.Color(agentCss(a));
     refreshPlate(a);        // what it is doing, above its head — repaints only when the text changes
     if (stateChanged) {
       const map = STATE_POI[a.state] || STATE_POI.idle;
@@ -591,8 +684,32 @@ function applyState(list) {
   document.getElementById('tally').textContent = list.length
     ? `${list.length} agent${list.length === 1 ? '' : 's'} · ${working} working` : 'idle';
   document.getElementById('empty').classList.toggle('on', list.length === 0);
+  renderLegend(list);
 }
-function ingest(payload) { applyState((payload && payload.agents) || []); }
+
+// The legend lists WHO IS ON THE FLOOR, in the palette's own order so it does not reshuffle every
+// time an agent finishes. Rows are only meaningful for designations actually present; showing all
+// nine while three agents work is how a legend becomes decoration.
+function renderLegend(list) {
+  const el = document.getElementById('legend-desig');
+  if (!el) return;
+  const present = new Set(list.map((x) => x.designation || 'general'));
+  const rows = [...DESIG.order.filter((id) => present.has(id)), ...(present.has('general') ? ['general'] : [])];
+  if (!rows.length) { el.innerHTML = ''; return; }
+  const counts = {};
+  for (const x of list) counts[x.designation || 'general'] = (counts[x.designation || 'general'] || 0) + 1;
+  el.innerHTML = rows.map((id) => {
+    const d = desigOf(id);
+    const n = counts[id] || 0;
+    return `<div><span class="dot" style="background:${d.glow}"></span>${d.label}${n > 1 ? ` <span style="opacity:.6">×${n}</span>` : ''}</div>`;
+  }).join('');
+}
+function ingest(payload) {
+  // The palette must be applied BEFORE the roster, or the first frame of a new agent is grey and
+  // then pops to its colour — which looks like a bug and is one.
+  if (payload && payload.palette) setDesignationPalette(payload.palette);
+  applyState((payload && payload.agents) || []);
+}
 
 // ---------------------------------------------------------------------------
 // HOVER + CLICK. Both used to be dead: pickAgent() bailed out whenever `demo` was true, and demo was
@@ -765,18 +882,17 @@ function applyPalette(t) {
   }
   // Repaint every nameplate so labels re-read against the new ground.
   PLATE_INK = PALETTE.text;
-  for (const el of document.querySelectorAll('[data-legend]')) {
-    el.style.background = STATE_CSS[el.getAttribute('data-legend')] || el.style.background;
-  }
   // Re-target every LIVE agent. Without this the palette only applies to agents that arrive after
   // the theme does, which is the wrong way round — the roster is usually already on screen.
   for (const a of agents.values()) {
-    a.target = new THREE.Color(STATE_COLOR[a.state] ?? STATE_COLOR.idle);
+    a.target = new THREE.Color(agentCss(a));
     for (const m of (a.tint || [])) if (m.color && m.userData.__base) m.color.copy(m.userData.__base);
   }
   for (const a of agents.values()) if (a.plate && a.plate.userData.redraw) {
-    a.plate.userData.redraw(a.name, a.doing || '', STATE_CSS[a.state] || STATE_CSS.idle);
+    a._plateText = null;          // force the repaint; the ink/glow choice depends on the new mode
+    refreshPlate(a);
   }
+  renderLegend(lastRoster);
 }
 window.addEventListener('message', (e) => { if (e.data && e.data.type === 'theme') applyPalette(e.data.tokens); });
 window.__applyPalette = applyPalette;   // testability seam
@@ -794,6 +910,12 @@ window.__presenceProbe = () => [...agents.values()].map((a) => {
   v.project(camera);
   return {
     id: a.id, name: a.name, state: a.state, clip: a.clip, restClip: a.restClip,
+    // The designation and the colour the BODY is actually wearing. A visual test that only checks the
+    // roster it pushed is checking its own input; this is what the renderer decided.
+    designation: a.designation || 'general',
+    bodyHex: (a.tint && a.tint[0] && a.tint[0].color) ? '#' + a.tint[0].color.getHexString() : null,
+    auraHex: (a.aura && a.aura.material) ? '#' + a.aura.material.color.getHexString() : null,
+    plateTier: a.plate ? Math.round((a.plate.position.y - a.plate.userData.baseY) / (a.plate.userData.tierH || 1)) : 0,
     walking: a.path.length > 0, poi: a.poi >= 0 ? pois[a.poi].name : null,
     pathLen: a.path.length, clipOnce: !!a.clipOnce,
     offTarget: a.poi >= 0 ? +a.group.position.distanceTo(pois[a.poi].pos).toFixed(3) : null,
@@ -974,24 +1096,36 @@ const _tmp = new THREE.Vector3();
       a.glow.material.color.lerp(tgt, 0.1);
       a.glow.material.opacity = a.state==='idle' ? 0.16 : 0.3 + (a.state==='working' ? Math.sin(t*6+a.phase)*0.12 : 0);
     }
-    // COLOUR-CODED BY STATE, on the body and not only the glow. This used to lerp `emissive` alone
-    // at 0.05, which left the characters reading as grey clay with a faint halo — the legend said
-    // four colours and the office showed one. Tinting the base colour toward the state is what makes
-    // "who is working" answerable from across the room, which is the whole reason the office exists.
-    // The base keeps some of its own material so they still look like figures rather than blobs.
-    const surf = STATE_SURFACE[a.state] || tgt;   // lit-surface variant, not the ink token
+    // COLOUR-CODED BY DESIGNATION, on the body and not only the glow.
+    //
+    // Two earlier versions of this were wrong in instructive ways. The first lerped `emissive` alone at
+    // 0.05, leaving the characters as grey clay with a faint halo — the legend said four colours and
+    // the office showed one. The second fixed that but keyed the hue to STATE, so a busy fleet was a
+    // room full of identical blue figures: it answered "is anything happening", which you can already
+    // tell, and never "who is doing what", which is the entire reason to look at a room.
+    //
+    // Now the hue is the DESIGNATION and the state is carried by how much of it the body takes
+    // (STATE_MIX) plus the pulse above. An idle researcher is a dim cyan, a working one is a bright
+    // pulsing cyan, and a coder next to them is unmistakably green in both moods. The base keeps some
+    // of its own material so they still look like figures rather than blobs.
+    const light = PALETTE.mode === 'day' || PALETTE.mode === 'standby';
+    const surf = surfaceOf(agentCss(a), light);   // lit-surface variant, not the ink token
+    const mix = STATE_MIX[a.state] ?? STATE_MIX.idle;
     for (const m of a.tint) {
       if (m.color) {
         if (!m.userData.__base) m.userData.__base = m.color.clone();
-        const want = m.userData.__base.clone().lerp(surf, a.state === 'idle' ? 0.16 : 0.55);
+        const want = m.userData.__base.clone().lerp(surf, mix).multiplyScalar(STATE_DIM[a.state] ?? 1);
         m.color.lerp(want, 0.12);
       }
       if (m.emissive) {
         m.emissive.lerp(tgt, 0.08);
-        m.emissiveIntensity = a.state==='working' ? 0.5 + Math.sin(t*7+a.phase)*0.2 : a.state==='done' ? 0.4 : a.state==='thinking' ? 0.35 : 0.12;
+        m.emissiveIntensity = a.state==='working' ? 0.5 + Math.sin(t*7+a.phase)*0.2
+          : a.state==='error' ? 0.45 + Math.sin(t*11+a.phase)*0.3     // a fast flash reads as alarm, not activity
+          : a.state==='done' ? 0.4 : a.state==='thinking' ? 0.35 : 0.12;
       }
     }
   }
+  deoverlapPlates();
   renderer.render(scene, camera);
 })();
 </script>

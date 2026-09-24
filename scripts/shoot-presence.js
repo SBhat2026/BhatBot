@@ -12,6 +12,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const { chromium } = require('playwright');
+const designation = require('../lib/designation');
 
 const SRC = path.join(__dirname, '..', 'src');
 const OUT = process.argv[2] || path.join(require('os').tmpdir(), 'presence-shots');
@@ -51,9 +52,13 @@ const TASKS = [
   'rebuild the project file index',
 ];
 const STATES = ['working', 'thinking', 'working', 'idle', 'done', 'error'];
+// Six DIFFERENT designations on purpose: the thing being checked is that the room shows a division of
+// labour, and a roster where everyone does the same job cannot show one either way.
+const DESIGS = ['research', 'code', 'browser', 'science', 'create', 'comms'];
 const roster = (n) => Array.from({ length: n }, (_, i) => ({
   id: i === n - 1 && n > 1 ? 'job:weaver' : 'suit-' + i,
   role: ['research', 'design', 'code', 'test', 'review', 'weaver'][i % 6],
+  designation: DESIGS[i % DESIGS.length],
   name: i === n - 1 && n > 1 ? 'weaver' : CODENAMES[i % CODENAMES.length],
   state: STATES[i % STATES.length],
   status: ['working', 'queued', 'running', 'parked', 'done', 'failed'][i % 6],
@@ -80,7 +85,11 @@ const roster = (n) => Array.from({ length: n }, (_, i) => ({
   // The scene is ready when the loading veil is gone (both GLBs decoded through draco).
   await fr.waitForFunction(() => getComputedStyle(document.getElementById('loading')).display === 'none', null, { timeout: 60000 });
   // Push through the SAME channel main.js uses: a postMessage from the host into the iframe.
-  const push = (n) => page.evaluate((agents) => document.getElementById('f').contentWindow.postMessage({ type: 'presence', agents }, '*'), roster(n));
+  // The palette travels WITH the roster, exactly as presenceSnapshot() sends it. A harness that pushed
+  // only the agents would render a grey room and prove nothing about the colour-coding — and it would
+  // be testing a message shape the app no longer sends.
+  const push = (n) => page.evaluate((payload) => document.getElementById('f').contentWindow.postMessage({ type: 'presence', ...payload }, '*'),
+    { agents: roster(n), palette: designation.forRenderer() });
   const shot = async (name, ms = 2600) => { await page.waitForTimeout(ms); await page.screenshot({ path: path.join(OUT, name) }); console.log('  ▸', name); };
 
   const probe = () => fr.evaluate(() => window.__presenceProbe());
@@ -155,6 +164,12 @@ const roster = (n) => Array.from({ length: n }, (_, i) => ({
   await shot('06-after-drag.png', 200);
 
   const tally = await fr.evaluate(() => document.getElementById('tally').textContent);
+  // ── COLOUR-CODED BY DESIGNATION — read the DOM before the browser goes away ─────────────────────
+  // What matters here is what the RENDERER decided, read back off the material and the legend DOM —
+  // not the roster that was pushed in, which would be checking the harness's own input.
+  const legendRows = await fr.evaluate(() => [...document.querySelectorAll('#legend-desig div')].map((d) => d.textContent.trim()));
+  const plateTiers = await fr.evaluate(() => window.__presenceProbe().map((a) => ({ id: a.id, tier: a.plateTier })));
+
   await browser.close(); server.close();
 
   // --- report ---------------------------------------------------------------------------------
@@ -174,6 +189,58 @@ const roster = (n) => Array.from({ length: n }, (_, i) => ({
   if (!workers.every((a) => a.poi && a.poi.startsWith('poi-sit_work') && a.clip === 'Sit_Work')) fails.push('a working agent is not sitting at a work desk playing Sit_Work');
   if (!thinkers.every((a) => a.poi && a.poi.startsWith('poi-sit_idle') && a.clip === 'Sit_Idle')) fails.push('a thinking agent is not on a sofa/cafe seat playing Sit_Idle');
   if (new Set(seated.map((a) => a.poi)).size !== seated.length) fails.push('two agents claimed the same anchor');
+
+  // ── COLOUR-CODED BY DESIGNATION ────────────────────────────────────────────────────────────────
+  {
+    const D = require('../lib/designation');
+    const rows = seated.map((a) => ({ name: a.name, desig: a.designation, state: a.state, body: a.bodyHex, aura: a.auraHex, tier: a.plateTier }));
+    console.log('\n  designation colours as rendered:');
+    for (const r of rows) console.log(`    ${String(r.name).padEnd(8)} ${String(r.desig).padEnd(10)} ${String(r.state).padEnd(9)} body=${r.body} aura=${r.aura} plateTier=${r.tier}`);
+
+    if (rows.some((r) => !r.body)) fails.push('an agent has no body colour at all');
+    // The aura is the unmodulated designation colour, so it is the cleanest read. Distinct designations
+    // must not converge — this is the bug that produced a uniform muddy brown when avatars shared
+    // materials, and it would look identical to a palette that had drifted together.
+    const auraByDesig = new Map();
+    for (const r of rows) if (r.desig && r.aura) auraByDesig.set(r.desig, r.aura);
+    const distinct = new Set(auraByDesig.values()).size;
+    console.log(`  ${auraByDesig.size} designation(s) on the floor → ${distinct} distinct aura colour(s)`);
+    if (distinct < auraByDesig.size) fails.push(`${auraByDesig.size} designations produced only ${distinct} colours — two agents doing different jobs look the same`);
+
+    // An ERRORED agent must read as failing whatever its designation is.
+    const bad = rows.find((r) => r.state === 'error');
+    if (bad) {
+      const errHex = D.forRenderer().error.toLowerCase();
+      const near = bad.aura && bad.aura.toLowerCase() === errHex;
+      console.log(`  errored agent aura ${bad.aura} vs error colour ${errHex} → ${near ? 'matches' : 'DOES NOT match'}`);
+      if (!near) fails.push('an errored agent is not wearing the error colour — red must win over designation');
+    }
+
+    // An IDLE agent must still be visibly duller than a working one, or "dim = idle" in the legend is
+    // a claim the room does not honour. The character's base material is near-white, so mixing LESS
+    // hue in makes an idle agent paler rather than dimmer — it has to be darkened as well.
+    const idle = rows.find((r) => r.state === 'idle');
+    const busy = rows.find((r) => r.state === 'working');
+    if (idle && busy && idle.body && busy.body) {
+      const lum = (h) => { const n = parseInt(h.slice(1), 16); return (((n >> 16) & 255) * 0.299 + ((n >> 8) & 255) * 0.587 + (n & 255) * 0.114) / 255; };
+      console.log(`  idle body luminance ${lum(idle.body).toFixed(3)} vs working ${lum(busy.body).toFixed(3)}`);
+      if (lum(idle.body) > 0.88) fails.push(`an idle agent's body luminance is ${lum(idle.body).toFixed(2)} — too pale to read as dim`);
+      if (lum(idle.body) >= lum(busy.body)) fails.push('an idle agent is not dimmer than a working one, so "dim = idle" in the legend is a claim the room does not honour');
+    }
+
+    // The legend must describe the floor, not the whole vocabulary.
+    console.log('  legend rows:', JSON.stringify(legendRows));
+    if (!legendRows.length) fails.push('the legend is empty while six agents are on the floor');
+    if (legendRows.length > auraByDesig.size) fails.push(`the legend lists ${legendRows.length} designations for ${auraByDesig.size} on the floor`);
+    for (const id of auraByDesig.keys()) {
+      const label = D.get(id).label;
+      if (!legendRows.some((l) => l.startsWith(label))) fails.push(`the legend does not mention ${label}, which is on the floor`);
+    }
+
+    // Nameplates: nobody's label may be buried under somebody else's, and the lift must converge.
+    console.log('  plate tiers:', plateTiers.map((p) => `${p.id}:${p.tier}`).join(' '));
+    if (plateTiers.some((p) => p.tier > 5)) fails.push('a nameplate was lifted past the tier bound — the de-overlap pass is not converging');
+  }
 
   console.log('\nhover card:', hoverOn.on ? `"${hoverOn.name}" — ${hoverOn.task} | ${hoverOn.step} | ${hoverOn.foot}` : '(did not open)');
   if (!hoverOn.on) fails.push('hover card did not open over an agent');
