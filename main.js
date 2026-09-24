@@ -4178,8 +4178,14 @@ async function supervisedWorker(spec) {
     '    called — unless his calendar says he is in class, in which case he is texted. Do NOT wait.',
     '  • If this item is really several, say so with need.kind="decompose" and list them.',
     '',
+    'If the tools you have are the wrong ones for this item — it was classified from its wording and',
+    'the wording can be misleading — call `toolbox` with the category you actually need. You are not',
+    'stuck with the set you were handed.',
+    '',
     'Never claim an item is done when it is not. "partial" with an honest summary is worth more than a',
     'confident "done" — the supervisor will retry it, and a false done is a hole in the final report.',
+    // The anchor, plus whatever the siblings have already posted to the blackboard. An agent working
+    // in parallel with two others should not rediscover what one of them learned ninety seconds ago.
     spec.context ? '\n' + spec.context : '',
   ].filter(Boolean).join('\n');
 

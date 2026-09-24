@@ -156,6 +156,16 @@ const stage = (ok2, label, detail) => { say(`${ok2 ? '✓' : '✗'} ${label}${de
     // Resume, which is what "several hours" is actually made of.
     const meta = (missions.attach(rep.missionId) || {}).meta || {};
     stage(meta.kind === 'supervised', 'the mission records that the SUPERVISOR should resume it, not a plain turn');
+
+    // Parallel has to be smarter than serial, not only faster. Without a board, three agents working
+    // three items at once run blind to each other and the one that learns something cannot tell the
+    // two about to hit the same wall.
+    stage(rep.boardFile && fs.existsSync(rep.boardFile), 'the agents share a blackboard', rep.boardFile ? path.basename(rep.boardFile) : 'none');
+    if (rep.boardFile && fs.existsSync(rep.boardFile)) {
+      const posts = fs.readFileSync(rep.boardFile, 'utf8').trim().split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+      stage(posts.some((p) => p.kind === 'finding') && posts.some((p) => p.kind === 'status'),
+        'and both ends of an item reach it', `${posts.length} posts`);
+    }
   }
 
   // ── 6. the office can colour what it is shown ──────────────────────────────────────────────────

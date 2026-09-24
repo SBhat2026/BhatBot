@@ -341,6 +341,57 @@ function rig(over = {}, opts = {}) {
     ok(missions.list({ status: 'parked' }).some((m) => m.id === r.missionId), 'a stopped run is parked, so it can be resumed');
   }
 
+  // ── PARALLEL HAS TO BE SMARTER, NOT JUST FASTER ──────────────────────────────────────────────────
+  // Three agents working three items at once run completely blind to each other unless something
+  // carries what one learns to the others. The one that discovers the API needs an account cannot warn
+  // the two about to hit the same wall, and the plan finds out three items later.
+  //
+  // The supervisor posts on the workers' BEHALF rather than handing them a tool, because an agent that
+  // forgets to post is the normal case and a coordination channel that only works when everyone
+  // remembers to use it does not work.
+  {
+    const seenContext = [];
+    const { sup } = rig({
+      runAgent: async ({ goal, context, board }) => {
+        seenContext.push({ goal, context: context || '', hasBoard: !!board });
+        await new Promise((r) => setTimeout(r, 5));
+        return goal === 'the one that learns something'
+          ? { status: 'done', summary: 'the endpoint needs an account token' }
+          : { status: 'done', summary: 'fine' };
+      },
+    }, { width: 1 });
+    const r = await sup.run({ goal: 'g', plan: ['the one that learns something', 'a later item', 'a third item'] });
+
+    ok(r.boardFile && /blackboard\.jsonl$/.test(r.boardFile), 'the run has a blackboard, and the report says where it is');
+    ok(fs.existsSync(r.boardFile), 'and it is a real file, so the run can be read back after the fact');
+    const posts = fs.readFileSync(r.boardFile, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+    ok(posts.length >= 6, `both ends of every item are posted (${posts.length} posts for 3 items)`);
+    ok(posts.some((p) => p.kind === 'status' && /starting/.test(p.text)), 'a status when an item starts');
+    ok(posts.some((p) => p.kind === 'finding' && /account token/.test(p.text)),
+      'and a FINDING carrying what was actually learned, not just that something finished');
+
+    // The point of all of it: a LATER agent can see it.
+    const later = seenContext.find((c) => c.goal === 'a third item');
+    ok(later && /account token/.test(later.context),
+      'an agent launched later sees what an earlier one learned — this is the whole reason the board exists');
+    ok(seenContext.every((c) => c.hasBoard), 'every worker is handed the board too, so it can post more than the supervisor knows');
+
+    // The FIRST agent cannot have seen anything, which is the control: if it had, the context would be
+    // coming from somewhere other than the board and the assertion above would prove nothing.
+    ok(!/account token/.test(seenContext[0].context), 'the first agent saw nothing — the board is the source, not the plan text');
+  }
+
+  // A failure is posted as a NEED rather than a finding: a sibling about to hit the same wall wants to
+  // know it is there, and that is a different signal from "here is what I learned".
+  {
+    const { sup } = rig({ runAgent: async ({ goal }) => (goal === 'a' ? { status: 'blocked', summary: 'the token is missing' } : { status: 'done', summary: 'ok' }) },
+      { maxItemAttempts: 1 });
+    const r = await sup.run({ goal: 'g', plan: ['a', 'b'] });
+    const posts = fs.readFileSync(r.boardFile, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+    ok(posts.some((p) => p.kind === 'need' && /token is missing/.test(p.text)),
+      'a blocked item posts a NEED — a wall a sibling is about to hit is a different signal from a lesson');
+  }
+
   // ── SOMEBODY ASKS WHETHER NINE DONE ITEMS ANSWER THE QUESTION ────────────────────────────────────
   // lib/custodian.js guarded the drone fan-out and nothing else, which left the biggest fan-out in the
   // app — an hour of unattended work — reporting "nine done" with nobody having asked whether those
