@@ -115,6 +115,15 @@ Five bugs, each caught by something that went looking rather than by reading cod
    retriever broken while it was working perfectly. Fifth time in this repo that a check testing the
    wrong thing gave a wrong answer rather than a smaller one.
 
+6. **A pause the run took on purpose was counted as a failed attempt.** The supervisor parks itself
+   while waiting for an answer, and went back through `missions.resume()` to carry on — which bumps
+   the counter that limits how many times a long job may be picked back up. A run that waits twice an
+   hour would have run out of permission to continue long before it ran out of work.
+
+7. **Forging cost the item one of its two attempts.** An item that stopped to build a tool got one
+   real go afterwards, which is the opposite of what forging is for. Asking had the same problem: the
+   attempt was spent on the question, so the answer arrived for an item already out of tries.
+
 ---
 
 ## Two things added that you did not ask for, and should know about
