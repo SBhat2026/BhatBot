@@ -236,7 +236,7 @@ const mcphub = require('../lib/mcphub');
   ok(/ONLY way to reach him/.test(main), 'the worker prompt says the envelope is the only way to reach Siddhant');
   // The mirror above is only as good as its fidelity to the real function.
   ok(/want\.delete\('long_run'\)/.test(main) && /want\.delete\('notify_user'\)/.test(main)
-    && /'visual_build', 'make_asset'/.test(main),
+    && /'visual_build', 'make_asset'/.test(main) && /'system_control', 'phone_mirror'/.test(main),
     'supervisedToolDefs really removes all of them, so the reconstruction below is reconstructing something');
 
   ok(Object.keys(SUPERVISED_TOOLS).length >= designation.DESIGNATIONS.length,
@@ -253,7 +253,7 @@ const mcphub = require('../lib/mcphub');
     // two deletions are ALSO asserted against main.js's source below — the mirror checks the effect,
     // the source check makes sure the mirror is still mirroring.
     want.add('forge_tool'); want.add('plugin'); want.delete('long_run'); want.delete('notify_user');
-    for (const n of ['visual_build', 'make_asset']) want.delete(n);
+    for (const n of ['visual_build', 'make_asset', 'system_control', 'phone_mirror']) want.delete(n);
 
     ok(want.size >= 8, `${desig} resolves to a usable set (${want.size} tools), not an empty one`);
     ok(!want.has('long_run'), `${desig} cannot start another long run from inside one`);
@@ -270,6 +270,16 @@ const mcphub = require('../lib/mcphub');
     // with a $2 ceiling could spend twenty dollars elsewhere and report that it stayed under.
     for (const n of ['visual_build', 'make_asset']) {
       ok(!want.has(n), `${desig} cannot call ${n} unattended — it bills a third-party account that no wall here can see`);
+    }
+    // system_control is raw AppleScript and System Events — keystroke into whatever is focused, quit
+    // any app — with no confirmation gate anywhere in its path. phone_mirror drives his actual iPhone.
+    // Both are fine in a turn he is watching and are the wrong thing to hand something running at 4am.
+    for (const n of ['system_control', 'phone_mirror']) {
+      ok(!want.has(n), `${desig} cannot drive his desktop or his phone unattended (${n})`);
+    }
+    if (desig === 'browser') {
+      ok(want.has('browser') && want.has('vision_click') && want.has('screen_parse'),
+        'the browser designation keeps what it needs to drive a BROWSER — the restriction is about the rest of his machine');
     }
   }
 }

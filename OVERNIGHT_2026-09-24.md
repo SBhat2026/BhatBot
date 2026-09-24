@@ -173,7 +173,7 @@ Memory grew 3MB over an hour, across 2,137 model calls and 1,530 tool calls.
 
 ---
 
-## Four things added that you did not ask for, and should know about
+## Five things added that you did not ask for, and should know about
 
 **Destructive commands are denied during a long run.** `autonomousMode` is on by default and
 auto-approves `rm` and friends, which is right for a turn you are watching — you asked, you are here,
@@ -203,6 +203,14 @@ and `make_asset` chains image → 3D → STL, three billable stages behind one c
 `spentUsd`, so an unattended run with a $2 ceiling could spend twenty dollars elsewhere and report,
 accurately by its own accounting, that it stayed under. Both are out of the unattended grant; a run
 that needs a video asks and you decide while awake. `generate_image` stays — flux-fast is $0.003.
+
+**Nothing unattended drives your desktop or your phone.** `system_control` is raw AppleScript plus
+System Events — keystroke into whatever happens to be focused, click any menu item, quit any app —
+and it has no confirmation gate anywhere in its path. That is right for a turn you asked for and are
+watching, and it is the largest lever in the app to hand something running at 4am on a live desktop
+where Messages might be the focused window. `phone_mirror` drives your actual iPhone. Both are out.
+The browser designation keeps `browser`, `screen_parse`, `vision_click` and `ui_inspect`, so it can
+still drive a *browser*, which is what it is for.
 
 ---
 

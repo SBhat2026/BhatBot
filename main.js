@@ -4119,6 +4119,16 @@ function supervisedToolDefs(desig) {
   // run that genuinely needs a video asks for one through its envelope, and Siddhant decides while
   // awake. generate_image stays: flux-fast is $0.003 a call, which is within the noise of a turn.
   for (const n of ['visual_build', 'make_asset']) want.delete(n);
+  // AND NOT THE TOOLS THAT DRIVE HIS ACTUAL MACHINE.
+  //
+  // `system_control` is raw AppleScript plus System Events: keystroke into whatever happens to be
+  // focused, click any menu item, quit any app. It has no confirmation gate at ALL — which is right
+  // for a turn he asked for and is watching, and is the largest lever in the app to hand something
+  // running at 4am on a live desktop where Messages might be the focused window. `phone_mirror`
+  // drives his actual iPhone. The browser designation keeps `browser`, `screen_parse`, `vision_click`
+  // and `ui_inspect`, so it can still drive a BROWSER, which is what it is for. Automating the rest
+  // of his desktop, and his phone, are things he should be awake for.
+  for (const n of ['system_control', 'phone_mirror']) want.delete(n);
   // AND NOT notify_user, which is in CORE and therefore reaches every agent by default.
   //
   // lib/escalate is supposed to be THE door to Siddhant: deduped, capped at a few interruptions an
