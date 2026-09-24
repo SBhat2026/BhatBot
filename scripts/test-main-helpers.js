@@ -16,16 +16,33 @@ let pass = 0, fail = 0;
 const ok = (c, m) => { if (c) { pass++; console.log('✅ ' + m); } else { fail++; console.error('❌ ' + m); } };
 
 // Pull `function NAME(...) { ... }` out of main.js by matching balanced braces from the signature.
+//
+// The parameter list is walked FIRST, by paren depth, before any brace matching starts. The obvious
+// version — jump to the first `{` after the name — silently truncates any function with an object
+// default in its signature: `function requestConfirm(command, reason, opts = {})` returns fifty
+// characters, the brace matcher closes on `{}` at depth zero, and every assertion about the body then
+// passes or fails on an empty string. That cost three false failures before it was noticed, and the
+// failures looked exactly like a missing feature.
 function extract(src, name) {
   const sig = 'function ' + name + '(';
   const start = src.indexOf(sig);
   if (start < 0) throw new Error('not found: ' + name);
-  let i = src.indexOf('{', start), depth = 0;
+  let i = start + sig.length, paren = 1;
+  for (; i < src.length && paren > 0; i++) {
+    if (src[i] === '(') paren++;
+    else if (src[i] === ')') paren--;
+  }
+  i = src.indexOf('{', i);
+  let depth = 0;
   for (; i < src.length; i++) {
     if (src[i] === '{') depth++;
     else if (src[i] === '}') { depth--; if (depth === 0) { i++; break; } }
   }
-  return src.slice(start, i);
+  const body = src.slice(start, i);
+  // A body this short means the walk went wrong, not that the function is tiny — and a silent
+  // truncation is the failure this whole comment is about.
+  if (body.length < sig.length + 4) throw new Error(`extract(${name}) produced ${body.length} chars — the signature walk failed`);
+  return body;
 }
 
 const main = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
@@ -274,6 +291,40 @@ ok(Array.isArray(tagCache('nope')) === false, 'cache: non-array → returned as-
   // It must not mutate either input — saveConfig hands it a fresh read, but a future caller might not.
   const b2 = { s: { k: 1 } }; mergeConfig(b2, { s: { k: 2 } });
   ok(b2.s.k === 1, 'mergeConfig: does not mutate the base it was given');
+}
+
+// ---- requestConfirm's two "nobody is here" gates ------------------------------------------------
+// autonomousMode is ON by default, which is right for a turn Siddhant is watching — he asked, he is
+// here, a confirm card is a speed bump. It is the wrong default for work he started so he could go to
+// bed: an `rm` at 4am gets auto-approved with nobody to see the card, and "nothing objected" is not
+// "he approved it". remoteDepth already encodes exactly this condition for phone-driven turns; a
+// supervised long run is the same condition arriving through a different door, and it runs LOCALLY, so
+// isRemote() is false for it.
+{
+  const src = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
+  const body = extract(src, 'requestConfirm');
+
+  ok(/isUnattended\(\)/.test(body),
+    'requestConfirm checks isUnattended() — a long run is "nobody at the keyboard" even though it is local');
+  // Order matters: the unattended denial has to come BEFORE the autonomousMode auto-approval, or it
+  // never runs. This is the whole bug, and it is invisible in a diff that only shows the new block.
+  ok(body.indexOf('isUnattended()') < body.indexOf('isAutonomous()'),
+    'and it checks it BEFORE autonomousMode auto-approves — after would never run');
+  ok(/unattendedAllowDestructive/.test(body), 'with an explicit opt-out, the way the remote gate has one');
+
+  // The counter has to be incremented by the worker and decremented in a finally, or one throw leaves
+  // the whole app permanently in unattended mode and every destructive confirm is denied forever.
+  const worker = extract(src, 'supervisedWorker');
+  ok(/unattendedDepth\+\+/.test(worker), 'the supervised worker raises the flag');
+  ok(/finally \{ unattendedDepth--; \}/.test(worker),
+    'and lowers it in a FINALLY — one throw without this leaves the app denying every destructive confirm forever');
+  ok((worker.match(/unattendedDepth\+\+/g) || []).length === (worker.match(/unattendedDepth--/g) || []).length,
+    'the increments and decrements balance');
+
+  // It is a COUNTER, not a boolean, because `width` workers run at once and a boolean would be
+  // cleared by whichever finished first while the others were still running.
+  ok(/let unattendedDepth = 0/.test(src) && /function isUnattended\(\) \{ return unattendedDepth > 0; \}/.test(src),
+    'it is a depth counter — width workers run concurrently, and a boolean would clear on the first to finish');
 }
 
 console.log(`\n${fail === 0 ? '✅' : '❌'} ${pass} passed, ${fail} failed`);

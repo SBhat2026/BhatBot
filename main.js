@@ -2740,6 +2740,13 @@ function isAutonomous() {
 // Local desktop use is unaffected. Set config.remoteAllowDestructive:true to opt back in.
 let remoteDepth = 0;
 function isRemote() { return remoteDepth > 0; }
+// NOBODY AT THE KEYBOARD, LOCALLY. remoteDepth exists because a phone-driven turn has no human
+// present to confirm a destructive command. A supervised long run is the same condition arriving
+// through a different door — it is started precisely so it can work while Siddhant is asleep — but it
+// runs on the desktop, so isRemote() is false and autonomousMode would auto-approve an `rm` at 4am
+// with nobody to see the card. Counted rather than flagged, because `width` workers run at once.
+let unattendedDepth = 0;
+function isUnattended() { return unattendedDepth > 0; }
 // opts.forceHuman (W3 stepup tier): never silently auto-approve even under autonomousMode — a human
 // must actively confirm via the card. opts.remoteOk (W3 confirm tier): routine mutations requested
 // over the AUTHENTICATED remote channel (mcpToken is the boundary) are allowed + audited, not denied
@@ -2748,6 +2755,16 @@ function requestConfirm(command, reason, opts = {}) {
   if (isRemote() && !opts.remoteOk && loadConfig().remoteAllowDestructive !== true) {
     try { fs.appendFileSync(AUDIT_PATH, JSON.stringify({ ts: new Date().toISOString(), remoteDenied: command.slice(0, 200), reason }) + '\n'); } catch {}
     sendToActivity('tool-update', { type: 'thinking', text: '⛔ remote destructive command denied (no human to confirm): ' + reason });
+    return Promise.resolve(false);
+  }
+  // The same rule for a long run. autonomousMode is ON by default and is right for a turn Siddhant is
+  // watching — he asked, he is here, the card would just be a speed bump. It is the wrong default for
+  // work he started so he could go to bed: there is nobody to see the card, and the difference between
+  // "he approved this" and "nothing objected" is the whole point of asking. Denied, audited, and the
+  // agent is told why so it can report the item as blocked rather than silently skipping it.
+  if (isUnattended() && !opts.remoteOk && loadConfig().unattendedAllowDestructive !== true) {
+    try { fs.appendFileSync(AUDIT_PATH, JSON.stringify({ ts: new Date().toISOString(), unattendedDenied: command.slice(0, 200), reason }) + '\n'); } catch {}
+    sendToActivity('tool-update', { type: 'thinking', text: '⛔ destructive command denied — this is an unattended long run, nobody is here to confirm: ' + reason });
     return Promise.resolve(false);
   }
   if (isAutonomous() && !opts.forceHuman) {
@@ -4170,6 +4187,8 @@ async function supervisedWorker(spec) {
   let spendUsd = 0, turns = 0, finalText = '';
   const price = (u) => ((u.input_tokens || 2000) / 1e6) * 3 + ((u.output_tokens || 400) / 1e6) * 15;   // Sonnet
 
+  unattendedDepth++;
+  try {
   for (let i = 0; i < maxTurns; i++) {
     turns++;
     let resp;
@@ -4226,6 +4245,7 @@ async function supervisedWorker(spec) {
     // envelope and a far better one than nothing.
     return { status: finalText ? 'partial' : 'failed', summary: finalText || ('wrap-up failed: ' + e.message), spendUsd, turns };
   }
+  } finally { unattendedDepth--; }
 }
 
 // The live supervised roster — what presenceSnapshot() renders and the office colours by designation.
