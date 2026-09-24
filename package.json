@@ -162,7 +162,8 @@
     "test:toolforge": "node scripts/test-toolforge.js",
     "test:escalate": "node scripts/test-escalate.js",
     "test:supervisor": "node scripts/test-supervisor.js",
-    "autonomy:doctor": "node scripts/autonomy-doctor.js"
+    "autonomy:doctor": "node scripts/autonomy-doctor.js",
+    "probe:envelope": "node scripts/envelope-probe.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

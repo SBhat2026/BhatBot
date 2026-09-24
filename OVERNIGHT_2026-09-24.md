@@ -227,8 +227,22 @@ on — `need.kind: "tool" | "human" | "decompose"`. If it does not, items will c
 `partial`s and the run will retry them twice and mark them blocked rather than forging or asking. It
 would still be a safe, bounded, honest failure. It would just not be the interesting one.
 
-**So the first real `long_run` should be small and watched.** One goal,
-`hours: 0.25`, `budget_usd: 0.50`. Then leave it alone.
+**There is now a two-cent way to check it**, and it is the narrowest possible one:
+
+```bash
+npm run probe:envelope        # 3 real Claude calls, ~$0.02  (--dry prints what it would send)
+```
+
+Three situations with one right answer each: a tool that does not exist, a decision only you can
+make, and an item that is plainly finished. It asserts the model asks for the right thing, that a
+tool it proposes is one the **real forge accepts**, and that a question it raises carries a fallback —
+a human need with no assumption is an item that stalls until the idle timeout instead of proceeding.
+It runs on `lib/llm.js`, so no Electron, and it says in its own output that it proves the *model*
+fills the schema rather than that main.js's plumbing around it is right. That second half is checked
+for free in `test-tool-wiring`.
+
+**Then the first real `long_run` should be small and watched.** One goal, `hours: 0.25`,
+`budget_usd: 0.50`. Then leave it alone.
 
 Also still open from the previous phase: **the phone call has never been confirmed end to end.** The
 webhook is on the cloud, signed probes return valid two-way TwiML in 2,987ms, but nobody has answered
