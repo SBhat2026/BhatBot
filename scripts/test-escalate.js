@@ -26,6 +26,7 @@ const TMP = () => fs.mkdtempSync(path.join(os.tmpdir(), 'esc-test-'));
 // first went red: written at 03:30, every fixture landed inside quiet hours at once.
 const DAYTIME = 1758600000000 + 14 * 3600 * 1000;
 const NIGHT = 1758600000000 + 3 * 3600 * 1000;      // 03:00 local
+const at = (h, m = 0) => new Date(2026, 8, 24, h, m, 0).getTime();
 
 // A fake notify that records what it was asked to send and how loudly. The real one (main.js
 // notifyUser) is what applies the calendar gate; this module must not second-guess it.
@@ -213,6 +214,30 @@ function fakeNotify(sink, r = { sent: true, via: 'call' }) {
 
     // The window wraps through midnight, which is the whole point of it.
     ok(E.isQuiet(NIGHT) && !E.isQuiet(DAYTIME), 'the quiet window wraps midnight');
+  }
+
+  // ── THE WINDOW IS MINUTES, BECAUSE HIS IS HALF PAST ──────────────────────────────────────────────
+  // It was whole hours, which cannot say 22:30 — so the setting could not express the actual thing it
+  // existed for. Siddhant's window is 22:30 to 06:30.
+  {
+    const { toMinutes } = require('../lib/escalate');
+    ok(toMinutes('22:30') === 1350 && toMinutes('06:30') === 390, '"HH:MM" parses');
+    ok(toMinutes(23) === 1380 && toMinutes(22.5) === 1350, 'a plain number still works, whole or fractional — old configs do not break');
+    ok(toMinutes('24:00') === null && toMinutes('9:99') === null && toMinutes('abc') === null && toMinutes(null) === null,
+      'nonsense is null rather than a silent zero, which would make midnight the start of the window');
+
+    const E = createEscalations({ dir: TMP(), notify: fakeNotify([]) });   // defaults: 22:30–06:30
+    const edges = [[22, 29, false], [22, 30, true], [23, 0, true], [2, 0, true], [6, 29, true], [6, 30, false], [9, 0, false], [18, 0, false]];
+    const wrong = edges.filter(([h, m, want]) => E.isQuiet(at(h, m)) !== want)
+      .map(([h, m, want]) => `${h}:${String(m).padStart(2, '0')} should be ${want ? 'quiet' : 'ringing'}`);
+    ok(wrong.length === 0, 'both edges land on the minute' + (wrong.length ? ' — ' + wrong.join(', ') : ' (22:30 in, 06:30 out)'));
+
+    // A zero-length or unreadable window must mean "never quiet", not "always quiet". The failure
+    // direction matters: always-quiet would silently stop every call he asked for.
+    const none = createEscalations({ dir: TMP(), notify: fakeNotify([]), opts: { quietFrom: 'x', quietTo: 'y' } });
+    ok(!none.isQuiet(at(3)) && !none.isQuiet(at(14)), 'an unreadable window is never quiet — the safe direction is that his calls still happen');
+    const zero = createEscalations({ dir: TMP(), notify: fakeNotify([]), opts: { quietFrom: '09:00', quietTo: '09:00' } });
+    ok(!zero.isQuiet(at(9)) && !zero.isQuiet(at(21)), 'a zero-length window is never quiet rather than always');
   }
 
   // ── durability: an answer that arrives after a restart still lands ───────────────────────────────

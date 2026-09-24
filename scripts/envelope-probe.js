@@ -25,6 +25,11 @@
 // schema, not that main.js's plumbing around it is correct (the structural contract between those
 // two files is checked, for free, in scripts/test-tool-wiring.js).
 const llm = require('../lib/llm');
+// The SAME sealing main.js's calls go through, so this probe exercises the real shaping rather than a
+// hand-written schema that happens to work. The first run of this file 400'd on all three calls
+// because the API requires `additionalProperties: false` on every object and nothing was adding it —
+// which would have made every envelope call in a real long run fail before reaching the model.
+const { sealSchema } = require('../lib/reasoning');
 
 const DRY = process.argv.includes('--dry');
 const MODEL = process.argv.includes('--opus') ? 'claude-opus-5' : 'claude-sonnet-5';
@@ -58,6 +63,24 @@ const SCHEMA = {
         kind: { type: 'string', enum: ['tool', 'human', 'decompose', 'none'] },
         question: { type: 'string' }, why: { type: 'string' }, assumption: { type: 'string' },
         name: { type: 'string' }, purpose: { type: 'string' }, code: { type: 'string' },
+        // `tests` IS REQUIRED BY THE FORGE and was missing from this schema. Before every object was
+        // sealed the model could sometimes smuggle it in anyway; with `additionalProperties: false`
+        // it became structurally impossible, so every forge request arrived without the one thing
+        // the forge refuses to build without. The envelope probe caught it on its first clean run.
+        //
+        // The two fields are typed DIFFERENTLY, and the reason is what the API's schema subset can
+        // express. It rejects an empty node ("Empty schema"), a type union containing 'object', and
+        // `additionalProperties: true` — all measured, not guessed. So there is no way to say "any
+        // object" at all:
+        //   • `input` is a JSON STRING, parsed by lib/toolforge. A tool's argument is usually an
+        //     object and that is the only way to carry one through.
+        //   • `expected` is a real value via anyOf, because the answer is almost always a scalar and
+        //     passing it straight through avoids the one ambiguity a JSON string would add — whether
+        //     "123" means the number or the string.
+        tests: { type: 'array', items: { type: 'object', required: ['input', 'expected'], properties: {
+          input: { type: 'string', description: 'JSON for the argument, e.g. {"n": 1994}' },
+          expected: { anyOf: [{ type: 'string' }, { type: 'number' }, { type: 'boolean' }], description: 'the value the tool must return for that input' },
+        } } },
         items: { type: 'array', items: { type: 'string' } },
       },
       required: ['kind'],
@@ -126,7 +149,7 @@ function parseLoose(s) {
       r = await llm.anthropicRequest({
         model: MODEL, max_tokens: 900, system: SYSTEM,
         messages: [{ role: 'user', content: c.transcript + '\n\nReport your envelope now. JSON only.' }],
-        output_config: { format: { type: 'json_schema', schema: SCHEMA } },
+        output_config: { format: { type: 'json_schema', schema: sealSchema(SCHEMA) } },
       }, { retries: 2 });
     } catch (e) {
       console.log('✗ call failed: ' + String(e && e.message || e).slice(0, 120));

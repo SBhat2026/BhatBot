@@ -24,10 +24,38 @@ const ok = (c, m) => { assert.ok(c, m); pass++; };
   const { body } = reasoning.shapeRequest({ model: 'claude-opus-5', max_tokens: 900, messages: [] }, { schema, schemaName: 'plan' });
   ok(body.output_config && body.output_config.format, 'a schema produces output_config.format');
   ok(body.output_config.format.type === 'json_schema', 'as a json_schema');
-  assert.deepStrictEqual(body.output_config.format.schema, schema); pass++;
+  // NOT deepStrictEqual against the input any more, and that assertion is why this suite stayed green
+  // while every structured call in the app 400'd. It checked that the schema was passed through
+  // FAITHFULLY, which it was, and never that the API would accept it — so it was measuring fidelity
+  // to the caller rather than fitness for the wire. The API requires `additionalProperties: false` on
+  // every object, and nothing was adding it.
+  ok(body.output_config.format.schema.additionalProperties === false,
+    'the schema is SEALED — the API rejects any object that does not say additionalProperties:false');
+  ok(JSON.stringify(schema).indexOf('additionalProperties') === -1,
+    "and the caller's own schema object is untouched — these are module-level constants shared across calls");
   ok(body.output_config.format.name === undefined,
     'and carries NO name field — the API rejects it: 400 "output_config.format.name: Extra inputs are not permitted"');
   assert.deepStrictEqual(Object.keys(body.output_config.format).sort(), ['schema', 'type']); pass++;
+
+  // SEALING IS RECURSIVE, and one level is not enough: the supervised worker's envelope has `need` as
+  // an object inside an object, and sealing only the outer one still 400s.
+  {
+    const nested = { type: 'object', properties: {
+      status: { type: 'string' },
+      need: { type: 'object', properties: { kind: { type: 'string' }, deeper: { type: 'object', properties: { x: { type: 'string' } } } } },
+      list: { type: 'array', items: { type: 'object', properties: { a: { type: 'string' } } } },
+    }, required: ['status'] };
+    const out = reasoning.shapeRequest({ model: 'claude-opus-5', max_tokens: 100, messages: [] }, { schema: nested }).body.output_config.format.schema;
+    ok(out.additionalProperties === false, 'the root is sealed');
+    ok(out.properties.need.additionalProperties === false, 'a nested object is sealed');
+    ok(out.properties.need.properties.deeper.additionalProperties === false, 'and one nested inside that');
+    ok(out.properties.list.items.additionalProperties === false, 'and an object inside an array');
+    // A caller that said so on purpose is left alone — including one that wants it open, which the
+    // API will refuse, but refusing it is the API's job and silently rewriting intent is not ours.
+    const explicit = reasoning.shapeRequest({ model: 'claude-opus-5', max_tokens: 100, messages: [] },
+      { schema: { type: 'object', properties: {}, additionalProperties: true } }).body.output_config.format.schema;
+    ok(explicit.additionalProperties === true, 'an explicit additionalProperties is not overwritten');
+  }
 
   // It must COMPOSE with the rest of output_config, not clobber it.
   const both = reasoning.shapeRequest({ model: 'claude-opus-5', max_tokens: 900, messages: [] }, { schema, depth: 'deep', taskBudget: 50000 }).body.output_config;
