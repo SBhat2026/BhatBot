@@ -327,5 +327,58 @@ ok(Array.isArray(tagCache('nope')) === false, 'cache: non-array → returned as-
     'it is a depth counter — width workers run concurrently, and a boolean would clear on the first to finish');
 }
 
+// ---- the autonomy lane must survive MODULE INIT -------------------------------------------------
+// Three objects are constructed at main.js module scope: the escalation door, the tool forge and the
+// supervisor. A throw in any of them does not break a feature — it stops BhatBot booting at all, and
+// nothing else in this suite would notice, because every other test reaches into main.js for one
+// function and never runs the top of the file.
+//
+// It cannot be checked by launching the app: that opens a window and starts the scheduler, the triage
+// lane and the briefing, which at 1am is a way to wake Siddhant up to prove his assistant starts. So
+// the block is extracted and evaluated against stubs, which is exactly what module init is.
+//
+// The stubs are deliberately HOSTILE. Everything main.js has not defined yet at that point in the
+// file must be reached through a closure, never called; a stub that throws the moment it is invoked
+// is what proves it. This is the actual failure mode — `loadConfig()` was being called eagerly here
+// for the interruption ceiling, which worked only because loadConfig happens to be hoisted and
+// tolerant of a missing file.
+{
+  const src = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
+  const start = src.indexOf("const designation = require('./lib/designation');");
+  const end = src.indexOf('}, {});', start);
+  ok(start > 0 && end > start, 'the autonomy lane block is where it was left');
+  const block = src.slice(start, end + 7).replace(/require\('\.\/lib\//g, "require('" + path.join(__dirname, '..', 'lib') + "/");
+
+  const tooEarly = (name) => () => { throw new Error(`${name}() was called during module init — it must be reached lazily, through a closure`); };
+  let built = null;
+  try {
+    // eslint-disable-next-line no-new-func
+    built = new Function('require', 'sandbox', 'missions', 'loadConfig', 'notifyUser', 'sendToActivity',
+      'fullCatalog', 'requestConfirm', 'console', 'supervisedWorker', 'supervisedDecompose', 'supervisorEvent',
+      block + '\nreturn { escalations, forge, supervisor };')(
+      require,
+      require('../lib/sandbox'),
+      require('../lib/mission').createMissions({ dir: fs.mkdtempSync(path.join(os.tmpdir(), 'boot-')) }),
+      tooEarly('loadConfig'), tooEarly('notifyUser'), tooEarly('sendToActivity'),
+      tooEarly('fullCatalog'), tooEarly('requestConfirm'),
+      { log() {}, warn() {}, error() {} },
+      tooEarly('supervisedWorker'), tooEarly('supervisedDecompose'), tooEarly('supervisorEvent'),
+    );
+    ok(true, 'the autonomy lane constructs at module init without touching anything defined later');
+  } catch (e) {
+    ok(false, 'the autonomy lane throws during module init — THE APP WOULD NOT BOOT: ' + e.message);
+  }
+
+  if (built) {
+    ok(typeof built.escalations.ask === 'function' && typeof built.escalations.answer === 'function', 'the escalation door is usable');
+    ok(typeof built.forge.forge === 'function' && typeof built.forge.list === 'function', 'the forge is usable');
+    ok(typeof built.supervisor.run === 'function' && typeof built.supervisor.roster === 'function', 'the supervisor is usable');
+    // And the deps really are lazy: asking for the roster must not reach any of the hostile stubs.
+    let threw = null;
+    try { built.supervisor.roster(); } catch (e) { threw = e.message; }
+    ok(!threw, 'and calling into it does not reach anything main.js defines later' + (threw ? ' — ' + threw : ''));
+  }
+}
+
 console.log(`\n${fail === 0 ? '✅' : '❌'} ${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);
