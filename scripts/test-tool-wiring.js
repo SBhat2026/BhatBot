@@ -147,6 +147,55 @@ const mcphub = require('../lib/mcphub');
   }
 }
 
+// ── THE ENVELOPE IS A CONTRACT BETWEEN TWO FILES ──────────────────────────────────────────────────
+// main.js tells the model, through a JSON schema, which kinds of "I am stuck" it may report.
+// lib/supervisor.js decides what to DO with each one. If those two lists drift apart the failure is
+// silent in the worst way: the schema invites the model to say `need.kind: "decompose"`, the model
+// says it, and the supervisor falls through to "a need this supervisor does not know how to serve" —
+// so the item is blocked for a reason that is entirely our fault and reads like the model's.
+//
+// This is also the single largest untested surface in the autonomy lane. The supervisor has run an
+// hour against a local model; the Claude-backed worker in main.js has not run at all, because the
+// budget is spent. The contract between them is the part that can be checked without spending
+// anything, so it is checked here.
+{
+  const supervisor = fs.readFileSync(path.join(ROOT, 'lib', 'supervisor.js'), 'utf8');
+
+  // What the model is ALLOWED to say.
+  const m = main.match(/kind:\s*\{\s*type:\s*'string',\s*enum:\s*\[([^\]]+)\]/);
+  ok(!!m, 'main.js declares an enum of need kinds in the envelope schema');
+  const offered = m[1].split(',').map((x) => x.trim().replace(/^'|'$/g, '')).filter(Boolean);
+  ok(offered.length >= 3, `the schema offers ${offered.length} need kinds: ${offered.join(', ')}`);
+
+  // What the supervisor actually handles. 'none' is the model saying "nothing is wrong", which
+  // main.js strips before the envelope ever reaches serveNeed — so it is handled by NOT being passed.
+  const served = [...supervisor.matchAll(/kind === '(\w+)'/g)].map((x) => x[1]);
+  for (const kind of offered) {
+    if (kind === 'none') {
+      ok(/need\.kind !== 'none'/.test(main),
+        "'none' is stripped in main.js before the envelope reaches the supervisor, which is how it is 'handled'");
+      continue;
+    }
+    ok(served.includes(kind),
+      `the supervisor serves need.kind="${kind}" — the schema invites the model to say it, and an unserved kind blocks the item for a reason that is our fault and reads like the model's`);
+  }
+  // And the other direction: nothing the supervisor can serve should be unreachable because the schema
+  // forbids the model from asking for it.
+  for (const kind of served) {
+    ok(offered.includes(kind), `the schema lets the model ask for "${kind}", which the supervisor can serve`);
+  }
+
+  // The fields each kind needs must be in the schema too, or the model cannot supply them.
+  for (const field of ['question', 'assumption', 'name', 'purpose', 'code', 'items']) {
+    ok(new RegExp(`${field}: \\{ type:`).test(main) || new RegExp(`${field}: \\{`).test(main),
+      `the envelope schema has a place for "${field}"`);
+  }
+  // A human escalation without an assumption stalls an item until the idle timeout; the prompt has to
+  // ask for one explicitly, because the schema cannot require it conditionally.
+  ok(/assumption/.test(main) && /assumption you would proceed on|with question and assumption/.test(main),
+    'and the worker is TOLD to supply an assumption with a human need — a question with no fallback is a question that stalls its item');
+}
+
 // ── FIVE TOOLS THAT ALL SOUND LIKE "DO A BIG JOB" ─────────────────────────────────────────────────
 // plan_and_run, delegate_project, deploy_drones, agent_team, fleet and now long_run all answer some
 // version of "this is too big for one turn". A sixth tool the model picks wrongly is worse than no
