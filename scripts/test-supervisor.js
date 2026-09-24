@@ -30,6 +30,12 @@ const TMP = () => fs.mkdtempSync(path.join(os.tmpdir(), 'sup-test-'));
 // Real time, tiny delays: the loop's own pacing is what is under test, so a fake clock would hide it.
 const fastOpts = { tickDelayMs: 1, idleWaitMs: 60, stallTicks: 8 };
 
+// 14:00 local, for the ESCALATION clock only. Escalations stop ringing between 23:00 and 07:00 and
+// fall back to their assumption instead, so a suite that let them read the wall clock would pass in
+// the afternoon and fail overnight — which it did, at 03:40, on exactly the two assertions about
+// calling him. The loop's own timing stays real; only the "what time is it for Siddhant" clock is fixed.
+const DAYTIME = 1758600000000 + 14 * 3600 * 1000;
+
 function rig(over = {}, opts = {}) {
   const dir = TMP();
   const events = [];
@@ -124,7 +130,7 @@ function rig(over = {}, opts = {}) {
   // ── escalation does not block the loop ───────────────────────────────────────────────────────────
   {
     const sent = [];
-    const escalations = createEscalations({ dir: TMP(), notify: async (m, u, o) => { sent.push({ m, u, o }); return { sent: true, via: 'call' }; }, opts: { maxPerHour: 99 } });
+    const escalations = createEscalations({ dir: TMP(), now: () => DAYTIME, notify: async (m, u, o) => { sent.push({ m, u, o }); return { sent: true, via: 'call' }; }, opts: { maxPerHour: 99 } });
     const order = [];
     const { sup } = rig({
       escalations,
@@ -153,7 +159,7 @@ function rig(over = {}, opts = {}) {
 
   // ── an answer unblocks the item ──────────────────────────────────────────────────────────────────
   {
-    const escalations = createEscalations({ dir: TMP(), notify: async () => ({ sent: true, via: 'telegram' }), opts: { maxPerHour: 99 } });
+    const escalations = createEscalations({ dir: TMP(), now: () => DAYTIME, notify: async () => ({ sent: true, via: 'telegram' }), opts: { maxPerHour: 99 } });
     let asked = 0;
     const { sup, events } = rig({
       escalations,
@@ -177,6 +183,32 @@ function rig(over = {}, opts = {}) {
     ok(asked === 2, 'the item was retried after the answer, not abandoned');
     const unblocked = events.find((e) => e.type === 'unblocked');
     ok(unblocked && /Princeton/.test(unblocked.answer), 'the unblock event carries what he actually said');
+    ok(unblocked && unblocked.fromSiddhant === true,
+      'and marks it as HIS answer rather than an assumption — writing "Siddhant said" when he was asleep puts a fabrication in the durable record');
+  }
+
+  // ── an answer nobody gave is not an answer he gave ───────────────────────────────────────────────
+  {
+    const NIGHT = 1758600000000 + 3 * 3600 * 1000;    // 03:00 local — he is asleep
+    const escalations = createEscalations({ dir: TMP(), now: () => NIGHT, notify: async () => ({ sent: true, via: 'telegram' }), opts: { maxPerHour: 99 } });
+    let attempt = 0;
+    let seenContext = '';
+    const { sup, events } = rig({
+      escalations,
+      runAgent: async ({ goal, item }) => {
+        attempt++;
+        if (attempt === 1) return { status: 'blocked', summary: 'ask', need: { kind: 'human', question: 'Which style?', assumption: 'APA' } };
+        seenContext = (item && item.note) || '';
+        return { status: 'done', summary: 'proceeded', spendUsd: 0 };
+      },
+    }, { idleWaitMs: 200 });
+    const r = await sup.run({ goal: 'g', plan: ['needs a decision at 3am'] });
+
+    ok(r.ok, 'a question asked at 3am does not stall the run until morning');
+    const u = events.find((e) => e.type === 'unblocked');
+    ok(u && u.fromSiddhant === false, 'the unblock is marked as NOT from Siddhant');
+    ok(/no answer — proceeding on the assumption/.test(seenContext),
+      `the plan note says it was an assumption, so the next agent is not told he said something he did not (got "${seenContext}")`);
   }
 
   // ── it forges a tool it does not have ───────────────────────────────────────────────────────────
@@ -208,7 +240,7 @@ function rig(over = {}, opts = {}) {
   {
     const forge = createForge({ dir: TMP(), sandbox: realSandbox });
     const sent = [];
-    const escalations = createEscalations({ dir: TMP(), notify: async (m) => { sent.push(m); return { sent: true, via: 'telegram' }; }, opts: { maxPerHour: 99 } });
+    const escalations = createEscalations({ dir: TMP(), now: () => DAYTIME, notify: async (m) => { sent.push(m); return { sent: true, via: 'telegram' }; }, opts: { maxPerHour: 99 } });
     const { sup } = rig({ forge, escalations,
       runAgent: async () => ({ status: 'blocked', summary: 'x', need: { kind: 'tool', name: 'broken_tool', purpose: 'p', code: 'return 1;', tests: [{ input: {}, expect: { equals: 2 } }] } }),
     }, { maxItemAttempts: 1, idleWaitMs: 40 });
@@ -266,6 +298,29 @@ function rig(over = {}, opts = {}) {
     const r = await sup.resume(h.id, { wallClockMs: 20000 });
     ok(r.ok && r.done.length === 2,
       'an item left `doing` by a dead process is made runnable again — otherwise it is neither runnable nor finishable and the run stalls blaming itself for a crash');
+  }
+
+  // ── THE PARK REASON IS A CONTRACT ────────────────────────────────────────────────────────────────
+  // main.js decides whether to AUTO-CONTINUE a parked run by reading its lastError. A run that ran out
+  // of TIME has more to do and picking it up is the whole point of "several hours". A run that ran out
+  // of MONEY, or failed five times running, or was stopped by hand, would hit the same wall seconds
+  // after resuming — auto-continuing it is a 30-second loop that spends real money to learn nothing.
+  // That decision is only sound if the reason is recorded verbatim, so this pins it.
+  {
+    const cases = [
+      ['wall-clock', { plan: ['a', 'b', 'c', 'd'], wallClockMs: 30 }, async () => { await new Promise((r) => setTimeout(r, 20)); return { status: 'done', summary: 'ok' }; }],
+      ['budget', { plan: ['a', 'b', 'c'], budgetUsd: 0.05 }, async () => ({ status: 'done', summary: 'ok', spendUsd: 0.06 })],
+    ];
+    for (const [want, spec, runAgent] of cases) {
+      const dir = TMP();
+      const missions = createMissions({ dir: path.join(dir, 'missions') });
+      const sup = createSupervisor({ missions, runAgent, onEvent: () => {} }, { ...fastOpts, width: 1 });
+      const r = await sup.run({ goal: 'g', ...spec });
+      const meta = (missions.attach(r.missionId) || {}).meta || {};
+      ok(r.stoppedBecause === want, `a ${want} wall reports itself as "${want}"`);
+      ok(String(meta.lastError).includes(want),
+        `and records "${want}" verbatim in lastError, which is what decides whether to auto-continue (got "${meta.lastError}")`);
+    }
   }
 
   // ── a cooperative stop ───────────────────────────────────────────────────────────────────────────

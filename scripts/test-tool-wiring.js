@@ -147,4 +147,37 @@ const mcphub = require('../lib/mcphub');
   }
 }
 
+// ── WHAT A SUPERVISED WORKER MAY REACH ────────────────────────────────────────────────────────────
+// A worker inside a long run gets a SCOPED tool set — ~20 relevant tools rather than 89 vague ones,
+// which is the same reasoning per-turn retrieval already proved on the main loop. Two properties have
+// to hold for every designation, and neither is visible by reading the map: every designation must
+// actually resolve to a usable set (a typo'd category silently yields nothing and the worker is left
+// with two tools), and none may reach `long_run` — a worker starting another long run is a recursion
+// that would cost a turn to be refused, and reads to the model as a capability it has.
+{
+  const toolcatalog = require('../lib/toolcatalog');
+  const body = main.slice(main.indexOf('const SUPERVISED_TOOLS ='), main.indexOf('function supervisedToolDefs'));
+  // eslint-disable-next-line no-new-func
+  const SUPERVISED_TOOLS = new Function(body + '\nreturn SUPERVISED_TOOLS;')();
+  const designation = require('../lib/designation');
+
+  ok(Object.keys(SUPERVISED_TOOLS).length >= designation.DESIGNATIONS.length,
+    'every designation has a tool scope — one without falls back to `general`, which is a silent downgrade');
+
+  for (const [desig, cats] of Object.entries(SUPERVISED_TOOLS)) {
+    const bad = cats.filter((c) => !toolcatalog.CATEGORIES[c]);
+    ok(bad.length === 0, `${desig} names only real tool categories${bad.length ? ' — unknown: ' + bad.join(', ') : ''}`);
+
+    const want = new Set();
+    for (const c of cats) for (const t of toolcatalog.expand(c, TOOLS)) want.add(t.name);
+    for (const n of toolcatalog.CORE) want.add(n);
+    want.add('forge_tool'); want.add('plugin'); want.delete('long_run');
+
+    ok(want.size >= 8, `${desig} resolves to a usable set (${want.size} tools), not an empty one`);
+    ok(!want.has('long_run'), `${desig} cannot start another long run from inside one`);
+    ok(want.has('forge_tool'), `${desig} can forge — "there is no tool for this" must be something it can act on`);
+    ok(want.has('toolbox'), `${desig} keeps the toolbox escape hatch, so a misclassified item can still widen its own scope`);
+  }
+}
+
 console.log(`✅ tool wiring: ${pass} assertions passed`);

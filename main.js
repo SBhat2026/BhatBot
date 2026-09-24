@@ -4078,6 +4078,11 @@ function supervisedToolDefs(desig) {
   // thing it can DO something about rather than a thing it reports.
   want.add('forge_tool');
   want.add('plugin');
+  // NOT long_run. The orchestrate category carries it, and a worker inside a long run reaching for
+  // another one is a recursion the tool would refuse anyway — but it would cost a turn and read to
+  // the model as a capability it has. A worker's job is one plan item; growing the plan is what
+  // `newItems` is for.
+  want.delete('long_run');
   return all.filter((t) => want.has(t.name));
 }
 
@@ -9849,6 +9854,9 @@ function missionCaps() {
   };
 }
 let _missionRunning = false;
+// Missions whose "I am not auto-continuing this" has already been said once. Saying it every 30
+// seconds for the rest of the day is how a useful notice becomes noise nobody reads.
+const _autoResumeExplained = new Set();
 async function tickMissions() {
   if (_missionRunning) return false;
   if (loadConfig().missionAutoContinue === false) return false;
@@ -9878,6 +9886,42 @@ async function tickMissions() {
 // Resume one parked mission. Deliberately mirrors runScheduledTask: same headless event shim, same
 // announce/notify treatment — a resumed mission IS a proactive run, nobody is watching the screen.
 async function resumeMission(id) {
+  const meta0 = (missions.attach(id) || {}).meta || {};
+  // ROUTE IT BACK WHERE IT CAME FROM. A supervised run parked at its wall has a plan, a width and a
+  // roster; handing it to a single agentLoop turn would change the execution model out from under it —
+  // one agent trying to work forty plan items in one turn, with no parallel width, no escalation
+  // routing and no forge. This is how "several hours" actually happens: one-hour windows, chained,
+  // each re-anchored on the verbatim goal, with the durable spend and resume caps as the real ceiling.
+  if (meta0.kind === 'supervised') {
+    if (_supervisedRun && !_supervisedRun.report) return null;    // one long run at a time, always
+    // WHICH WALL IT HIT DECIDES WHETHER CONTINUING MAKES SENSE. A run that ran out of TIME has more
+    // to do and picking it up is the whole point. A run that ran out of MONEY, or failed five times
+    // running, or was stopped by hand, would hit the same wall within seconds of resuming — so
+    // auto-continuing it is a 30-second loop that spends real money to learn nothing. Those wait for
+    // Siddhant to say `long_run{action:"resume"}`, which is him raising the ceiling deliberately.
+    if (!/wall-clock|waiting on|process died/i.test(String(meta0.lastError || ''))) {
+      if (!_autoResumeExplained.has(id)) {
+        _autoResumeExplained.add(id);
+        sendToActivity('tool-update', { type: 'thinking', text: `⏸ long run ${id} stopped on "${String(meta0.lastError || '').slice(0, 60)}" — not auto-continuing; say so and I will resume it` });
+      }
+      return null;
+    }
+    sendToActivity('tool-update', { type: 'thinking', text: `↩️ continuing the long run — ${String(meta0.goal).slice(0, 120)}` });
+    _supervisedRun = { goal: meta0.goal, startedAt: Date.now(), missionId: id, report: null };
+    _supervisedRun.promise = supervisor.resume(id, {})
+      .then((rep) => {
+        _supervisedRun.report = rep;
+        if (rep.stoppedBecause !== 'wall-clock') {
+          // Only a genuine ending is news. A run that hit the clock again is mid-flight and the tick
+          // will pick it up; narrating every hop of a six-hour job is noise.
+          notifyUser(`Long run ${rep.stoppedBecause}: ${String(rep.goal).slice(0, 120)}\n${rep.done.length} done, ${rep.blocked.length} blocked · $${rep.spentUsd}`, 'low').catch(() => {});
+        }
+        return rep;
+      })
+      .catch((e) => { _supervisedRun.report = { ok: false, stoppedBecause: 'crashed', error: String(e && e.message || e) }; return _supervisedRun.report; });
+    return _supervisedRun.promise;
+  }
+
   const m = missions.resume(id);
   if (!m) return null;
   const meta = m.meta || {};

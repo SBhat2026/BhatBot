@@ -140,6 +140,20 @@ const dead = M.open({ goal: 'killed mid-run' });
 const alive = M.open({ goal: 'still going' });
 tick(10 * 60 * 1000);          // both heartbeats now 10 min old…
 alive.heartbeat();             // …but this one just checked in
+// ── WHO PICKS IT UP ───────────────────────────────────────────────────────────────────────────────
+// A mission parked by the supervisor has a plan, a width and a roster. Handing it to a single agent
+// turn on resume would change the execution model out from under it — one agent trying to work forty
+// plan items in one turn, with no parallel width, no escalation routing and no forge. main.js's
+// resumeMission branches on this, so it has to survive the round trip to disk.
+{
+  const sup = M.open({ goal: 'a long job', kind: 'supervised' });
+  ok(M.attach(sup.id).meta.kind === 'supervised', 'a mission records who should resume it');
+  const turn = M.open({ goal: 'an ordinary turn' });
+  ok(M.attach(turn.id).meta.kind === 'turn', 'an ordinary mission defaults to the turn loop, so nothing changes for existing callers');
+  sup.park('wall clock');
+  ok(M.attach(sup.id).meta.kind === 'supervised', 'and it survives being parked — which is the only moment it matters');
+}
+
 const reaped = M.reapOrphans({ staleMs: 5 * 60 * 1000 });
 ok(reaped.includes(dead.id), 'reapOrphans: parks a mission whose process died');
 ok(!reaped.includes(alive.id), 'reapOrphans: leaves a live mission alone');
