@@ -126,6 +126,36 @@ Five bugs, each caught by something that went looking rather than by reading cod
 
 ---
 
+## The hour, actually run
+
+`scripts/soak-supervisor.js --minutes 62 --items 800 --width 3`, against a local qwen3 through
+Ollama. Free. Every item verified by the script itself, because "the agent said done" is exactly the
+signal an endurance test must not trust.
+
+```
+stopped: wall-clock after 62.5min · 710 scheduling passes
+agent CLAIMED done: 476 · INDEPENDENTLY VERIFIED: 560
+false "done": 0
+rss 56MB → 59MB
+escalations: 9 asked, 4 answered, 5 still open   (160 escalation events → 9 interruptions)
+throughput: 254 verified in the first 31min, 305 in the second
+```
+
+Three results worth pulling out.
+
+**It did not degrade — it sped up.** 254 verified in the first half, 305 in the second. The question
+an hour-long test exists to answer is "does it get worse", and the answer is no.
+
+**Zero false "done".** It under-claimed by 84 items, which is the safe direction: work it had actually
+finished and reported as partial. A false done is a hole in the report; an under-claim is not.
+
+**160 escalation events produced 9 interruptions.** Dedupe and the per-hour ceiling did what they were
+built for, and the run never stopped waiting for any of them.
+
+Memory grew 3MB over an hour, across 2,137 model calls and 1,530 tool calls.
+
+---
+
 ## Two things added that you did not ask for, and should know about
 
 **Destructive commands are denied during a long run.** `autonomousMode` is on by default and
@@ -145,10 +175,15 @@ normal case and a channel that only works when everyone remembers to use it does
 ## What is NOT proven
 
 **The hour-long lane has never run against Claude.** The Anthropic budget is spent
-($4.00/$4.00), so the endurance run used a local qwen3 through Ollama — free, real latency, real tool
-calls, every item verified independently of what the agent claimed. That proves the *supervisor*.
-What it does not touch is `supervisedWorker` in `main.js`, the Claude-backed runner: its loop, its
-envelope call and its tool scoping have only been exercised structurally.
+($4.00/$4.00), so the 62-minute run above used a local qwen3. That proves the *supervisor* — the
+loop, the walls, the escalation path, the forge, the durability, the memory profile. What it does not
+touch is `supervisedWorker` in `main.js`, the Claude-backed runner: its loop, its envelope call and
+its tool scoping have only been exercised structurally.
+
+Concretely, what is unproven is whether Claude reliably produces the ENVELOPE the supervisor routes
+on — `need.kind: "tool" | "human" | "decompose"`. If it does not, items will come back as bare
+`partial`s and the run will retry them twice and mark them blocked rather than forging or asking. It
+would still be a safe, bounded, honest failure. It would just not be the interesting one.
 
 **So the first real `long_run` should be small and watched.** One goal,
 `hours: 0.25`, `budget_usd: 0.50`. Then leave it alone.

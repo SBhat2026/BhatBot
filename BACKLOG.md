@@ -44,9 +44,13 @@ deleting it, not by leaving a ✅ behind — a list of completed work is what th
   CALLS rather than texting. That asymmetry is deliberate (a call during a seminar costs embarrassment;
   silence during an emergency costs the thing calling exists for) but it is worth knowing, and
   `google_accounts` reports all three tokens as needing re-auth outside Electron.
-- ⚠ **A forged tool still takes a small model several tries.** After the shape fixes it is 24 forges
-  from 89 attempts — down from 0 from 17, but the refusals could teach more than they do. Claude will
-  do better; this is a note about the ERROR MESSAGES, not about the model.
+- ✅ ~~A forged tool takes a small model several tries~~ — **answered by the 62-minute soak, and the
+  answer is not what it looked like.** Every remaining refusal in 237 attempts was the forge doing its
+  job: the model's Roman-numeral tool genuinely disagreed with its own declared expectation
+  (`expected "MMMDCCCXXIX", got "MMMCCCXXIX"`), and in one case its *expectation* was the wrong one
+  (`expected "M CXXXV"` — a stray space — against code that was right). Those are correctness
+  failures by a 4B model, not friction in the error messages. Two tools were forged and both worked.
+  Nothing to fix here; recorded so nobody re-opens it.
 
 
 ### Broken right now (found 2026-09-21)
