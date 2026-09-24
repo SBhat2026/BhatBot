@@ -251,8 +251,10 @@ const ITEM_BY_TEXT = new Map();
   // deterministic checks — which is exactly the degraded mode a real unattended run falls into when
   // the budget is gone, and therefore the mode worth soaking.
   const custodian = require('../lib/custodian').createCustodian({});
+  let stopRequested = false;
   const sup = createSupervisor({
     missions, escalations, forge,
+    shouldStop: () => stopRequested,
     review: async ({ goal, deliverable, trace }) => custodian.review({ prompt: goal, deliverable, trace, autonomous: true }),
     runAgent: worker,
     decompose: async () => items.map((i) => i.text),
@@ -268,6 +270,14 @@ const ITEM_BY_TEXT = new Map();
   // The heartbeat is the instrument. A soak whose only output is the final verdict cannot tell you
   // WHEN it went wrong, and "it degraded somewhere in the middle" is not a finding.
   const completionTimes = [];
+  // A BUSY RUN THAT PRODUCES NOTHING IS THE FAILURE THIS HARNESS EXISTS TO CATCH, and the first
+  // version of it took thirty minutes to make that visible — three items had seized all three worker
+  // slots and were cycling between blocked and todo forever, while the heartbeat cheerfully reported
+  // rising model and tool counts. Model calls are ACTIVITY. Verified items are WORK. When the second
+  // climbs and the first does not, stop and say so rather than spending the remaining half hour
+  // confirming it.
+  let lastVerified = 0, flatFor = 0;
+  let deadlocked = null;
   const beat = setInterval(() => {
     const mins = (Date.now() - startedAt) / 60000;
     const r = process.memoryUsage().rss;
@@ -275,6 +285,20 @@ const ITEM_BY_TEXT = new Map();
     const verified = items.filter((i) => i.check()).length;
     while (completionTimes.length < verified) completionTimes.push(mins);
     log(`  ${mins.toFixed(1)}min · verified ${verified}/${items.length} · rss ${Math.round(r / 1048576)}MB · model ${stats.modelCalls} calls (${stats.modelErrors} err) · tools ${stats.toolCalls} · forged ${stats.forgeOk}/${stats.forgeAttempts} · asked ${asked.length}`);
+
+    if (verified > lastVerified) { lastVerified = verified; flatFor = 0; return; }
+    if (verified >= items.length) return;                    // nothing left to verify is not a stall
+    flatFor++;
+    if (flatFor === 5) log('  ⚠ five minutes with no new verified item — watching for a livelock');
+    if (flatFor >= 8 && !deadlocked) {
+      deadlocked = `${flatFor} minutes with no new verified item while ${items.length - verified} remain, `
+        + `and the agents were not idle: ${stats.modelCalls} model calls and ${stats.toolCalls} tool calls so far. `
+        + 'Busy and producing nothing is a livelock, not slowness.';
+      log('  ✗ ' + deadlocked);
+      // Stopping cooperatively rather than killing: the report below is the interesting part, and the
+      // plan file it leaves behind is what names the items that seized the slots.
+      stopRequested = true;
+    }
   }, 60000);
   beat.unref?.();
 
@@ -325,10 +349,11 @@ const ITEM_BY_TEXT = new Map();
     + (hadWorkLate ? '' : ' (everything was finished before halfway — nothing left to measure)'));
 
   const fails = [];
+  if (deadlocked) fails.push('LIVELOCK: ' + deadlocked);
   if (report.stoppedBecause === 'crashed') fails.push('the run crashed');
   // Running out of WORK is not running out of stamina. 'complete' and 'blocked' both mean there was
   // nothing left to do; only a wall or a stall before the time is up is a real early stop.
-  const RAN_OUT = report.stoppedBecause === 'complete' || report.stoppedBecause === 'blocked';
+  const RAN_OUT = report.stoppedBecause === 'complete' || report.stoppedBecause === 'blocked' || !!deadlocked;
   if (elapsedMin < MINUTES * 0.95 && !RAN_OUT) fails.push(`stopped early at ${elapsedMin.toFixed(1)}min (${report.stoppedBecause}) — it was asked for ${MINUTES}`);
   if (RAN_OUT && elapsedMin < MINUTES * 0.95) log(`NOTE: it ran out of work at ${elapsedMin.toFixed(1)}min rather than running out of stamina — give it more --items to test the full window.`);
   if (verified.length === 0) fails.push('nothing was independently verified — the run did no real work');
