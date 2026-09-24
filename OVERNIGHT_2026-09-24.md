@@ -7,8 +7,11 @@ genuinely needs you, keep going on its own until the job is done, show the agent
 what they are doing, run for an hour without you, and reach you by phone unless your calendar says
 you are busy — in which case Telegram.
 
-Everything below is built, tested and wired. One thing is genuinely unproven and it is flagged
-plainly at the bottom, because it is the thing you would most want to know before trusting this.
+Everything below is built, tested and wired, and none of it spent a cent of Anthropic budget — the
+endurance work ran against a local model on your own machine. **One thing is genuinely unproven**, it
+is flagged plainly at the bottom, and there is now a two-cent command that settles it. I did not run
+that command: you said you would not add budget, and two cents is small enough that spending it
+anyway is how a line stops meaning anything.
 
 ---
 
