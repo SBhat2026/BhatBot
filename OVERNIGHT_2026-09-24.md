@@ -173,7 +173,7 @@ Memory grew 3MB over an hour, across 2,137 model calls and 1,530 tool calls.
 
 ---
 
-## Three things added that you did not ask for, and should know about
+## Four things added that you did not ask for, and should know about
 
 **Destructive commands are denied during a long run.** `autonomousMode` is on by default and
 auto-approves `rm` and friends, which is right for a turn you are watching — you asked, you are here,
@@ -195,6 +195,14 @@ also had that — six agents could each text you, and `urgency:"call"` at 3am be
 which is the exact thing the quiet-hours rule exists to prevent. A ceiling with a way around it is not
 a ceiling. Workers now reach you through the guarded path or not at all. `gmail` came out clean on the
 same question: it has search/read/draft/label and no send, so a worker can draft and nothing leaves.
+
+**A budget that cannot see the spending is not a budget.** Every wall the lane has counts Anthropic
+tokens. `visual_build` bills your Replicate account per second of output — your own backlog has it at
+~$3.20 for ten seconds of 1080p, "the most expensive call in the system", with no confirmation gate —
+and `make_asset` chains image → 3D → STL, three billable stages behind one call. Neither appears in
+`spentUsd`, so an unattended run with a $2 ceiling could spend twenty dollars elsewhere and report,
+accurately by its own accounting, that it stayed under. Both are out of the unattended grant; a run
+that needs a video asks and you decide while awake. `generate_image` stays — flux-fast is $0.003.
 
 ---
 
