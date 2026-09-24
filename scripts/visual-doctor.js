@@ -107,12 +107,104 @@ function serve(port) {
     return { elements: out, theme: document.documentElement.getAttribute('data-theme') };
   }, { must: MUST_SHOW, also: ALSO_SAMPLE, cond: CONDITIONAL });
 
+  // ── SECOND PASS: THE FLEET PANEL, WITH A LONG RUN IN IT ─────────────────────────────────────────
+  // The COMMAND view is what the first pass covers, and it is the only view anything ever covered.
+  // The long-run strip is the surface Siddhant reads after being away for an hour — the one place the
+  // interface has to be legible when nobody was watching it being built — and it renders only when a
+  // run is feeding it, so it has to be fed. renderLongRun is a plain top-level function, so this
+  // drives the same code path the IPC message does.
+  const LR_FIXTURE = {
+    running: true,
+    goal: 'Audit the science lane and rebuild the figure pipeline',
+    missionId: 'm_fixture', elapsedMs: 47 * 60000, spentUsd: 1.24,
+    done: 9, total: 14, blocked: 2,
+    forged: ['roman_numeral', 'parse_duration'],
+    waiting: [
+      { id: 'esc_a1b2c3', question: 'Which Princeton calendar should the seminar block come from?', assumption: 'sb9699@princeton.edu', quiet: true },
+    ],
+    plan: [
+      { text: 'Pull the last 40 PubMed hits for the electrode work', status: 'done', note: '' },
+      { text: 'Rebuild the figure pipeline against the new schema', status: 'doing', note: 'ORRIN · writing lib/figures.js' },
+      { text: 'Reconcile the seminar calendar', status: 'blocked', note: 'waiting on esc_a1b2c3' },
+      { text: 'Re-render every figure at 300dpi', status: 'todo', note: '' },
+      { text: 'Check the citation style against his last paper', status: 'blocked', note: 'no answer — proceeding on the assumption: APA' },
+    ],
+  };
+  await page.evaluate((fx) => {
+    window.__lrFixture = fx;
+    // Both routes, because only one of them is guaranteed to exist: showPanel is the app's own
+    // switcher, and clicking the nav button is what a person does.
+    try { window.showPanel('vanguard'); } catch {}
+    try { if (!document.getElementById('vanguard-panel').classList.contains('active')) document.querySelector('[data-panel="vanguard"]').click(); } catch {}
+    try { window.renderLongRun(fx); } catch (e) { window.__lrError = String(e.message); }
+  }, LR_FIXTURE);
+  await page.waitForTimeout(500);
+
+  const lrErr = await page.evaluate(() => window.__lrError || null);
+  if (lrErr) errors.push('renderLongRun threw: ' + lrErr);
+
+  const fleet = await page.evaluate(({ must, also }) => {
+    const paintedBg = (el) => {
+      for (let n = el; n && n !== document.documentElement.parentElement; n = n.parentElement) {
+        const c = getComputedStyle(n).backgroundColor;
+        const m = c && c.match(/rgba?\(([^)]+)\)/);
+        if (m) { const p = m[1].split(',').map(parseFloat); if (p[3] == null || p[3] > 0.5) return c; }
+      }
+      return 'rgb(255,255,255)';
+    };
+    const grab = (el, sel, shouldShow) => {
+      const cs = getComputedStyle(el), r = el.getBoundingClientRect();
+      const own = [...el.childNodes].filter((n) => n.nodeType === 3).map((n) => n.textContent.trim()).join(' ').trim();
+      return { sel, shouldShow, w: Math.round(r.width), h: Math.round(r.height), x: Math.round(r.x), y: Math.round(r.y),
+        display: cs.display, visibility: cs.visibility, opacity: cs.opacity, color: cs.color, bg: paintedBg(el),
+        fontPx: parseFloat(cs.fontSize) || 16, weight: cs.fontWeight, text: own.slice(0, 60),
+        scrollW: el.scrollWidth, clientW: el.clientWidth, overflowX: cs.overflowX, overflow: cs.overflow,
+        interactive: false, isCanvas: false, canvasBlank: false };
+    };
+    const out = [];
+    for (const sel of must) { const el = document.querySelector(sel); if (el) out.push(grab(el, sel, true)); else out.push({ sel, shouldShow: true, w: 0, h: 0, display: 'missing' }); }
+    for (const sel of also) document.querySelectorAll(sel).forEach((el, i) => out.push(grab(el, `${sel}[${i}]`, false)));
+    return { elements: out,
+      // Read the TEXT back, not just the geometry: a strip that is the right size and says nothing is
+      // the failure mode here, and it looks identical to a working one in a screenshot.
+      goal: (document.getElementById('lr-goal') || {}).textContent || '',
+      meta: (document.getElementById('lr-meta') || {}).textContent || '',
+      fill: (document.getElementById('lr-fill') || {}).style ? document.getElementById('lr-fill').style.width : '',
+      asks: document.querySelectorAll('.lr-ask').length,
+      steps: document.querySelectorAll('.lr-step').length,
+      firstStep: (document.querySelector('.lr-step') || {}).textContent || '',
+      // Checked LAST, and it restores the fixture afterwards so the screenshot below shows the strip
+      // rather than the empty state this assertion just put it into.
+      hiddenWhenEmpty: (() => { try { window.renderLongRun(null); const h = document.getElementById('longrun').hidden; window.renderLongRun(window.__lrFixture); return h; } catch { return null; } })(),
+      panelActive: !!(document.getElementById('vanguard-panel') || {}).classList && document.getElementById('vanguard-panel').classList.contains('active'),
+    };
+  }, { must: ['#longrun', '#lr-goal', '#lr-bar, .lr-bar', '#lr-plan'], also: ['.lr-ask', '.lr-step', '#lr-meta'] });
+
+  const fleetFindings = check({ elements: fleet.elements, invariants: [] });
+  snapshot.elements.push(...fleet.elements);
+
   snapshot.invariants = INVARIANTS;
-  const findings = check(snapshot);
+  const findings = [...check(snapshot), ...fleetFindings];
   const errs = findings.filter((f) => f.level === 'error');
   const warns = findings.filter((f) => f.level === 'warn');
 
+  // The content assertions the geometry cannot make.
+  const contentFails = [];
+  if (!/Audit the science lane/.test(fleet.goal)) contentFails.push('the long-run strip shows no goal');
+  if (!/9\/14 steps/.test(fleet.meta)) contentFails.push(`the progress read-out is wrong: "${fleet.meta}"`);
+  if (!/2 blocked/.test(fleet.meta)) contentFails.push('blocked steps are not reported in the strip header');
+  if (fleet.fill !== '64%') contentFails.push(`the progress bar is at "${fleet.fill}", not 64%`);
+  if (fleet.asks !== 1) contentFails.push(`${fleet.asks} question(s) shown; one was waiting`);
+  if (fleet.steps < 5) contentFails.push(`only ${fleet.steps} plan steps rendered`);
+  // Open work first: a forty-step plan with thirty done must not make you scroll past thirty ticks to
+  // find the one thing that is stuck.
+  if (!/Reconcile the seminar calendar/.test(fleet.firstStep)) contentFails.push(`the first step shown is "${fleet.firstStep.slice(0, 50)}" — blocked work should lead`);
+  if (fleet.hiddenWhenEmpty !== true) contentFails.push(`the strip does not hide itself when nothing is running (hidden=${fleet.hiddenWhenEmpty}) — the office is the hero when there is no run`);
+  if (!fleet.panelActive) contentFails.push('the FLEET panel never opened, so everything above was measured on a hidden element');
+
   console.log(`\n── visual doctor ── theme:${snapshot.theme} width:${width} ── ${snapshot.elements.length} elements\n`);
+  if (contentFails.length) { console.log('  LONG-RUN STRIP:'); for (const f of contentFails) console.log('    ✗ ' + f); console.log(''); }
+  else console.log('  ✓ long-run strip: goal, progress, the question it is waiting on, and blocked work first\n');
   if (errors.length) { console.log('  PAGE ERRORS:'); for (const e of errors.slice(0, 4)) console.log('    ✗ ' + e); console.log(''); }
   for (const f of [...errs, ...warns]) console.log(`  ${f.level === 'error' ? '✗' : '⚠'} ${f.rule.padEnd(13)} ${f.sel}\n      ${f.detail}`);
   if (!findings.length) console.log('  ✓ nothing invisible, unreadable, overflowing, blank or overlapping');
@@ -123,5 +215,5 @@ function serve(port) {
   console.log(`  screenshot: ${shot}\n`);
 
   await browser.close(); server.close();
-  process.exit(errs.length ? 1 : 0);
+  process.exit(errs.length || contentFails.length ? 1 : 0);
 })().catch((e) => { console.error('✗', e.message); process.exit(1); });

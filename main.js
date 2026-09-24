@@ -4226,8 +4226,49 @@ async function supervisedWorker(spec) {
 // The live supervised roster — what presenceSnapshot() renders and the office colours by designation.
 const supervisedAgents = new Map();
 
+// Coalesced, like pushPresenceNow: a six-agent run emits a burst of state changes at once and the
+// strip only needs the last one.
+let _lrSoon = null;
+function pushLongRunSoon() {
+  if (_lrSoon) return;
+  _lrSoon = setTimeout(() => { _lrSoon = null; pushLongRun(); }, 250);
+  _lrSoon.unref?.();
+}
+
+// The "come back and see what happened" surface. An hour-long run whose only trace is a scrolling
+// activity feed makes you reconstruct it from log lines; this is the state, not the history. Pushed
+// on the events that CHANGE it rather than on a timer, because a panel that repaints four times a
+// second for a number that moves once a minute is the office's old demo mode with extra steps.
+function pushLongRun() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  try {
+    const live = _supervisedRun && !_supervisedRun.report ? _supervisedRun : null;
+    const h = (live && live.missionId) ? missions.attach(live.missionId) : null;
+    const plan = h ? h.plan.read() : [];
+    mainWindow.webContents.send('longrun-update', {
+      running: !!live,
+      goal: live ? live.goal : ((_supervisedRun && _supervisedRun.report && _supervisedRun.report.goal) || ''),
+      missionId: live ? live.missionId : null,
+      elapsedMs: live ? Date.now() - live.startedAt : 0,
+      spentUsd: h ? +((h.meta || {}).spendUsd || 0).toFixed(4) : 0,
+      done: plan.filter((p) => p.status === 'done').length,
+      total: plan.length,
+      blocked: plan.filter((p) => p.status === 'blocked').length,
+      plan: plan.slice(0, 60).map((p) => ({ text: p.text, status: p.status, note: p.note || '' })),
+      working: supervisor.roster().map((a) => ({ name: a.name, label: a.label, color: a.color, task: a.task, step: a.step })),
+      waiting: escalations.pending().map((x) => ({ id: x.id, question: x.question, assumption: x.assumption || '', quiet: !!x.quiet })),
+      forged: forge.list().map((t) => t.name),
+      stoppedBecause: (_supervisedRun && _supervisedRun.report) ? _supervisedRun.report.stoppedBecause : null,
+    });
+  } catch {}
+}
+
 function supervisorEvent(e) {
   try {
+    // Anything that moves the plan, the roster or what is waiting on him changes what the strip
+    // should say. Listing them is deliberate: a blanket push on every event would repaint on each of
+    // the ~90 agent-state ticks a six-agent run emits per minute.
+    if (['run-start', 'progress', 'escalated', 'unblocked', 'assumed', 'plan-grew', 'forged', 'gave-up', 'run-end', 'agent', 'agent-gone'].includes(e.type)) pushLongRunSoon();
     switch (e.type) {
       case 'agent':
         supervisedAgents.set(e.id, { id: e.id, name: e.name, designation: e.designation, state: e.state, task: e.task, step: e.step, since: e.since });

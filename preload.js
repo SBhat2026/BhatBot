@@ -33,6 +33,7 @@ contextBridge.exposeInMainWorld('bhatbot', {
   applyVoicePreset: (preset) => ipcRenderer.invoke('apply-voice-preset', { preset }),
   onFleetUpdate: (cb) => ipcRenderer.on('fleet-update', (_e, d) => cb(d)),           // C-Fleet — live suit relay
   onPresenceUpdate: (cb) => ipcRenderer.on('presence-update', (_e, d) => cb(d)),     // 3D fleet-presence (FLEET tab iframe)
+  onLongRun: (cb) => ipcRenderer.on('longrun-update', (_e, d) => cb(d)),             // the hour-long run's plan + progress (FLEET tab strip)
   onTurnState: (cb) => ipcRenderer.on('turn-state', (_e, d) => cb(d)),               // T2 — single merged display-state snapshot per turn
   synapseGraph: () => ipcRenderer.invoke('synapse-graph'),                            // SYNAPSE second brain — current graph
   synapseEnsure: () => ipcRenderer.invoke('synapse-ensure'),                          // free import if empty (no cost)
