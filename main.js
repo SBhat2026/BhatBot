@@ -5156,6 +5156,7 @@ async function executeTool(name, input, opts = {}) {
           tools:  { cmd: ['node', 'scripts/toolcheck.js'],          what: 'every tool runtime' },
           code:   { cmd: ['node', 'scripts/deadcode.js'],           what: 'modules nothing requires' },
           browser:{ cmd: ['node', 'scripts/browser-doctor.js'],    what: 'whether a browser can actually launch (five tools depend on it)' },
+          autonomy:{cmd: ['node', 'scripts/autonomy-doctor.js'],   what: 'whether the hour-long lane is wired — it plans, forges, escalates and survives a crash' },
         };
         const area = String((input && input.area) || 'code');
         const pick = area === 'all' ? Object.keys(AREAS) : [area];
