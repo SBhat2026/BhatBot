@@ -248,6 +248,17 @@ for free in `test-tool-wiring`.
 **Then the first real `long_run` should be small and watched.** One goal, `hours: 0.25`,
 `budget_usd: 0.50`. Then leave it alone.
 
+**The calendar gate is only as good as the Google tokens, and I cannot check them from here.** All
+three accounts are connected, including `sb9699@princeton.edu`, and the gate queries all three. But
+the tokens are vaulted and only decrypt inside Electron, so from a shell every one of them reports
+"needs re-auth" and I cannot tell a real expiry from that. It matters because the gate **fails
+open**: any uncertainty — expired token, API error, no calendar — is treated as "he is free", so an
+expired grant means it CALLS rather than texting.
+
+That asymmetry is deliberate. A call during a seminar costs embarrassment; silence during an
+emergency costs the thing calling exists for. But it is worth knowing which way it errs, and
+`google_accounts` inside the app will say whether any of the three actually needs re-authorising.
+
 Also still open from the previous phase: **the phone call has never been confirmed end to end.** The
 webhook is on the cloud, signed probes return valid two-way TwiML in 2,987ms, but nobody has answered
 the phone. `self_check area:voice` will name the stage that broke if it fails.
