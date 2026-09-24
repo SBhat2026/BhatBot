@@ -284,6 +284,38 @@ the phone. `self_check area:voice` will name the stage that broke if it fails.
 
 ---
 
+## How you use it
+
+You mostly do not call any of this. You say what you want and BhatBot picks `long_run` when the job
+outlasts the conversation — the two neighbouring tools now say so in their own descriptions, and the
+retriever finds it from "work on this while I'm asleep", "keep going for an hour on your own" and
+"you can't do that, build a tool for it".
+
+When you want to drive it directly, in the chat:
+
+- *"start a long run on X, give it two hours and five dollars"* → `long_run{action:"start"}`
+- *"how's that going?"* → `long_run{action:"status"}` — plan, spend, who is on what, what is waiting
+  on you, and every tool it has built
+- *"use the Princeton one"* → BhatBot passes it on with `long_run{action:"answer"}`, which unblocks
+  the item. A reply by SMS or Telegram does the same thing without you saying anything extra.
+- *"stop"* → finishes what is in flight, parks, resumable
+
+Two diagnostics, both free:
+
+```bash
+npm run autonomy:doctor     # 10s — is the lane wired end to end
+npm run browser:doctor      # 2s  — can a browser actually launch
+```
+
+Both are reachable from chat too: *"check yourself"* → `self_check area:autonomy`.
+
+While a run is going, the FLEET tab shows it: the goal and progress at the top, who is working right
+now and on what, the question it is waiting on you for, and the plan with blocked work first. Below
+that, the office — each agent coloured by what it is doing, pulsing while it works, dim when idle,
+red when it failed, with a speech bubble when it tells the others something.
+
+---
+
 ## Where things are
 
 ```
