@@ -90,6 +90,33 @@ function fakeNotify(sink, r = { sent: true, via: 'call' }) {
     ok(sent.length === 3, 'the budget is a rolling hour, not a lifetime cap');
   }
 
+  // ── SETTINGS THAT TAKE EFFECT WITHOUT A RESTART ──────────────────────────────────────────────────
+  // main.js builds this once at module load and reads config.escalation for the ceiling. With a
+  // captured object, "stop calling me so often" would mean "quit and relaunch BhatBot", which is not
+  // a setting. A function is re-read on every ask.
+  {
+    const sent = [];
+    let live = { maxPerHour: 1 };
+    let t = DAYTIME;
+    const E = createEscalations({ dir: TMP(), notify: fakeNotify(sent), now: () => t, opts: () => live });
+
+    await E.ask({ question: 'one' });
+    await E.ask({ question: 'two', assumption: 'x' });
+    ok(sent.length === 1, 'the ceiling of one is honoured');
+
+    live = { maxPerHour: 5 };            // he changes it in config, without restarting
+    await E.ask({ question: 'three' });
+    ok(sent.length === 2, 'raising the ceiling takes effect on the next question');
+
+    live = { maxPerHour: 5, quietFrom: 0, quietTo: 23 };   // "quiet" almost all day
+    ok(E.isQuiet(t), 'and the quiet window is live too');
+
+    // An object still works, for every caller that does not need this.
+    const S = createEscalations({ dir: TMP(), notify: fakeNotify([]), now: () => t, opts: { maxPerHour: 9 } });
+    ok(S.conf().maxPerHour === 9, 'a plain options object behaves exactly as before');
+    ok(createEscalations({ dir: TMP(), notify: fakeNotify([]) }).conf().maxPerHour === 4, 'and no options at all falls back to the defaults');
+  }
+
   // ── attribution ──────────────────────────────────────────────────────────────────────────────────
   {
     const sent = [];

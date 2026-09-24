@@ -134,7 +134,9 @@ const escalations = createEscalations({
   notify: (msg, urgency, opts) => notifyUser(msg, urgency, opts),
   log: (t) => console.log(t),
   onEvent: (e) => { try { sendToActivity('tool-update', { type: 'thinking', text: escalationLine(e) }); } catch {} },
-  opts: { maxPerHour: (loadConfig().escalation || {}).maxPerHour },
+  // A FUNCTION, so a change to config.escalation takes effect on the next question rather than on the
+  // next app launch. "Quit and relaunch BhatBot to stop it calling you so often" is not a setting.
+  opts: () => loadConfig().escalation || {},
 });
 function escalationLine(e) {
   if (e.type === 'escalation-asked') return `🆘 asked Siddhant (${e.via || 'no channel'}): ${String(e.question).slice(0, 90)}`;
