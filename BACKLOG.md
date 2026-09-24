@@ -25,6 +25,30 @@ deleting it, not by leaving a ✅ behind — a list of completed work is what th
 
 ## Open
 
+### Found during the autonomy pass (2026-09-23, overnight)
+
+- ⚠ **The hour-long lane has never run against Claude.** `lib/supervisor.js` ran a full hour against a
+  local qwen3 (`scripts/soak-supervisor.js`) — real latency, real tool calls, every item verified
+  independently of what the agent claimed. What that does NOT cover is `supervisedWorker` in main.js,
+  the Claude-backed runner: its loop, its envelope call and its tool scoping have only been exercised
+  structurally, because the Anthropic budget is spent. **The first real `long_run` should be small and
+  watched** — one goal, `hours: 0.25`, `budget_usd: 0.50` — before anything is left alone overnight.
+- ⚠ **Anything driving a local model starves local embeddings.** Ollama serialises: while the soak was
+  running qwen3, every `nomic-embed-text` call timed out at 60s. Semantic recall degrades to lexical
+  so a live turn survives it, but tool retrieval and episodic recall are quietly worse for the
+  duration. If a long run ever routes through the cheap local tier, this becomes a live problem rather
+  than a test-environment one. `OLLAMA_NUM_PARALLEL`, or a second instance on another port, is the fix
+  if it starts mattering.
+- ⚠ **The calendar gate fails OPEN, on purpose.** `lib/availability.js` treats every uncertainty —
+  expired token, API error, no calendar — as "he is free", so an expired Google grant means BhatBot
+  CALLS rather than texting. That asymmetry is deliberate (a call during a seminar costs embarrassment;
+  silence during an emergency costs the thing calling exists for) but it is worth knowing, and
+  `google_accounts` reports all three tokens as needing re-auth outside Electron.
+- ⚠ **A forged tool still takes a small model several tries.** After the shape fixes it is 24 forges
+  from 89 attempts — down from 0 from 17, but the refusals could teach more than they do. Claude will
+  do better; this is a note about the ERROR MESSAGES, not about the model.
+
+
 ### Broken right now (found 2026-09-21)
 - ⚠ **Fleet presence: characters can spawn on top of each other.** Two agents landing on adjacent POIs
   overlap their labels so one is unreadable. Cosmetic, but the office is there for the visual read.

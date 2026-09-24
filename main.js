@@ -181,6 +181,11 @@ const supervisor = createSupervisor({
   decompose: (spec) => supervisedDecompose(spec),
   onEvent: (e) => supervisorEvent(e),
   shouldStop: () => !!(_supervisedRun && _supervisedRun.stopRequested),
+  // `autonomous: true` — an hour-long run has nobody sitting at a prompt to answer a question, so the
+  // custodian records its doubt rather than blocking on one. It degrades the right way: with no judge
+  // it runs only its deterministic checks and accepts what it cannot disprove, because a reviewer
+  // that blocks when it cannot think is worse than no reviewer.
+  review: async ({ goal, deliverable, trace }) => custodian.review({ prompt: goal, deliverable, trace, autonomous: true }),
 }, {});
 const simulate = require('./lib/simulate');           // physics/chem/math simulation sandbox (scipy/sympy/rdkit/openmm/pyscf…)
 const selfheal = require('./lib/selfheal');           // autonomous self-healing (DISABLED by default; verify-gated self_fix loop)
@@ -4296,6 +4301,9 @@ function supervisorEvent(e) {
       case 'plan-grew':
         sendToActivity('tool-update', { type: 'thinking', text: `➕ ${e.by} found more work: ${e.added.join(' · ').slice(0, 110)}` });
         break;
+      case 'doubt':
+        sendToActivity('tool-update', { type: 'thinking', text: `🔍 custodian: ${e.verdict} — ${String(e.reason).slice(0, 110)}` });
+        break;
       case 'run-end':
         sendToActivity('tool-update', { type: 'thinking', text: `🏁 long run ${e.stoppedBecause} — ${e.done.length} done, ${e.blocked.length} blocked, $${e.spentUsd}` });
         supervisedAgents.clear();
@@ -5201,6 +5209,11 @@ async function executeTool(name, input, opts = {}) {
               const bits = [`Long run ${rep.stoppedBecause}: ${String(rep.goal).slice(0, 120)}`,
                 `${rep.done.length} done, ${rep.blocked.length} blocked, ${rep.open.length} open · $${rep.spentUsd} · ${Math.round(rep.elapsedMs / 60000)}min`];
               if (rep.forged.length) bits.push(`built: ${rep.forged.join(', ')}`);
+              // A doubt is the most useful sentence in a morning report, so it goes in the message
+              // rather than only into the JSON nobody opens.
+              if (rep.custodian && rep.custodian.verdict && rep.custodian.verdict !== 'accept') {
+                bits.push(`⚠ ${rep.custodian.verdict}: ${rep.custodian.reason || rep.custodian.question || 'the result may not answer what you asked'}`);
+              }
               if (rep.waitingOnSiddhant.length) bits.push(`still needs you: ${rep.waitingOnSiddhant.map((w) => w.question).join(' | ').slice(0, 300)}`);
               notifyUser(bits.join('\n'), 'low').catch(() => {});
               return rep;

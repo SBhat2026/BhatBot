@@ -46,6 +46,7 @@ function rig(over = {}, opts = {}) {
     decompose: over.decompose || (async ({ goal }) => [goal]),
     escalations: over.escalations,
     forge: over.forge,
+    review: over.review,
     onEvent: (e) => events.push(e),
     log: over.log || (() => {}),
     sleep: over.sleep,
@@ -338,6 +339,50 @@ function rig(over = {}, opts = {}) {
     ok(r.done.length === 2 && r.open.length === 3,
       'it drains what was already in flight rather than orphaning that spend — the money is gone either way and a discarded result has no upside');
     ok(missions.list({ status: 'parked' }).some((m) => m.id === r.missionId), 'a stopped run is parked, so it can be resumed');
+  }
+
+  // ── SOMEBODY ASKS WHETHER NINE DONE ITEMS ANSWER THE QUESTION ────────────────────────────────────
+  // lib/custodian.js guarded the drone fan-out and nothing else, which left the biggest fan-out in the
+  // app — an hour of unattended work — reporting "nine done" with nobody having asked whether those
+  // nine answer what was asked. Its verdict is ATTACHED, never substituted: a reviewer that can
+  // rewrite the report is not a reviewer, it is a second author.
+  {
+    let asked = null;
+    const { sup, events } = rig({
+      review: async (q) => { asked = q; return { verdict: 'sendback', reason: 'none of this touches the actual question' }; },
+    });
+    const r = await sup.run({ goal: 'find out why the calls fail', plan: ['read the logs', 'check the webhook'] });
+
+    ok(asked && asked.goal === 'find out why the calls fail', 'the reviewer is given the goal VERBATIM, not a paraphrase of it');
+    ok(asked.deliverable.includes('read the logs') && asked.trace.length === 2, 'and what was actually done, plus the whole plan as trace');
+    ok(r.custodian && r.custodian.verdict === 'sendback', "the verdict rides along with the report");
+    ok(r.done.length === 2 && r.ok, 'and the report itself is unchanged — a doubt is attached, never substituted');
+    ok(events.some((e) => e.type === 'doubt'), 'a non-accept verdict is an event, so the doubt is visible while it happens rather than only in the JSON');
+
+    // An ACCEPT should not produce a doubt event, or the signal means nothing.
+    const { sup: s2, events: e2 } = rig({ review: async () => ({ verdict: 'accept' }) });
+    const r2 = await s2.run({ goal: 'g', plan: ['a'] });
+    ok(r2.custodian.verdict === 'accept' && !e2.some((e) => e.type === 'doubt'), 'an accept is recorded quietly');
+
+    // A reviewer that throws must not take the run's report with it — the work still happened.
+    const { sup: s3 } = rig({ review: async () => { throw new Error('judge is down'); } });
+    const r3 = await s3.run({ goal: 'g', plan: ['a'] });
+    ok(r3.ok && r3.custodian.verdict === 'error' && /judge is down/.test(r3.custodian.reason),
+      'a reviewer that throws is recorded as an error and the report survives it');
+
+    // Nothing finished → nothing to judge. A reviewer's opinion of an empty deliverable is noise.
+    let calledOnNothing = false;
+    const { sup: s4 } = rig({
+      review: async () => { calledOnNothing = true; return { verdict: 'accept' }; },
+      runAgent: async () => ({ status: 'failed', summary: 'no' }),
+    }, { maxConsecutiveFailures: 2, maxItemAttempts: 1 });
+    await s4.run({ goal: 'g', plan: ['a', 'b'] });
+    ok(!calledOnNothing, 'a run that finished nothing is not sent for review — it has already said so plainly');
+
+    // And with no reviewer wired at all, the run is exactly as it was.
+    const { sup: s5 } = rig({});
+    const r5 = await s5.run({ goal: 'g', plan: ['a'] });
+    ok(r5.ok && r5.custodian === null, 'with no reviewer the report carries null rather than a fabricated approval');
   }
 
   // ── planDigest is what progress is measured against ──────────────────────────────────────────────
