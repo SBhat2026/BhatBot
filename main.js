@@ -4309,6 +4309,19 @@ function supervisorEvent(e) {
         supervisedAgents.delete(e.id);
         pushPresenceNow();
         break;
+      case 'said': {
+        // What one agent just told the others, shown over its head for a few seconds. A `status` is
+        // bookkeeping and not worth a bubble; a FINDING or a NEED is the agent saying something a
+        // sibling should act on, which is the only kind worth interrupting the room for.
+        if (e.kind === 'status') break;
+        const a = supervisedAgents.get(e.id);
+        if (!a) break;
+        a.says = String(e.text || '').replace(/^.*?→\s*\w+:\s*/, '').slice(0, 120);
+        a.saysKind = e.kind;
+        a.saysAt = Date.now();
+        pushPresenceNow();
+        break;
+      }
       case 'run-start':
         sendToActivity('tool-update', { type: 'thinking', text: `🎯 long run started — ${e.plan.length} step(s): ${e.plan.slice(0, 3).join(' · ').slice(0, 120)}` });
         break;
@@ -9703,6 +9716,7 @@ const FLEET_STATE = {
   failed: 'error', error: 'error', stopped: 'idle',
 };
 const PRESENCE_CAP = 12;                                  // office has 14 POIs; keep a little headroom
+const SAYS_TTL_MS = 7000;                                 // how long an agent's last remark stays over its head
 
 // The standing roster, cached. subagents.list() reads one history FILE PER SPECIALIST to compute a
 // `turns` count, and presenceSnapshot runs on the 1.2s presence poll — so rendering three idle
@@ -9733,6 +9747,9 @@ function presenceSnapshot() {
         designation: a.designation,
         task: String(a.task || '').slice(0, 160),
         step: String(a.step || '').slice(0, 120),
+        // A bubble with a TTL. Stale speech is worse than none — a room where everyone is permanently
+        // mid-sentence tells you nothing, and the text would outlive the moment it described.
+        ...(a.says && Date.now() - (a.saysAt || 0) < SAYS_TTL_MS ? { says: a.says, saysKind: a.saysKind } : {}),
         tool: null, since: a.since || Date.now(),
         steerable: false,                                  // a supervised item is steered through the plan, not a steer box
         supervised: true,

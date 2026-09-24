@@ -66,6 +66,10 @@ const roster = (n) => Array.from({ length: n }, (_, i) => ({
   step: ['calling run_shell', 'reading main.js', 'waiting on rate budget', '', 'writing report', 'retrying'][i % 6],
   since: Date.now() - (i + 1) * 41000,
   steerable: !(i === n - 1 && n > 1),
+  // Two of them are mid-remark: a finding and a need. The office's job is to make coordination
+  // visible, and a roster where nobody ever says anything cannot show whether it does.
+  ...(i === 0 ? { says: 'the endpoint needs an account token — do not bother retrying it', saysKind: 'finding' } : {}),
+  ...(i === 2 ? { says: 'blocked: no credentials for the staging host', saysKind: 'need' } : {}),
 }));
 
 (async () => {
@@ -168,6 +172,7 @@ const roster = (n) => Array.from({ length: n }, (_, i) => ({
   // What matters here is what the RENDERER decided, read back off the material and the legend DOM —
   // not the roster that was pushed in, which would be checking the harness's own input.
   const legendRows = await fr.evaluate(() => [...document.querySelectorAll('#legend-desig div')].map((d) => d.textContent.trim()));
+  const bubbles = await fr.evaluate(() => window.__bubbleProbe());
   const plateTiers = await fr.evaluate(() => window.__presenceProbe().map((a) => ({ id: a.id, tier: a.plateTier })));
 
   await browser.close(); server.close();
@@ -236,6 +241,15 @@ const roster = (n) => Array.from({ length: n }, (_, i) => ({
       const label = D.get(id).label;
       if (!legendRows.some((l) => l.startsWith(label))) fails.push(`the legend does not mention ${label}, which is on the floor`);
     }
+
+    // Speech. Two agents were given a remark; exactly those two must be showing one, and the other
+    // four must not — a bubble that never clears is worse than none, because stale speech describes a
+    // moment that has passed.
+    console.log('  bubbles:', JSON.stringify(bubbles));
+    const shown = bubbles.filter((b) => b.visible);
+    if (shown.length !== 2) fails.push(`${shown.length} speech bubbles visible; two agents had something to say`);
+    if (!shown.some((b) => b.kind === 'need') || !shown.some((b) => b.kind === 'finding')) fails.push('a finding and a need did not both render');
+    if (shown.some((b) => !b.text)) fails.push('a bubble is visible with no text in it');
 
     // Nameplates: nobody's label may be buried under somebody else's, and the lift must converge.
     console.log('  plate tiers:', plateTiers.map((p) => `${p.id}:${p.tier}`).join(' '));

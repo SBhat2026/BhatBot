@@ -415,6 +415,95 @@ function nameplate(text, task, colorCss) {
   return spr;
 }
 
+// ── WHAT ONE AGENT JUST TOLD THE OTHERS ───────────────────────────────────────────────────────────
+// The office made the division of labour readable and left out the half that makes a fleet a fleet:
+// the agents talking to each other. Three people working silently at three desks look identical
+// whether they are coordinating or not, and coordination is the thing worth watching.
+//
+// A bubble, not a third line on the nameplate. The plate answers "who is this and what are they on",
+// which is true for as long as they are on it; a remark is true for a moment. Mixing a standing fact
+// and a passing one in the same box makes both harder to read.
+const BUBBLE_W = 560, BUBBLE_H = 150;
+function makeBubble() {
+  const cv = document.createElement('canvas'); cv.width = BUBBLE_W; cv.height = BUBBLE_H;
+  const ctx = cv.getContext('2d');
+  const tex = new THREE.CanvasTexture(cv); tex.colorSpace = THREE.SRGBColorSpace;
+  const spr = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false, depthTest: false }));
+  spr.scale.set(2.4, 0.643, 1);
+  spr.visible = false;
+
+  spr.userData.draw = (text, kind, accent) => {
+    ctx.clearRect(0, 0, BUBBLE_W, BUBBLE_H);
+    ctx.font = '500 27px -apple-system, Segoe UI, Roboto, sans-serif';
+    // Wrap first, then size the bubble to the wrapped text — a fixed box around one short sentence is
+    // mostly empty and around three lines is mostly clipped.
+    const words = String(text || '').split(/\s+/).filter(Boolean);
+    const maxW = BUBBLE_W - 56;
+    const lines = [];
+    let cur = '';
+    for (const w of words) {
+      const next = cur ? cur + ' ' + w : w;
+      if (ctx.measureText(next).width <= maxW) { cur = next; continue; }
+      if (cur) lines.push(cur);
+      cur = w;
+      if (lines.length === 3) break;
+    }
+    if (cur && lines.length < 3) lines.push(cur);
+    if (!lines.length) return false;
+    if (words.join(' ').length > lines.join(' ').length) lines[lines.length - 1] = lines[lines.length - 1].replace(/.{2}$/, '…');
+
+    const lh = 33, padY = 15, padX = 20;
+    const boxH = lines.length * lh + padY * 2;
+    const boxW = Math.min(BUBBLE_W - 8, Math.max(...lines.map((l) => ctx.measureText(l).width)) + padX * 2);
+    const x = (BUBBLE_W - boxW) / 2, y = BUBBLE_H - boxH - 16;
+
+    ctx.fillStyle = 'rgba(10,16,24,0.88)';
+    ctx.strokeStyle = accent; ctx.lineWidth = 2.5;
+    const r = 14;
+    ctx.beginPath();
+    ctx.moveTo(x + r, y); ctx.lineTo(x + boxW - r, y); ctx.quadraticCurveTo(x + boxW, y, x + boxW, y + r);
+    ctx.lineTo(x + boxW, y + boxH - r); ctx.quadraticCurveTo(x + boxW, y + boxH, x + boxW - r, y + boxH);
+    ctx.lineTo(x + r, y + boxH); ctx.quadraticCurveTo(x, y + boxH, x, y + boxH - r);
+    ctx.lineTo(x, y + r); ctx.quadraticCurveTo(x, y, x + r, y);
+    ctx.closePath(); ctx.fill(); ctx.stroke();
+    // The tail, so it reads as speech rather than as a label.
+    ctx.beginPath();
+    ctx.moveTo(BUBBLE_W / 2 - 11, y + boxH - 1); ctx.lineTo(BUBBLE_W / 2, y + boxH + 14); ctx.lineTo(BUBBLE_W / 2 + 11, y + boxH - 1);
+    ctx.closePath(); ctx.fill();
+
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    // A NEED is a warning and wears the accent; a FINDING is information and stays legible ink.
+    ctx.fillStyle = kind === 'need' ? accent : 'rgba(226,240,250,0.96)';
+    lines.forEach((ln, i) => ctx.fillText(ln, BUBBLE_W / 2, y + padY + lh / 2 + i * lh));
+    tex.needsUpdate = true;
+    return true;
+  };
+  return spr;
+}
+
+/** Show (or clear) an agent's remark. Lazily builds the sprite — most agents never say anything. */
+function refreshBubble(a) {
+  const text = a.says || '';
+  if (text === a._bubbleText) return;
+  a._bubbleText = text;
+  if (!text) { if (a.bubble) a.bubble.visible = false; return; }
+  if (!a.bubble) {
+    a.bubble = makeBubble();
+    // Scale in the character's own units, like the plate does. The height is NOT set here: the bubble
+    // rides above whatever height the de-overlap pass settled the plate at, so a plate that was lifted
+    // to clear a neighbour does not end up inside the bubble that belongs to it.
+    a.bubble.scale.multiplyScalar(a.plate ? a.plate.scale.x / 2.2 : 1);
+    a.group.add(a.bubble);
+  }
+  const drew = a.bubble.userData.draw(text, a.saysKind, desigOf(a.designation).glow);
+  a.bubble.visible = !!drew;
+  // Say it with the body too — but ONLY if the body is free. A seated agent is seated because that is
+  // what "working" means in this room, and yanking it into a Wave for two seconds makes the seating
+  // a lie for exactly as long as you are looking at it. The bubble is the cue for those; the empty
+  // hands of an idle or standing agent are what a gesture is for.
+  if (drew && !/^Sit/.test(a.restClip || '')) react(a, a.saysKind === 'need' ? 'Sad' : 'Wave');
+}
+
 /** What this agent is doing, in the fewest words that are still true. */
 function plateTask(a) {
   const t = String(a.step || a.task || a.status || '').replace(/\s+/g, ' ').trim();
@@ -456,13 +545,28 @@ function deoverlapPlates() {
     a.plate.visible = true;
     live.push({ a, d, x: (_plateV.x * 0.5 + 0.5) * innerWidth, y: (-_plateV.y * 0.5 + 0.5) * innerHeight });
   }
-  if (live.length < 2) { for (const l of live) l.a.plate.position.y = l.a.plate.userData.baseY; return; }
+  if (live.length < 2) {
+    for (const l of live) {
+      l.a.plate.position.y = l.a.plate.userData.baseY;
+      if (l.a.bubble) l.a.bubble.position.y = l.a.plate.position.y + l.a.plate.userData.tierH * 2.6;
+    }
+    return;
+  }
   live.sort((p, q) => p.d - q.d);
 
   // A plate's on-screen size shrinks with distance, so the collision box has to as well — a fixed
   // pixel box would spread far-away labels that were never touching.
-  const boxW = (l) => Math.max(40, 2600 / Math.max(1, l.d));
-  const boxH = (l) => Math.max(14, 700 / Math.max(1, l.d));
+  //
+  // DERIVED FROM THE CAMERA, not guessed. The first version used 2600/d and 700/d, which overstated a
+  // plate's real width by about half, so plates that were nowhere near each other were treated as
+  // colliding and the lift regularly hit its own tier ceiling — labels floating a metre and a half
+  // above their owner's head for no reason. A world-space size w at distance d spans w·focal/d pixels,
+  // and the plate is genuinely 2.2 × 0.6875 world units.
+  const focalPx = innerHeight / (2 * Math.tan((camera.fov / 2) * Math.PI / 180));
+  const PLATE_WORLD_W = 2.2, PLATE_WORLD_H = 0.6875, TIER_WORLD = 0.34;
+  const boxW = (l) => Math.max(30, (PLATE_WORLD_W * focalPx) / Math.max(1, l.d));
+  const boxH = (l) => Math.max(10, (PLATE_WORLD_H * focalPx) / Math.max(1, l.d));
+  const tierPx = (l) => (TIER_WORLD * focalPx) / Math.max(1, l.d);
 
   const placed = [];
   for (const l of live) {
@@ -470,9 +574,14 @@ function deoverlapPlates() {
     // Six tiers is more than the room's twelve anchors can ever need at once, and a bound means a
     // pathological arrangement cannot spin here.
     while (tier < 6 && placed.some((q) => Math.abs(q.x - l.x) < (boxW(l) + boxW(q)) / 2
-                                        && Math.abs((q.y - q.tier * 22) - (l.y - tier * 22)) < (boxH(l) + boxH(q)) / 2)) tier++;
+                                        && Math.abs((q.y - q.tier * tierPx(q)) - (l.y - tier * tierPx(l))) < (boxH(l) + boxH(q)) / 2)) tier++;
     l.tier = tier;
-    l.a.plate.position.y = l.a.plate.userData.baseY + tier * l.a.plate.userData.tierH;
+    const tierH = l.a.plate.userData.tierH;
+    l.a.plate.position.y = l.a.plate.userData.baseY + tier * tierH;
+    // The bubble sits clear of its OWN plate, at whatever height that plate ended up. 2.6 tiers is the
+    // plate's height plus the bubble's plus a gap — measured from the render, not guessed: at 0.62 in
+    // unscaled units the bubble landed on top of the name it belonged to.
+    if (l.a.bubble) l.a.bubble.position.y = l.a.plate.position.y + tierH * 2.6;
     placed.push(l);
   }
 }
@@ -667,6 +776,8 @@ function applyState(list) {
     a.since = info.since || a.since;
     a.steerable = info.steerable !== false;
     a.designation = info.designation || a.designation || 'general';
+    a.says = info.says || '';
+    a.saysKind = info.saysKind || 'finding';
     // Hue from the DESIGNATION (or the error colour), not from the state. The state is carried by
     // STATE_MIX, the aura pulse and the orb — see the animation block at the bottom of this file.
     a.target = new THREE.Color(agentCss(a));
@@ -677,6 +788,12 @@ function applyState(list) {
       const r = STATE_REACTION[a.state];
       if (r) react(a, r);
     }
+    // AFTER the state block, deliberately. refreshBubble decides whether to play a gesture by asking
+    // whether the agent is seated, and on the turn an agent first appears its resting clip is still
+    // the spawn default until retarget() has run — so doing this first made every newly-working agent
+    // wave from its desk, which is precisely the thing the seating is supposed to tell you it is not
+    // doing.
+    refreshBubble(a);       // what it just told the others, for as long as that is still news
   }
   for (const [id, a] of [...agents]) if (!live.has(id)) despawnAgent(a);
 
@@ -904,6 +1021,11 @@ window.addEventListener('message', (e) => { if (e.data && e.data.type === 'prese
 // it. Without this a visual test has to blind-probe the canvas for a character, which is flaky the
 // moment the framing or the seating layout changes.
 window.__cameraProbe = () => ({ azimuth, elevation, radius, dragging: !!drag });
+// Which agents are mid-remark, for the visual harness. A bubble is drawn to a canvas, so nothing
+// short of reading the renderer's own state can tell whether it is up and what it says.
+window.__bubbleProbe = () => [...agents.values()].map((a) => ({
+  id: a.id, visible: !!(a.bubble && a.bubble.visible), text: a._bubbleText || '', kind: a.saysKind || null,
+}));
 window.__presenceProbe = () => [...agents.values()].map((a) => {
   const v = a.group.position.clone();
   v.y += charTargetH * 0.6;
@@ -1082,6 +1204,7 @@ const _tmp = new THREE.Vector3();
     // --- animation + state tint ---------------------------------------------
     if (a.mixer) a.mixer.update(dt);
     if (a.plate) a.plate.quaternion.copy(camera.quaternion);
+    if (a.bubble && a.bubble.visible) a.bubble.quaternion.copy(camera.quaternion);
     const tgt = a.target || new THREE.Color(STATE_COLOR.idle);
     if (a.aura) {
       a.aura.material.color.lerp(tgt, 0.08);

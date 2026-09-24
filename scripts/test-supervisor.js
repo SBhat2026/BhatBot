@@ -257,6 +257,46 @@ function rig(over = {}, opts = {}) {
     ok(call.success && call.result === 'MMXXVI', 'the forged tool is real and still works afterwards');
   }
 
+  // ── AN AGENT THAT KEEPS ASKING THE SAME QUESTION MUST NOT RUN FOREVER ────────────────────────────
+  // Found by an hour-long soak and by nothing else. Refunding an attempt for getting an answer is
+  // right; refunding it EVERY time is a livelock. The item escalates, the question dedupes onto an
+  // escalation that is already answered, applyAnswers unblocks it immediately, the attempt comes
+  // back, and it escalates again. Three such items took all three worker slots and held them for half
+  // an hour — 591 journal entries across three of eight hundred items, while 779 never got a turn.
+  //
+  // The stall wall could not see it, and that is the instructive part: the plan WAS changing on every
+  // pass, blocked → todo → blocked. Progress by the letter of the definition, livelock by any other
+  // measure. So the bound cannot be another progress heuristic — it has to be a count nothing can
+  // give back.
+  {
+    const escalations = createEscalations({ dir: TMP(), now: () => DAYTIME, notify: async () => ({ sent: true, via: 'call' }), opts: { maxPerHour: 99 } });
+    let calls = 0;
+    const { sup } = rig({
+      escalations,
+      // A pathological worker: it is TOLD the answer and asks again anyway. A real agent can do this,
+      // so the supervisor has to be able to survive it.
+      runAgent: async ({ goal }) => {
+        calls++;
+        if (goal === 'the one that never stops asking') {
+          return { status: 'blocked', summary: 'asking again', need: { kind: 'human', question: 'which style?', assumption: 'APA' } };
+        }
+        return { status: 'done', summary: 'ok', spendUsd: 0 };
+      },
+    }, { maxItemAttempts: 2, idleWaitMs: 50, width: 1 });
+
+    // Answer it the instant it is asked, which is what makes the loop tight.
+    const answerer = setInterval(() => { try { if (escalations.pending().length) escalations.answer('Chicago'); } catch {} }, 5);
+    const t0 = Date.now();
+    const r = await sup.run({ goal: 'g', plan: ['the one that never stops asking', 'a', 'b', 'c'], wallClockMs: 15000 });
+    clearInterval(answerer);
+    const ms = Date.now() - t0;
+
+    ok(r.stoppedBecause !== 'wall-clock', `the run ended on its own rather than being cut off by the clock (${r.stoppedBecause}, ${ms}ms)`);
+    ok(calls < 12, `the asking item was run a bounded number of times (${calls} worker calls in total)`);
+    ok(r.done.length === 3, 'and the OTHER three items were all finished — one greedy item did not starve the rest');
+    ok(r.blocked.length === 1 && /attempts/.test(r.blocked[0].why), 'the asking item is reported blocked with its attempt count');
+  }
+
   // ── FORGING AND ASKING ARE NOT FAILED ATTEMPTS ───────────────────────────────────────────────────
   // maxItemAttempts is two: one go and one retry. An item that stopped to BUILD A TOOL, or to ASK a
   // question, was not tried and found wanting — it was tried and found to need something that now
