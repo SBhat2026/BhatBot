@@ -147,6 +147,28 @@ const mcphub = require('../lib/mcphub');
   }
 }
 
+// ── FIVE TOOLS THAT ALL SOUND LIKE "DO A BIG JOB" ─────────────────────────────────────────────────
+// plan_and_run, delegate_project, deploy_drones, agent_team, fleet and now long_run all answer some
+// version of "this is too big for one turn". A sixth tool the model picks wrongly is worse than no
+// sixth tool — so the two closest neighbours have to say, in their own descriptions, when to reach
+// for the new one instead. A model choosing between them reads THEIR text, not long_run's.
+{
+  const desc = (n) => (TOOLS.find((t) => t.name === n) || {}).description || '';
+  for (const n of ['plan_and_run', 'delegate_project']) {
+    ok(/long_run/.test(desc(n)), `${n} names long_run as the alternative`);
+  }
+  // And it has to say WHEN, not merely that the other exists. These are the three discriminators.
+  const both = desc('plan_and_run') + ' ' + desc('delegate_project');
+  ok(/hour|outlast|survive a crash/i.test(both), 'the discriminator includes duration');
+  ok(/decision|answer|Siddhant/i.test(both), 'and needing a decision from Siddhant');
+  ok(/capability|tool that does not exist/i.test(both), 'and needing a capability that does not exist yet');
+
+  // long_run's own description must distinguish itself from them too, since a model already holding
+  // long_run is deciding whether to keep it.
+  ok(/plan_and_run/.test(desc('long_run')) && /delegate_project/.test(desc('long_run')),
+    'long_run names the tools it is NOT');
+}
+
 // ── WHAT A SUPERVISED WORKER MAY REACH ────────────────────────────────────────────────────────────
 // A worker inside a long run gets a SCOPED tool set — ~20 relevant tools rather than 89 vague ones,
 // which is the same reasoning per-turn retrieval already proved on the main loop. Two properties have
