@@ -173,7 +173,7 @@ Memory grew 3MB over an hour, across 2,137 model calls and 1,530 tool calls.
 
 ---
 
-## Two things added that you did not ask for, and should know about
+## Three things added that you did not ask for, and should know about
 
 **Destructive commands are denied during a long run.** `autonomousMode` is on by default and
 auto-approves `rm` and friends, which is right for a turn you are watching — you asked, you are here,
@@ -185,7 +185,16 @@ it never fired. Set `config.unattendedAllowDestructive: true` to opt back in.
 **The agents can see each other.** Three agents working three items at once ran blind: the one that
 discovers the endpoint needs a token could not tell the two about to hit the same wall. They now share
 a blackboard — the supervisor posts on their behalf, because an agent that forgets to post is the
-normal case and a channel that only works when everyone remembers to use it does not work.
+normal case and a channel that only works when everyone remembers to use it does not work. In the
+office they say it out loud: a finding or a need appears as a speech bubble over the agent's head for
+seven seconds, in its own designation colour.
+
+**A worker had a second, unguarded door to you.** The escalation path is deduped, capped at a few
+interruptions an hour and silent overnight. `notify_user` is in the core tool set, so every worker
+also had that — six agents could each text you, and `urgency:"call"` at 3am becomes an URGENT SMS,
+which is the exact thing the quiet-hours rule exists to prevent. A ceiling with a way around it is not
+a ceiling. Workers now reach you through the guarded path or not at all. `gmail` came out clean on the
+same question: it has search/read/draft/label and no send, so a worker can draft and nothing leaves.
 
 ---
 
