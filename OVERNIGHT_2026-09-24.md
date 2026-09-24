@@ -243,9 +243,14 @@ the phone. `self_check area:voice` will name the stage that broke if it fails.
    should I raise it and let the wall-clock do the limiting?
 2. **Quiet hours are 23:00–07:00.** Is that actually your window? It is
    `config.escalation.quietFrom` / `quietTo`.
-3. **Destructive commands.** Denied in an unattended run right now. Do you want an opt-in for a
-   specific scratch directory, or is denied-everywhere correct?
-4. **The first long run.** Pick the task and I will run it small and watched before anything is left
+3. **What an unattended run may not do.** I took four things away from it: destructive shell
+   commands, `system_control` / `phone_mirror`, `visual_build` / `make_asset`, and `notify_user`. Each
+   has a reason in the sections above and each is a real capability you might want back. Which, if
+   any, are wrong?
+4. **The Anthropic budget.** You said you would not add more, and I have not spent any — the endurance
+   work all ran locally. But the Claude-backed worker is the one part that has never run, and proving
+   it costs perhaps $1–2 of real calls. Worth it, or leave it until you next have budget anyway?
+5. **The first long run.** Pick the task and I will run it small and watched before anything is left
    going overnight.
 
 ---
