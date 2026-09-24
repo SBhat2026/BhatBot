@@ -187,4 +187,18 @@ const stage = (ok2, label, detail) => { say(`${ok2 ? '✓' : '✗'} ${label}${de
     process.exit(1);
   }
   console.log('✓ the hour-long lane is wired: it plans, delegates by designation, forges what it lacks, asks for help without stopping, meters its spend, and survives on disk.');
+  // WIRED IS NOT PROVEN, and the difference is the whole reason this script exists. Everything above
+  // ran against a scripted worker, because what breaks here is plumbing. Whether CLAUDE fills the
+  // envelope the supervisor routes on — "I need a tool", "I need Siddhant" — has never been checked
+  // by any of it, and a long run whose agents never say either of those is a slower way of failing.
+  const forged = fs.existsSync(path.join(HOME, 'forged')) ? fs.readdirSync(path.join(HOME, 'forged')).filter((f) => f.endsWith('.json')).length : 0;
+  const everRun = (() => { try { return require('../lib/mission').createMissions({}).list().some((m) => m.kind === 'supervised'); } catch { return false; } })();
+  console.log('');
+  if (!everRun) {
+    console.log('  Note: no supervised run has ever happened on this machine, so the Claude-backed half of');
+    console.log('  this — whether the model fills the envelope — is still unproven. `npm run probe:envelope`');
+    console.log('  settles it for about two cents (`--dry` first, to see what it would send).');
+  } else {
+    console.log(`  ${everRun ? 'A supervised run has happened here before' : ''}${forged ? `, and ${forged} tool(s) have been forged` : ''}.`);
+  }
 })().catch((e) => { console.error('✗ autonomy doctor crashed: ' + (e && e.stack || e)); process.exit(1); });
