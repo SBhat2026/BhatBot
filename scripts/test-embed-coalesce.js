@@ -25,6 +25,27 @@ const uniq = (n) => `test-embed-coalesce ${n} ${process.pid} ${Math.random()}`;
     process.exit(0);
   }
 
+  // CONFIGURED IS NOT THE SAME AS ANSWERING, and the difference is not academic: embedderReady()
+  // probes /api/tags, which a busy Ollama answers instantly while every actual embed times out behind
+  // a model that is mid-generation. This suite went red for exactly that reason — a local soak was
+  // saturating the same server — and reported six broken coalescing invariants, none of which were
+  // broken. A warm-up embed asks the question the test actually depends on.
+  {
+    // Raced against 15s rather than waiting out lib/semantic's own 60s abort: a healthy embedder
+    // answers in under two, and a gate that stalls for a minute to decide to skip is a gate people
+    // start running with --skip.
+    const t0 = Date.now();
+    const warm = await Promise.race([
+      semantic.embedBatch([uniq('warmup')]).catch((e) => ({ error: String(e && e.message || e) })),
+      new Promise((r) => { const t = setTimeout(() => r({ error: 'no answer in 15s' }), 15000); t.unref?.(); }),
+    ]);
+    if (!warm || !warm.vecs || !warm.vecs[0]) {
+      console.log(`⏭  embed coalescing skipped — the embedder is configured but did not answer in ${Date.now() - t0}ms`
+        + `${warm && warm.error ? ' (' + warm.error + ')' : ''}. Something else is probably using it (a local model run, a soak).`);
+      process.exit(0);
+    }
+  }
+
   // ── concurrent callers collapse to one request ────────────────────────────────────────────────
   {
     semantic._memoClear();
