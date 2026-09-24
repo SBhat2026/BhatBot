@@ -9,10 +9,9 @@ you are busy — in which case Telegram.
 
 Everything below is built, tested and wired, and **none of it spent any Anthropic budget** — the
 endurance work ran against a local model on your own machine. (The ledger does show $0.09 on the 24th;
-that is the synapse worker daemon on its own schedule, not this.) **One thing is genuinely unproven**,
-it is flagged plainly at the bottom, and there is now a two-cent command that settles it. I did not
-run that command: you said you would not add budget, and two cents is small enough that spending it
-anyway is how a line stops meaning anything.
+that is the synapse worker daemon on its own schedule, not this.) You then asked me to run the envelope probe — the one thing that was unproven — and **it found that
+every structured call in the app was failing before it reached the model.** That is written up below;
+it is the most consequential finding of the night and it was invisible to 121 passing tests.
 
 ---
 
@@ -230,46 +229,64 @@ still drive a *browser*, which is what it is for.
 
 ---
 
-## What is NOT proven
+## What the probe found, and it was not what the probe was for
 
-**The hour-long lane has never run against Claude.** The testing budget you set is spent, so the
-62-minute run above used a local qwen3. That proves the *supervisor* — the
-loop, the walls, the escalation path, the forge, the durability, the memory profile. What it does not
-touch is `supervisedWorker` in `main.js`, the Claude-backed runner: its loop, its envelope call and
-its tool scoping have only been exercised structurally.
+`npm run probe:envelope` failed on all three calls, before reaching the model:
 
-Concretely, what is unproven is whether Claude reliably produces the ENVELOPE the supervisor routes
-on — `need.kind: "tool" | "human" | "decompose"`. If it does not, items will come back as bare
-`partial`s and the run will retry them twice and mark them blocked rather than forging or asking. It
-would still be a safe, bounded, honest failure. It would just not be the interesting one.
-
-**There is now a two-cent way to check it**, and it is the narrowest possible one:
-
-```bash
-npm run probe:envelope        # 3 real Claude calls, ~$0.02  (--dry prints what it would send)
+```
+400 output_config.format.schema: For 'object' type,
+    'additionalProperties' must be explicitly set to false
 ```
 
-Three situations with one right answer each: a tool that does not exist, a decision only you can
-make, and an item that is plainly finished. It asserts the model asks for the right thing, that a
-tool it proposes is one the **real forge accepts**, and that a question it raises carries a fallback —
-a human need with no assumption is an item that stalls until the idle timeout instead of proceeding.
-It runs on `lib/llm.js`, so no Electron, and it says in its own output that it proves the *model*
-fills the schema rather than that main.js's plumbing around it is right. That second half is checked
-for free in `test-tool-wiring`.
+**Every structured call in the app was being rejected.** The supervised worker's envelope and its
+planner both use schemas, so the first real `long_run` would have decomposed to a single item, worked
+it twice, and marked it blocked — the exact "safe, bounded, useless" failure predicted here, from a
+cause I had attributed to the model.
 
-**Then the first real `long_run` should be small and watched.** One goal, `hours: 0.25`,
-`budget_usd: 0.50`. Then leave it alone.
+`test-structured-output` was green throughout, and the assertion responsible is worth quoting:
+
+```js
+assert.deepStrictEqual(body.output_config.format.schema, schema);
+```
+
+It checked the schema was passed through **faithfully**, which it was, and never that the API would
+**accept** it. Fidelity to the caller instead of fitness for the wire. Sixth time in this repo a check
+has tested the wrong thing and returned a wrong answer rather than a smaller one.
+
+The requirement is the API's, so it is satisfied in the shaping layer now rather than in each schema —
+recursively, because the envelope has `need` as an object inside an object and sealing only the outer
+one still 400s.
+
+Then a second bug the first had been hiding: **the envelope schema has no `tests` field**, and the
+forge refuses to build a tool without test cases. Before sealing, the model could sometimes smuggle it
+in anyway; with `additionalProperties: false` it became structurally impossible. The subset also
+rejects an empty node, a type union containing `object`, and `additionalProperties: true` — all
+measured — so there is no way to say "any object" at all. `input` now travels as a JSON string the
+forge parses back; `expected` is a real value via `anyOf`.
+
+**It passes now:**
+
+```
+needs a tool      ✓ status=blocked need=tool   → the real forge BUILT it
+needs Siddhant    ✓ status=blocked need=human  → with a question AND a fallback
+plainly finished  ✓ status=done   need=none
+```
+
+Six cents across all the runs. Claude asks for a tool when no tool fits and builds one the forge
+accepts, asks you when only you know and always states what it would assume, and says nothing is wrong
+when nothing is.
+
+**Still true:** the full `supervisedWorker` loop in `main.js` — its tool turns, its per-item budget —
+has not run end to end. The envelope it routes on now has. The first real `long_run` should still be
+small and watched: `hours: 0.25`, `budget_usd: 0.50`.
 
 **The calendar gate is only as good as the Google tokens, and I cannot check them from here.** All
 three accounts are connected, including `sb9699@princeton.edu`, and the gate queries all three. But
-the tokens are vaulted and only decrypt inside Electron, so from a shell every one of them reports
-"needs re-auth" and I cannot tell a real expiry from that. It matters because the gate **fails
-open**: any uncertainty — expired token, API error, no calendar — is treated as "he is free", so an
-expired grant means it CALLS rather than texting.
-
-That asymmetry is deliberate. A call during a seminar costs embarrassment; silence during an
-emergency costs the thing calling exists for. But it is worth knowing which way it errs, and
-`google_accounts` inside the app will say whether any of the three actually needs re-authorising.
+the tokens are vaulted and only decrypt inside Electron, so from a shell every one reports "needs
+re-auth" and I cannot tell a real expiry from that. It matters because the gate **fails open**: any
+uncertainty is treated as "he is free", so an expired grant means it CALLS rather than texting. That
+asymmetry is deliberate — a call during a seminar costs embarrassment, silence during an emergency
+costs the thing calling exists for — but it is worth knowing which way it errs.
 
 Also still open from the previous phase: **the phone call has never been confirmed end to end.** The
 webhook is on the cloud, signed probes return valid two-way TwiML in 2,987ms, but nobody has answered
@@ -304,8 +321,9 @@ the phone. `self_check area:voice` will name the stage that broke if it fails.
 1. **Budget.** A run defaults to `$2` for the whole job and auto-resume stops at `$5` total
    (`config.missionBudgetUsd`). For a genuinely long job — six hours — is $5 the right ceiling, or
    should I raise it and let the wall-clock do the limiting?
-2. **Quiet hours are 23:00–07:00.** Is that actually your window? It is
-   `config.escalation.quietFrom` / `quietTo`.
+2. ~~**Quiet hours**~~ — answered: **22:30–06:30**, set. The field was whole hours and could not say
+   half past, so it takes `"HH:MM"` now; an unreadable window means never quiet rather than always,
+   because a typo should not be able to silence every call you asked for.
 3. **What an unattended run may not do.** I took four things away from it: destructive shell
    commands, `system_control` / `phone_mirror`, `visual_build` / `make_asset`, and `notify_user`. Each
    has a reason in the sections above and each is a real capability you might want back. Which, if
