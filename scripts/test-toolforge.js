@@ -69,6 +69,9 @@ const DURATION_TESTS = [
     ok(!r.ok && r.stage === 'tests', 'a tool whose case fails is refused at the tests stage');
     ok(!registered && !fs.existsSync(path.join(TMP, 'adder.json')), 'nothing is registered and nothing is written when a case fails');
     ok(r.errors[0].includes('expected 7') && r.errors[0].includes('3'), 'the failure says what was expected and what came back');
+    ok(r.errors[0].includes('for input') && r.errors[0].includes('5'),
+      'and the INPUT it was given — the commonest real mistake is a shape mismatch between the case and the code, '
+      + "and \"expected 7, got 3\" does not point at it while \"for input {a:5,b:2}\" does");
   }
 
   // ── THE VACUOUS-TEST WALL ────────────────────────────────────────────────────────────────────────

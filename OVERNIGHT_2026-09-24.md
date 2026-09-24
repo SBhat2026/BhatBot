@@ -1,6 +1,6 @@
 # Overnight pass — the autonomy lane
 
-**Branch** `redesign-2026-09` · 12 commits · 29 files · +4,278 lines · `verify: 121/121`
+**Branch** `redesign-2026-09` · 16 commits · 29 files · +4,719 lines · `verify: 121/121`
 
 You asked for BhatBot to handle any task you throw at it: build a tool when none fits, ask when it
 genuinely needs you, keep going on its own until the job is done, show the agents colour-coded by
