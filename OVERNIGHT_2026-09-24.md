@@ -147,33 +147,45 @@ in work done tonight — which is the argument for building the instrument along
 
 ---
 
-## The hour, actually run
+## The hour, actually run — twice
 
 `scripts/soak-supervisor.js --minutes 62 --items 800 --width 3`, against a local qwen3 through
 Ollama. Free. Every item verified by the script itself, because "the agent said done" is exactly the
 signal an endurance test must not trust.
 
+It ran twice because the first run finished proving a supervisor that no longer existed — the
+custodian, the blackboard and the attempt refunds all landed after it started. **Re-running the hour
+on the code that actually ships is what caught the livelock**, and 84 unit assertions did not. These
+are the shipping numbers:
+
 ```
-stopped: wall-clock after 62.5min · 710 scheduling passes
-agent CLAIMED done: 476 · INDEPENDENTLY VERIFIED: 560
+stopped: wall-clock after 62.2min · 739 scheduling passes
+agent CLAIMED done: 444 · INDEPENDENTLY VERIFIED: 523
 false "done": 0
-rss 56MB → 59MB
-escalations: 9 asked, 4 answered, 5 still open   (160 escalation events → 9 interruptions)
-throughput: 254 verified in the first 31min, 305 in the second
+rss 56MB → 64MB                       (2,175 model calls, 1,473 tool calls)
+blackboard: 1,480 posts, 0.5MB
+escalations: 232 events → 9 interruptions, 0 left open
+custodian: accept
+throughput: 241 verified in the first 31min, 280 in the second
 ```
 
-Three results worth pulling out.
+Four results worth pulling out.
 
-**It did not degrade — it sped up.** 254 verified in the first half, 305 in the second. The question
-an hour-long test exists to answer is "does it get worse", and the answer is no.
+**It did not degrade — it sped up.** 241 verified in the first half, 280 in the second. The question
+an hour-long test exists to answer is "does it get worse", and the answer is no. The first run said
+the same thing: 254 then 305.
 
-**Zero false "done".** It under-claimed by 84 items, which is the safe direction: work it had actually
-finished and reported as partial. A false done is a hole in the report; an under-claim is not.
+**Zero false "done".** It under-claimed by 79 items — work it had actually finished and reported as
+partial. A false done is a hole in the report; an under-claim is not.
 
-**160 escalation events produced 9 interruptions.** Dedupe and the per-hour ceiling did what they were
-built for, and the run never stopped waiting for any of them.
+**232 escalation events produced 9 interruptions, and every one resolved.** Dedupe, the per-hour
+ceiling and the already-answered fast path did what they were built for. All nine were auto-assumed,
+which is correct: it was 2am, and the quiet-hours rule says a question with a stated fallback stops
+being a blocker rather than waiting until morning.
 
-Memory grew 3MB over an hour, across 2,137 model calls and 1,530 tool calls.
+**Nothing grew without bound.** 8MB of memory over an hour, and a blackboard of 1,480 posts weighing
+half a megabyte — an append-only log inside a loop is the classic way a long run eats a disk, so the
+harness checks its size too.
 
 ---
 
