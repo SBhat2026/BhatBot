@@ -119,6 +119,10 @@ function serve(port) {
     missionId: 'm_fixture', elapsedMs: 47 * 60000, spentUsd: 1.24,
     done: 9, total: 14, blocked: 2,
     forged: ['roman_numeral', 'parse_duration'],
+    working: [
+      { name: 'ORRIN', label: 'Code', color: '#aeb40d', task: 'Rebuild the figure pipeline', step: 'writing lib/figures.js' },
+      { name: 'VALE', label: 'Science', color: '#d99f1f', task: 'Pull the PubMed hits', step: 'find_papers' },
+    ],
     waiting: [
       { id: 'esc_a1b2c3', question: 'Which Princeton calendar should the seminar block come from?', assumption: 'sb9699@princeton.edu', quiet: true },
     ],
@@ -171,6 +175,8 @@ function serve(port) {
       meta: (document.getElementById('lr-meta') || {}).textContent || '',
       fill: (document.getElementById('lr-fill') || {}).style ? document.getElementById('lr-fill').style.width : '',
       asks: document.querySelectorAll('.lr-ask').length,
+      who: [...document.querySelectorAll('.lr-who')].map((e) => e.textContent.trim()),
+      whoDots: [...document.querySelectorAll('.lr-who i')].map((e) => getComputedStyle(e).backgroundColor),
       steps: document.querySelectorAll('.lr-step').length,
       firstStep: (document.querySelector('.lr-step') || {}).textContent || '',
       // Checked LAST, and it restores the fixture afterwards so the screenshot below shows the strip
@@ -195,6 +201,9 @@ function serve(port) {
   if (!/2 blocked/.test(fleet.meta)) contentFails.push('blocked steps are not reported in the strip header');
   if (fleet.fill !== '64%') contentFails.push(`the progress bar is at "${fleet.fill}", not 64%`);
   if (fleet.asks !== 1) contentFails.push(`${fleet.asks} question(s) shown; one was waiting`);
+  if (fleet.who.length !== 2) contentFails.push(`${fleet.who.length} live agents shown; two were working`);
+  if (!fleet.who.some((t) => /writing lib\/figures\.js/.test(t))) contentFails.push('the live step is missing — the plan already says WHICH items are in flight, the roster is the only thing that says what is happening right now');
+  if (new Set(fleet.whoDots).size !== 2) contentFails.push(`the two agents share a colour (${fleet.whoDots.join(', ')}) — the strip and the office must agree`);
   if (fleet.steps < 5) contentFails.push(`only ${fleet.steps} plan steps rendered`);
   // Open work first: a forty-step plan with thirty done must not make you scroll past thirty ticks to
   // find the one thing that is stuck.
@@ -204,7 +213,7 @@ function serve(port) {
 
   console.log(`\n── visual doctor ── theme:${snapshot.theme} width:${width} ── ${snapshot.elements.length} elements\n`);
   if (contentFails.length) { console.log('  LONG-RUN STRIP:'); for (const f of contentFails) console.log('    ✗ ' + f); console.log(''); }
-  else console.log('  ✓ long-run strip: goal, progress, the question it is waiting on, and blocked work first\n');
+  else console.log('  ✓ long-run strip: goal, progress, who is on it right now, the question it is waiting on, and blocked work first\n');
   if (errors.length) { console.log('  PAGE ERRORS:'); for (const e of errors.slice(0, 4)) console.log('    ✗ ' + e); console.log(''); }
   for (const f of [...errs, ...warns]) console.log(`  ${f.level === 'error' ? '✗' : '⚠'} ${f.rule.padEnd(13)} ${f.sel}\n      ${f.detail}`);
   if (!findings.length) console.log('  ✓ nothing invisible, unreadable, overflowing, blank or overlapping');

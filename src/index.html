@@ -171,7 +171,12 @@
     white-space: nowrap; font-variant-numeric: tabular-nums; }
   .lr-bar { height: 3px; border-radius: 2px; background: var(--surface-sunk); margin: 8px 0 2px; overflow: hidden; }
   .lr-bar > i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .4s ease; }
-  #lr-waiting:empty, #lr-plan:empty { display: none; }
+  #lr-waiting:empty, #lr-plan:empty, #lr-working:empty { display: none; }
+  #lr-working { margin-top: 7px; display: flex; flex-wrap: wrap; gap: 5px 14px; font-size: 11px; color: var(--text-dim); }
+  .lr-who { display: flex; align-items: baseline; gap: 6px; }
+  .lr-who i { width: 6px; height: 6px; border-radius: 50%; flex: 0 0 auto; align-self: center; }
+  .lr-who b { font-weight: 600; color: var(--text); letter-spacing: .02em; }
+  .lr-who span { color: var(--text-dim2); }
   #lr-waiting { margin-top: 8px; }
   .lr-ask { font-size: 11.5px; color: var(--text); background: color-mix(in srgb, var(--warn) 14%, transparent);
     border-left: 2px solid var(--warn); border-radius: 0 5px 5px 0; padding: 5px 9px; margin-top: 4px; }
@@ -1454,6 +1459,7 @@
         <span id="lr-meta"></span>
       </div>
       <div class="lr-bar"><i id="lr-fill"></i></div>
+      <div id="lr-working"></div>
       <div id="lr-waiting"></div>
       <div id="lr-plan"></div>
     </div>
@@ -2572,6 +2578,22 @@ function renderLongRun(d) {
   if ((d.forged || []).length) bits.push(`built ${d.forged.length}`);
   document.getElementById('lr-meta').textContent = bits.join(' · ');
   document.getElementById('lr-fill').style.width = d.total ? Math.round((d.done / d.total) * 100) + '%' : '0%';
+
+  // WHO IS ON IT RIGHT NOW, and what they are actually doing this second. The plan below says which
+  // items are in flight; only the roster carries the live step, which is the difference between
+  // "something is happening" and knowing what. Coloured by designation, the same colours as the office
+  // below, so the two views read as one thing.
+  const wk = document.getElementById('lr-working');
+  wk.innerHTML = '';
+  for (const a of (d.working || []).slice(0, 6)) {
+    const el = document.createElement('div');
+    el.className = 'lr-who';
+    const dot = document.createElement('i'); dot.style.background = a.color || 'var(--text-dim2)';
+    const nm = document.createElement('b'); nm.textContent = a.name;
+    const what = document.createElement('span'); what.textContent = a.step ? `${a.label} · ${a.step}` : a.label;
+    el.appendChild(dot); el.appendChild(nm); el.appendChild(what);
+    wk.appendChild(el);
+  }
 
   // What it needs from Siddhant, first and loudest. `quiet` means it was asked at 3am and did not
   // ring — saying so is the difference between "you ignored it" and "it did not wake you".
