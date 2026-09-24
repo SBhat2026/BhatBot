@@ -574,8 +574,26 @@ function saveConfig(patch) {
   // safeStorage is up we AUTO-VAULT it (replace with a CRED_REF); otherwise the write is REJECTED
   // (throws PLAINTEXT_CRED_BLOCKED). This also fences self_fix/self_heal out of persisting new keys.
   const safePatch = configsec.sanitizeWrite(patch, credentials.canStore() ? { store: vaultStore } : {});
-  const next = { ...loadConfigRaw(), ...safePatch };   // base = RAW (refs intact)
+  const next = mergeConfig(loadConfigRaw(), safePatch);   // base = RAW (refs intact)
   return saveConfigRaw(next);
+}
+// ONE LEVEL DEEP, and only for plain objects. A top-level spread lost a sibling key every time two
+// writers touched the same section: `saveConfig({ selfHeal: { enabled: false } })` replaced the whole
+// `selfHeal` object, so whatever the other writer had just put beside `enabled` was gone. Every call
+// site in this file already hand-rolled the fix (`const cur = loadConfig().x || {}; saveConfig({ x:
+// { ...cur, ... } })`) — which works only if `cur` was read after the other write, and during boot it
+// frequently was not. That is the reported "a config edit during app boot is silently reverted".
+//
+// Arrays REPLACE rather than concatenate, because every array in this config is a complete list
+// (triage.neverArchive, plugins, allow-lists) and merging them would make removal impossible. An
+// explicit `null` also replaces, so a key can still be cleared on purpose.
+function mergeConfig(base, patch) {
+  const out = { ...base };
+  for (const [k, v] of Object.entries(patch || {})) {
+    const isPlain = (x) => x && typeof x === 'object' && !Array.isArray(x);
+    out[k] = (isPlain(v) && isPlain(base[k])) ? { ...base[k], ...v } : v;
+  }
+  return out;
 }
 // One-shot startup migration: encrypt any plaintext secrets into the vault, leave CRED_REF handles.
 // Idempotent (ref values skipped); only runs when safeStorage is available.
@@ -4774,6 +4792,7 @@ async function executeTool(name, input, opts = {}) {
           visual: { cmd: ['node', 'scripts/visual-doctor.js'],      what: 'what the interface actually renders — geometry and contrast' },
           tools:  { cmd: ['node', 'scripts/toolcheck.js'],          what: 'every tool runtime' },
           code:   { cmd: ['node', 'scripts/deadcode.js'],           what: 'modules nothing requires' },
+          browser:{ cmd: ['node', 'scripts/browser-doctor.js'],    what: 'whether a browser can actually launch (five tools depend on it)' },
         };
         const area = String((input && input.area) || 'code');
         const pick = area === 'all' ? Object.keys(AREAS) : [area];

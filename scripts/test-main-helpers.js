@@ -242,5 +242,39 @@ ok(Array.isArray(tagCache('nope')) === false, 'cache: non-array → returned as-
   ok(detectLoop(Array.from({ length: 20 }, () => sig('x', 1))).window <= 8, 'detectLoop: only inspects the recent window');
 }
 
+// ---- mergeConfig — the "config edit during boot is silently reverted" fix -------------------------
+// The bug was a top-level spread: a patch to one key inside a section replaced the whole section, so
+// a sibling key another writer had just added vanished. Two writers touching config.selfHeal in the
+// same boot is not hypothetical — it is what was observed.
+{
+  const mergeConfig = load('mergeConfig');
+
+  const base = { selfHeal: { enabled: true, interval: 15 }, voice: { rate: 1.1 } };
+  const out = mergeConfig(base, { selfHeal: { enabled: false } });
+  ok(out.selfHeal.enabled === false, 'mergeConfig: the patched nested key wins');
+  ok(out.selfHeal.interval === 15, 'mergeConfig: a SIBLING nested key survives — this is the whole bug');
+  ok(out.voice.rate === 1.1, 'mergeConfig: an untouched section is left alone');
+
+  // Arrays are complete lists in this config (triage.neverArchive, plugins, allow-lists). Merging
+  // them index-wise would make removing an entry impossible, so they replace wholesale.
+  const arr = mergeConfig({ triage: { neverArchive: ['a', 'b', 'c'] } }, { triage: { neverArchive: ['a'] } });
+  ok(arr.triage.neverArchive.length === 1 && arr.triage.neverArchive[0] === 'a',
+    'mergeConfig: an array REPLACES, so a pin can actually be removed');
+
+  // Clearing a section on purpose must still work.
+  ok(mergeConfig({ geo: { city: 'x' } }, { geo: null }).geo === null, 'mergeConfig: an explicit null clears a section');
+
+  // A scalar over an object, and an object over a scalar, both replace — no crash, no half-merge.
+  ok(mergeConfig({ a: { b: 1 } }, { a: 5 }).a === 5, 'mergeConfig: scalar over object replaces');
+  ok(mergeConfig({ a: 5 }, { a: { b: 1 } }).a.b === 1, 'mergeConfig: object over scalar replaces');
+
+  // Top-level keys still behave exactly as a spread did.
+  ok(mergeConfig({ x: 1 }, { y: 2 }).x === 1, 'mergeConfig: unrelated top-level keys are preserved');
+
+  // It must not mutate either input — saveConfig hands it a fresh read, but a future caller might not.
+  const b2 = { s: { k: 1 } }; mergeConfig(b2, { s: { k: 2 } });
+  ok(b2.s.k === 1, 'mergeConfig: does not mutate the base it was given');
+}
+
 console.log(`\n${fail === 0 ? '✅' : '❌'} ${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);

@@ -26,19 +26,6 @@ deleting it, not by leaving a ✅ behind — a list of completed work is what th
 ## Open
 
 ### Broken right now (found 2026-09-21)
-- ⚠ **Playwright browsers were never installed.** `~/Library/Caches/ms-playwright/` does not exist, and
-  `main.js` calls `chromium.launchPersistentContext` with no `channel`, so five tools are dead on this
-  machine: `browser`, `browser_workflow`, `browser_observe`, `browser_devtools`, `smart_login`. Nothing
-  reports it until you ask it to browse. Fix: `npx playwright install chromium` (~150MB), or pin
-  `channel: 'chrome'` since Chrome is installed. **Decide which — a pinned channel means no 150MB
-  download but ties the browser stack to whatever Chrome ships.**
-- ⚠ **Worker spend is unmetered.** `scripts/synapse-worker.js` goes through `lib/llm.js`, which never
-  writes `costs.json`. The ledger's last entry is 3 Sep; the worker has actually spent $1.06 lifetime.
-  Every cost readout is therefore wrong by however much the worker has done.
-- ⚠ **A config edit during app boot is silently reverted.** Writing `~/.bhatbot/config.json` while
-  Electron is starting gets clobbered by its own `saveConfig` merge. Observed: `selfHeal.enabled:false`
-  written pre-launch came back `true`. Anything scripting a config change has to do it with the app
-  down, or after it has settled.
 - ⚠ **Fleet presence: characters can spawn on top of each other.** Two agents landing on adjacent POIs
   overlap their labels so one is unreadable. Cosmetic, but the office is there for the visual read.
 
@@ -121,6 +108,13 @@ Gated on data volume, not on code:
 ## Known-good, do not "fix"
 
 Recorded because each one looks like a bug until you know why it is that way:
+
+- **Playwright is installed and both launch paths work.** This file claimed five browser tools were
+  dead because `~/Library/Caches/ms-playwright/` did not exist. It does (`chromium-1223`), and both
+  `chromium.launch()` and `channel:'chrome'` were observed opening a page and reading its title on
+  2026-09-23. The entry was a claim nobody re-checked; `self_check area:browser` now checks it, so the
+  next version of this worry answers itself. Do not add `channel:'chrome'` — it buys nothing here and
+  pins the stack to whatever Chrome ships.
 
 - `lib/brain.js` keeps its own `cosine()` rather than importing `lib/semantic.js` — deliberate, so the
   graph layer stays dependency-free and runs in the cloud brain.
