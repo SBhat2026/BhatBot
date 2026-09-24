@@ -257,6 +257,45 @@ function rig(over = {}, opts = {}) {
     ok(call.success && call.result === 'MMXXVI', 'the forged tool is real and still works afterwards');
   }
 
+  // ── FORGING AND ASKING ARE NOT FAILED ATTEMPTS ───────────────────────────────────────────────────
+  // maxItemAttempts is two: one go and one retry. An item that stopped to BUILD A TOOL, or to ASK a
+  // question, was not tried and found wanting — it was tried and found to need something that now
+  // exists. Charging it an attempt means it gets one real go after building its own tool, which is the
+  // opposite of what forging is for, and an answer that arrives for an item already out of tries.
+  {
+    const forge = createForge({ dir: TMP(), sandbox: realSandbox });
+    let n = 0;
+    const { sup } = rig({
+      forge,
+      runAgent: async () => {
+        n++;
+        if (n === 1) return { status: 'blocked', summary: 'x', need: { kind: 'tool', name: 'doubler', purpose: 'Double a number.', code: 'return Number(input.n) * 2;', tests: [{ input: { n: 3 }, expected: 6 }] } };
+        if (n === 2) return { status: 'partial', summary: 'nearly' };          // a REAL attempt
+        return { status: 'done', summary: 'used it', spendUsd: 0 };
+      },
+    }, { maxItemAttempts: 2 });
+    const r = await sup.run({ goal: 'g', plan: ['needs a tool then two goes'] });
+    ok(r.ok && n === 3,
+      `forging did not cost one of the two attempts (${n} worker calls: forge, a real try, then success)`);
+  }
+  {
+    const escalations = createEscalations({ dir: TMP(), now: () => DAYTIME, notify: async () => ({ sent: true, via: 'call' }), opts: { maxPerHour: 99 } });
+    let n = 0;
+    const { sup } = rig({
+      escalations,
+      runAgent: async () => {
+        n++;
+        if (n === 1) return { status: 'blocked', summary: 'x', need: { kind: 'human', question: 'which?', assumption: 'the first' } };
+        if (n === 2) return { status: 'partial', summary: 'nearly' };          // a REAL attempt
+        return { status: 'done', summary: 'done', spendUsd: 0 };
+      },
+    }, { maxItemAttempts: 2, idleWaitMs: 2000 });
+    const answerSoon = setInterval(() => { if (escalations.pending().length) { escalations.answer('the second one'); clearInterval(answerSoon); } }, 10);
+    const r = await sup.run({ goal: 'g', plan: ['needs an answer then two goes'] });
+    clearInterval(answerSoon);
+    ok(r.ok && n === 3, `asking did not cost one of the two attempts either (${n} worker calls)`);
+  }
+
   // ── a forge that fails its own tests becomes a question, not another attempt ─────────────────────
   {
     const forge = createForge({ dir: TMP(), sandbox: realSandbox });
