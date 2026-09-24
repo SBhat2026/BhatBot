@@ -117,6 +117,22 @@ Five bugs, each caught by something that went looking rather than by reading cod
 
 ---
 
+## Two things added that you did not ask for, and should know about
+
+**Destructive commands are denied during a long run.** `autonomousMode` is on by default and
+auto-approves `rm` and friends, which is right for a turn you are watching — you asked, you are here,
+a confirm card is a speed bump. It is the wrong rule for work you started so you could go to bed:
+nobody is there to see the card, and "nothing objected" is not "he approved it". The existing
+`remoteDepth` guard encodes exactly this condition for phone-driven turns, but a long run is local, so
+it never fired. Set `config.unattendedAllowDestructive: true` to opt back in.
+
+**The agents can see each other.** Three agents working three items at once ran blind: the one that
+discovers the endpoint needs a token could not tell the two about to hit the same wall. They now share
+a blackboard — the supervisor posts on their behalf, because an agent that forgets to post is the
+normal case and a channel that only works when everyone remembers to use it does not work.
+
+---
+
 ## What is NOT proven
 
 **The hour-long lane has never run against Claude.** The Anthropic budget is spent
@@ -127,3 +143,34 @@ envelope call and its tool scoping have only been exercised structurally.
 
 **So the first real `long_run` should be small and watched.** One goal,
 `hours: 0.25`, `budget_usd: 0.50`. Then leave it alone.
+
+Also still open from the previous phase: **the phone call has never been confirmed end to end.** The
+webhook is on the cloud, signed probes return valid two-way TwiML in 2,987ms, but nobody has answered
+the phone. `self_check area:voice` will name the stage that broke if it fails.
+
+---
+
+## Questions
+
+1. **Budget.** A run defaults to `$2` for the whole job and auto-resume stops at `$5` total
+   (`config.missionBudgetUsd`). For a genuinely long job — six hours — is $5 the right ceiling, or
+   should I raise it and let the wall-clock do the limiting?
+2. **Quiet hours are 23:00–07:00.** Is that actually your window? It is
+   `config.escalation.quietFrom` / `quietTo`.
+3. **Destructive commands.** Denied in an unattended run right now. Do you want an opt-in for a
+   specific scratch directory, or is denied-everywhere correct?
+4. **The first long run.** Pick the task and I will run it small and watched before anything is left
+   going overnight.
+
+---
+
+## Where things are
+
+```
+scripts/autonomy-doctor.js      self_check area:autonomy   — 10s, no spend, walks the whole lane
+scripts/soak-supervisor.js      --minutes 60               — an hour against a local model, free
+scripts/browser-doctor.js       self_check area:browser
+~/.bhatbot/missions/<id>/       plan.md · journal.jsonl · blackboard.jsonl · checkpoint.json
+~/.bhatbot/forged/              every tool it has built, with the cases that proved it
+~/.bhatbot/escalations/         every question it has asked you, and what you said
+```

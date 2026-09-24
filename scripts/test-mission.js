@@ -140,6 +140,25 @@ const dead = M.open({ goal: 'killed mid-run' });
 const alive = M.open({ goal: 'still going' });
 tick(10 * 60 * 1000);          // both heartbeats now 10 min old…
 alive.heartbeat();             // …but this one just checked in
+// ── UNPARK IS NOT A RESUME ────────────────────────────────────────────────────────────────────────
+// resumeCount is the durable circuit breaker that decides how many times a long job may be picked
+// back up. A run that parks itself for ninety seconds waiting for an answer and then carries on is
+// the SAME attempt; counting it would spend the chaining allowance on pauses the run made on purpose,
+// and a run that waits often would quietly run out of permission to continue.
+{
+  const m = M.open({ goal: 'waits for an answer' });
+  m.park('waiting on esc_abc123');
+  ok(M.attach(m.id).meta.status === 'parked', 'a self-park really parks it, so a crash mid-wait is recoverable');
+  m.unpark();
+  const after = M.attach(m.id).meta;
+  ok(after.status === 'running', 'unpark puts it back to running');
+  ok((after.resumeCount || 0) === 0, 'and does NOT bump resumeCount — this is the same attempt');
+  ok(after.parkedAt === null, 'and clears parkedAt, so dueForResume does not also try to pick it up');
+
+  M.resume(m.id);
+  ok(M.attach(m.id).meta.resumeCount === 1, 'a real resume still counts, which is what keeps a crash-loop bounded');
+}
+
 // ── WHO PICKS IT UP ───────────────────────────────────────────────────────────────────────────────
 // A mission parked by the supervisor has a plan, a width and a roster. Handing it to a single agent
 // turn on resume would change the execution model out from under it — one agent trying to work forty

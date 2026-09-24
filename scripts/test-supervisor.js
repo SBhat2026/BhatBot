@@ -158,6 +158,26 @@ function rig(over = {}, opts = {}) {
     ok(ms < 4000, `the whole run took ${ms}ms — it waited its bounded idle window, not indefinitely`);
   }
 
+  // ── WAITING MUST NOT SPEND THE CHAINING ALLOWANCE ────────────────────────────────────────────────
+  // The run parks itself while it waits for an answer, which is honest — it really is parked, and a
+  // crash mid-wait should be recoverable. But resumeCount is the circuit breaker that decides how many
+  // times a long job may be picked back up, and going through missions.resume() to carry on would
+  // spend a tenth of that allowance on two pauses the run made on purpose.
+  {
+    const dir = TMP();
+    const missions = createMissions({ dir: path.join(dir, 'missions') });
+    const escalations = createEscalations({ dir: TMP(), now: () => DAYTIME, notify: async () => ({ sent: true, via: 'call' }), opts: { maxPerHour: 99 } });
+    const sup = createSupervisor({
+      missions, escalations, onEvent: () => {},
+      runAgent: async () => ({ status: 'blocked', summary: 'ask', need: { kind: 'human', question: 'which one?', assumption: 'the first' } }),
+    }, { ...fastOpts, idleWaitMs: 40, maxItemAttempts: 1 });
+
+    const r = await sup.run({ goal: 'g', plan: ['needs a decision'] });
+    const meta = (missions.attach(r.missionId) || {}).meta || {};
+    ok((meta.resumeCount || 0) === 0,
+      `an internal wait does not count as a resume (resumeCount ${meta.resumeCount || 0} after waiting)`);
+  }
+
   // ── an answer unblocks the item ──────────────────────────────────────────────────────────────────
   {
     const escalations = createEscalations({ dir: TMP(), now: () => DAYTIME, notify: async () => ({ sent: true, via: 'telegram' }), opts: { maxPerHour: 99 } });
