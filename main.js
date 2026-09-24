@@ -115,6 +115,73 @@ const missions = createMissions({ log: (t) => console.log(t) });
 // without threading a handle through executeTool's signature. Same main-owns-state accessor pattern
 // the rest of this file uses. Always null between turns.
 let _activeMission = null;
+
+// ── THE AUTONOMY LANE ─────────────────────────────────────────────────────────────────────────────
+// Four modules that together answer "handle any task, for an hour, without me":
+//   designation — what an agent is DOING, and the one colour that means it (hue = task, motion = state)
+//   escalate    — the single door to Siddhant. Asks and RETURNS; the run keeps working.
+//   toolforge   — the 88th tool, built and tested in the sandbox before it counts as a tool
+//   supervisor  — the loop that drives a plan for an hour and stops in a bounded, honest way
+//
+// Every dep is passed as an arrow rather than a value, so nothing here depends on where in this file
+// notifyUser or fullCatalog happens to be defined. That mattered the moment these moved.
+const designation = require('./lib/designation');
+const { createEscalations } = require('./lib/escalate');
+const { createForge } = require('./lib/toolforge');
+const { createSupervisor } = require('./lib/supervisor');
+
+const escalations = createEscalations({
+  notify: (msg, urgency, opts) => notifyUser(msg, urgency, opts),
+  log: (t) => console.log(t),
+  onEvent: (e) => { try { sendToActivity('tool-update', { type: 'thinking', text: escalationLine(e) }); } catch {} },
+  opts: { maxPerHour: (loadConfig().escalation || {}).maxPerHour },
+});
+function escalationLine(e) {
+  if (e.type === 'escalation-asked') return `🆘 asked Siddhant (${e.via || 'no channel'}): ${String(e.question).slice(0, 90)}`;
+  if (e.type === 'escalation-joined') return `🆘 ${e.agent} is waiting on the same question`;
+  if (e.type === 'escalation-throttled') return `🔇 held a question back (${e.used}/${e.ceiling} interruptions this hour) — proceeding on the assumption`;
+  if (e.type === 'escalation-answered') return `✅ Siddhant answered${e.assumed ? ' (which question, I had to guess)' : ''}: ${String(e.answer).slice(0, 80)}`;
+  return '';
+}
+
+const forge = createForge({
+  sandbox,
+  log: (t) => console.log(t),
+  // A forged tool may not shadow a built-in: the built-in would become unreachable and the failure
+  // would read as the built-in breaking.
+  existingTools: () => { try { return fullCatalog().map((t) => t.name); } catch { return []; } },
+  // fs/net/http reach outside the sandbox, so they are Siddhant's call — and the card has to say what
+  // is actually being granted, to which tool, for what. There is no "allow modules?" prompt here.
+  approve: async ({ name, purpose, modules, code }) => {
+    try {
+      // forceHuman, deliberately. requestConfirm auto-approves when isAutonomous(), which is right for
+      // the shell commands that flag was written for and wrong here: an unattended run must not be able
+      // to grant filesystem or network access to code it just wrote. And because forceHuman means the
+      // card can sit unanswered forever, the wait is bounded and a silence REFUSES — the forge then
+      // reports that the capability was not granted and the run continues pure-compute or asks.
+      const asked = requestConfirm(
+        `Let the forged tool "${name}" use ${modules.join(', ')}?`,
+        [`Purpose: ${purpose}`, '', 'Code:', String(code).slice(0, 900)].join('\n'),
+        { forceHuman: true },
+      );
+      const timeout = new Promise((r) => { const t = setTimeout(() => r(false), 120000); t.unref?.(); });
+      return (await Promise.race([asked, timeout])) === true;
+    } catch { return false; }
+  },
+  onForged: (t) => { try { sendToActivity('tool-update', { type: 'thinking', text: `🛠 forged ${t.name} — ${t.casesPassed} case(s) passed` }); } catch {} },
+});
+
+// The supervised run currently in flight. One at a time: a second hour-long run would double every
+// budget wall while halving the attention either gets, and the walls are the point.
+let _supervisedRun = null;      // { missionId, goal, startedAt, promise, report }
+const supervisor = createSupervisor({
+  missions, escalations, forge,
+  log: (t) => console.log(t),
+  runAgent: (spec) => supervisedWorker(spec),
+  decompose: (spec) => supervisedDecompose(spec),
+  onEvent: (e) => supervisorEvent(e),
+  shouldStop: () => !!(_supervisedRun && _supervisedRun.stopRequested),
+}, {});
 const simulate = require('./lib/simulate');           // physics/chem/math simulation sandbox (scipy/sympy/rdkit/openmm/pyscf…)
 const selfheal = require('./lib/selfheal');           // autonomous self-healing (DISABLED by default; verify-gated self_fix loop)
 const selfdrive = require('./lib/selfdrive');         // Phase 6 — ON-DEMAND self-improvement governor (reflect→pipeline→implement→verify; never pushes)
@@ -1008,6 +1075,34 @@ function jobsStatusBlock() {
       + '\nThese run in the background while you chat. When Siddhant asks how work is going, answer from this list. When he wants to redirect, stop, or skip background work, call manage_jobs (guide/cancel) — do not just acknowledge.';
   } catch { return ''; }
 }
+// The autonomy lane's live state. Two things the model cannot work out for itself and gets wrong
+// without: which tools it built earlier (a forged tool it cannot see is a tool it does not have), and
+// what a long run is currently waiting on Siddhant for — because the very next thing he types may BE
+// that answer, and the model is the only thing that can tell whether it is.
+function autonomyBlock() {
+  try {
+    const out = [];
+    const forged = forge.promptBlock();
+    if (forged) out.push(forged);
+
+    const live = _supervisedRun && !_supervisedRun.report ? _supervisedRun : null;
+    if (live) {
+      const h = live.missionId ? missions.attach(live.missionId) : null;
+      const d = h ? h.plan.digest() : null;
+      out.push(`A LONG RUN IS GOING RIGHT NOW: "${String(live.goal).slice(0, 160)}"`
+        + (d ? ` — ${d.done}/${d.total} steps done` : '')
+        + `, ${Math.round((Date.now() - live.startedAt) / 60000)} min in. Check it with long_run{action:"status"}; do not start another.`);
+    }
+
+    const waiting = escalations.pending();
+    if (waiting.length) {
+      out.push(`THE RUN IS WAITING ON SIDDHANT (${waiting.length}):\n`
+        + waiting.map((e) => `  • ${e.question}${e.assumption ? `  [assuming "${e.assumption}" if he does not answer]` : ''}  (${e.id})`).join('\n')
+        + '\nIf what he just said answers one of these, pass it on with long_run{action:"answer", text:"<exactly what he said>"} — that unblocks the item. If it plainly does not, leave it alone.');
+    }
+    return out.length ? '\n\n---\n## AUTONOMY\n' + out.join('\n\n') : '';
+  } catch { return ''; }
+}
 // Four-block system: [cached static] + [mode prompt] + [small retrieved memory] + [live jobs].
 // The mode block goes AFTER the cache_control block so prompt-cache hits survive mode switches
 // (system blocks concatenate, so this is semantically identical to prepending).
@@ -1056,7 +1151,7 @@ function systemBlocks(query) {
   return blocks;
 }
 function buildSystemPrompt(query) {
-  return buildStaticPrompt() + '\n\n' + costBlock() + modePrompts.selectModePrompt({ suggestedMode: currentMode }) + buildMemoryBlock(query || '') + jobsStatusBlock();
+  return buildStaticPrompt() + '\n\n' + costBlock() + modePrompts.selectModePrompt({ suggestedMode: currentMode }) + buildMemoryBlock(query || '') + jobsStatusBlock() + autonomyBlock();
 }
 
 // ---------------------------------------------------------------------------
@@ -3951,6 +4046,220 @@ async function droneAgentRun(ctx, task) {
   return { status: 'ok', summary: finalText || '(completed, no text output)' };
 }
 
+// ── SUPERVISED RUNS (lib/supervisor.js) ───────────────────────────────────────────────────────────
+// The hour-long lane. droneAgentRun above is the model for the loop; the difference that matters is
+// the ENVELOPE: a supervised worker must be able to say "I cannot do this, and here is what I need",
+// because that sentence is what the supervisor routes into forging a tool or calling Siddhant. A
+// worker that can only say "done" or "failed" gives the supervisor nothing to act on, which is how a
+// long run turns into an expensive way of producing a shrug.
+
+// Which tools each designation gets. Scoped, not because a wide grant is dangerous here, but because
+// ~20 relevant tools beat 87 vague ones: per-turn retrieval already proved that on the main loop.
+const SUPERVISED_TOOLS = {
+  browser: ['web', 'vision', 'desktop'],
+  science: ['science', 'files', 'web'],
+  code: ['files', 'shell', 'self'],
+  research: ['web', 'info', 'memory'],
+  comms: ['mail', 'ask', 'info'],
+  orchestrate: ['agents', 'info'],
+  create: ['make', 'files', 'vision'],
+  memory: ['memory', 'files'],
+  forge: ['files', 'shell'],
+  general: ['web', 'files', 'info'],
+};
+
+function supervisedToolDefs(desig) {
+  const cats = SUPERVISED_TOOLS[desig] || SUPERVISED_TOOLS.general;
+  const want = new Set();
+  const all = fullCatalog();
+  for (const c of cats) { try { for (const t of toolcatalog.expand(c, all)) want.add(t.name); } catch {} }
+  for (const n of toolcatalog.CORE || []) want.add(n);
+  // Every worker can forge. The point of the whole lane is that "there is no tool for this" is a
+  // thing it can DO something about rather than a thing it reports.
+  want.add('forge_tool');
+  want.add('plugin');
+  return all.filter((t) => want.has(t.name));
+}
+
+const SUPERVISED_ENVELOPE = {
+  type: 'object',
+  properties: {
+    status: { type: 'string', enum: ['done', 'partial', 'blocked'] },
+    summary: { type: 'string' },
+    need: {
+      type: 'object',
+      properties: {
+        kind: { type: 'string', enum: ['tool', 'human', 'decompose', 'none'] },
+        question: { type: 'string' }, why: { type: 'string' }, assumption: { type: 'string' },
+        name: { type: 'string' }, purpose: { type: 'string' }, code: { type: 'string' },
+        items: { type: 'array', items: { type: 'string' } },
+      },
+      required: ['kind'],
+    },
+    newItems: { type: 'array', items: { type: 'string' } },
+  },
+  required: ['status', 'summary'],
+};
+
+/** The decomposer the supervisor calls when it is handed a goal and no plan. */
+async function supervisedDecompose({ goal }) {
+  const sys = [
+    'Break this goal into the FEWEST concrete, independently-workable steps that would actually finish it.',
+    'Each step is one sentence, starts with a verb, and names its own deliverable. 3–10 steps.',
+    'Steps that can run at the same time are better than steps that must wait — they will be run in parallel.',
+    'Do NOT include "review the result" or "report back" steps; the supervisor does that.',
+    'Output ONLY JSON: {"steps":["...","..."]}',
+  ].join('\n');
+  try {
+    const r = await anthropicRequest({
+      model: MODEL_SONNET, max_tokens: 900, system: sys,
+      messages: [{ role: 'user', content: 'Goal: ' + String(goal).slice(0, 2000) }],
+      _reason: { schema: { type: 'object', properties: { steps: { type: 'array', items: { type: 'string' } } }, required: ['steps'] } },
+    }, getApiKey());
+    const txt = (r.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('');
+    const j = parseJsonLoose(txt) || {};
+    return Array.isArray(j.steps) ? j.steps : [];
+  } catch (e) {
+    console.warn('[supervisor] decompose failed:', e.message);
+    return [];
+  }
+}
+
+/**
+ * One plan item, one agent, one envelope.
+ *
+ * The loop is droneAgentRun's; the tail is not. After the work turns it makes ONE tool-free call for
+ * the envelope, schema-enforced, so "I need a tool" and "I need Siddhant" arrive as data rather than
+ * as a sentence somebody has to parse out of prose. The wrap-up is tool-free on purpose: the first
+ * fan-out run in this repo produced no report at all because the final turn still had tools and spent
+ * itself calling one.
+ */
+async function supervisedWorker(spec) {
+  const desig = spec.designation || 'general';
+  const toolDefs = supervisedToolDefs(desig);
+  const maxTurns = Math.max(2, Math.min(spec.maxTurns || 12, 20));
+  const sys = [
+    `You are ${spec.name}, one of several agents working in parallel on one mission for Siddhant.`,
+    `Your designation is ${designation.get(desig).label}. Your job is ONE item of the plan: ${spec.goal}`,
+    'Do the work. Use your tools. Verify what you claim — check the result rather than assuming it.',
+    '',
+    'THREE THINGS YOU CAN DO THAT AN ORDINARY AGENT CANNOT:',
+    '  • If no tool can do what this item needs, FORGE ONE with forge_tool (it is sandboxed and must',
+    '    pass the cases you declare before it counts). Then use it.',
+    '  • If you are missing a fact or a decision only Siddhant can supply, say so in your envelope with',
+    '    need.kind="human", the exact question, and the assumption you would proceed on. He will be',
+    '    called — unless his calendar says he is in class, in which case he is texted. Do NOT wait.',
+    '  • If this item is really several, say so with need.kind="decompose" and list them.',
+    '',
+    'Never claim an item is done when it is not. "partial" with an honest summary is worth more than a',
+    'confident "done" — the supervisor will retry it, and a false done is a hole in the final report.',
+    spec.context ? '\n' + spec.context : '',
+  ].filter(Boolean).join('\n');
+
+  let hist = [{ role: 'user', content: String(spec.goal) }];
+  let spendUsd = 0, turns = 0, finalText = '';
+  const price = (u) => ((u.input_tokens || 2000) / 1e6) * 3 + ((u.output_tokens || 400) / 1e6) * 15;   // Sonnet
+
+  for (let i = 0; i < maxTurns; i++) {
+    turns++;
+    let resp;
+    try {
+      resp = await pacedSubagentRequest({
+        model: MODEL_SONNET, max_tokens: 3072, system: sys, tools: toolDefs,
+        messages: validateHistory(hist.slice(-24)),
+        _reason: { subagent: true, taskBudget: maxTurns * 3072 * 4 },
+      }, getApiKey());
+    } catch (e) {
+      return { status: finalText ? 'partial' : 'failed', summary: finalText || ('model error: ' + e.message), spendUsd, turns };
+    }
+    spendUsd += price(resp.usage || {});
+    const content = resp.content || [];
+    hist.push({ role: 'assistant', content });
+    const text = content.filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim();
+    if (text) { finalText = text; if (spec.onStep) try { spec.onStep(text.slice(0, 160)); } catch {} }
+    const tus = content.filter((b) => b.type === 'tool_use');
+    if (!tus.length || resp.stop_reason === 'end_turn') break;
+    // A per-item wallet, so one item cannot eat the run's whole budget before the supervisor's own
+    // wall notices. The supervisor's budget is the outer wall; this is the inner one.
+    if (spendUsd >= (spec.budgetUsd || 0.35)) { finalText = (finalText ? finalText + '\n' : '') + '(stopped: this item hit its own budget slice)'; break; }
+    if (spec.onStep) try { spec.onStep(describeAction(tus[0].name, tus[0].input || {})); } catch {}
+    const runOne = async (tu) => {
+      const r = await executeTool(tu.name, tu.input, {});
+      return { type: 'tool_result', tool_use_id: tu.id, content: JSON.stringify(r).slice(0, 16 * 1024), is_error: r && r.success === false };
+    };
+    let results;
+    if (tus.length > 1 && tus.every((b) => PARALLEL_SAFE.has(b.name))) results = await Promise.all(tus.map(runOne));
+    else { results = []; for (const tu of tus) results.push(await runOne(tu)); }
+    hist.push({ role: 'user', content: results });
+  }
+
+  // THE ENVELOPE — tool-free, schema-enforced.
+  try {
+    const r = await pacedSubagentRequest({
+      model: MODEL_SONNET, max_tokens: 900,
+      system: 'Report on the work just done, as JSON only. status: "done" only if the item is genuinely finished; "partial" if real progress was made but it is not; "blocked" if it cannot proceed. If it is blocked or partial BECAUSE something is missing, fill `need`: kind="tool" (with name, purpose, code as a JS function body taking `input`, and tests), kind="human" (with question and assumption), or kind="decompose" (with items). Otherwise omit `need` or use kind="none". `newItems` is for real work you discovered that is not in the plan.',
+      messages: validateHistory([...hist.slice(-12), { role: 'user', content: 'Report your envelope now. JSON only.' }]),
+      _reason: { subagent: true, schema: SUPERVISED_ENVELOPE },
+    }, getApiKey());
+    spendUsd += price(r.usage || {});
+    const txt = (r.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('');
+    const j = parseJsonLoose(txt) || {};
+    const need = j.need && j.need.kind && j.need.kind !== 'none' ? j.need : null;
+    return {
+      status: ['done', 'partial', 'blocked'].includes(j.status) ? j.status : (finalText ? 'partial' : 'failed'),
+      summary: String(j.summary || finalText || '(no report)').slice(0, 1200),
+      need, newItems: Array.isArray(j.newItems) ? j.newItems.slice(0, 5) : [],
+      spendUsd, turns,
+    };
+  } catch (e) {
+    // A failed wrap-up must not discard the work. The loop's own last text is a worse report than the
+    // envelope and a far better one than nothing.
+    return { status: finalText ? 'partial' : 'failed', summary: finalText || ('wrap-up failed: ' + e.message), spendUsd, turns };
+  }
+}
+
+// The live supervised roster — what presenceSnapshot() renders and the office colours by designation.
+const supervisedAgents = new Map();
+
+function supervisorEvent(e) {
+  try {
+    switch (e.type) {
+      case 'agent':
+        supervisedAgents.set(e.id, { id: e.id, name: e.name, designation: e.designation, state: e.state, task: e.task, step: e.step, since: e.since });
+        pushPresenceNow();
+        break;
+      case 'agent-gone':
+        supervisedAgents.delete(e.id);
+        pushPresenceNow();
+        break;
+      case 'run-start':
+        sendToActivity('tool-update', { type: 'thinking', text: `🎯 long run started — ${e.plan.length} step(s): ${e.plan.slice(0, 3).join(' · ').slice(0, 120)}` });
+        break;
+      case 'progress':
+        sendToActivity('tool-update', { type: 'thinking', text: `📊 ${e.done}/${e.total} done${e.blocked ? `, ${e.blocked} blocked` : ''} · $${e.spentUsd.toFixed(3)} · ${Math.round(e.elapsedMs / 1000)}s` });
+        break;
+      case 'forging':
+        sendToActivity('tool-update', { type: 'thinking', text: `🛠 building a tool it does not have: ${e.name || '(unnamed)'}` });
+        break;
+      case 'escalated':
+        sendToActivity('tool-update', { type: 'thinking', text: `🆘 ${e.deduped ? 'joined an existing question' : 'asked Siddhant'}: ${String(e.question).slice(0, 90)}` });
+        break;
+      case 'assumed':
+        sendToActivity('tool-update', { type: 'thinking', text: `🤔 no answer — proceeding on: ${String(e.assumption).slice(0, 90)}` });
+        break;
+      case 'plan-grew':
+        sendToActivity('tool-update', { type: 'thinking', text: `➕ ${e.by} found more work: ${e.added.join(' · ').slice(0, 110)}` });
+        break;
+      case 'run-end':
+        sendToActivity('tool-update', { type: 'thinking', text: `🏁 long run ${e.stoppedBecause} — ${e.done.length} done, ${e.blocked.length} blocked, $${e.spentUsd}` });
+        supervisedAgents.clear();
+        pushPresenceNow();
+        break;
+      default: break;
+    }
+  } catch {}
+}
+
 // When the caller gives a mission but no explicit drones, an orchestrator call designs the fleet:
 // N personas + roles from the mission. Bounded to `cap`; falls back to a sensible default trio.
 async function designDroneFleet(mission, cap = 6) {
@@ -4817,6 +5126,130 @@ async function executeTool(name, input, opts = {}) {
           summary: failed.length ? `${failed.join(', ')} ${failed.length === 1 ? 'is' : 'are'} not healthy — see the report for the stage that broke.` : `${pick.join(', ')} all healthy.` };
         break;
       }
+      // ── THE HOUR-LONG LANE ──────────────────────────────────────────────────────────────────
+      case 'long_run': {
+        const act = String(input.action || 'status');
+        if (act === 'start') {
+          const goal = String(input.goal || '').trim();
+          if (!goal) { result = { success: false, error: 'long_run start needs a `goal`' }; break; }
+          // ONE AT A TIME. Two hour-long runs would double every budget wall while halving the
+          // attention either gets, and the walls are the entire reason this lane is safe to leave alone.
+          if (_supervisedRun && !_supervisedRun.report) {
+            result = { success: false, error: `a run is already going: "${String(_supervisedRun.goal).slice(0, 80)}" (${_supervisedRun.missionId}). Check it with long_run{action:"status"} or stop it first.` };
+            break;
+          }
+          const hours = Math.max(0.05, Math.min(8, Number(input.hours) || 1));
+          const budgetUsd = Math.max(0.05, Math.min(20, Number(input.budget_usd) || 2));
+          const width = Math.max(1, Math.min(12, Math.round(Number(input.width) || 3)));
+          const plan = Array.isArray(input.plan) ? input.plan.map(String).filter(Boolean) : [];
+          _supervisedRun = { goal, startedAt: Date.now(), missionId: null, report: null, promise: null };
+          // Deliberately NOT awaited. An hour-long run cannot be a tool call the model waits on; it
+          // reports through the Activity feed and the office, and `status` is how anyone asks.
+          _supervisedRun.promise = supervisor.run({ goal, plan, budgetUsd, wallClockMs: hours * 3600 * 1000, width })
+            .then((rep) => {
+              _supervisedRun.report = rep;
+              _supervisedRun.missionId = rep.missionId;
+              // The end of a long run is news. It goes out at low urgency — Telegram — because the
+              // whole point was that he did not have to sit here, and a finished job is not an
+              // emergency. Anything that needed him is in the message.
+              const bits = [`Long run ${rep.stoppedBecause}: ${String(rep.goal).slice(0, 120)}`,
+                `${rep.done.length} done, ${rep.blocked.length} blocked, ${rep.open.length} open · $${rep.spentUsd} · ${Math.round(rep.elapsedMs / 60000)}min`];
+              if (rep.forged.length) bits.push(`built: ${rep.forged.join(', ')}`);
+              if (rep.waitingOnSiddhant.length) bits.push(`still needs you: ${rep.waitingOnSiddhant.map((w) => w.question).join(' | ').slice(0, 300)}`);
+              notifyUser(bits.join('\n'), 'low').catch(() => {});
+              return rep;
+            })
+            .catch((e) => { _supervisedRun.report = { ok: false, stoppedBecause: 'crashed', error: String(e && e.message || e), done: [], blocked: [], open: [], spentUsd: 0, elapsedMs: 0, forged: [], waitingOnSiddhant: [] }; return _supervisedRun.report; });
+          result = { success: true, started: true, goal,
+            limits: { hours, budget_usd: budgetUsd, width },
+            note: 'Running in the background. Agents appear in the 3D office coloured by what they are doing; progress streams to the Activity panel. Do NOT wait on this — tell Siddhant it has started and what it will do, and check long_run{action:"status"} when he asks. If it needs a decision it will call him (or text him if his calendar says he is busy).' };
+          break;
+        }
+        if (act === 'stop') {
+          if (!_supervisedRun || _supervisedRun.report) { result = { success: false, error: 'no run is going' }; break; }
+          // Cooperative, like every other stop in this codebase: the wall-clock wall is set to zero so
+          // the next scheduling pass drains what is in flight and parks. Killing mid-tool would orphan
+          // the spend, which is the one outcome with no upside.
+          _supervisedRun.stopRequested = true;
+          result = { success: true, stopping: true, note: 'It will finish what is in flight and park. Resume it later with long_run{action:"resume"}.' };
+          break;
+        }
+        if (act === 'resume') {
+          const id = String(input.mission_id || '').trim() || (missions.list({ status: 'parked' })[0] || {}).id;
+          if (!id) { result = { success: false, error: 'nothing parked to resume' }; break; }
+          if (_supervisedRun && !_supervisedRun.report) { result = { success: false, error: 'a run is already going' }; break; }
+          const m = missions.attach(id);
+          _supervisedRun = { goal: (m && m.meta && m.meta.goal) || '(resumed)', startedAt: Date.now(), missionId: id, report: null };
+          _supervisedRun.promise = supervisor.resume(id, { wallClockMs: Math.max(0.05, Math.min(8, Number(input.hours) || 1)) * 3600 * 1000, width: Number(input.width) || 3 })
+            .then((rep) => { _supervisedRun.report = rep; return rep; })
+            .catch((e) => { _supervisedRun.report = { ok: false, stoppedBecause: 'crashed', error: String(e && e.message || e) }; return _supervisedRun.report; });
+          result = { success: true, resumed: id, note: 'Picked up where it stopped, with its spend and resume limits intact.' };
+          break;
+        }
+        if (act === 'answer') {
+          const text = String(input.text || '').trim();
+          if (!text) { result = { success: false, error: 'answer needs `text` — exactly what Siddhant said' }; break; }
+          const r = escalations.answer(text);
+          result = r.matched
+            ? { success: true, delivered_to: r.id, assumed_which_question: !!r.assumed, still_open: r.alsoOpen,
+                note: r.assumed ? 'More than one question was open and nothing in his reply said which — this was matched to the most recent. If the run acts oddly, ask him which he meant.' : undefined }
+            : { success: false, error: `nothing was waiting for an answer (${r.reason})` };
+          break;
+        }
+        // status
+        {
+          const live = _supervisedRun && !_supervisedRun.report ? _supervisedRun : null;
+          const h = live && live.missionId ? missions.attach(live.missionId) : null;
+          const plan = h ? h.plan.read() : [];
+          result = {
+            success: true,
+            running: !!live,
+            ...(live ? {
+              goal: live.goal, mission_id: live.missionId,
+              elapsed_min: Math.round((Date.now() - live.startedAt) / 60000),
+              spent_usd: h ? +((h.meta || {}).spendUsd || 0).toFixed(4) : 0,
+              plan: plan.map((p) => ({ step: p.text, status: p.status, note: p.note || undefined })),
+              working_now: supervisor.roster().map((a) => ({ agent: a.name, doing: a.label, on: a.task })),
+            } : {}),
+            ...(_supervisedRun && _supervisedRun.report ? { last_run: _supervisedRun.report } : {}),
+            waiting_on_siddhant: escalations.pending().map((e) => ({ id: e.id, question: e.question, assuming_meanwhile: e.assumption || undefined, asked_min_ago: Math.round((Date.now() - e.askedAt) / 60000) })),
+            parked: missions.list({ status: 'parked' }).slice(0, 5).map((m) => ({ mission_id: m.id, goal: String(m.goal).slice(0, 100), why: m.lastError, spent_usd: m.spendUsd, resumes: m.resumeCount })),
+            forged_tools: forge.list().map((t) => ({ name: t.name, purpose: t.purpose, calls: t.calls || 0 })),
+          };
+        }
+        break;
+      }
+      case 'forge_tool': {
+        const act = String(input.action || 'list');
+        if (act === 'list') {
+          const t = forge.list();
+          result = { success: true, count: t.length, tools: t.map((x) => ({ name: x.name, purpose: x.purpose, inputs: x.inputKeys, allow: x.allow, calls: x.calls || 0, forgedAt: x.forgedAt, forgedFor: x.forgedFor || undefined })),
+            ...(t.length ? { note: 'Call one with forge_tool{action:"call", name, input} — or plugin{action:"call", ...}, same thing.' } : { note: 'Nothing forged yet.' }) };
+          break;
+        }
+        if (act === 'remove') {
+          result = forge.remove(input.name) ? { success: true, removed: input.name } : { success: false, error: `no forged tool named "${input.name}"` };
+          break;
+        }
+        if (act === 'call') {
+          const r = await forge.run(input.name, input.input || {});
+          result = r.success ? { success: true, result: r.result } : { success: false, error: r.error };
+          break;
+        }
+        // forge
+        const r = await forge.forge({
+          name: input.name, purpose: input.purpose, code: input.code,
+          tests: input.tests, allow: input.allow, timeoutMs: input.timeout_ms,
+          forgedFor: (_activeMission && _activeMission.meta && _activeMission.meta.goal) || _currentUserPrompt || '',
+          missionId: _activeMission ? _activeMission.id : null,
+        });
+        result = r.ok
+          ? { success: true, tool: r.tool.name, cases_passed: r.cases.length, allow: r.tool.allow,
+              call_with: r.callWith, note: 'It is registered and persistent. Use it now.' }
+          : { success: false, stage: r.stage, errors: r.errors, ...(r.cases ? { cases: r.cases.map((c) => ({ case: c.i, pass: c.pass, why: c.why || undefined })) } : {}),
+              note: r.note || 'Nothing was registered. Fix it and forge again.' };
+        break;
+      }
       case 'google_accounts': {
         const list = (typeof google.accounts === 'function') ? google.accounts() : [];
         result = {
@@ -5374,13 +5807,27 @@ async function executeTool(name, input, opts = {}) {
       case 'plugin': {   // W6 — sandboxed execution of user/community plugin tools
         const plugins = Array.isArray(loadConfig().plugins) ? loadConfig().plugins : [];
         if ((input.action || 'list') === 'list') {
-          result = { success: true, plugins: plugins.map((p) => ({ name: p.name, description: p.description || '', allow: p.allow || [] })) };
+          result = { success: true,
+            plugins: plugins.map((p) => ({ name: p.name, description: p.description || '', allow: p.allow || [] })),
+            forged: forge.list().map((t) => ({ name: t.name, description: t.purpose, allow: t.allow, inputs: t.inputKeys })) };
           break;
         }
         const p = plugins.find((x) => x && x.name === input.name);
-        if (!p) { result = { success: false, error: `no plugin named "${input.name}". Define it in config.plugins.` }; break; }
-        const r = await sandbox.runPlugin(p, input.input || {});
-        result = r.success ? { success: true, result: r.result } : { success: false, error: r.error };
+        if (p) {
+          const r = await sandbox.runPlugin(p, input.input || {});
+          result = r.success ? { success: true, result: r.result } : { success: false, error: r.error };
+          break;
+        }
+        // FORGED TOOLS ANSWER HERE TOO. forge_tool's own `call` action is the documented route, but the
+        // schema tells the model both work, and a tool that exists but cannot be reached through the
+        // name the model remembers is a tool it does not have.
+        const fg = forge.get(input.name);
+        if (fg) {
+          const r = await forge.run(input.name, input.input || {});
+          result = r.success ? { success: true, result: r.result, forged: true } : { success: false, error: r.error };
+          break;
+        }
+        result = { success: false, error: `no plugin or forged tool named "${input.name}". Forged tools: ${forge.list().map((t) => t.name).join(', ') || '(none)'}. Config plugins: ${plugins.map((x) => x.name).join(', ') || '(none)'}.` };
         break;
       }
       case 'browser':
@@ -7465,6 +7912,11 @@ async function runAgentHeadless(instruction, opts = {}) {
     // A login is blocking on a 2FA code → route this reply straight to it, don't run the agent.
     if (deliverTwoFactorCode(instr)) return { text: '✓ 2FA code received — continuing the login.' };
     instr = security.sanitizeExternalContent(instr, 'sms');
+    // A supervised run may be waiting on an answer. Deliver it FIRST and then let the agent turn run
+    // anyway: the reply is both an answer to the run and a message to BhatBot, and swallowing it would
+    // mean Siddhant gets no acknowledgement that his answer landed.
+    const escSms = escalations.answer(instr);
+    if (escSms.matched) instr += `\n\n[This answered the long run's question ${escSms.id}${escSms.assumed ? ' — more than one was open, so WHICH question is a guess; say so if it matters' : ''}. That item is unblocked and will be retried.]`;
     const pend = takePendingReplies();
     if (pend.length) {
       instr += '\n\n[You previously asked and are awaiting a reply — this SMS answers one of these. Resume that task now: '
@@ -7675,6 +8127,13 @@ function startTelegramBridge() {
     // A login is blocking on a 2FA code → route this reply to it instead of the agent.
     if (deliverTwoFactorCode(userText)) { telegramBot.sendMessage(chatId, '✓ 2FA code received — continuing the login.'); return; }
     userText = security.sanitizeExternalContent(userText, 'telegram');   // P0.4
+    // Telegram is where an escalation lands when the calendar says he is in class, so it is the MOST
+    // likely place an answer comes back. Deliver it, tell him it landed, and still run the turn.
+    const escTg = escalations.answer(userText);
+    if (escTg.matched) {
+      telegramBot.sendMessage(chatId, `✓ that unblocks the long run${escTg.assumed ? ' — I had to guess which question you meant, since more than one was open' : ''}.`).catch(() => {});
+      userText += `\n\n[This answered a waiting question in the long run.${escTg.assumed ? ' Which one was a GUESS — more than one was open.' : ''}]`;
+    }
 
     telegramBot.sendChatAction(chatId, 'typing');
     const hist = (telegramHistories.get(chatId) || []).slice(-20);
@@ -9175,6 +9634,25 @@ function standingRoster() {
 function presenceSnapshot() {
   const agents = [];
   const seen = new Set();
+  // 0) SUPERVISED AGENTS — the hour-long lane (lib/supervisor.js). First, because these are the most
+  // real thing on the floor: each one is working a named item of a durable plan, and each already
+  // knows its own designation, so nothing here has to infer it.
+  try {
+    for (const [id, a] of supervisedAgents) {
+      if (agents.length >= PRESENCE_CAP) break;
+      seen.add(id);
+      agents.push({
+        id, role: a.designation, name: a.name,
+        state: a.state || 'working', status: a.state || 'working',
+        designation: a.designation,
+        task: String(a.task || '').slice(0, 160),
+        step: String(a.step || '').slice(0, 120),
+        tool: null, since: a.since || Date.now(),
+        steerable: false,                                  // a supervised item is steered through the plan, not a steer box
+        supervised: true,
+      });
+    }
+  } catch {}
   // 1) real fleet suits first — these are the ones with ids, tasks, and a steer box.
   try {
     const now = Date.now();
@@ -9192,6 +9670,10 @@ function presenceSnapshot() {
         task: String(a.task || '').slice(0, 160),
         step: String(a.step || a.note || '').slice(0, 120),
         tool: a.tool || null,
+        // HUE MEANS WHAT IT IS DOING. Derived from the role first and the task second, because a suit's
+        // role is the more reliable signal and its task text is whatever the caller typed. Every
+        // presence source sets this so the office legend describes the WHOLE floor, not just one lane.
+        designation: designation.classify(a.role || '') !== 'general' ? designation.classify(a.role || '') : designation.classify(a.task || a.tool || ''),
         since: a.ts || now,
         // DERIVED, not asserted. A fleet suit launched by `fleet`/`plan_and_run` has a suit-card and
         // a feedback queue that fleetDrainFeedback actually delivers. A background run (the backlog
@@ -9220,6 +9702,7 @@ function presenceSnapshot() {
         task: String(j.goal || j.kind || '').slice(0, 160),
         step: String(j.note || '').slice(0, 120),
         tool: null,
+        designation: designation.classify(j.kind || '') !== 'general' ? designation.classify(j.kind || '') : designation.classify(j.goal || j.name || ''),
         since: j.startedAt || Date.now(),
         steerable: false,
       });
@@ -9253,13 +9736,18 @@ function presenceSnapshot() {
         task: `${a.name} specialist — ${a.turns ? `${a.turns} turn${a.turns === 1 ? '' : 's'} of history` : 'no history yet'}`,
         step: '',
         tool: null,
+        designation: designation.classify(a.name || ''),
         since: Date.now(),
         steerable: false,                                  // no suit-card until it is actually running
         standing: true,                                    // lets the UI style it as "available", not "busy"
       });
     }
   } catch {}
-  return { agents };
+  // The palette travels WITH the roster. presence.html is an iframe on file:// and cannot require()
+  // lib/designation, and the one failure mode worth designing against is a second copy of the palette
+  // growing there and drifting — an office whose legend is a lie. scripts/test-designation.js asserts
+  // that no designation colour is hardcoded in that file; this is what makes that possible.
+  return { agents, palette: designation.forRenderer() };
 }
 
 // Push the live roster to every presence surface a few times a second.

@@ -37,7 +37,7 @@ const prelude = [
 // `subagents` must be injected too, or the standing-roster branch silently throws into its own
 // try/catch and every assertion about it passes vacuously — the test would still be green while
 // testing nothing. Default to the real roster shape; pass [] to model "no specialists configured".
-function build(fleetAgents, jobs, standing) {
+function build(fleetAgents, jobs, standing, supervised) {
   const jobsBus = { active: () => jobs, list: () => jobs };
   const roster = standing === undefined
     ? [{ name: 'research', codename: 'ORACLE', turns: 3 }, { name: 'coding', codename: 'FORGE', turns: 0 }, { name: 'lifeadmin', codename: 'WARDEN', turns: 12 }]
@@ -47,8 +47,12 @@ function build(fleetAgents, jobs, standing) {
   // subagents.list() reads one history FILE PER SPECIALIST and the presence feed polls every 1.2s —
   // ~150 file reads a minute to draw three idle characters. Extract it alongside so the test
   // exercises the real path rather than a shape that no longer exists.
-  return new Function('fleetAgents', 'jobsBus', 'subagents',
-    prelude + '\n' + extract(main, 'standingRoster') + '\n' + extract(main, 'presenceSnapshot') + '\nreturn presenceSnapshot;')(fleetAgents, jobsBus, subagents);
+  // `designation` and `supervisedAgents` are injected for the same reason `subagents` is: the branch
+  // that uses them sits inside a try/catch, so a missing binding would make every assertion about
+  // colour-coding pass vacuously while the office rendered grey.
+  return new Function('fleetAgents', 'jobsBus', 'subagents', 'designation', 'supervisedAgents',
+    prelude + '\n' + extract(main, 'standingRoster') + '\n' + extract(main, 'presenceSnapshot') + '\nreturn presenceSnapshot;')(
+    fleetAgents, jobsBus, subagents, require('../lib/designation'), supervised || new Map());
 }
 
 // --- THE bug: every agent must carry an id, or the click handler drops it ---------------------
@@ -104,9 +108,9 @@ function build(fleetAgents, jobs, standing) {
 {
   // jobsBus throwing must not take the office down — it is the lower-priority half of the roster.
   const boom = { active: () => { throw new Error('jobsBus down'); } };
-  const fn = new Function('fleetAgents', 'jobsBus',
+  const fn = new Function('fleetAgents', 'jobsBus', 'designation', 'supervisedAgents',
     prelude + '\n' + extract(main, 'presenceSnapshot') + '\nreturn presenceSnapshot;')(
-    new Map([['s1', { role: 'r', status: 'working' }]]), boom);
+    new Map([['s1', { role: 'r', status: 'working' }]]), boom, require('../lib/designation'), new Map());
   const snap = fn();
   ok(snap.agents.length === 1, 'a throwing jobsBus still yields the fleet suits');
 }
@@ -222,6 +226,69 @@ function build(fleetAgents, jobs, standing) {
     const r = shouldRaiseFleet(junk || {}, [{ id: 'y' }, null], NEVER);
     ok(r && typeof r.raise === 'boolean', 'fleet: junk input returns a decision rather than throwing');
   }
+}
+
+// ── COLOUR-CODED BY TASK DESIGNATION, ACROSS THE WHOLE FLOOR ──────────────────────────────────────
+// The office used to colour agents by STATE, which makes every agent in a busy fleet the same colour
+// and answers a question you can already answer from the activity log. Hue now means WHAT THEY ARE
+// DOING — and that only works if EVERY presence source sets it. A fleet suit with a designation and a
+// background job without one gives you a legend that describes half the room.
+{
+  const D = require('../lib/designation');
+
+  const fa = new Map([
+    ['suit-r', { role: 'research', codename: 'ORACLE', status: 'working', task: 'read the papers' }],
+    ['suit-c', { role: 'coding', codename: 'FORGE', status: 'working', task: 'patch the loop' }],
+    ['suit-x', { role: '', codename: 'MYSTERY', status: 'working', task: 'render a diagram in blender' }],
+  ]);
+  const jobs = [{ id: 'j1', name: 'triage_mail', kind: 'triage_mail', status: 'running', goal: 'sort the inbox' }];
+  const snap = build(fa, jobs, [{ name: 'coding', codename: 'FORGE2', turns: 1 }])();
+
+  ok(snap.agents.every((a) => typeof a.designation === 'string' && a.designation),
+    'EVERY presence entry carries a designation — suits, jobs and the standing roster alike');
+
+  const by = Object.fromEntries(snap.agents.map((a) => [a.id, a.designation]));
+  ok(by['suit-r'] === 'research', "a suit's ROLE decides its designation");
+  ok(by['suit-c'] === 'code', 'and a coding suit reads as code');
+  ok(by['suit-x'] === 'create',
+    'a suit with no usable role falls back to its TASK text — the role is the better signal, the task is the fallback');
+  ok(by['job:j1'] === 'comms', 'a background job is classified too, from its kind');
+
+  ok(snap.agents.every((a) => D.get(a.designation).glow), 'every designation resolves to a colour');
+
+  // THE PALETTE TRAVELS WITH THE ROSTER. presence.html is an iframe on file:// and cannot require()
+  // lib/designation; the failure worth designing against is a second copy of the palette growing
+  // there and drifting, so the office ends up with a legend that is a lie.
+  ok(snap.palette && Array.isArray(snap.palette.designations) && snap.palette.designations.length >= 5,
+    'the snapshot carries the palette, so the office never needs its own copy');
+  ok(snap.palette.error && snap.palette.unknown, 'including the error colour and the grey fallback');
+  ok(snap.palette.designations.every((d) => d.id && d.glow && d.ink), 'each palette row has an id and both colour variants');
+}
+
+// ── SUPERVISED AGENTS COME FIRST ───────────────────────────────────────────────────────────────────
+// A supervised agent is working a named item of a durable plan. That is the most real thing on the
+// floor, so it takes the anchors ahead of a standing specialist who is merely available.
+{
+  const supervised = new Map([
+    ['sa_0_abc', { id: 'sa_0_abc', name: 'VALE', designation: 'science', state: 'working', task: 'fold the protein', step: 'sci_compute', since: 500 }],
+  ]);
+  const fa = new Map([['suit-1', { role: 'research', status: 'working', task: 't' }]]);
+  const snap = build(fa, [{ id: 'j', name: 'x', status: 'running' }], undefined, supervised)();
+
+  ok(snap.agents[0].id === 'sa_0_abc', 'the supervised agent is first');
+  ok(snap.agents[0].designation === 'science' && snap.agents[0].name === 'VALE',
+    'it keeps the designation the supervisor gave it — nothing re-infers what is already known');
+  ok(snap.agents[0].supervised === true, 'it is marked supervised, so the UI can style it differently from a steerable suit');
+  ok(snap.agents[0].steerable === false,
+    'and it is NOT steerable: a supervised item is redirected through the plan, not through a steer box, and popping an empty monitor for one is the dead-window bug again');
+  ok(snap.agents.some((a) => a.id === 'suit-1'), 'the ordinary suits are still there behind it');
+
+  // A full supervised roster must crowd out the decorative standing specialists, not the reverse.
+  const many = new Map();
+  for (let i = 0; i < 12; i++) many.set('sa_' + i, { id: 'sa_' + i, name: 'A' + i, designation: 'code', state: 'working', task: 't' });
+  const full = build(new Map(), [], undefined, many)();
+  ok(full.agents.length === 12 && full.agents.every((a) => a.supervised),
+    'twelve supervised agents fill the room; the standing roster waits its turn');
 }
 
 console.log(`✅ presence: ${pass} assertions passed`);

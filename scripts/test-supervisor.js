@@ -268,6 +268,23 @@ function rig(over = {}, opts = {}) {
       'an item left `doing` by a dead process is made runnable again — otherwise it is neither runnable nor finishable and the run stalls blaming itself for a crash');
   }
 
+  // ── a cooperative stop ───────────────────────────────────────────────────────────────────────────
+  {
+    let stopNow = false;
+    const dir = TMP();
+    const missions = createMissions({ dir: path.join(dir, 'missions') });
+    let started = 0;
+    const sup = createSupervisor({
+      missions, onEvent: () => {}, shouldStop: () => stopNow,
+      runAgent: async () => { started++; if (started === 2) stopNow = true; await new Promise((r) => setTimeout(r, 5)); return { status: 'done', summary: 'ok', spendUsd: 0 }; },
+    }, { ...fastOpts, width: 1 });
+    const r = await sup.run({ goal: 'g', plan: ['a', 'b', 'c', 'd', 'e'] });
+    ok(r.stoppedBecause === 'stopped', 'a stop request stops the run at the next scheduling pass');
+    ok(r.done.length === 2 && r.open.length === 3,
+      'it drains what was already in flight rather than orphaning that spend — the money is gone either way and a discarded result has no upside');
+    ok(missions.list({ status: 'parked' }).some((m) => m.id === r.missionId), 'a stopped run is parked, so it can be resumed');
+  }
+
   // ── planDigest is what progress is measured against ──────────────────────────────────────────────
   {
     const a = [{ text: 'x', status: 'todo' }, { text: 'y', status: 'todo' }];
