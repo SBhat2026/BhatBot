@@ -4107,6 +4107,18 @@ function supervisedToolDefs(desig) {
   // the model as a capability it has. A worker's job is one plan item; growing the plan is what
   // `newItems` is for.
   want.delete('long_run');
+  // AND NOT THE TOOLS THAT SPEND SOMEONE ELSE'S MONEY.
+  //
+  // Every wall this lane has counts Anthropic tokens. `visual_build` bills Siddhant's Replicate
+  // account per second of output — BACKLOG.md has it at ~$3.20 for ten seconds of 1080p, "the most
+  // expensive call in the system", with no confirmation gate — and `make_asset` chains image → 3D →
+  // STL, which is three billable stages behind one call. Neither shows up in `spentUsd`, so a run
+  // with a $2 ceiling could spend twenty dollars elsewhere and report that it stayed under budget.
+  //
+  // A budget that cannot see the spending is not a budget. These stay out of an unattended grant; a
+  // run that genuinely needs a video asks for one through its envelope, and Siddhant decides while
+  // awake. generate_image stays: flux-fast is $0.003 a call, which is within the noise of a turn.
+  for (const n of ['visual_build', 'make_asset']) want.delete(n);
   // AND NOT notify_user, which is in CORE and therefore reaches every agent by default.
   //
   // lib/escalate is supposed to be THE door to Siddhant: deduped, capped at a few interruptions an

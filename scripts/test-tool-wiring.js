@@ -235,8 +235,9 @@ const mcphub = require('../lib/mcphub');
   // And the worker is TOLD, or it spends turns reaching for a tool it does not have.
   ok(/ONLY way to reach him/.test(main), 'the worker prompt says the envelope is the only way to reach Siddhant');
   // The mirror above is only as good as its fidelity to the real function.
-  ok(/want\.delete\('long_run'\)/.test(main) && /want\.delete\('notify_user'\)/.test(main),
-    'supervisedToolDefs really removes both, so the reconstruction below is reconstructing something');
+  ok(/want\.delete\('long_run'\)/.test(main) && /want\.delete\('notify_user'\)/.test(main)
+    && /'visual_build', 'make_asset'/.test(main),
+    'supervisedToolDefs really removes all of them, so the reconstruction below is reconstructing something');
 
   ok(Object.keys(SUPERVISED_TOOLS).length >= designation.DESIGNATIONS.length,
     'every designation has a tool scope — one without falls back to `general`, which is a silent downgrade');
@@ -252,6 +253,7 @@ const mcphub = require('../lib/mcphub');
     // two deletions are ALSO asserted against main.js's source below — the mirror checks the effect,
     // the source check makes sure the mirror is still mirroring.
     want.add('forge_tool'); want.add('plugin'); want.delete('long_run'); want.delete('notify_user');
+    for (const n of ['visual_build', 'make_asset']) want.delete(n);
 
     ok(want.size >= 8, `${desig} resolves to a usable set (${want.size} tools), not an empty one`);
     ok(!want.has('long_run'), `${desig} cannot start another long run from inside one`);
@@ -262,6 +264,13 @@ const mcphub = require('../lib/mcphub');
     // a second door with none of that on it, where six agents can each text him and urgency:"call" at
     // 3am becomes an URGENT SMS. A ceiling with a way around it is not a ceiling.
     ok(!want.has('notify_user'), `${desig} has no messaging tool — it reaches Siddhant through the guarded escalation path or not at all`);
+    // A BUDGET THAT CANNOT SEE THE SPENDING IS NOT A BUDGET. Every wall this lane has counts
+    // Anthropic tokens; visual_build bills Replicate at ~$3.20 for ten seconds of video and
+    // make_asset chains three billable stages behind one call. Neither appears in spentUsd, so a run
+    // with a $2 ceiling could spend twenty dollars elsewhere and report that it stayed under.
+    for (const n of ['visual_build', 'make_asset']) {
+      ok(!want.has(n), `${desig} cannot call ${n} unattended — it bills a third-party account that no wall here can see`);
+    }
   }
 }
 
