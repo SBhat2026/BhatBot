@@ -232,6 +232,12 @@ const mcphub = require('../lib/mcphub');
   const SUPERVISED_TOOLS = new Function(body + '\nreturn SUPERVISED_TOOLS;')();
   const designation = require('../lib/designation');
 
+  // And the worker is TOLD, or it spends turns reaching for a tool it does not have.
+  ok(/ONLY way to reach him/.test(main), 'the worker prompt says the envelope is the only way to reach Siddhant');
+  // The mirror above is only as good as its fidelity to the real function.
+  ok(/want\.delete\('long_run'\)/.test(main) && /want\.delete\('notify_user'\)/.test(main),
+    'supervisedToolDefs really removes both, so the reconstruction below is reconstructing something');
+
   ok(Object.keys(SUPERVISED_TOOLS).length >= designation.DESIGNATIONS.length,
     'every designation has a tool scope — one without falls back to `general`, which is a silent downgrade');
 
@@ -242,12 +248,20 @@ const mcphub = require('../lib/mcphub');
     const want = new Set();
     for (const c of cats) for (const t of toolcatalog.expand(c, TOOLS)) want.add(t.name);
     for (const n of toolcatalog.CORE) want.add(n);
-    want.add('forge_tool'); want.add('plugin'); want.delete('long_run');
+    // Mirrors supervisedToolDefs. A reconstruction can drift from the thing it reconstructs, so the
+    // two deletions are ALSO asserted against main.js's source below — the mirror checks the effect,
+    // the source check makes sure the mirror is still mirroring.
+    want.add('forge_tool'); want.add('plugin'); want.delete('long_run'); want.delete('notify_user');
 
     ok(want.size >= 8, `${desig} resolves to a usable set (${want.size} tools), not an empty one`);
     ok(!want.has('long_run'), `${desig} cannot start another long run from inside one`);
     ok(want.has('forge_tool'), `${desig} can forge — "there is no tool for this" must be something it can act on`);
     ok(want.has('toolbox'), `${desig} keeps the toolbox escape hatch, so a misclassified item can still widen its own scope`);
+    // ONE DOOR TO SIDDHANT. lib/escalate dedupes, caps interruptions at a few an hour and goes silent
+    // between 23:00 and 07:00. notify_user is in CORE and therefore reaches every agent by default —
+    // a second door with none of that on it, where six agents can each text him and urgency:"call" at
+    // 3am becomes an URGENT SMS. A ceiling with a way around it is not a ceiling.
+    ok(!want.has('notify_user'), `${desig} has no messaging tool — it reaches Siddhant through the guarded escalation path or not at all`);
   }
 }
 

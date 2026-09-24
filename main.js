@@ -4107,6 +4107,15 @@ function supervisedToolDefs(desig) {
   // the model as a capability it has. A worker's job is one plan item; growing the plan is what
   // `newItems` is for.
   want.delete('long_run');
+  // AND NOT notify_user, which is in CORE and therefore reaches every agent by default.
+  //
+  // lib/escalate is supposed to be THE door to Siddhant: deduped, capped at a few interruptions an
+  // hour, and silent between 23:00 and 07:00. A worker holding notify_user has a second door with
+  // none of that on it — six agents could each text him, and `urgency:"call"` at 3am becomes an
+  // URGENT SMS, which is precisely the thing the quiet-hours rule exists to prevent. A ceiling with a
+  // way around it is not a ceiling. Workers reach him through their envelope's need.kind="human",
+  // which goes through the guarded path; the system prompt says so.
+  want.delete('notify_user');
   return all.filter((t) => want.has(t.name));
 }
 
@@ -4177,7 +4186,9 @@ async function supervisedWorker(spec) {
     '    pass the cases you declare before it counts). Then use it.',
     '  • If you are missing a fact or a decision only Siddhant can supply, say so in your envelope with',
     '    need.kind="human", the exact question, and the assumption you would proceed on. He will be',
-    '    called — unless his calendar says he is in class, in which case he is texted. Do NOT wait.',
+    '    called — unless his calendar says he is in class, or it is the middle of the night, in which',
+    '    case he is texted instead. This is the ONLY way to reach him: you have no messaging tool, on',
+    '    purpose, because that path is deduped and capped and yours would not be. Do NOT wait for him.',
     '  • If this item is really several, say so with need.kind="decompose" and list them.',
     '',
     'If the tools you have are the wrong ones for this item — it was classified from its wording and',
