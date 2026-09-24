@@ -1,6 +1,6 @@
 # Overnight pass — the autonomy lane
 
-**Branch** `redesign-2026-09` · 16 commits · 29 files · +4,719 lines · `verify: 121/121`
+**Branch** `redesign-2026-09` · 31 commits · 30 files · +5,300 lines · `verify: 121/121`
 
 You asked for BhatBot to handle any task you throw at it: build a tool when none fits, ask when it
 genuinely needs you, keep going on its own until the job is done, show the agents colour-coded by
@@ -91,7 +91,8 @@ after resuming — so those wait for you to raise the ceiling deliberately.
 
 ## What the tests found
 
-Five bugs, each caught by something that went looking rather than by reading code.
+Eight bugs, each caught by something that went looking rather than by reading code. Four of them were
+in work done tonight — which is the argument for building the instrument alongside the thing.
 
 1. **`"the most recent"` was whatever the filesystem listed last.** A flaky escalation test — two
    failures in three runs — turned out to be a real misrouting bug. Two questions raised in the same
