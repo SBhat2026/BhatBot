@@ -120,7 +120,7 @@ const inRepo = (p) => path.resolve(String(p)).startsWith(ROOT);
 const inWork = (p) => path.resolve(String(p)).startsWith(WORK);
 
 let forge = null;   // set in main, injected here
-const stats = { toolCalls: 0, toolErrors: 0, modelCalls: 0, modelErrors: 0, forgeAttempts: 0, forgeOk: 0 };
+const stats = { toolCalls: 0, toolErrors: 0, modelCalls: 0, modelErrors: 0, forgeAttempts: 0, forgeOk: 0, tokensIn: 0, tokensOut: 0 };
 // WHY a forge failed is the interesting number, not how many did. If a small model cannot drive the
 // forge, the question is whether its refusals TEACH — an error a model cannot act on is a dead end
 // dressed as feedback.
@@ -167,6 +167,11 @@ async function ollama(messages, tools, timeoutMs = 90000) {
   });
   if (!r.ok) throw new Error('ollama ' + r.status);
   const j = await r.json();
+  // Ollama reports its own token counts and they were being dropped on the floor. The whole point of
+  // running the soak locally is that tokens/item can be measured for free — a benchmark that cannot
+  // see its own token cost cannot tell you whether an optimisation worked.
+  stats.tokensIn += j.prompt_eval_count || 0;
+  stats.tokensOut += j.eval_count || 0;
   return j.message || {};
 }
 
@@ -183,6 +188,8 @@ function toolCallsOf(msg) {
 }
 
 async function worker(spec) {
+  const t0in = stats.tokensIn, t0out = stats.tokensOut;
+  const used = () => ({ tokensIn: stats.tokensIn - t0in, tokensOut: stats.tokensOut - t0out });
   const sys = `You are ${spec.name}, working one item of a plan. Designation: ${designation.get(spec.designation).label}.
 Do the work with the tools. When the item asks you to WRITE something to a path, you must actually call write_file — saying you did is not doing it.
 If no tool can do what is needed, forge one with forge_tool, then call it with call_forged.
@@ -191,7 +198,7 @@ Be brief. Do not explain. /no_think`;
   let last = '';
   for (let i = 0; i < 8; i++) {
     let m;
-    try { m = await ollama(msgs, TOOLS); } catch (e) { stats.modelErrors++; return { status: 'failed', summary: 'model error: ' + e.message, turns: i }; }
+    try { m = await ollama(msgs, TOOLS); } catch (e) { stats.modelErrors++; return { status: 'failed', summary: 'model error: ' + e.message, turns: i, ...used() }; }
     const calls = toolCallsOf(m);
     last = String(m.content || '').slice(0, 300) || last;
     if (!calls.length) break;
@@ -208,11 +215,11 @@ Be brief. Do not explain. /no_think`;
   // the supervisor is what is under test, not the local model's JSON discipline.
   const item = ITEM_BY_TEXT.get(spec.goal);
   if (item && item.kind === 'ask') {
-    return { status: 'blocked', summary: 'needs Siddhant', turns: 8,
+    return { status: 'blocked', summary: 'needs Siddhant', turns: 8, ...used(),
       need: { kind: 'human', question: `What citation style do you want for item ${item.id}?`, assumption: 'APA' } };
   }
   const ok = item ? item.check() : false;
-  return { status: ok ? 'done' : 'partial', summary: (ok ? 'verified: ' : 'not verified yet: ') + last.slice(0, 120), turns: 8 };
+  return { status: ok ? 'done' : 'partial', summary: (ok ? 'verified: ' : 'not verified yet: ') + last.slice(0, 120), turns: 8, ...used() };
 }
 
 const ITEM_BY_TEXT = new Map();
@@ -380,9 +387,68 @@ const ITEM_BY_TEXT = new Map();
   const resumes = ((missions.attach(report.missionId) || {}).meta || {}).resumeCount || 0;
   if (resumes > 0) fails.push(`the run spent ${resumes} of its resume allowance on internal waits — unpark() is not being used`);
 
-  fs.writeFileSync(path.join(TMP, 'report.json'), JSON.stringify({ report, stats, events, rss, completionTimes, verified: verified.length, falseDone, elapsedMin }, null, 2));
+  // ── SOMEWHERE THE RESULT SURVIVES ───────────────────────────────────────────────────────────────
+  // This used to write only into its own temp dir. Three days after the overnight pass, macOS had
+  // reaped every one of them — so an optimisation pass that wanted a "before" had no denominator at
+  // all. A benchmark whose output the operating system deletes is a benchmark you can only ever run
+  // once. The durable copy goes to ~/.bhatbot/bench/ and one scannable row goes to BENCH_LOG.md.
+  const journalRows = (() => { try { return missions.attach(report.missionId).journal(); } catch { return []; } })();
+  // The journal is the real record; the harness's own counters are the fallback for anything the
+  // supervisor never saw (a call that threw before an envelope came back).
+  const tokIn = journalRows.reduce((a, r) => a + (r.tokensIn || 0), 0) || stats.tokensIn;
+  const tokOut = journalRows.reduce((a, r) => a + (r.tokensOut || 0), 0) || stats.tokensOut;
+  const perItem = verified.length ? Math.round((tokIn + tokOut) / verified.length) : 0;
+
+  const record = {
+    at: new Date().toISOString(),
+    git: (() => { try { return require('child_process').execSync('git rev-parse --short HEAD', { cwd: ROOT, encoding: 'utf8' }).trim(); } catch { return '(unknown)'; } })(),
+    args: { minutes: MINUTES, items: ITEMS, width: WIDTH, model: MODEL },
+    elapsedMin: +elapsedMin.toFixed(1),
+    verified: verified.length, claimed: report.done.length, falseDone: falseDone.length,
+    tokensIn: tokIn, tokensOut: tokOut, tokensPerVerifiedItem: perItem,
+    spentUsd: report.spentUsd,
+    rssStartMb: Math.round(startRss / 1048576), rssEndMb: Math.round(endRss / 1048576),
+    modelCalls: stats.modelCalls, modelErrors: stats.modelErrors, toolCalls: stats.toolCalls,
+    forged: stats.forgeOk, forgeAttempts: stats.forgeAttempts,
+    escalations: { asked: asked.length, open: escalations.pending().length },
+    boardPosts, throughput: { firstHalf: early, secondHalf: late },
+    stoppedBecause: report.stoppedBecause, ticks: report.ticks,
+    pass: fails.length === 0, fails,
+    report, stats, events, rss, completionTimes,
+  };
+
+  const BENCH = path.join(os.homedir(), '.bhatbot', 'bench');
+  let saved = path.join(TMP, 'report.json');
+  try {
+    fs.mkdirSync(BENCH, { recursive: true });
+    saved = path.join(BENCH, `soak-${record.at.replace(/[:.]/g, '-')}.json`);
+    fs.writeFileSync(saved, JSON.stringify(record, null, 2));
+  } catch (e) { fs.writeFileSync(saved, JSON.stringify(record, null, 2)); }
+
+  // One row per run, newest last, in the repo — so a regression is visible in a diff rather than only
+  // to whoever remembers to open a JSON file.
+  try {
+    const LOG = path.join(ROOT, 'BENCH_LOG.md');
+    if (!fs.existsSync(LOG)) {
+      fs.writeFileSync(LOG, [
+        '# Soak log',
+        '',
+        'One row per `scripts/soak-supervisor.js` run. Every `verified` count is checked by the harness',
+        'itself, never by asking the agent — "the agent said done" is the one signal an endurance test',
+        'must not trust. Full records in `~/.bhatbot/bench/`.',
+        '',
+        '| when | commit | min | width | verified | false-done | tok/item | $ | rss | fwd/2nd half | stopped | pass |',
+        '|---|---|---|---|---|---|---|---|---|---|---|---|',
+        '',
+      ].join('\n'));
+    }
+    const row = `| ${record.at.slice(0, 16).replace('T', ' ')} | \`${record.git}\` | ${record.elapsedMin} | ${WIDTH} | ${record.verified} | ${record.falseDone} | ${perItem} | ${record.spentUsd} | ${record.rssStartMb}→${record.rssEndMb}MB | ${early}/${late} | ${record.stoppedBecause} | ${record.pass ? '✅' : '❌'} |\n`;
+    fs.appendFileSync(LOG, row);
+  } catch {}
+
+  log(`tokens: ${tokIn} in / ${tokOut} out → ${perItem} per verified item`);
   console.log('─'.repeat(78));
-  if (fails.length) { console.log(`\n❌ soak FAILED (${fails.length}):`); fails.forEach((f) => console.log('   ✗ ' + f)); console.log(`\nfull report: ${path.join(TMP, 'report.json')}`); process.exit(1); }
+  if (fails.length) { console.log(`\n❌ soak FAILED (${fails.length}):`); fails.forEach((f) => console.log('   ✗ ' + f)); console.log(`\nfull report: ${saved}`); process.exit(1); }
   console.log(`\n✅ the supervisor ran ${elapsedMin.toFixed(1)} minutes unattended: ${verified.length} items independently verified, ${forge.list().length} tool(s) forged, ${asked.length} question(s) escalated without blocking, ${Math.round(growthMb)}MB memory growth.`);
-  console.log(`   full report: ${path.join(TMP, 'report.json')}`);
+  console.log(`   ${perItem} tokens per verified item · full report: ${saved}`);
 })();
