@@ -546,6 +546,86 @@ function rig(over = {}, opts = {}) {
     ok(r5.ok && r5.custodian === null, 'with no reviewer the report carries null rather than a fabricated approval');
   }
 
+  // ── DEPENDENCIES ─────────────────────────────────────────────────────────────────────────────────
+  // The whole point of Phase 1. These are written BEFORE the gate exists, because the most dangerous
+  // one of them passes trivially today and starts failing the moment the gate is wrong.
+  {
+    // THE FALSE COMPLETE. `loop()` reports 'complete' when nothing is open, nothing is in flight and
+    // nothing is doing. Narrow "open" to "READY" and a plan whose remaining todos are all waiting on a
+    // dependency reports complete, closes the mission and returns ok:true with the work never started.
+    // Two nodes are enough to catch it, and this is the assertion that has to exist first.
+    const order = [];
+    const { sup } = rig({
+      runAgent: async ({ goal }) => { order.push(goal); await new Promise((r) => setTimeout(r, 10)); return { status: 'done', summary: 'ok' }; },
+    }, { width: 3 });
+    const r = await sup.run({ goal: 'g', plan: [
+      { id: 't1', text: 'first', needs: [] },
+      { id: 't2', text: 'second', needs: ['t1'] },
+    ] });
+    ok(r.ok && r.stoppedBecause === 'complete', `a two-node chain completes (${r.stoppedBecause})`);
+    ok(r.done.length === 2, `BOTH items ran — a run that reports complete with work unstarted is the trap (done: ${r.done.length})`);
+    ok(order.join(',') === 'first,second', `and in dependency order (got ${order.join(',')})`);
+  }
+  {
+    // A diamond: t1 → (t2, t3) → t4. t4 must start after BOTH middles, and the middles may overlap.
+    // Timestamps, not array positions — `started.indexOf(x) < finished.indexOf(y)` compares offsets in
+    // two different arrays and means nothing. Overlap is a claim about the clock, so measure the clock.
+    const started = [], finished = [];
+    const at = {};
+    const { sup } = rig({
+      runAgent: async ({ goal }) => {
+        started.push(goal); at[goal + ':start'] = Date.now();
+        await new Promise((r) => setTimeout(r, goal === 't2' ? 40 : 10));
+        finished.push(goal); at[goal + ':end'] = Date.now();
+        return { status: 'done', summary: 'ok' };
+      },
+    }, { width: 4 });
+    const r = await sup.run({ goal: 'g', plan: [
+      { id: 't1', text: 't1', needs: [] },
+      { id: 't2', text: 't2', needs: ['t1'] },
+      { id: 't3', text: 't3', needs: ['t1'] },
+      { id: 't4', text: 't4', needs: ['t2', 't3'] },
+    ] });
+    ok(r.ok && r.done.length === 4, 'the diamond completes');
+    ok(at['t4:start'] >= at['t2:end'] && at['t4:start'] >= at['t3:end'],
+      't4 started after BOTH t2 and t3 finished — the assertion the whole phase exists for');
+    ok(at['t3:start'] < at['t2:end'],
+      'and t3 ran WHILE its slow cousin was still going — rolling refill survived, the wave barrier did not come back');
+    ok(at['t2:start'] >= at['t1:end'] && at['t3:start'] >= at['t1:end'],
+      'and neither middle started before the item they both depend on finished');
+  }
+  {
+    // A dead dependency must propagate, and must not take independent branches down with it.
+    const { sup } = rig({
+      runAgent: async ({ goal }) => (goal === 'doomed' ? { status: 'failed', summary: 'exploded' } : { status: 'done', summary: 'ok' }),
+    }, { maxItemAttempts: 1, width: 3 });
+    const r = await sup.run({ goal: 'g', plan: [
+      { id: 't1', text: 'doomed', needs: [] },
+      { id: 't2', text: 'downstream', needs: ['t1'] },
+      { id: 't3', text: 'unrelated', needs: [] },
+    ] });
+    ok(r.done.includes('unrelated'), 'an independent branch finishes anyway');
+    const dead = r.blocked.find((b) => b.text === 'downstream');
+    ok(!!dead, 'the dependent item is blocked, not silently dropped');
+    ok(dead && /t1/.test(dead.why), `and the reason names what it was waiting for (got "${dead && dead.why}")`);
+  }
+  {
+    // A cycle must be refused with a reason. Hanging forever is the alternative.
+    const { sup } = rig({ runAgent: async () => ({ status: 'done', summary: 'ok' }) });
+    const r = await sup.run({ goal: 'g', plan: [
+      { id: 't1', text: 'a', needs: ['t2'] },
+      { id: 't2', text: 'b', needs: ['t1'] },
+    ] });
+    ok(!r.ok && /cycle/i.test(r.stoppedBecause + ' ' + (r.error || '')),
+      `a cyclic plan is refused rather than hanging (${r.stoppedBecause})`);
+  }
+  {
+    // Legacy plans — no ids anywhere — must behave exactly as they always have.
+    const { sup } = rig({ runAgent: async () => ({ status: 'done', summary: 'ok' }) });
+    const r = await sup.run({ goal: 'g', plan: ['one', 'two', 'three'] });
+    ok(r.ok && r.done.length === 3, 'a plan with no ids runs exactly as before');
+  }
+
   // ── THE ROSTER THE SIBLINGS SEE IS THE ONE THAT IS ACTUALLY HERE ─────────────────────────────────
   // fleetStatusBlock has always taken `activeAgents` to prune dead agents out, and no caller in the
   // repo ever passed it — while a fresh codename is minted per item, so the roster grew one finished

@@ -140,6 +140,57 @@ const dead = M.open({ goal: 'killed mid-run' });
 const alive = M.open({ goal: 'still going' });
 tick(10 * 60 * 1000);          // both heartbeats now 10 min old…
 alive.heartbeat();             // …but this one just checked in
+// ── THE PLAN IS A GRAPH, AND STILL A DOCUMENT ─────────────────────────────────────────────────────
+// plan.md is meant to be opened and edited by hand, so the DAG metadata has to survive a round trip
+// through markdown without eating anything that merely looks like it.
+{
+  const { renderPlan, parsePlan, cycleOf } = require('../lib/mission');
+  const cases = [
+    { id: 't1', needs: [], role: 'research', text: 'Pull the last 40 PubMed hits', status: 'done', note: '' },
+    { id: 't3', needs: ['t1', 't2'], role: 'coding', text: 'Rebuild the figure pipeline', status: 'todo', note: 'FORGE' },
+    { id: '', needs: [], role: '', text: 'A legacy item with no parenthetical', status: 'todo', note: '' },
+    { id: '', needs: [], role: '', text: '(optional) reconcile the ledger', status: 'todo', note: '' },
+    { id: 't7', needs: ['t1'], role: 'memory', text: '← · odd chars  — everywhere', status: 'blocked', note: 'waiting on esc_abc123' },
+  ];
+  const back = parsePlan(renderPlan(cases));
+  ok(back.length === cases.length, 'every line survives the round trip');
+  const same = cases.every((c, i) => back[i].text === c.text && back[i].note === c.note
+    && back[i].id === c.id && back[i].role === c.role && JSON.stringify(back[i].needs) === JSON.stringify(c.needs)
+    && back[i].status === c.status);
+  ok(same, 'and survives it byte-for-byte' + (same ? '' : ' — got ' + JSON.stringify(back)));
+
+  // The two that matter most, called out because each is a way the format could quietly eat data:
+  ok(back[3].id === '' && back[3].text === '(optional) reconcile the ledger',
+    'a parenthetical that is not an id is left alone — the pattern is anchored on t<digits>, not on "starts with ("');
+  ok(back[4].text === '← · odd chars  — everywhere' && back[4].note === 'waiting on esc_abc123',
+    'an item whose TEXT contains the separators keeps all of it — the note is the LAST segment, not the first');
+
+  ok(cycleOf(cases) === null, 'a clean graph has no cycle');
+  ok(cycleOf([{ id: 'a', needs: ['b'] }, { id: 'b', needs: ['a'] }]) !== null, 'a two-node cycle is found');
+  ok(cycleOf([{ id: 'a', needs: ['b'] }, { id: 'b', needs: ['c'] }, { id: 'c', needs: ['a'] }]) !== null, 'and a three-node one');
+  ok(cycleOf([{ id: 'a', needs: ['ghost'] }]) === null, 'a dangling dependency is not a cycle — it is just unmet');
+  ok(cycleOf([]) === null && cycleOf(null) === null, 'and junk does not throw');
+}
+
+// ── GROWING THE PLAN MUST NOT ERASE IT ────────────────────────────────────────────────────────────
+// plan.set() normalised to exactly {text, status, note}, and lib/supervisor.js calls it on every batch
+// of work an agent discovers — so the first `newItems` would have dropped every edge in the plan.
+{
+  const m = M.open({ goal: 'a graph' });
+  m.plan.set([
+    { id: 't1', text: 'first', needs: [], role: 'research' },
+    { id: 't2', text: 'second', needs: ['t1'], role: 'coding' },
+  ]);
+  const cur = m.plan.read();
+  m.plan.set([...cur, { text: 'discovered while working', status: 'todo', note: 'found' }]);
+  const after = m.plan.read();
+  ok(after.length === 3, 'the discovered item is appended');
+  ok(after[1].id === 't2' && JSON.stringify(after[1].needs) === '["t1"]' && after[1].role === 'coding',
+    'and the existing edges are still there afterwards' + (after[1].id === 't2' ? '' : ' — got ' + JSON.stringify(after[1])));
+  m.plan.mark(0, 'done', 'ok');
+  ok(m.plan.read()[0].id === 't1', 'mark() preserves the graph too');
+}
+
 // ── A DECLARED BUDGET IS THE REAL CEILING ─────────────────────────────────────────────────────────
 // `missionBudgetUsd` defaults to $5 and dueForResume retires anything at or over it. Hours are chained
 // by parking on the wall clock and resuming, so a run opened at $12 would be retired around hop two
