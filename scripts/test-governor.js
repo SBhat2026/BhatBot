@@ -82,13 +82,19 @@ console.log('[governor]');
   ok('foreground is never shed at any level (the hard invariant)');
 }
 
-// 5. Memory drives the ladder independently of thermal — sized for the REAL 16GB machine.
+// 5. Memory drives the ladder independently of thermal — sized for the REAL 24GB machine.
+//
+// These numbers moved with DEFAULTS (25/15/8 → 18/11/6) and had to, in the same commit: at the new
+// thresholds 20% free is nominal and 12% is warm, so the old assertions were not merely stale, they
+// were asserting the old machine's behaviour on the new one. Same absolute headroom, different
+// percentage of a bigger pool.
 {
   const { g, s } = mk();
   s.mem = 30; g.poll(); assert.strictEqual(g.level(), 'nominal');
-  s.mem = 20; g.poll(); assert.strictEqual(g.level(), 'warm', '20% free on 16GB → warm');
-  s.mem = 12; g.poll(); assert.strictEqual(g.level(), 'hot');
-  s.mem = 5;  g.poll(); assert.strictEqual(g.level(), 'critical');
+  s.mem = 20; g.poll(); assert.strictEqual(g.level(), 'nominal', '20% of 24GB is ~4.8GB free — that was warm on the 16GB box and is fine here');
+  s.mem = 15; g.poll(); assert.strictEqual(g.level(), 'warm', '15% free → warm');
+  s.mem = 9;  g.poll(); assert.strictEqual(g.level(), 'hot');
+  s.mem = 4;  g.poll(); assert.strictEqual(g.level(), 'critical');
   ok('memory pressure drives the ladder independently of thermal');
 }
 

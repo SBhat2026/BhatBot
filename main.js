@@ -129,6 +129,7 @@ const designation = require('./lib/designation');
 const { createEscalations } = require('./lib/escalate');
 const { createForge } = require('./lib/toolforge');
 const { createSupervisor } = require('./lib/supervisor');
+const tiersLib = require('./lib/tiers');
 
 const escalations = createEscalations({
   notify: (msg, urgency, opts) => notifyUser(msg, urgency, opts),
@@ -190,6 +191,18 @@ const supervisor = createSupervisor({
   // absent opinion is `null`, never zero.
   widthCaps: {
     admission: () => { try { return admission.width(MODEL_SONNET, 3072, { min: 1, max: FLEET_CAP }); } catch { return null; } },
+    // THE MACHINE GETS A SAY, and a narrow one on purpose. Cloud agents cost neither watts nor RAM —
+    // they are network-bound and already paced by admission — so the tier does not really want to
+    // limit them, and capping at 5/3/2 is about keeping an unattended run's footprint proportionate
+    // to how much of the machine is his right now rather than about heat. The governor's own
+    // `critical` is the one case that stops launching outright, because at that point the machine is
+    // in trouble and an hour-long run is not the priority.
+    tier: () => {
+      try {
+        if (governor.poll() && !governor.allowBackgroundTick('supervisor')) return 0;   // critical
+        return { aggressive: 5, balanced: 3, conservative: 2 }[tiers.poll()] ?? null;
+      } catch { return null; }
+    },
   },
   // `autonomous: true` — an hour-long run has nobody sitting at a prompt to answer a question, so the
   // custodian records its doubt rather than blocking on one. It degrades the right way: with no judge
@@ -393,6 +406,11 @@ function readMemFreePct() {
   }
   return _memFreePct;
 }
+// WHICH TIER IS THIS MACHINE IN. The governor answers "is it under pressure"; this answers "is
+// Siddhant using it", which is the question that decides whether an unattended run may hold a 9.6GB
+// model resident. It CONSUMES the governor rather than absorbing it, because their hysteresis runs in
+// opposite directions — see the header of lib/tiers.js.
+let tiers = null;      // built just after the governor, which it reads
 const governor = createGovernor({
   readThermal: () => {
     try { if (powerMonitor.getCurrentThermalState) return powerMonitor.getCurrentThermalState(); } catch {}
@@ -403,6 +421,45 @@ const governor = createGovernor({
   powerSaver: powerSaverOn,
   log: (m) => console.log(m),
 });
+tiers = tiersLib.createTiers({
+  readIdleMs: tiersLib.readIdleMs,
+  onAC: () => !onBatteryPower(),
+  heavyAppRunning: () => tiersLib.heavyAppRunning((loadConfig().tiers || {}).heavyApps),
+  readMemFreePct,
+  governorLevel: () => { try { governor.poll(); return governor.level(); } catch { return 'nominal'; } },
+  config: loadConfig().tiers || {},
+  log: (m) => console.log(m),
+  onChange: (c) => {
+    try {
+      sendToActivity('tool-update', { type: 'thinking', text: c.direction === 'latched'
+        ? `🪜 staying ${c.to} — ${c.why}`
+        : `🪜 ${c.from} → ${c.to} (${c.why})` });
+    } catch {}
+    // Model residency follows the tier, and a DOWNWARD move evicts rather than waiting for the
+    // keep-alive to lapse: the whole point of dropping is that he needs the memory back now.
+    try { applyTierResidency(c.to, c.direction); } catch (e) { console.warn('[tiers] residency:', e && e.message); }
+  },
+});
+
+/**
+ * Per-tier local-model residency — M5_TUNING_PLAN.md §3: evict / keep warm / pin.
+ *
+ * OLLAMA_KEEP_ALIVE is read by the ollama server per request, so this sets it for the calls WE make.
+ * On the way down we also stop the resident model outright, because the reason the tier dropped is
+ * that something else needs the memory, and a 30-minute keep-alive would hold 5-10GB for half an hour
+ * after he opened Xcode.
+ */
+function applyTierResidency(tier, direction) {
+  if ((loadConfig().tiers || {}).enabled === false) return;
+  const ka = tiersLib.KEEP_ALIVE[tier];
+  if (ka) process.env.OLLAMA_KEEP_ALIVE = ka;
+  if (direction !== 'down' || tier !== 'conservative') return;
+  const model = (loadConfig().cheapModel || loadConfig().localModel || '').trim();
+  if (!model) return;
+  // Best-effort and non-blocking: failing to evict must never take a turn down with it.
+  exec(`ollama stop ${JSON.stringify(model)}`, { timeout: 4000 }, () => {});
+}
+
 // Heavy local compute is gated by BOTH the legacy battery bit and the governor, so the existing
 // power-saver behaviour is preserved exactly while the thermal/memory ladder is added on top.
 function shouldSpareCompute() { governor.poll(); return shouldSpareWatts() || !governor.allowLocalModel(); }
