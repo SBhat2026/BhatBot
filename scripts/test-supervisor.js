@@ -42,6 +42,7 @@ function rig(over = {}, opts = {}) {
   const missions = createMissions({ dir: path.join(dir, 'missions') });
   const sup = createSupervisor({
     missions,
+    widthCaps: over.widthCaps,
     runAgent: over.runAgent || (async ({ goal }) => ({ status: 'done', summary: 'did ' + goal, spendUsd: 0.01 })),
     decompose: over.decompose || (async ({ goal }) => [goal]),
     escalations: over.escalations,
@@ -544,6 +545,60 @@ function rig(over = {}, opts = {}) {
     const { sup: s5 } = rig({});
     const r5 = await s5.run({ goal: 'g', plan: ['a'] });
     ok(r5.ok && r5.custodian === null, 'with no reviewer the report carries null rather than a fabricated approval');
+  }
+
+  // ── ONE ARBITER, AND IT SAYS WHO BOUND IT ────────────────────────────────────────────────────────
+  // Admission, the cost pilot and the machine tier all want to set the agent count. Two of them will
+  // eventually disagree, and without a single owner the loser is an evening spent asking "who lowered
+  // my width".
+  {
+    // Exactly one place in the file computes it. A second would be the whole bug.
+    const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'supervisor.js'), 'utf8');
+    const sites = (src.match(/function widthNow\(/g) || []).length;
+    ok(sites === 1, `exactly one function decides width (found ${sites})`);
+    ok(/bindingConstraint/.test(src), 'and it names what bound it');
+  }
+  {
+    let cap = 5;
+    const seen = [];
+    const { sup, events } = rig({
+      widthCaps: { admission: () => cap },
+      runAgent: async () => { await new Promise((r) => setTimeout(r, 12)); return { status: 'done', summary: 'ok' }; },
+    }, { width: 5 });
+    const items = Array.from({ length: 14 }, (_, i) => `read the paper on electrode wear, part ${i}`);
+    const p = sup.run({ goal: 'g', plan: items });
+    setTimeout(() => { cap = 1; }, 40);      // admission tightens mid-run
+    const r = await p;
+    ok(r.ok, 'the run finishes while a cap moves under it');
+    const widths = events.filter((e) => e.type === 'width');
+    ok(widths.length >= 2, `width changed during the run (${widths.map((w) => w.value).join(' → ')})`);
+    ok(widths.some((w) => w.value === 1 && w.bindingConstraint === 'admission'),
+      'and the narrowing is attributed to admission, not left anonymous');
+    void seen;
+  }
+  {
+    // Nothing can raise width above what the run asked for.
+    const { sup, events } = rig({ widthCaps: { generous: () => 99 } }, { width: 2 });
+    await sup.run({ goal: 'g', plan: ['read a', 'read b', 'read c'] });
+    const w = events.filter((e) => e.type === 'width');
+    ok(w.every((x) => x.value <= 2), 'a cap above the request cannot raise it');
+    ok(w.length && w[0].bindingConstraint === 'spec', 'and the request itself is named as the binding constraint');
+  }
+  {
+    // An absent or broken controller has NO opinion — it must not be able to stop the run by
+    // defaulting to zero.
+    const { sup } = rig({ widthCaps: { broken: () => { throw new Error('nope'); }, silent: () => null } }, { width: 3 });
+    const r = await sup.run({ goal: 'g', plan: ['read a', 'read b'] });
+    ok(r.ok && r.done.length === 2, 'a controller that throws or abstains is ignored rather than obeyed');
+  }
+  {
+    // A cap of ZERO is a request to stop launching — drain and park, do not spin.
+    const { sup } = rig({ widthCaps: { tier: () => 0 } }, { width: 3, stallTicks: 500 });
+    const t0 = Date.now();
+    const r = await sup.run({ goal: 'g', plan: ['read a', 'read b'], wallClockMs: 4000 });
+    ok(r.stoppedBecause === 'throttled', `width 0 parks the run rather than spinning (${r.stoppedBecause})`);
+    ok(Date.now() - t0 < 3000, 'and it does so promptly rather than waiting out the clock');
+    ok(r.open.length === 2, 'with the work left open for a resume');
   }
 
   // ── ALL ONE ROLE, OR ONE OF EACH. NOTHING BETWEEN. ──────────────────────────────────────────────

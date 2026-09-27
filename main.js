@@ -183,6 +183,14 @@ const supervisor = createSupervisor({
   decompose: (spec) => supervisedDecompose(spec),
   onEvent: (e) => supervisorEvent(e),
   shouldStop: () => !!(_supervisedRun && _supervisedRun.stopRequested),
+  // THE SUPERVISOR STOPS BEING AN ISLAND. lib/admission.js has always derived a safe fan-out width
+  // from the live rolling OTPM window, and every other parallel path in the app consults it; this one
+  // never did, so an hour-long run kept launching at whatever width the tool call happened to name
+  // while the rate window said otherwise. Each entry here can only LOWER the requested width, and an
+  // absent opinion is `null`, never zero.
+  widthCaps: {
+    admission: () => { try { return admission.width(MODEL_SONNET, 3072, { min: 1, max: FLEET_CAP }); } catch { return null; } },
+  },
   // `autonomous: true` — an hour-long run has nobody sitting at a prompt to answer a question, so the
   // custodian records its doubt rather than blocking on one. It degrades the right way: with no judge
   // it runs only its deterministic checks and accepts what it cannot disprove, because a reviewer
@@ -4417,6 +4425,13 @@ function supervisorEvent(e) {
         break;
       case 'assumed':
         sendToActivity('tool-update', { type: 'thinking', text: `🤔 no answer — proceeding on: ${String(e.assumption).slice(0, 90)}` });
+        break;
+      case 'width':
+        // Only worth a line when it actually moves, and always with the reason — "who lowered my
+        // width" should never be a question anyone has to investigate.
+        if (e.from != null && e.from !== e.value) {
+          sendToActivity('tool-update', { type: 'thinking', text: `⚖ agents ${e.from} → ${e.value} (${e.bindingConstraint})` });
+        }
         break;
       case 'mode':
         // Which shape the cast is in, and why. Five specialists or five of one — the two states the
