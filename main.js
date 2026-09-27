@@ -4383,7 +4383,7 @@ function supervisorEvent(e) {
     if (['run-start', 'progress', 'escalated', 'unblocked', 'assumed', 'plan-grew', 'forged', 'gave-up', 'run-end', 'agent', 'agent-gone'].includes(e.type)) pushLongRunSoon();
     switch (e.type) {
       case 'agent':
-        supervisedAgents.set(e.id, { id: e.id, name: e.name, designation: e.designation, state: e.state, task: e.task, step: e.step, since: e.since });
+        supervisedAgents.set(e.id, { id: e.id, name: e.name, designation: e.designation, role: e.role, state: e.state, task: e.task, step: e.step, since: e.since });
         pushPresenceNow();
         break;
       case 'agent-gone':
@@ -4417,6 +4417,19 @@ function supervisorEvent(e) {
         break;
       case 'assumed':
         sendToActivity('tool-update', { type: 'thinking', text: `🤔 no answer — proceeding on: ${String(e.assumption).slice(0, 90)}` });
+        break;
+      case 'mode':
+        // Which shape the cast is in, and why. Five specialists or five of one — the two states the
+        // roster is allowed to be in, and the moment it changes between them is worth a line.
+        sendToActivity('tool-update', { type: 'thinking', text: e.to === 'uniform'
+          ? `👥 all agents on ${Object.keys(e.histogram || {})[0] || 'one role'} — the remaining work is single-role`
+          : `👥 five specialists — ${Object.entries(e.histogram || {}).map(([r, n]) => `${r}×${n}`).join(' · ')}` });
+        break;
+      case 'plan-rejected':
+        sendToActivity('tool-update', { type: 'thinking', text: `⛔ the plan has a dependency cycle at ${e.at} — nothing was started` });
+        break;
+      case 'dep-dead':
+        sendToActivity('tool-update', { type: 'thinking', text: `⛓ step ${e.id || e.item} cannot run — ${e.needed} did not complete` });
         break;
       case 'plan-grew':
         sendToActivity('tool-update', { type: 'thinking', text: `➕ ${e.by} found more work: ${e.added.join(' · ').slice(0, 110)}` });
@@ -9823,7 +9836,7 @@ function presenceSnapshot() {
       if (agents.length >= PRESENCE_CAP) break;
       seen.add(id);
       agents.push({
-        id, role: a.designation, name: a.name,
+        id, role: a.role || a.designation, name: a.name,
         state: a.state || 'working', status: a.state || 'working',
         designation: a.designation,
         task: String(a.task || '').slice(0, 160),

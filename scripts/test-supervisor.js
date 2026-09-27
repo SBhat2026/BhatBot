@@ -546,6 +546,92 @@ function rig(over = {}, opts = {}) {
     ok(r5.ok && r5.custodian === null, 'with no reviewer the report carries null rather than a fabricated approval');
   }
 
+  // ── ALL ONE ROLE, OR ONE OF EACH. NOTHING BETWEEN. ──────────────────────────────────────────────
+  {
+    // THE INVARIANT, checked continuously rather than at the end. In ensemble mode two agents of the
+    // same role must never be in flight at once — that is the "nothing in between" state.
+    let worst = 0, sawEnsemble = false;
+    const live = new Map();
+    const { sup, events } = rig({
+      runAgent: async ({ role, id }) => {
+        live.set(id, role);
+        const counts = {};
+        for (const r of live.values()) counts[r] = (counts[r] || 0) + 1;
+        worst = Math.max(worst, Math.max(...Object.values(counts)));
+        await new Promise((r) => setTimeout(r, 12));
+        live.delete(id);
+        return { status: 'done', summary: 'ok' };
+      },
+    }, { width: 5 });
+
+    const r = await sup.run({ goal: 'g', plan: [
+      'write the migration code', 'read the papers on electrode wear', 'click through the staging site',
+      'remember the decision about the schema', 'render the diagram',
+      'write the second migration', 'read two more papers', 'render a second diagram',
+    ] });
+    sawEnsemble = events.some((e) => e.type === 'mode' && e.to === 'ensemble');
+    ok(r.ok && r.done.length === 8, 'an eight-item, five-role plan completes');
+    ok(sawEnsemble, 'and it announced ensemble mode');
+    ok(worst === 1, `never two agents of the same role at once (worst concurrent same-role count: ${worst})`);
+  }
+  {
+    // UNIFORM: a single-role plan lets all five work it, because there is nothing else to be.
+    let worst = 0;
+    const live = new Map();
+    const { sup, events } = rig({
+      runAgent: async ({ role, id }) => {
+        live.set(id, role);
+        const counts = {};
+        for (const r of live.values()) counts[r] = (counts[r] || 0) + 1;
+        worst = Math.max(worst, Math.max(...Object.values(counts)));
+        await new Promise((r) => setTimeout(r, 15));
+        live.delete(id);
+        return { status: 'done', summary: 'ok' };
+      },
+    }, { width: 5 });
+    const r = await sup.run({ goal: 'g', plan: Array.from({ length: 10 }, (_, i) => `read the paper on electrode wear, part ${i}`) });
+    ok(r.ok && r.done.length === 10, 'a single-role plan completes');
+    ok(worst > 1, `and all five may work it — ${worst} agents of the one role ran at once, which uniform mode is for`);
+    ok(events.some((e) => e.type === 'mode' && e.to === 'uniform'), 'and it announced uniform mode');
+  }
+  {
+    // UNIFORM → ENSEMBLE. Two items that both classify as `code`, the first of which discovers
+    // research work — so a second role appears WHILE coding work is still open. That is the only shape
+    // that genuinely transitions: a single item discovering a second role does not, because by the
+    // next pass the first is done and the plan is single-role again, just a different one.
+    //
+    // The strings are chosen against the real classifier, not against what they sound like — an
+    // earlier version of this test used "write the second migration", which classifies as `general`
+    // and therefore `research`, so the plan was two roles from the start and the assertion passed
+    // while the comment above it described something that never happened.
+    const { sup, events } = rig({
+      runAgent: async ({ goal }) => {
+        await new Promise((r) => setTimeout(r, 8));
+        return goal === 'write the migration code'
+          ? { status: 'done', summary: 'found more', newItems: ['read the papers on electrode wear'] }
+          : { status: 'done', summary: 'ok' };
+      },
+    }, { width: 5 });
+    await sup.run({ goal: 'g', plan: ['write the migration code', 'refactor the loop'] });
+    const modes = events.filter((e) => e.type === 'mode');
+    ok(modes[0] && modes[0].to === 'uniform', `it starts uniform on a two-coding-item plan (${modes.map((m) => m.to).join(' → ')})`);
+    ok(modes.some((m) => m.to === 'ensemble'), 'and switches to ensemble when a second role appears mid-run');
+    const toEnsemble = modes.find((m) => m.to === 'ensemble');
+    ok(toEnsemble && toEnsemble.histogram && Object.keys(toEnsemble.histogram).length >= 2,
+      'carrying the role histogram that caused it — a run that reshapes its cast silently is unexplainable later');
+  }
+  {
+    // Agents are named for the ROLE they fill, so the name means the same thing all run.
+    const seen = [];
+    const { sup } = rig({ runAgent: async ({ name, role }) => { seen.push([role, name]); return { status: 'done', summary: 'ok' }; } }, { width: 5 });
+    await sup.run({ goal: 'g', plan: ['write the code', 'read the papers', 'write more code'] });
+    const byRole = new Map(seen);
+    ok(byRole.get('coding') === 'FORGE' && byRole.get('research') === 'ORACLE',
+      `the role decides the name (${seen.map((x) => x.join('=')).join(', ')})`);
+    const coding = seen.filter(([r]) => r === 'coding').map(([, n]) => n);
+    ok(new Set(coding).size === 1, 'and two coding items are worked by the same name, not two invented ones');
+  }
+
   // ── DEPENDENCIES ─────────────────────────────────────────────────────────────────────────────────
   // The whole point of Phase 1. These are written BEFORE the gate exists, because the most dangerous
   // one of them passes trivially today and starts failing the moment the gate is wrong.
