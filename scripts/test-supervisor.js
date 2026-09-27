@@ -546,6 +546,59 @@ function rig(over = {}, opts = {}) {
     ok(r5.ok && r5.custodian === null, 'with no reviewer the report carries null rather than a fabricated approval');
   }
 
+  // ── THE ROSTER THE SIBLINGS SEE IS THE ONE THAT IS ACTUALLY HERE ─────────────────────────────────
+  // fleetStatusBlock has always taken `activeAgents` to prune dead agents out, and no caller in the
+  // repo ever passed it — while a fresh codename is minted per item, so the roster grew one finished
+  // agent at a time and every one of them rode into every later worker's context. Measured at 120
+  // items: ~3,000 tokens of agents that were long gone.
+  {
+    const seen = [];
+    const { sup } = rig({
+      runAgent: async ({ goal, context }) => { seen.push({ goal, context: context || '' }); return { status: 'done', summary: 'ok' }; },
+    }, { width: 1 });
+    await sup.run({ goal: 'g', plan: ['alpha', 'bravo', 'charlie', 'delta', 'echo', 'foxtrot'] });
+
+    const last = seen[seen.length - 1].context;
+    const roster = last.split('\n').filter((l) => l.startsWith('•'));
+    ok(roster.length <= 1,
+      `the last worker saw ${roster.length} agent(s) on the roster, not five finished ones — ${JSON.stringify(roster).slice(0, 120)}`);
+    // The findings still come through: pruning the roster must not silence the lateral channel.
+    ok(/alpha/.test(last) || /finding/.test(last), 'and it still sees what its siblings learned');
+  }
+
+  // ── TOKENS REACH THE JOURNAL ─────────────────────────────────────────────────────────────────────
+  // mission.step() has accepted tokensIn/tokensOut since it was written and nobody ever passed them, so
+  // every journal row ever recorded has `undefined` for both. Nothing can predict a run's cost from a
+  // history that never recorded one.
+  {
+    const dir = TMP();
+    const missions = createMissions({ dir: path.join(dir, 'missions') });
+    const sup = createSupervisor({
+      missions, onEvent: () => {},
+      runAgent: async () => ({ status: 'done', summary: 'ok', spendUsd: 0.02, tokensIn: 8200, tokensOut: 430 }),
+    }, fastOpts);
+    const r = await sup.run({ goal: 'g', plan: ['a', 'b'] });
+    const rows = missions.attach(r.missionId).journal();
+    ok(rows.length === 2, 'both items journalled');
+    ok(rows.every((x) => x.tokensIn === 8200 && x.tokensOut === 430),
+      `and each row carries its token counts (got ${JSON.stringify(rows.map((x) => [x.tokensIn, x.tokensOut]))})`);
+  }
+
+  // ── THE FIVE REAL CODENAMES ──────────────────────────────────────────────────────────────────────
+  // CODENAMES is an object; this file used it as an array, so `.length` was undefined, the guard was
+  // always falsy, and every supervised agent that has ever run was called VALE or ORRIN. The names the
+  // office legend and the drone fleet already use had never appeared in a long run.
+  {
+    const { CODENAMES } = require('../lib/agents/roles');
+    const names = [];
+    const { sup } = rig({ runAgent: async ({ name }) => { names.push(name); return { status: 'done', summary: 'ok' }; } }, { width: 1 });
+    await sup.run({ goal: 'g', plan: ['a', 'b', 'c'] });
+    const real = Object.entries(CODENAMES).filter(([r]) => r !== 'orchestrator').map(([, n]) => n);
+    ok(names.every((n) => real.some((c) => n.startsWith(c))),
+      `agents are named from the real roster (got ${names.join(', ')}; expected from ${real.join(', ')})`);
+    ok(!names.includes('VALE'), 'and not from the fallback list that the broken guard always selected');
+  }
+
   // ── planDigest is what progress is measured against ──────────────────────────────────────────────
   {
     const a = [{ text: 'x', status: 'todo' }, { text: 'y', status: 'todo' }];

@@ -380,5 +380,53 @@ ok(Array.isArray(tagCache('nope')) === false, 'cache: non-array → returned as-
   }
 }
 
+// ---- the supervised worker prices in DOLLARS ----------------------------------------------------
+// `spendUsd` drives the $2 run wall and the $0.35 per-item wallet, and it was computed by a hand-rolled
+// `(in/1e6)*3 + (out/1e6)*15`. claude-sonnet-5 bills $2/$10, so an uncached turn was over-counted by
+// half; and the formula ignored cache_read/cache_creation entirely, so a CACHED turn — where
+// input_tokens is only the delta — was under-counted by about as much the other way. The walls were
+// enforcing a currency that was not dollars. lib/pricing.js already exists to prevent exactly this.
+{
+  const pricing = require('../lib/pricing');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
+
+  const worker = extract(src, 'supervisedWorker');
+  ok(/pricing\.usd\(MODEL_SONNET/.test(worker), 'the supervised worker prices through lib/pricing');
+  ok(!/\/ 1e6\) \* 3 \+/.test(worker), 'and carries no hand-rolled rate of its own');
+
+  const drone = extract(src, 'droneAgentRun');
+  ok(/pricing\.usd\(model/.test(drone), 'the drone loop prices through lib/pricing too');
+  ok(!/\/ 1e6\) \* 3 \+/.test(drone), 'and carries no hand-rolled rate either');
+
+  // The number the walls would now see, for a realistic cached turn.
+  const cached = { input_tokens: 1000, output_tokens: 500, cache_read_input_tokens: 20000, cache_creation_input_tokens: 3000 };
+  const real = pricing.usd('claude-sonnet-5', cached);
+  const handRolled = (1000 / 1e6) * 3 + (500 / 1e6) * 15;
+  ok(real > handRolled * 1.5,
+    `a cached turn really costs $${real.toFixed(4)} and the old formula said $${handRolled.toFixed(4)} — it under-counted exactly when caching worked`);
+  ok(pricing.usd('claude-sonnet-5', { input_tokens: 1000, output_tokens: 500 }) < handRolled,
+    'and it over-counted when caching did not');
+
+  // Tokens must reach the journal, or nothing can ever predict what a run will cost.
+  ok(/tokensIn \+=/.test(worker) && /tokensOut \+=/.test(worker), 'the worker accumulates token counts');
+  ok((worker.match(/tokensIn, tokensOut/g) || []).length >= 3,
+    'and every return path carries them out — a path that drops them is a hole in the cost history');
+}
+
+// ---- the cache gate counts the whole billable prefix ---------------------------------------------
+// It counted `messages` alone. A supervised worker's first turn is ~30 tokens of goal beside ~5,500 of
+// tool schema, so the gate looked at a 9,000-token prefix, saw 30, and declined to cache it. Turn one
+// therefore never wrote a cache entry and the schema was billed at full rate at least twice per item.
+{
+  const src = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
+  const i = src.indexOf('const cacheable = estimateTokens(body.messages)');
+  ok(i > 0, 'the gate computes a `cacheable` prefix size');
+  const block = src.slice(i, i + 420);
+  ok(/body\.tools/.test(block), 'including the tools array');
+  ok(/body\.system/.test(block), 'and the system prompt');
+  ok(/cacheable >= 2000/.test(block), 'and that total is what the 2000-token threshold tests');
+  ok(!/estimateTokens\(body\.messages\) >= 2000/.test(src), 'the messages-only test is gone');
+}
+
 console.log(`\n${fail === 0 ? '✅' : '❌'} ${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);

@@ -1782,8 +1782,19 @@ async function anthropicRequest(body, apiKey, { retries = 5 } = {}) {
   // (small one-off judge/plan calls skip it — the write premium would outweigh a prefix that never
   // repeats). Gated by config.convoCache (default on). Failure here must never block the call.
   try {
+    // THE WHOLE BILLABLE PREFIX, not just the messages.
+    //
+    // This counted `messages` alone, which is nearly empty on the first turn of any subagent — a
+    // supervised worker opens with ~30 tokens of goal beside ~5,500 of tool schema and ~360 of system.
+    // So the gate looked at a 9,000-token prefix, saw 30, and decided it was too small to be worth
+    // caching. Turn one therefore never wrote a cache entry and the schema was billed at full rate at
+    // least twice for every plan item. Tools and system are billed and cacheable exactly like messages
+    // are, so they belong in the same count.
+    const cacheable = estimateTokens(body.messages)
+      + (Array.isArray(body.tools) ? estimateTokens(body.tools) : 0)
+      + (body.system ? estimateTokens(body.system) : 0);
     if (loadConfig().convoCache !== false && Array.isArray(body && body.messages) && body.messages.length
-        && estimateTokens(body.messages) >= 2000) {
+        && cacheable >= 2000) {
       body = { ...body, messages: tagLastBlockForCache(body.messages) };
     }
   } catch {}
@@ -4044,7 +4055,7 @@ async function droneAgentRun(ctx, task) {
     const text = content.filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim();
     if (text) finalText = text;
     const u = resp.usage || {};
-    const usd = ((u.input_tokens || 2000) / 1e6) * 3 + ((u.output_tokens || 400) / 1e6) * 15;   // Sonnet ~ $3 in / $15 out
+    const usd = pricing.usd(model, u);   // the table, not a hand-rolled copy — see supervisedWorker's note
     const step = ctx.onStep ? ctx.onStep({ usd, note: (text || 'tool step').slice(0, 60) }) : { budgetLeft: true };
     const tus = content.filter((b) => b.type === 'tool_use');
     if (!tus.length || resp.stop_reason === 'end_turn' || (step && step.budgetLeft === false) || (step && step.terminated)) break;
@@ -4244,7 +4255,20 @@ async function supervisedWorker(spec) {
 
   let hist = [{ role: 'user', content: String(spec.goal) }];
   let spendUsd = 0, turns = 0, finalText = '';
-  const price = (u) => ((u.input_tokens || 2000) / 1e6) * 3 + ((u.output_tokens || 400) / 1e6) * 15;   // Sonnet
+  let tokensIn = 0, tokensOut = 0;
+  // THE PRICING TABLE, NOT A THIRD COPY OF IT.
+  //
+  // This was `(in/1e6)*3 + (out/1e6)*15`, hand-rolled and wrong in two directions at once.
+  // claude-sonnet-5 bills $2/$10, not $3/$15 — so an uncached turn was over-counted by half — and the
+  // formula ignored `cache_read_input_tokens` and `cache_creation_input_tokens` entirely, so a CACHED
+  // turn (where `input_tokens` is only the delta) was under-counted by about the same margin in the
+  // other direction. A realistic turn: real $0.0185, hand-rolled $0.0105.
+  //
+  // That number is not cosmetic. It drives spendUsd → the $2 run wall and the $0.35 per-item wallet,
+  // so both walls were enforcing a currency that was not dollars. lib/pricing.js exists precisely to
+  // stop this, and its header already explains that two drifting tables is how it went wrong the first
+  // time; this was the third.
+  const price = (u) => pricing.usd(MODEL_SONNET, u || {});
 
   unattendedDepth++;
   try {
@@ -4258,9 +4282,11 @@ async function supervisedWorker(spec) {
         _reason: { subagent: true, taskBudget: maxTurns * 3072 * 4 },
       }, getApiKey());
     } catch (e) {
-      return { status: finalText ? 'partial' : 'failed', summary: finalText || ('model error: ' + e.message), spendUsd, turns };
+      return { status: finalText ? 'partial' : 'failed', summary: finalText || ('model error: ' + e.message), spendUsd, turns, tokensIn, tokensOut };
     }
     spendUsd += price(resp.usage || {});
+    tokensIn += (resp.usage || {}).input_tokens || 0;
+    tokensOut += (resp.usage || {}).output_tokens || 0;
     const content = resp.content || [];
     hist.push({ role: 'assistant', content });
     const text = content.filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim();
@@ -4290,6 +4316,8 @@ async function supervisedWorker(spec) {
       _reason: { subagent: true, schema: SUPERVISED_ENVELOPE },
     }, getApiKey());
     spendUsd += price(r.usage || {});
+    tokensIn += (r.usage || {}).input_tokens || 0;
+    tokensOut += (r.usage || {}).output_tokens || 0;
     const txt = (r.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('');
     const j = parseJsonLoose(txt) || {};
     const need = j.need && j.need.kind && j.need.kind !== 'none' ? j.need : null;
@@ -4297,12 +4325,12 @@ async function supervisedWorker(spec) {
       status: ['done', 'partial', 'blocked'].includes(j.status) ? j.status : (finalText ? 'partial' : 'failed'),
       summary: String(j.summary || finalText || '(no report)').slice(0, 1200),
       need, newItems: Array.isArray(j.newItems) ? j.newItems.slice(0, 5) : [],
-      spendUsd, turns,
+      spendUsd, turns, tokensIn, tokensOut,
     };
   } catch (e) {
     // A failed wrap-up must not discard the work. The loop's own last text is a worse report than the
     // envelope and a far better one than nothing.
-    return { status: finalText ? 'partial' : 'failed', summary: finalText || ('wrap-up failed: ' + e.message), spendUsd, turns };
+    return { status: finalText ? 'partial' : 'failed', summary: finalText || ('wrap-up failed: ' + e.message), spendUsd, turns, tokensIn, tokensOut };
   }
   } finally { unattendedDepth--; }
 }
@@ -9998,6 +10026,9 @@ async function runScheduledTask(s) {
 // resumable and runaway). Serial, idle-gated, and it always yields to the user.
 function missionCaps() {
   const c = loadConfig();
+  // maxSpendUsd is the FLOOR here, not the ceiling: lib/mission.js dueForResume measures a mission
+  // that declared its own budgetUsd against that instead, so a run Siddhant asked for at $12 is not
+  // retired at hop two and told "spend limit ($5)" — a number he never chose.
   return {
     maxResumes: Number(c.missionMaxResumes) || 20,
     maxSpendUsd: Number(c.missionBudgetUsd) || 5,

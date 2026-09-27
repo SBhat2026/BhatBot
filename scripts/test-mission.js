@@ -140,6 +140,33 @@ const dead = M.open({ goal: 'killed mid-run' });
 const alive = M.open({ goal: 'still going' });
 tick(10 * 60 * 1000);          // both heartbeats now 10 min old…
 alive.heartbeat();             // …but this one just checked in
+// ── A DECLARED BUDGET IS THE REAL CEILING ─────────────────────────────────────────────────────────
+// `missionBudgetUsd` defaults to $5 and dueForResume retires anything at or over it. Hours are chained
+// by parking on the wall clock and resuming, so a run opened at $12 would be retired around hop two
+// and told "spend limit ($5)" — a limit nobody chose for it, reported as an expiry rather than as the
+// budget it was given. At $3–4/hour that kills a four-hour run at about ninety minutes.
+{
+  const rich = M.open({ goal: 'a four-hour job', budgetUsd: 12 });
+  rich.spend(7);
+  rich.park('stopped: wall-clock');
+  const v1 = M.dueForResume({ maxSpendUsd: 5, maxResumes: 20, maxAgeHours: 24, defaultBackoffMs: 0 });
+  ok(v1.ready.some((m) => m.id === rich.id), '$7 spent against a DECLARED $12 budget is still due for resume');
+  ok(!v1.expired.some((x) => x.id === rich.id), 'and is not retired on the global $5 net');
+
+  rich.spend(6);                       // now $13, past its own ceiling
+  const v2 = M.dueForResume({ maxSpendUsd: 5, maxResumes: 20, maxAgeHours: 24, defaultBackoffMs: 0 });
+  const gone = v2.expired.find((x) => x.id === rich.id);
+  ok(!!gone, 'past its OWN ceiling it does retire');
+  ok(/\$12/.test(gone.reason), `and the reason names the budget it was actually given (got "${gone && gone.reason}")`);
+
+  // A mission that never declared one is still measured against the global floor.
+  const plain = M.open({ goal: 'an ordinary mission' });
+  plain.spend(6);
+  plain.park('stopped: wall-clock');
+  const v3 = M.dueForResume({ maxSpendUsd: 5, maxResumes: 20, maxAgeHours: 24, defaultBackoffMs: 0 });
+  ok(v3.expired.some((x) => x.id === plain.id), 'a mission with no declared budget still retires at the global floor');
+}
+
 // ── UNPARK IS NOT A RESUME ────────────────────────────────────────────────────────────────────────
 // resumeCount is the durable circuit breaker that decides how many times a long job may be picked
 // back up. A run that parks itself for ninety seconds waiting for an answer and then carries on is
