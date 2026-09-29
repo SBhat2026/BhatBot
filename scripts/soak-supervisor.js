@@ -528,6 +528,21 @@ const ITEM_BY_TEXT = new Map();
   // to whoever remembers to open a JSON file.
   try {
     const LOG = path.join(ROOT, 'BENCH_LOG.md');
+    // The header is written when the file is created AND REPAIRED IF IT IS STALE. Writing it only on
+    // creation is how the log ended up with a 12-column header over 13-column rows when the energy
+    // column was added: every value after `rss` read one column to the left, so the Wh figure appeared
+    // under "fwd/2nd half". A misaligned comparison table is worse than no table, because it is still
+    // legible and now wrong.
+    const HEADER = '| when | commit | min | width | verified | false-done | tok/item | $ | rss | energy | fwd/2nd half | stopped | pass |';
+    const RULE = '|---|---|---|---|---|---|---|---|---|---|---|---|---|';
+    if (fs.existsSync(LOG)) {
+      const cur = fs.readFileSync(LOG, 'utf8');
+      const head = (cur.match(/^\|\s*when\s*\|.*$/m) || [])[0];
+      if (head && head !== HEADER) {
+        fs.writeFileSync(LOG, cur.replace(head, HEADER).replace(/^\|-{3}\|.*$/m, RULE));
+        log('note: repaired a stale BENCH_LOG header (columns had been added since it was written)');
+      }
+    }
     if (!fs.existsSync(LOG)) {
       fs.writeFileSync(LOG, [
         '# Soak log',
@@ -536,8 +551,8 @@ const ITEM_BY_TEXT = new Map();
         'itself, never by asking the agent — "the agent said done" is the one signal an endurance test',
         'must not trust. Full records in `~/.bhatbot/bench/`.',
         '',
-        '| when | commit | min | width | verified | false-done | tok/item | $ | rss | energy | fwd/2nd half | stopped | pass |',
-        '|---|---|---|---|---|---|---|---|---|---|---|---|---|',
+        HEADER,
+        RULE,
         '',
       ].join('\n'));
     }
