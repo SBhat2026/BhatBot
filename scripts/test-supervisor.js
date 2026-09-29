@@ -547,6 +547,37 @@ function rig(over = {}, opts = {}) {
     ok(r5.ok && r5.custodian === null, 'with no reviewer the report carries null rather than a fabricated approval');
   }
 
+  // ── A ROUGH PATCH IS NOT A BROKEN RUN ────────────────────────────────────────────────────────────
+  // A 62-minute soak died on this: 256 items verified, then five consecutive model timeouts during a
+  // burst of unrelated load, and the consecutive-failure wall retired it as though nothing had ever
+  // worked. The streak alone cannot tell "everything is broken" from "half an hour of success and a
+  // bad minute", and only the first is what that wall is for.
+  {
+    let n = 0;
+    const { sup } = rig({
+      // Thirty successes, then a burst of five failures, then fine again.
+      runAgent: async () => {
+        n++;
+        if (n > 30 && n <= 35) return { status: 'failed', summary: 'model timed out' };
+        return { status: 'done', summary: 'ok' };
+      },
+    }, { maxConsecutiveFailures: 5, maxItemAttempts: 3, width: 1 });
+    // 36 items, deliberately under the 40-item planMax — an earlier version of this asked for 45 and
+    // then asserted that 40+ finished, which the cap makes arithmetically impossible.
+    const r = await sup.run({ goal: 'g', plan: Array.from({ length: 36 }, (_, i) => `read the paper, part ${i}`) });
+    ok(r.stoppedBecause !== 'failures',
+      `a run with a track record survives a five-failure burst (stopped: ${r.stoppedBecause})`);
+    ok(r.done.length >= 30, `and gets on with the work (${r.done.length} of 36 done)`);
+  }
+  {
+    // But a run where the recent window really IS mostly failures still stops — the wall has to keep
+    // working, or it has just been deleted.
+    const { sup } = rig({ runAgent: async () => ({ status: 'failed', summary: 'exploded' }) },
+      { maxConsecutiveFailures: 5, maxItemAttempts: 9, width: 1 });
+    const r = await sup.run({ goal: 'g', plan: Array.from({ length: 20 }, (_, i) => `item ${i}`) });
+    ok(r.stoppedBecause === 'failures', `a genuinely broken run still stops (${r.stoppedBecause})`);
+  }
+
   // ── ONE ARBITER, AND IT SAYS WHO BOUND IT ────────────────────────────────────────────────────────
   // Admission, the cost pilot and the machine tier all want to set the agent count. Two of them will
   // eventually disagree, and without a single owner the loser is an evening spent asking "who lowered
