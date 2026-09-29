@@ -379,6 +379,82 @@ ok(digestResult('plain string').head === 'plain string', 'digestResult: handles 
   ok(r && r.seq > Math.max(...seqs), `a re-attached mission continues the sequence rather than restarting it (${r && r.seq} > ${Math.max(...seqs)})`);
 }
 
+// ── the mission LEASE ─────────────────────────────────────────────────────────────────────────────
+//
+// Two processes can resume the same mission: the Electron main process and the headless
+// synapse-worker both hold a missions handle over the same directory, and `/waiting on/` is on the
+// auto-resume allowlist with a 5-second backoff, so a mission parked for its five-MINUTE idle wait is
+// "due" after five seconds. The only thing that used to prevent a double resume was a module-scope
+// variable — per-process, and therefore not a guard. Two loops on one plan.md interleave their marks
+// and each refunds the other's attempts.
+{
+  const L = createMissions({ dir: path.join(TMP, 'lease'), now });
+  const h = L.open({ goal: 'leased work' });
+  ok(h.lease() && h.lease().pid === process.pid, 'a new mission is leased to the process that opened it');
+
+  h.park('waiting on esc_1');
+  ok(h.lease() === null, 'parking hands the lease back — holding it across a park makes a mission unresumable');
+
+  // A LIVE holder on this host keeps it. pid 1 is launchd: always alive, never us.
+  fs.writeFileSync(path.join(h.dir, 'lease.json'), JSON.stringify({ pid: 1, at: now(), host: os.hostname() }));
+  ok(L.resume(h.id) === null, 'resume is REFUSED while another live process holds the lease');
+  ok(L.attach(h.id) !== null, 'but attach still works — reading a mission is not running it');
+
+  // A DEAD holder does not get to keep a mission forever. Find a pid that certainly does not exist.
+  let dead = 999999;
+  while (true) { try { process.kill(dead, 0); dead--; } catch { break; } }
+  fs.writeFileSync(path.join(h.dir, 'lease.json'), JSON.stringify({ pid: dead, at: now(), host: os.hostname() }));
+  const taken = L.resume(h.id);
+  ok(taken !== null, `a lease whose holder has died is taken over rather than waited on forever (stole from ${dead})`);
+  ok(taken && taken.lease().pid === process.pid, 'and the new holder is recorded');
+
+  // The reaper has to release on behalf of a process that cannot.
+  fs.writeFileSync(path.join(h.dir, 'lease.json'), JSON.stringify({ pid: dead, at: now() - 10 * 60000, host: os.hostname() }));
+  L.attach(h.id) && fs.writeFileSync(path.join(h.dir, 'mission.json'),
+    JSON.stringify({ ...JSON.parse(fs.readFileSync(path.join(h.dir, 'mission.json'), 'utf8')), status: 'running', heartbeatAt: now() - 10 * 60000 }));
+  L.reapOrphans({ staleMs: 60000 });
+  ok(!fs.existsSync(path.join(h.dir, 'lease.json')),
+    'reapOrphans releases a dead process’s lease — otherwise the mission is parked, due, and permanently refused');
+
+  // And we never drop somebody else's.
+  const h2 = L.open({ goal: 'not yours' });
+  fs.writeFileSync(path.join(h2.dir, 'lease.json'), JSON.stringify({ pid: 1, at: now(), host: os.hostname() }));
+  ok(L.releaseLease(h2.id) === false && fs.existsSync(path.join(h2.dir, 'lease.json')),
+    'releaseLease refuses to drop a lease held by another process');
+}
+
+// The assertion that actually matters, made the only way it can be made honestly: TWO REAL PROCESSES
+// racing for the same mission. An in-process test proves nothing here, because the lease is
+// deliberately re-entrant for the same pid — which is correct, and is exactly why it cannot be the
+// thing under test. Written synchronously (spawn + a blocking poll) because this file is synchronous
+// top to bottom, and an un-awaited promise here would exit before the race resolved and pass silently.
+{
+  const { spawn } = require('child_process');
+  const dir = path.join(TMP, 'race');
+  const R = createMissions({ dir, now: () => Date.now() });
+  const h = R.open({ goal: 'contended' });
+  h.park('waiting on something');
+
+  const sleep = (ms) => { try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); } catch { } };
+  const src = (out) => `
+    const { createMissions } = require(${JSON.stringify(path.resolve(__dirname, '../lib/mission.js'))});
+    const M = createMissions({ dir: ${JSON.stringify(dir)} });
+    const h = M.resume(${JSON.stringify(h.id)});
+    require('fs').writeFileSync(${JSON.stringify(out)}, h ? 'GOT' : 'REFUSED');
+    setTimeout(() => process.exit(0), 900);   // hold the lease while the sibling tries for it
+  `;
+  const outA = path.join(TMP, 'race-a.txt'), outB = path.join(TMP, 'race-b.txt');
+  spawn(process.execPath, ['-e', src(outA)], { stdio: 'ignore' }).unref();
+  spawn(process.execPath, ['-e', src(outB)], { stdio: 'ignore' }).unref();
+
+  const read = (f) => { try { return fs.readFileSync(f, 'utf8'); } catch { return ''; } };
+  for (let i = 0; i < 100 && !(read(outA) && read(outB)); i++) sleep(100);
+  const a = read(outA), b = read(outB);
+  ok(!!a && !!b, `both racing processes reported in (a=${a || 'timeout'} b=${b || 'timeout'})`);
+  ok([a, b].filter((o) => o === 'GOT').length === 1,
+    `two processes racing for one mission: EXACTLY ONE wins (${a} / ${b})`);
+}
+
 try { fs.rmSync(TMP, { recursive: true, force: true }); } catch {}
 console.log(`\n${fail ? '❌' : '✅'} ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
