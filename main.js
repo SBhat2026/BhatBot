@@ -5550,7 +5550,16 @@ async function executeTool(name, input, opts = {}) {
             break;
           }
           const hours = Math.max(0.05, Math.min(8, Number(input.hours) || 1));
-          const budgetUsd = Math.max(0.05, Math.min(20, Number(input.budget_usd) || 2));
+          // THE DEFAULT BUDGET FOLLOWS THE REQUESTED DURATION. A flat $2 regardless of `hours` is the
+          // same defect as the $5 resume cap it took a soak to find: `long_run{hours:4}` would die on
+          // the budget wall around minute 35 at the $3.50/h ceiling and report "budget", which reads
+          // like a cost problem and is really a default contradicting the duration that was asked for.
+          // An explicit budget_usd is still obeyed exactly, including a deliberately small one. The $20
+          // hard ceiling still wins, so an 8-hour run defaults to $20 rather than $28 — that is a
+          // deliberate cap on an unattended overnight job, not an oversight, and costpilot will report
+          // the resulting $2.50/h as comfortably under target rather than as a problem.
+          const targetPerHour = Number((loadConfig().costpilot || {}).targetUsdPerHour) || 3.5;
+          const budgetUsd = Math.max(0.05, Math.min(20, Number(input.budget_usd) || +(hours * targetPerHour).toFixed(2)));
           const width = Math.max(1, Math.min(12, Math.round(Number(input.width) || 3)));
           const plan = Array.isArray(input.plan) ? input.plan.map(String).filter(Boolean) : [];
           _supervisedRun = { goal, startedAt: Date.now(), missionId: null, report: null, promise: null };
