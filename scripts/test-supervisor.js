@@ -1079,6 +1079,55 @@ function rig(over = {}, opts = {}) {
       `an explicit stallTicks is honoured as ticks×delay (50×4ms → stopped at ${ms}ms)`);
   }
 
+  // ── the custodian reviews while there is still time ─────────────────────────────────────────────
+  //
+  // Reviewing once, after four hours and the whole spend, is an autopsy. A doubt at the first layer
+  // boundary is worth ten times the same doubt at the end, because everything downstream inherits
+  // whatever this layer got wrong.
+  {
+    const calls = [];
+    const { sup, events } = rig({
+      review: async (a) => { calls.push({ interim: !!a.interim, done: a.doneCount, remaining: a.remainingCount }); return { verdict: 'accept' }; },
+      runAgent: async () => ({ status: 'done', summary: 'ok' }),
+    }, { interimReviewMinDone: 3, width: 1 });
+    const plan = Array.from({ length: 12 }, (_, i) => 'research topic number ' + (i + 1));
+    const r = await sup.run({ goal: 'g', plan });
+    const interim = calls.filter((c) => c.interim);
+    ok(interim.length >= 2, `the custodian is consulted DURING the run, not only at the end (${interim.length} interim)`);
+    ok(interim.every((c) => c.remaining > 0), 'every interim review still had work left to influence');
+    ok(calls.filter((c) => !c.interim).length === 1, 'and the final review still happens exactly once');
+    ok(r.done.length === 12, 'while the run itself completes normally');
+    // The gate has to be the threshold, not every completion, or a 40-item run buys 40 model calls.
+    ok(interim.length <= 4, `and it is bounded rather than firing per item (${interim.length} for 12 items at a threshold of 3)`);
+  }
+
+  // A doubt raised mid-run has to reach BOTH the report and the blackboard — a doubt that only lands
+  // in the final JSON changes nothing about the work that follows it.
+  {
+    let boardSaw = '';
+    const { sup, events } = rig({
+      review: async (a) => (a.interim ? { verdict: 'revise', reason: 'the sources are all from one author' } : { verdict: 'accept' }),
+      runAgent: async ({ context }) => { if (/one author/.test(context || '')) boardSaw = context; return { status: 'done', summary: 'ok' }; },
+    }, { interimReviewMinDone: 3, width: 1 });
+    const r = await sup.run({ goal: 'g', plan: Array.from({ length: 10 }, (_, i) => 'research topic ' + (i + 1)) });
+    ok(r.doubts.length === 1, `the same doubt is recorded once, not once per boundary (${r.doubts.length})`);
+    ok(r.doubts[0].raised >= 2, `with a count of how many boundaries it survived unaddressed (${r.doubts[0].raised})`);
+    ok(/one author/.test(r.doubts[0].reason || ''), 'with the reason it gave');
+    ok(r.doubts[0].afterDone >= 3, `and where in the run it was raised (after ${r.doubts[0].afterDone} done)`);
+    ok(events.some((e) => e.type === 'doubt' && e.interim), 'it emits a doubt event marked interim');
+    ok(/one author/.test(boardSaw), 'and later agents actually read it off the blackboard');
+  }
+
+  // A reviewer that throws must not take the run with it — it is an advisor, not a dependency.
+  {
+    const { sup } = rig({
+      review: async (a) => { if (a.interim) throw new Error('reviewer exploded'); return { verdict: 'accept' }; },
+      runAgent: async () => ({ status: 'done', summary: 'ok' }),
+    }, { interimReviewMinDone: 3, width: 1 });
+    const r = await sup.run({ goal: 'g', plan: Array.from({ length: 8 }, (_, i) => 'research topic ' + (i + 1)) });
+    ok(r.ok && r.done.length === 8, `a throwing interim reviewer does not stop the run (${r.stoppedBecause})`);
+  }
+
   console.log(`\n${fail === 0 ? '✅' : '❌'} supervisor: ${pass} passed, ${fail} failed`);
   process.exit(fail === 0 ? 0 : 1);
 })();

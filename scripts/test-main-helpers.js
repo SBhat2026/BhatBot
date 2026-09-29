@@ -25,9 +25,14 @@ const ok = (c, m) => { if (c) { pass++; console.log('✅ ' + m); } else { fail++
 // failures looked exactly like a missing feature.
 function extract(src, name) {
   const sig = 'function ' + name + '(';
-  const start = src.indexOf(sig);
+  let start = src.indexOf(sig);
   if (start < 0) throw new Error('not found: ' + name);
-  let i = start + sig.length, paren = 1;
+  // KEEP THE `async`. Matching on 'function NAME(' silently drops a preceding `async`, and the
+  // extracted body then throws "await is only valid in async functions" from inside new Function —
+  // an error that points at the helper under test rather than at the harness that mangled it.
+  const sigStart = start;                                  // where the paren walk must begin
+  if (src.slice(Math.max(0, start - 6), start) === 'async ') start -= 6;
+  let i = sigStart + sig.length, paren = 1;
   for (; i < src.length && paren > 0; i++) {
     if (src[i] === '(') paren++;
     else if (src[i] === ')') paren--;
@@ -428,5 +433,117 @@ ok(Array.isArray(tagCache('nope')) === false, 'cache: non-array → returned as-
   ok(!/estimateTokens\(body\.messages\) >= 2000/.test(src), 'the messages-only test is gone');
 }
 
+(async () => {
+
+// ── the browser context reaper ───────────────────────────────────────────────────────────────────
+//
+// The RAM death spiral starts here: `browserContext.on('page')` accumulates every popup and
+// target=_blank tab as a live renderer and nothing ever closed them. The reaper has to be TIMID,
+// because this is a visible window Siddhant shares with the agents — a reaped tab he was reading is a
+// far worse bug than the leak — so the interesting assertions are all about what it REFUSES to close.
+{
+  // The reaper closes over `browserContext`, `page`, `pageSeen`, `touchPage` and `console`, so the
+  // harness supplies them and drives real (fake) page objects through it.
+  const mk = (id) => ({ id, closed: false, isClosed() { return this.closed; }, async close() { this.closed = true; } });
+  const build = () => {
+    const pages = [];
+    const ctx = { pages: () => pages };
+    const fn = new Function('deps', `
+      const { ctxRef, pageRef, pageSeen, touchPage, console } = deps;
+      let browserContext = ctxRef.v, page = pageRef.v;
+      ${extract(main, 'reapBrowserPages')}
+      return (opts) => { browserContext = ctxRef.v; page = pageRef.v; return reapBrowserPages(opts); };
+    `);
+    const pageSeen = new WeakMap();
+    const touchPage = (p, byUser) => { const prev = pageSeen.get(p) || {}; pageSeen.set(p, { at: Date.now(), user: prev.user || !!byUser }); };
+    const ctxRef = { v: ctx }, pageRef = { v: null };
+    const reap = fn({ ctxRef, pageRef, pageSeen, touchPage, console: { log() {} } });
+    return { pages, ctx, ctxRef, pageRef, pageSeen, touchPage, reap };
+  };
+
+  // 1. The page being driven is never closed, however stale it looks.
+  {
+    const h = build();
+    const active = mk('active'), idle = mk('idle');
+    h.pages.push(active, idle);
+    h.pageSeen.set(active, { at: 0, user: false });
+    h.pageSeen.set(idle, { at: 0, user: false });
+    h.pageRef.v = active;
+    await h.reap({ idleMs: 1000, maxPages: 6 });
+    ok(!active.closed, 'the page an agent is driving is never reaped, however stale its timestamp');
+    ok(idle.closed, 'while a genuinely idle sibling is');
+  }
+
+  // 2. A page HE touched is his, permanently. One click exempts it.
+  {
+    const h = build();
+    const his = mk('his'), theirs = mk('theirs'), keep = mk('keep');
+    h.pages.push(keep, his, theirs);
+    h.pageRef.v = keep;
+    h.pageSeen.set(his, { at: 0, user: true });
+    h.pageSeen.set(theirs, { at: 0, user: false });
+    await h.reap({ idleMs: 1000, maxPages: 6, force: true });
+    ok(!his.closed, 'a tab Siddhant clicked in is exempt even under force — he cannot know a background process has opinions about it');
+    ok(theirs.closed, 'an untouched one is not');
+  }
+
+  // 3. A fresh page is left alone: the window is about idleness, not tidiness.
+  {
+    const h = build();
+    const keep = mk('keep'), fresh = mk('fresh');
+    h.pages.push(keep, fresh);
+    h.pageRef.v = keep;
+    h.touchPage(fresh, false);
+    await h.reap({ idleMs: 60000, maxPages: 6 });
+    ok(!fresh.closed, 'a page touched moments ago is not reaped — the threshold is idleness, not housekeeping');
+  }
+
+  // 4. The hard cap overrides the idle window, because past it the alternative is the spiral.
+  {
+    const h = build();
+    const keep = mk('keep');
+    h.pages.push(keep); h.pageRef.v = keep; h.touchPage(keep, false);
+    const extra = [];
+    for (let i = 0; i < 5; i++) { const p = mk('x' + i); extra.push(p); h.pages.push(p); h.touchPage(p, false); }
+    const r = await h.reap({ idleMs: 10 * 60000, maxPages: 3 });
+    ok(r.closed === 3, `past the cap the oldest untouched pages go regardless of age (closed ${r.closed} to get 6 down to 3)`);
+    ok(!keep.closed, 'and never the active one');
+  }
+
+  // 5. It never empties the context. A browser with no pages is a broken browser, not a tidy one.
+  {
+    const h = build();
+    const only = mk('only');
+    h.pages.push(only);
+    h.pageRef.v = null;                       // nothing marked active — the dangerous case
+    h.pageSeen.set(only, { at: 0, user: false });
+    await h.reap({ idleMs: 0, maxPages: 1, force: true });
+    ok(!only.closed, 'the last remaining page is never closed, even with nothing marked active');
+  }
+
+  // 6. A page that throws on close does not stop the sweep.
+  {
+    const h = build();
+    const keep = mk('keep'), bad = mk('bad'), good = mk('good');
+    bad.close = async () => { throw new Error('Target closed'); };
+    h.pages.push(keep, bad, good);
+    h.pageRef.v = keep;
+    h.pageSeen.set(bad, { at: 0, user: false });
+    h.pageSeen.set(good, { at: 0, user: false });
+    await h.reap({ idleMs: 1000, maxPages: 6 });
+    ok(good.closed, 'one page throwing on close does not abort the sweep');
+  }
+
+  // 7. No context at all is not an error.
+  {
+    const h = build();
+    h.ctxRef.v = null;
+    const r = await h.reap({});
+    ok(r && r.closed === 0, 'with no browser open it does nothing and says so');
+  }
+}
+
 console.log(`\n${fail === 0 ? '✅' : '❌'} ${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);
+
+})();

@@ -354,6 +354,10 @@ const ITEM_BY_TEXT = new Map();
   log(`events: ${Object.entries(events).map(([k, v]) => k + '=' + v).join(' ')}`);
   log(`escalations: ${asked.length} asked, ${escalations.all().filter((e) => e.status === 'answered').length} answered, ${escalations.pending().length} still open`);
   log(`forged tools: ${forge.list().map((t) => `${t.name}(${t.calls} calls)`).join(', ') || '(none)'}`);
+  if (report.doubts && report.doubts.length) {
+    log(`doubts raised mid-run (${report.doubts.length}) — these are the ones there was still time to act on:`);
+    for (const d of report.doubts.slice(0, 5)) log(`      [${d.verdict}] after ${d.afterDone} done${d.raised > 1 ? `, still true after ${d.raised} checks` : ''}: ${d.reason}`);
+  }
   // The overnight field. A soak that escalates and falls back must show the fallbacks, or the harness
   // is measuring a behaviour it cannot display.
   if (report.assumed && report.assumed.length) {

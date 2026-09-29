@@ -635,6 +635,9 @@ const OBSERVER_SCRIPT = `(() => {
 function onUserBrowserEvent(d) {
   if (!d || !d.selector) return;
   lastUserActivityTs = Date.now();
+  // HIS PAGE IS HIS. One click is enough to make a tab permanently exempt from the reaper — he cannot
+  // be expected to know a background process has opinions about the tab he is reading.
+  try { if (page) touchPage(page, true); } catch {}
   userEventBuffer.push(d);
   if (userEventBuffer.length > 200) userEventBuffer.shift();
   if (recordingSteps) {            // if a workflow is being recorded, capture HIS steps too
@@ -3037,7 +3040,50 @@ let devtoolsConsole = [];   // { type, text, ts }
 let devtoolsNetwork = [];   // { url, method, status, type, size, ts }
 const pushCapped = (arr, item) => { arr.push(item); if (arr.length > DEVTOOLS_CAP) arr.splice(0, arr.length - DEVTOOLS_CAP); };
 
+// ── the browser context reaper ───────────────────────────────────────────────────────────────────
+//
+// THE RAM DEATH SPIRAL, and every component in it behaves correctly. The browser role leaks
+// 0.6–1.2 GB over a long run because `browserContext.on('page')` accumulates every popup and every
+// target=_blank tab as a live page — each one a renderer process — and nothing ever closes them. Then:
+// memory falls → the governor goes `hot` → the tier drops → `ollama stop` → the local lane switches
+// off → all work goes cloud → $/h spikes → costpilot shrinks the width → the run slows → more wall
+// clock → more leak. Monotonic degradation out of correct parts. The one-way tier latch (tiers.js,
+// maxDrops) stops the loop from repeating; this stops it from starting.
+//
+// IT IS DELIBERATELY TIMID, because this is a VISIBLE window Siddhant shares with the agents and a
+// reaped tab he was reading is a much worse bug than the leak. A page is only closed when it is not
+// the active page, he has never interacted with it, it has been idle past the threshold, and it is not
+// the last one standing. The hard cap is the exception: past `maxPages` the oldest untouched pages go
+// regardless of age, because at that point the alternative is the spiral.
+const pageSeen = new WeakMap();       // page → { at, user } — last touch, and whether HE did it
+function touchPage(p, byUser) {
+  try { const prev = pageSeen.get(p) || {}; pageSeen.set(p, { at: Date.now(), user: prev.user || !!byUser }); } catch {}
+}
+async function reapBrowserPages({ idleMs = 5 * 60 * 1000, maxPages = 6, force = false } = {}) {
+  if (!browserContext) return { closed: 0, kept: 0, why: 'no context' };
+  let pages = [];
+  try { pages = browserContext.pages().filter((p) => { try { return !p.isClosed(); } catch { return false; } }); } catch { return { closed: 0, kept: 0, why: 'unreadable' }; }
+  const now = Date.now();
+  const candidates = pages
+    .filter((p) => p !== page)                                    // never the one being driven
+    .filter((p) => !(pageSeen.get(p) || {}).user)                 // never one he touched himself
+    .map((p) => ({ p, at: (pageSeen.get(p) || {}).at || 0 }))
+    .sort((a, b) => a.at - b.at);                                 // oldest first
+  const overCap = Math.max(0, pages.length - maxPages);
+  let closed = 0;
+  for (let i = 0; i < candidates.length; i++) {
+    const c = candidates[i];
+    const stale = now - c.at >= idleMs;
+    if (!(force || stale || i < overCap)) continue;
+    if (pages.length - closed <= 1) break;                        // never leave the context empty
+    try { await c.p.close({ runBeforeUnload: false }); closed++; } catch {}
+  }
+  if (closed) console.log(`[browser] reaped ${closed} idle page(s), ${pages.length - closed} left`);
+  return { closed, kept: pages.length - closed };
+}
+
 function attachPageHandlers(p) {
+  touchPage(p, false);
   try {
     p.on('dialog', async (dlg) => {
       try { sendToActivity('tool-update', { type: 'thinking', text: `🔔 page dialog (${dlg.type()}): "${(dlg.message() || '').slice(0, 60)}" — auto-accepted` }); } catch {}
@@ -3629,7 +3675,10 @@ const liveHealth = createLiveHealth({
 // them only via these accessor/reset closures — which reassign main's own `let`s — so state can't
 // drift. recordingSteps is likewise main-owned (onUserBrowserEvent writes it too) via rec* closures.
 const { browserAction, browserWorkflow } = require('./tools/browser')({
-  getPage: () => page,
+  // Touching on read is enough: the page handed to a driver IS the live one by definition, and that
+  // is what keeps the reaper from closing the tab an agent is working in right now.
+  getPage: () => { try { if (page) touchPage(page, false); } catch {} return page; },
+  reapBrowserPages,
   resetBrowser: () => { browser = null; page = null; browserContext = null; browserLaunching = null; },
   closeBrowser: async () => { try { await (browserContext || browser).close(); } catch {} },
   ensureBrowser, saveBrowserState, dismissInterruptions, visionClickByText, scheduleSaveBounds,
@@ -5492,6 +5541,11 @@ async function executeTool(name, input, opts = {}) {
               if (rep.cost && rep.cost.line) bits.push(rep.cost.line);
               // A doubt is the most useful sentence in a morning report, so it goes in the message
               // rather than only into the JSON nobody opens.
+              // A doubt raised mid-run is the more useful one, because it names WHERE the work went
+              // sideways rather than only that it did. `raised > 1` means nothing addressed it.
+              if (rep.doubts && rep.doubts.length) {
+                bits.push(`doubts raised during the run: ${rep.doubts.slice(0, 2).map((d) => `${d.reason}${d.raised > 1 ? ` (still true after ${d.raised} checks)` : ''}`).join(' | ').slice(0, 300)}`);
+              }
               if (rep.custodian && rep.custodian.verdict && rep.custodian.verdict !== 'accept') {
                 bits.push(`⚠ ${rep.custodian.verdict}: ${rep.custodian.reason || rep.custodian.question || 'the result may not answer what you asked'}`);
               }
