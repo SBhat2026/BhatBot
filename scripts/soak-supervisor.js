@@ -51,6 +51,20 @@ const MINUTES = Number(arg('minutes', 60));
 const MODEL = arg('model', 'qwen3:latest');
 const WIDTH = Number(arg('width', 3));
 const ITEMS = Number(arg('items', 120));
+// ── two-lane mode ────────────────────────────────────────────────────────────────────────────────
+//
+// `--lanes` exercises the two-lane scheduler end to end instead of with fakes. The LOCAL lane is the
+// real thing: the same Ollama worker every other mode uses. The CLOUD lane is SIMULATED — it does the
+// same verification work but sleeps for a sampled latency instead of calling Anthropic, because the
+// point here is the scheduler's lane mechanics (one local slot, N cloud slots, no borrowing, correct
+// release on failure) and those are timing behaviour, not model behaviour. Spending real money to
+// re-measure a sleep would tell us nothing we do not already know.
+//
+// Said plainly because a simulated lane reported as a real one is worse than no measurement: this
+// proves the SCHEDULER under realistic timing. It does not prove the Claude worker, which is still
+// unproven end to end and needs its own live run.
+const LANES = process.argv.includes('--lanes');
+const CLOUD_MS = Number(arg('cloud-ms', 2500));      // a plausible Sonnet item: a few turns of tools
 const OLLAMA = 'http://localhost:11434';
 const ROOT = path.join(__dirname, '..');
 
@@ -199,6 +213,24 @@ function toolCallsOf(msg) {
   return [];
 }
 
+// The lane-aware wrapper. It records what each lane did so the report can say whether the second lane
+// actually bought throughput — which is the only question two lanes exist to answer.
+const laneStats = { cloud: { started: 0, done: 0, ms: 0, peak: 0, live: 0 }, local: { started: 0, done: 0, ms: 0, peak: 0, live: 0 } };
+async function laneAwareWorker(spec) {
+  const lane = spec.lane === 'local' ? 'local' : 'cloud';
+  const L = laneStats[lane];
+  L.started++; L.live++; L.peak = Math.max(L.peak, L.live);
+  const t0 = Date.now();
+  try {
+    if (lane === 'local') return await worker(spec);
+    // The simulated cloud lane. Jittered, because a constant latency would let the scheduler settle
+    // into a lockstep that no real network ever produces and would hide a refill bug.
+    await new Promise((r) => setTimeout(r, Math.round(CLOUD_MS * (0.6 + Math.random() * 0.8))));
+    L.done++;
+    return { status: 'done', summary: 'simulated cloud item', spendUsd: 0, tokensIn: 0, tokensOut: 0 };
+  } finally { L.live--; L.ms += Date.now() - t0; }
+}
+
 async function worker(spec) {
   const t0in = stats.tokensIn, t0out = stats.tokensOut;
   const used = () => ({ tokensIn: stats.tokensIn - t0in, tokensOut: stats.tokensOut - t0out });
@@ -276,7 +308,10 @@ const ITEM_BY_TEXT = new Map();
     missions, escalations, forge,
     shouldStop: () => stopRequested,
     review: async ({ goal, deliverable, trace }) => custodian.review({ prompt: goal, deliverable, trace, autonomous: true }),
-    runAgent: worker,
+    // In two-lane mode every SECOND item goes local, so both lanes stay busy and the scheduler is
+    // actually under contention rather than nominally two-laned with one lane idle.
+    laneFor: LANES ? ((item) => (/\blocal\b/i.test(item.text || '') || (item.text || '').length % 2 === 0 ? 'local' : 'cloud')) : undefined,
+    runAgent: LANES ? laneAwareWorker : worker,
     decompose: async () => items.map((i) => i.text),
     onEvent: (e) => {
       events[e.type] = (events[e.type] || 0) + 1;
@@ -357,6 +392,16 @@ const ITEM_BY_TEXT = new Map();
   if (report.doubts && report.doubts.length) {
     log(`doubts raised mid-run (${report.doubts.length}) — these are the ones there was still time to act on:`);
     for (const d of report.doubts.slice(0, 5)) log(`      [${d.verdict}] after ${d.afterDone} done${d.raised > 1 ? `, still true after ${d.raised} checks` : ''}: ${d.reason}`);
+  }
+  if (LANES) {
+    log('two lanes (the cloud lane is SIMULATED latency, not Anthropic — this measures the SCHEDULER):');
+    for (const k of ['cloud', 'local']) {
+      const L = laneStats[k];
+      log(`      ${k}: ${L.started} started · peak ${L.peak} concurrent · ${Math.round(L.ms / Math.max(1, L.started))}ms mean`);
+    }
+    const ok1 = laneStats.local.peak <= 1;
+    log(`      local lane never exceeded one slot: ${ok1 ? 'yes' : 'NO — ' + laneStats.local.peak}`);
+    log(`      the second lane was additive: peak ${laneStats.cloud.peak + laneStats.local.peak} against a cloud width of ${WIDTH}`);
   }
   // The overnight field. A soak that escalates and falls back must show the fallbacks, or the harness
   // is measuring a behaviour it cannot display.
