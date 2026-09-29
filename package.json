@@ -164,7 +164,8 @@
     "test:supervisor": "node scripts/test-supervisor.js",
     "autonomy:doctor": "node scripts/autonomy-doctor.js",
     "probe:envelope": "node scripts/envelope-probe.js",
-    "test:tiers": "node scripts/test-tiers.js"
+    "test:tiers": "node scripts/test-tiers.js",
+    "test:costpilot": "node scripts/test-costpilot.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

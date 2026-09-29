@@ -130,6 +130,42 @@ const { createEscalations } = require('./lib/escalate');
 const { createForge } = require('./lib/toolforge');
 const { createSupervisor } = require('./lib/supervisor');
 const tiersLib = require('./lib/tiers');
+const { createCostPilot } = require('./lib/costpilot');
+
+// The cost watcher for the run currently in flight, rebuilt per run because its elapsed clock and its
+// prediction basis are both run-scoped. null between runs.
+let _costpilot = null;
+/**
+ * buildCostPilot(missionIdOf) — a watcher bound to one run.
+ *
+ * Run spend comes from mission.json rather than from lib/costledger.js, and the reason is worth
+ * keeping: the ledger is keyed by calendar day, so a run that starts at 22:00 would see its own
+ * cumulative spend reset to zero at midnight and compute a negative burn rate — then act on it. The
+ * mission's spendUsd is monotonic for the life of the run.
+ *
+ * Reports go out at LOW urgency, which is Telegram: a status update every fifteen minutes is exactly
+ * the thing that must not ring, and Siddhant asked for the monitoring to be independent of the work.
+ */
+function buildCostPilot(missionIdOf) {
+  const handle = () => { try { const id = missionIdOf(); return id ? missions.attach(id) : null; } catch { return null; } };
+  return createCostPilot({
+    missionMeta: () => (handle() || {}).meta || {},
+    journal: () => { const h = handle(); return h ? h.journal(200) : []; },
+    planDigest: () => { const h = handle(); return h ? h.plan.digest() : { total: 0, done: 0 }; },
+    priceOf: (tin, tout) => pricing.usd(MODEL_SONNET, { input_tokens: tin, output_tokens: tout }),
+    config: loadConfig().costpilot || {},
+    log: (m) => console.log(m),
+    onReport: (r) => {
+      try { sendToActivity('tool-update', { type: 'thinking', text: `💷 ${r.line}` }); } catch {}
+      // Only the periodic reports go to his phone, and only while the run is actually going — the
+      // forced one at the end is already covered by the run's own finish message.
+      try {
+        if (!r.lever && !r.overRate) return;                       // nothing he needs to know yet
+        notifyUser(`Long run · ${r.line}`, 'low').catch(() => {});
+      } catch {}
+    },
+  });
+}
 
 const escalations = createEscalations({
   notify: (msg, urgency, opts) => notifyUser(msg, urgency, opts),
@@ -189,7 +225,9 @@ const supervisor = createSupervisor({
   // never did, so an hour-long run kept launching at whatever width the tool call happened to name
   // while the rate window said otherwise. Each entry here can only LOWER the requested width, and an
   // absent opinion is `null`, never zero.
+  costpilot: { tick: (force) => (_costpilot ? _costpilot.tick(force) : null) },
   widthCaps: {
+    costpilot: () => { try { return _costpilot ? _costpilot.widthCap() : null; } catch { return null; } },
     admission: () => { try { return admission.width(MODEL_SONNET, 3072, { min: 1, max: FLEET_CAP }); } catch { return null; } },
     // THE MACHINE GETS A SAY, and a narrow one on purpose. Cloud agents cost neither watts nor RAM —
     // they are network-bound and already paced by admission — so the tier does not really want to
@@ -5403,6 +5441,7 @@ async function executeTool(name, input, opts = {}) {
           const width = Math.max(1, Math.min(12, Math.round(Number(input.width) || 3)));
           const plan = Array.isArray(input.plan) ? input.plan.map(String).filter(Boolean) : [];
           _supervisedRun = { goal, startedAt: Date.now(), missionId: null, report: null, promise: null };
+          _costpilot = buildCostPilot(() => _supervisedRun && _supervisedRun.missionId);
           // Deliberately NOT awaited. An hour-long run cannot be a tool call the model waits on; it
           // reports through the Activity feed and the office, and `status` is how anyone asks.
           _supervisedRun.promise = supervisor.run({ goal, plan, budgetUsd, wallClockMs: hours * 3600 * 1000, width })
@@ -5415,6 +5454,7 @@ async function executeTool(name, input, opts = {}) {
               const bits = [`Long run ${rep.stoppedBecause}: ${String(rep.goal).slice(0, 120)}`,
                 `${rep.done.length} done, ${rep.blocked.length} blocked, ${rep.open.length} open · $${rep.spentUsd} · ${Math.round(rep.elapsedMs / 60000)}min`];
               if (rep.forged.length) bits.push(`built: ${rep.forged.join(', ')}`);
+              if (rep.cost && rep.cost.line) bits.push(rep.cost.line);
               // A doubt is the most useful sentence in a morning report, so it goes in the message
               // rather than only into the JSON nobody opens.
               if (rep.custodian && rep.custodian.verdict && rep.custodian.verdict !== 'accept') {
@@ -5425,8 +5465,13 @@ async function executeTool(name, input, opts = {}) {
               return rep;
             })
             .catch((e) => { _supervisedRun.report = { ok: false, stoppedBecause: 'crashed', error: String(e && e.message || e), done: [], blocked: [], open: [], spentUsd: 0, elapsedMs: 0, forged: [], waitingOnSiddhant: [] }; return _supervisedRun.report; });
+          const forecast = (() => { try { return _costpilot.predict(); } catch { return null; } })();
           result = { success: true, started: true, goal,
             limits: { hours, budget_usd: budgetUsd, width },
+            // SAID BEFORE IT IS SPENT. With no history this is the configured assumption and says so;
+            // after a few runs it is measured from real token counts. Either way he gets a number at
+            // the moment he can still change his mind, rather than a bill afterwards.
+            predicted: forecast ? { usd: forecast.projectedUsd, basis: forecast.basis } : null,
             note: 'Running in the background. Agents appear in the 3D office coloured by what they are doing; progress streams to the Activity panel. Do NOT wait on this — tell Siddhant it has started and what it will do, and check long_run{action:"status"} when he asks. If it needs a decision it will call him (or text him if his calendar says he is busy).' };
           break;
         }
@@ -5445,6 +5490,7 @@ async function executeTool(name, input, opts = {}) {
           if (_supervisedRun && !_supervisedRun.report) { result = { success: false, error: 'a run is already going' }; break; }
           const m = missions.attach(id);
           _supervisedRun = { goal: (m && m.meta && m.meta.goal) || '(resumed)', startedAt: Date.now(), missionId: id, report: null };
+          _costpilot = buildCostPilot(() => id);
           _supervisedRun.promise = supervisor.resume(id, { wallClockMs: Math.max(0.05, Math.min(8, Number(input.hours) || 1)) * 3600 * 1000, width: Number(input.width) || 3 })
             .then((rep) => { _supervisedRun.report = rep; return rep; })
             .catch((e) => { _supervisedRun.report = { ok: false, stoppedBecause: 'crashed', error: String(e && e.message || e) }; return _supervisedRun.report; });
@@ -10175,6 +10221,7 @@ async function resumeMission(id) {
     }
     sendToActivity('tool-update', { type: 'thinking', text: `↩️ continuing the long run — ${String(meta0.goal).slice(0, 120)}` });
     _supervisedRun = { goal: meta0.goal, startedAt: Date.now(), missionId: id, report: null };
+    _costpilot = buildCostPilot(() => id);
     _supervisedRun.promise = supervisor.resume(id, {})
       .then((rep) => {
         _supervisedRun.report = rep;
