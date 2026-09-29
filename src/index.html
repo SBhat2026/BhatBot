@@ -173,6 +173,11 @@
   .lr-bar > i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .4s ease; }
   #lr-waiting:empty, #lr-plan:empty, #lr-working:empty { display: none; }
   #lr-working { margin-top: 7px; display: flex; flex-wrap: wrap; gap: 5px 14px; font-size: 11px; color: var(--text-dim); }
+  /* An idle desk is INFORMATION, not a fault: an unoccupied cloud slot costs nothing. Dimmed rather
+     than hidden, because five desks with two lit is the honest picture of a two-role plan, and hiding
+     the three would make the roster look smaller than the fleet actually is. */
+  #lr-working .lr-who.idle { opacity: .38; }
+  #lr-working .lr-who.idle span { font-style: italic; }
   .lr-who { display: flex; align-items: baseline; gap: 6px; }
   .lr-who i { width: 6px; height: 6px; border-radius: 50%; flex: 0 0 auto; align-self: center; }
   .lr-who b { font-weight: 600; color: var(--text); letter-spacing: .02em; }
@@ -2585,7 +2590,15 @@ function renderLongRun(d) {
   // below, so the two views read as one thing.
   const wk = document.getElementById('lr-working');
   wk.innerHTML = '';
-  for (const a of (d.working || []).slice(0, 6)) {
+  // THE FIVE DESKS, INCLUDING THE DIM ONES. Under `ensemble` a plan whose ready work happens to be all
+  // research leaves four roles with nothing to do, and four empty desks read as a broken roster unless
+  // the view says why. An idle CLOUD desk costs nothing, so dim is the correct resting state and not a
+  // fault — but "waiting for a free slot" and "no work of this kind" look identical on screen and are
+  // completely different situations, so they are labelled apart.
+  const ROLE_DESKS = [['coding', 'FORGE'], ['research', 'ORACLE'], ['browser', 'SCOUT'], ['memory', 'VAULT'], ['creative', 'ATELIER']];
+  const busyByName = new Map((d.working || []).map((a) => [a.name, a]));
+  const desks = d.mode === 'uniform' ? (d.working || []) : null;   // uniform: only the roles in play
+  for (const a of (desks || []).slice(0, 6)) {
     const el = document.createElement('div');
     el.className = 'lr-who';
     const dot = document.createElement('i'); dot.style.background = a.color || 'var(--text-dim2)';
@@ -2599,6 +2612,34 @@ function renderLongRun(d) {
     what.textContent = (a.step ? `${a.label} · ${a.step}` : a.label) + (a.lane === 'local' ? '  · local, free' : '');
     el.appendChild(dot); el.appendChild(nm); el.appendChild(what);
     wk.appendChild(el);
+  }
+  if (!desks) {
+    for (const [role, codename] of ROLE_DESKS) {
+      const a = busyByName.get(codename);
+      const el = document.createElement('div');
+      el.className = 'lr-who' + (a ? '' : ' idle');
+      const dot = document.createElement('i');
+      dot.style.background = a ? (a.color || 'var(--text-dim2)') : 'transparent';
+      dot.style.boxShadow = a ? '' : 'inset 0 0 0 1px var(--text-dim2)';
+      const nm = document.createElement('b'); nm.textContent = codename;
+      const what = document.createElement('span');
+      what.textContent = a ? (a.step ? `${a.label} · ${a.step}` : a.label)
+        : (d.heldForRole ? 'waiting for a slot' : 'no work of this kind');
+      el.appendChild(dot); el.appendChild(nm); el.appendChild(what);
+      wk.appendChild(el);
+    }
+    // The local grinder is not one of the five, so it is listed after them rather than in the table.
+    for (const a of (d.working || []).filter((x) => x.lane === 'local').slice(0, 1)) {
+      const el = document.createElement('div');
+      el.className = 'lr-who';
+      const dot = document.createElement('i');
+      dot.style.background = 'transparent';
+      dot.style.boxShadow = 'inset 0 0 0 2px ' + (a.color || 'var(--text-dim2)');
+      const nm = document.createElement('b'); nm.textContent = a.name;
+      const what = document.createElement('span'); what.textContent = (a.step ? `${a.label} · ${a.step}` : a.label) + '  · local, free';
+      el.appendChild(dot); el.appendChild(nm); el.appendChild(what);
+      wk.appendChild(el);
+    }
   }
 
   // What it needs from Siddhant, first and loudest. `quiet` means it was asked at 3am and did not

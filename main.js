@@ -4572,17 +4572,28 @@ function pushLongRun() {
       working: supervisor.roster().map((a) => ({ name: a.name, label: a.label, color: a.color, task: a.task, step: a.step, lane: a.lane })),
       waiting: escalations.pending().map((x) => ({ id: x.id, question: x.question, assumption: x.assumption || '', quiet: !!x.quiet })),
       forged: forge.list().map((t) => t.name),
+      // THE FIVE DESKS, including the dim ones. Under `ensemble` a plan whose ready work is all
+      // research leaves four roles with genuinely nothing to do, and four empty desks read as a broken
+      // roster unless the view says why they are empty. `heldForRole` separates the two causes that
+      // look identical: work that is ready and waiting only because its role is already busy, versus a
+      // role with no work at all.
+      mode: _lastSupervisorMode,
+      heldForRole: _lastHeldForRole,
       stoppedBecause: (_supervisedRun && _supervisedRun.report) ? _supervisedRun.report.stoppedBecause : null,
     });
   } catch {}
 }
 
+let _lastSupervisorMode = null, _lastHeldForRole = 0;
 function supervisorEvent(e) {
   try {
+    if (e.type === 'progress') { if (e.mode) _lastSupervisorMode = e.mode; _lastHeldForRole = Number(e.heldForRole) || 0; }
+    if (e.type === 'mode' && e.to) _lastSupervisorMode = e.to;
+    if (e.type === 'run-end') { _lastSupervisorMode = null; _lastHeldForRole = 0; }
     // Anything that moves the plan, the roster or what is waiting on him changes what the strip
     // should say. Listing them is deliberate: a blanket push on every event would repaint on each of
     // the ~90 agent-state ticks a six-agent run emits per minute.
-    if (['run-start', 'progress', 'escalated', 'unblocked', 'assumed', 'plan-grew', 'forged', 'gave-up', 'run-end', 'agent', 'agent-gone'].includes(e.type)) pushLongRunSoon();
+    if (['run-start', 'progress', 'escalated', 'unblocked', 'assumed', 'plan-grew', 'forged', 'gave-up', 'run-end', 'agent', 'agent-gone', 'mode'].includes(e.type)) pushLongRunSoon();
     switch (e.type) {
       case 'agent':
         supervisedAgents.set(e.id, { id: e.id, name: e.name, designation: e.designation, role: e.role, state: e.state, task: e.task, step: e.step, since: e.since });
