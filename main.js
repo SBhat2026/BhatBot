@@ -5496,10 +5496,18 @@ async function executeTool(name, input, opts = {}) {
                 bits.push(`⚠ ${rep.custodian.verdict}: ${rep.custodian.reason || rep.custodian.question || 'the result may not answer what you asked'}`);
               }
               if (rep.waitingOnSiddhant.length) bits.push(`still needs you: ${rep.waitingOnSiddhant.map((w) => w.question).join(' | ').slice(0, 300)}`);
+              // WHAT IT DECIDED FOR HIM. Quiet hours are 22:30–06:30, so an overnight run gets zero
+              // calls and every human question falls back to its own assumption. Those decisions are
+              // real and they are his to reverse, so they belong in the message he actually reads and
+              // not only in the JSON. First three, because a notification he scrolls is one he skips.
+              if (rep.assumed && rep.assumed.length) {
+                const head = rep.assumed.slice(0, 3).map((a) => `“${a.question || a.text}” → ${a.assumption}`).join(' | ');
+                bits.push(`decided without you (${rep.assumed.length}): ${head.slice(0, 300)}${rep.assumed.length > 3 ? ' …' : ''}`);
+              }
               notifyUser(bits.join('\n'), 'low').catch(() => {});
               return rep;
             })
-            .catch((e) => { _supervisedRun.report = { ok: false, stoppedBecause: 'crashed', error: String(e && e.message || e), done: [], blocked: [], open: [], spentUsd: 0, elapsedMs: 0, forged: [], waitingOnSiddhant: [] }; return _supervisedRun.report; });
+            .catch((e) => { _supervisedRun.report = { ok: false, stoppedBecause: 'crashed', error: String(e && e.message || e), done: [], blocked: [], open: [], spentUsd: 0, elapsedMs: 0, forged: [], waitingOnSiddhant: [], assumed: [] }; return _supervisedRun.report; });
           const forecast = (() => { try { return _costpilot.predict(); } catch { return null; } })();
           result = { success: true, started: true, goal,
             limits: { hours, budget_usd: budgetUsd, width },

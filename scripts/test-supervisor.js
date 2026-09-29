@@ -984,6 +984,101 @@ function rig(over = {}, opts = {}) {
       'with neither lane ever over its own ceiling');
   }
 
+  // ── what it decided while he was asleep ─────────────────────────────────────────────────────────
+  //
+  // Quiet hours are 22:30–06:30, so an overnight run gets zero calls and every human need falls back
+  // to its stated assumption. The per-item note already records that, but one line inside a forty-item
+  // plan is not a report. This is the field he reads over breakfast.
+  {
+    // Nobody is awake: the escalation is never answered, so the idle wait times out and the run
+    // proceeds on the assumption — the overnight path exactly.
+    const escalations = {
+      ask: async () => ({ id: 'esc_night1', question: 'Which citation style?', assumption: 'APA' }),
+      isAnswered: () => null,
+      get: (id) => (id === 'esc_night1' ? { id, question: 'Which citation style?', assumption: 'APA' } : null),
+      pending: () => [{ id: 'esc_night1', question: 'Which citation style?', assumption: 'APA' }],
+      wait: async () => ({ answered: false, timedOut: true }),
+    };
+    const { sup } = rig({
+      escalations,
+      runAgent: async ({ goal }) => (goal === 'format the bibliography'
+        ? { status: 'blocked', summary: 'need a call', need: { kind: 'human', question: 'Which citation style?', assumption: 'APA' } }
+        : { status: 'done', summary: 'fine' }),
+    }, { idleWaitMs: 10, maxItemAttempts: 2 });
+    const r = await sup.run({ goal: 'g', plan: ['format the bibliography', 'research something else'], width: 2 });
+
+    ok(Array.isArray(r.assumed), 'the report has an aggregate `assumed` list');
+    ok(r.assumed.length === 1, `and it lists the decision exactly once, however many attempts it took (${r.assumed.length})`);
+    const a = r.assumed[0] || {};
+    ok(a.assumption === 'APA', `each entry says what was assumed (${a.assumption})`);
+    ok(/citation style/i.test(a.question || ''), `and the question it would have asked (${a.question})`);
+    ok(/bibliography/.test(a.text || ''), `and which item it was for (${a.text})`);
+  }
+
+  // An ANSWERED question is not an assumption. If it were, the morning field would be a list of
+  // everything that happened and therefore useless.
+  {
+    const escalations = {
+      ask: async () => ({ id: 'esc_day1', question: 'Which account?', assumption: 'the primary one' }),
+      isAnswered: () => ({ status: 'answered', answer: 'the savings account', question: 'Which account?' }),
+      get: (id) => ({ id, question: 'Which account?', assumption: 'the primary one' }),
+      pending: () => [],
+      wait: async () => ({ answered: true }),
+    };
+    const { sup } = rig({
+      escalations,
+      runAgent: async ({ goal }) => (goal === 'reconcile the ledger'
+        ? { status: 'blocked', summary: 'need a call', need: { kind: 'human', question: 'Which account?', assumption: 'the primary one' } }
+        : { status: 'done', summary: 'fine' }),
+    }, { idleWaitMs: 10, maxItemAttempts: 3 });
+    const r = await sup.run({ goal: 'g', plan: ['reconcile the ledger', 'research something else'], width: 2 });
+    ok(r.assumed.length === 0, `a question he actually answered is not listed as an assumption (${r.assumed.length})`);
+  }
+
+  // ── the stall wall is a DURATION ────────────────────────────────────────────────────────────────
+  //
+  // `stallTicks: 40` at `tickDelayMs: 250` is ten seconds, which meant something different the moment
+  // the loop's tick rate changed: under a readiness gate with idle ensemble slots the loop makes many
+  // more cheap passes, so the same 40 arrives far sooner, and a DAG legitimately waiting on one long
+  // in-flight dependency looks exactly like a wedged run. Nothing in the suite exercised this at all.
+  {
+    // Every item comes back 'todo' with no progress: the plan digest never changes. A real stall.
+    const { sup, events } = rig({ runAgent: async () => ({ status: 'todo', summary: '' }) },
+      { stallMs: 120, tickDelayMs: 1, maxItemAttempts: 999, maxConsecutiveFailures: 999 });
+    const t0 = Date.now();
+    const r = await sup.run({ goal: 'g', plan: ['a task that never moves'] });
+    const ms = Date.now() - t0;
+    ok(r.stoppedBecause === 'stalled', `a plan that never moves stops as 'stalled' (${r.stoppedBecause})`);
+    ok(ms >= 100, `and it waited the configured DURATION rather than a pass count (${ms}ms >= 100)`);
+    ok(ms < 4000, `without waiting the ten-minute default (${ms}ms)`);
+    const ev = events.find((e) => e.type === 'stalled');
+    ok(ev && ev.stalledMs >= 100 && ev.wallMs === 120,
+      `and it says how long it stood still and against what wall (${ev && ev.stalledMs}ms vs ${ev && ev.wallMs}ms)`);
+  }
+
+  // The wall must not fire while work is genuinely in flight — that is the DAG's normal mid-layer
+  // state, and tripping there would kill long-running items for being slow.
+  {
+    const { sup } = rig({
+      runAgent: async () => { await new Promise((r) => setTimeout(r, 300)); return { status: 'done', summary: 'slow but real' }; },
+    }, { stallMs: 80, tickDelayMs: 1 });
+    const r = await sup.run({ goal: 'g', plan: ['one genuinely slow item'] });
+    ok(r.ok && r.done.length === 1,
+      `an item slower than the stall wall is not a stall — work in flight is work (${r.stoppedBecause})`);
+  }
+
+  // Back-compat: a caller that set stallTicks meant "this many idle passes", which at its own tick
+  // rate is exactly that many milliseconds. Their intent has to survive the change of mechanism.
+  {
+    const { sup } = rig({ runAgent: async () => ({ status: 'todo', summary: '' }) },
+      { stallTicks: 50, tickDelayMs: 4, maxItemAttempts: 999, maxConsecutiveFailures: 999 });
+    const t0 = Date.now();
+    const r = await sup.run({ goal: 'g', plan: ['a task that never moves'] });
+    const ms = Date.now() - t0;
+    ok(r.stoppedBecause === 'stalled' && ms >= 180 && ms < 4000,
+      `an explicit stallTicks is honoured as ticks×delay (50×4ms → stopped at ${ms}ms)`);
+  }
+
   console.log(`\n${fail === 0 ? '✅' : '❌'} supervisor: ${pass} passed, ${fail} failed`);
   process.exit(fail === 0 ? 0 : 1);
 })();

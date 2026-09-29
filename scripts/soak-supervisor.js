@@ -354,6 +354,12 @@ const ITEM_BY_TEXT = new Map();
   log(`events: ${Object.entries(events).map(([k, v]) => k + '=' + v).join(' ')}`);
   log(`escalations: ${asked.length} asked, ${escalations.all().filter((e) => e.status === 'answered').length} answered, ${escalations.pending().length} still open`);
   log(`forged tools: ${forge.list().map((t) => `${t.name}(${t.calls} calls)`).join(', ') || '(none)'}`);
+  // The overnight field. A soak that escalates and falls back must show the fallbacks, or the harness
+  // is measuring a behaviour it cannot display.
+  if (report.assumed && report.assumed.length) {
+    log(`decided without him (${report.assumed.length}):`);
+    for (const a of report.assumed.slice(0, 5)) log(`      “${a.question || a.text}” → ${a.assumption}`);
+  }
   log(`custodian: ${report.custodian ? `${report.custodian.verdict}${report.custodian.reason ? ' — ' + String(report.custodian.reason).slice(0, 90) : ''}` : '(not asked)'}`);
   // The blackboard is what makes three agents smarter than three agents in separate rooms. An hour of
   // it is also the only way to find out whether it grows without bound.

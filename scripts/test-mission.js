@@ -317,8 +317,12 @@ ok(!pruned.includes(dead.id), 'prune: keeps parked missions regardless of age (t
   const g = G.open({ goal: 'noisy' });
   fs.writeFileSync(path.join(g.dir, 'journal.jsonl'), 'x'.repeat(JOURNAL_MAX_BYTES + 1024));
   g.step({ name: 'read_file', input: {}, result: { success: true } });
-  ok(fs.statSync(path.join(g.dir, 'journal.jsonl')).size < JOURNAL_MAX_BYTES, 'journal: truncated once past the size cap');
-  ok(g.journal().length === 1, 'journal: still usable after truncation');
+  ok(fs.statSync(path.join(g.dir, 'journal.jsonl')).size < JOURNAL_MAX_BYTES, 'journal: the LIVE file drops back under the cap once past it');
+  // The oversize content here is a wall of unparseable `x`, so the only READABLE rows are the marker
+  // and the new step. What matters is that the journal is usable, and that the bytes were moved aside
+  // rather than destroyed — the previous version deleted them.
+  ok(g.journal().length === 2, 'journal: still usable after a rotation (the roll marker plus the new step)');
+  ok(fs.existsSync(path.join(g.dir, 'journal.jsonl.1')), 'journal: the oversize generation is moved aside, not deleted');
 }
 
 // ---- digestResult edge cases ----
@@ -327,6 +331,52 @@ ok(digestResult('plain string').head === 'plain string', 'digestResult: handles 
 {
   const circular = {}; circular.self = circular;
   ok(typeof digestResult(circular).head === 'string', 'digestResult: a circular object degrades instead of throwing');
+}
+
+// ── the journal ROTATES, it does not wipe ─────────────────────────────────────────────────────────
+//
+// At the byte bound this used to do `writeFileSync(jfile, '')`, which deletes the audit trail and the
+// replay() cache in the middle of a run while seq kept counting past an empty file. On a four-hour run
+// that is a blank page exactly where the explanation should be, and it arrives silently.
+{
+  const R = createMissions({ dir: path.join(TMP, 'rotate'), now, journalMaxBytes: 4096 });
+  const h = R.open({ goal: 'rotate me' });
+  const big = 'x'.repeat(400);
+  for (let i = 1; i <= 40; i++) h.step({ name: 'item:' + i, input: { text: big }, result: { out: big }, status: 'ok' });
+
+  const jfile = path.join(h.dir, 'journal.jsonl');
+  ok(fs.existsSync(jfile + '.1'), 'the previous generation is kept rather than deleted');
+  ok(fs.statSync(jfile).size <= 4096 * 2, `and the live file stays bounded (${fs.statSync(jfile).size}B)`);
+
+  const rows = h.journal();
+  const names = rows.map((r) => r.name);
+  ok(names.includes('item:40'), 'the most recent steps are readable');
+  ok(names.includes('journal:rotated'), 'the roll itself is recorded, so a gap can never be silent');
+
+  const seqs = rows.filter((r) => r.name !== 'journal:rotated').map((r) => r.seq);
+  ok(seqs.every((v, i) => i === 0 || v > seqs[i - 1]), 'seq is monotonic across the rotation');
+  // Retention is TWO generations, deliberately, and this 4KB bound forces four rolls to prove the
+  // mechanism. What that buys in practice is the number that matters: a soak wrote 591 rows in half
+  // an hour (~240KB/h), so against the real 5MB bound a four-hour run never rotates at all and two
+  // generations cover roughly forty hours. The guarantee is "a bounded, ANNOUNCED window", not "all
+  // of history" — and the thing being fixed was an unannounced window of zero.
+  ok(seqs.length > 0 && seqs.length < 40, `retention is a bounded window, not everything (${seqs.length} of 40 after four rolls)`);
+  ok(rows.filter((r) => r.name === 'journal:rotated').length >= 1, 'and every surviving roll is marked');
+
+  // The case a four-hour run actually hits: a realistic bound, so nothing is lost at all.
+  {
+    const R2 = createMissions({ dir: path.join(TMP, 'rotate-real'), now });   // the real 5MB bound
+    const h3 = R2.open({ goal: 'a realistic run' });
+    for (let i = 1; i <= 600; i++) h3.step({ name: 'item:' + i, input: { text: 'a plan item of ordinary length' }, result: { out: 'done, with an ordinary note' }, status: 'ok' });
+    const all = h3.journal();
+    ok(all.length === 600 && all[0].name === 'item:1',
+      `at the real bound a 600-step run does not rotate and loses nothing (${all.length} rows, first is ${all[0] && all[0].name})`);
+  }
+
+  // Identity has to survive a re-attach, because that is what resume does.
+  const h2 = R.attach(h.id);
+  const r = h2.step({ name: 'after-reattach', result: {}, status: 'ok' });
+  ok(r && r.seq > Math.max(...seqs), `a re-attached mission continues the sequence rather than restarting it (${r && r.seq} > ${Math.max(...seqs)})`);
 }
 
 try { fs.rmSync(TMP, { recursive: true, force: true }); } catch {}
