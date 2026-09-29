@@ -176,15 +176,26 @@ async function ollama(messages, tools, timeoutMs = 90000) {
   return j.message || {};
 }
 
-/** Some local builds put the call in `tool_calls`, some emit it as JSON in the content. Accept both. */
+/**
+ * Some local builds put the call in `tool_calls`, some emit it as JSON in the content. Accept both —
+ * but COUNT THEM SEPARATELY. A parser this permissive cannot otherwise answer the one question the
+ * local lane depends on: does this model actually emit ollama `tool_calls`? A single "tools: 116"
+ * counter reads as proof of native tool-calling while being satisfied entirely by the text fallback.
+ * That is the same shape of mistake as a test that asserts fidelity to the caller instead of fitness
+ * for the wire, and it has cost this project a whole evening before.
+ */
 function toolCallsOf(msg) {
   if (Array.isArray(msg.tool_calls) && msg.tool_calls.length) {
+    stats.toolsNative = (stats.toolsNative || 0) + msg.tool_calls.length;
     return msg.tool_calls.map((c) => ({ name: c.function && c.function.name, args: (c.function && c.function.arguments) || {} }));
   }
   const txt = String(msg.content || '').trim();
   const m = txt.match(/\{[\s\S]*"name"\s*:\s*"(\w+)"[\s\S]*\}/);
   if (!m) return [];
-  try { const j = JSON.parse(m[0]); if (j.name) return [{ name: j.name, args: j.arguments || j.parameters || {} }]; } catch {}
+  try {
+    const j = JSON.parse(m[0]);
+    if (j.name) { stats.toolsScraped = (stats.toolsScraped || 0) + 1; return [{ name: j.name, args: j.arguments || j.parameters || {} }]; }
+  } catch {}
   return [];
 }
 
@@ -267,9 +278,18 @@ const ITEM_BY_TEXT = new Map();
     review: async ({ goal, deliverable, trace }) => custodian.review({ prompt: goal, deliverable, trace, autonomous: true }),
     runAgent: worker,
     decompose: async () => items.map((i) => i.text),
-    onEvent: (e) => { events[e.type] = (events[e.type] || 0) + 1; },
+    onEvent: (e) => {
+      events[e.type] = (events[e.type] || 0) + 1;
+      // A capped plan invalidates the whole measurement, so it is a loud failure and not a counter.
+      if (e.type === 'plan-capped') log(`⚠️  PLAN CAPPED: ${e.given} items given, ${e.kept} kept — this run measures nothing about endurance.`);
+    },
     log: () => {},
-  }, { width: WIDTH, itemBudgetUsd: 999, maxItemAttempts: 2, stallTicks: 400, idleWaitMs: 90000 });
+    // planMax MUST match the harness's own item count. The cap is right in production — it is what
+    // stops a runaway decomposition — but it also guards the direct-plan path now, and a soak handed
+    // 800 items against the default 40 does not soak: it exhausts a 40-item plan in six minutes and
+    // reports "blocked", which reads exactly like a stamina failure and is nothing of the kind. That
+    // is how the first attempt at this baseline died.
+  }, { width: WIDTH, itemBudgetUsd: 999, maxItemAttempts: 2, stallTicks: 400, idleWaitMs: 90000, planMax: items.length + 50 });
 
   const startedAt = Date.now();
   const startRss = process.memoryUsage().rss;
@@ -297,7 +317,7 @@ const ITEM_BY_TEXT = new Map();
     if (pw.ok) watts.push({ mins: +mins.toFixed(1), w: +pw.watts.toFixed(1) });
     const verified = items.filter((i) => i.check()).length;
     while (completionTimes.length < verified) completionTimes.push(mins);
-    log(`  ${mins.toFixed(1)}min · verified ${verified}/${items.length} · rss ${Math.round(r / 1048576)}MB · model ${stats.modelCalls} calls (${stats.modelErrors} err) · tools ${stats.toolCalls} · forged ${stats.forgeOk}/${stats.forgeAttempts} · asked ${asked.length}`);
+    log(`  ${mins.toFixed(1)}min · verified ${verified}/${items.length} · rss ${Math.round(r / 1048576)}MB · model ${stats.modelCalls} calls (${stats.modelErrors} err) · tools ${stats.toolCalls} (${stats.toolsNative || 0} native/${stats.toolsScraped || 0} scraped) · forged ${stats.forgeOk}/${stats.forgeAttempts} · asked ${asked.length}`);
 
     if (verified > lastVerified) { lastVerified = verified; flatFor = 0; return; }
     if (verified >= items.length) return;                    // nothing left to verify is not a stall

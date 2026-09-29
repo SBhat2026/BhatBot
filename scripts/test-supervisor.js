@@ -43,6 +43,7 @@ function rig(over = {}, opts = {}) {
   const sup = createSupervisor({
     missions,
     widthCaps: over.widthCaps,
+    laneFor: over.laneFor,
     runAgent: over.runAgent || (async ({ goal }) => ({ status: 'done', summary: 'did ' + goal, spendUsd: 0.01 })),
     decompose: over.decompose || (async ({ goal }) => [goal]),
     escalations: over.escalations,
@@ -871,6 +872,116 @@ function rig(over = {}, opts = {}) {
     ok(snapshot && snapshot.length === 1 && snapshot[0].designation === 'research' && /^#/.test(snapshot[0].color) && snapshot[0].label === 'Research',
       'roster() gives the office a name, a designation, its label and its colour for every live agent');
     ok(sup.roster().length === 0, 'and it is empty once the run is over — a finished agent is not on the floor');
+  }
+
+  // ── TWO LANES ───────────────────────────────────────────────────────────────────────────────────
+  //
+  // The local lane exists because of a measurement, so the tests are about the measurement's
+  // consequence: local is serial, cloud is parallel, and the two do not borrow each other's slots.
+  {
+    let maxLocal = 0, maxCloud = 0, sawLocal = 0, sawCloud = 0;
+    const live = { local: 0, cloud: 0 };
+    const { sup } = rig({
+      laneFor: (p) => (/^local/.test(p.text) ? 'local' : 'cloud'),
+      runAgent: async ({ lane }) => {
+        live[lane]++;
+        if (lane === 'local') { sawLocal++; maxLocal = Math.max(maxLocal, live.local); }
+        else { sawCloud++; maxCloud = Math.max(maxCloud, live.cloud); }
+        await new Promise((r) => setTimeout(r, 15));
+        live[lane]--;
+        return { status: 'done', summary: 'ok', spendUsd: 0 };
+      },
+    });
+    await sup.run({ goal: 'g', width: 3, plan: [
+      'local grind one', 'local grind two', 'local grind three',
+      'research alpha', 'write the code for beta', 'browse for gamma', 'remember delta', 'design epsilon',
+    ] });
+    ok(sawLocal === 3 && sawCloud === 5, `every item ran in the lane it was assigned (local ${sawLocal}, cloud ${sawCloud})`);
+    ok(maxLocal === 1, `the local lane is exactly one wide — a second local agent buys nothing, it just halves both (peak ${maxLocal})`);
+    ok(maxCloud > 1, `the cloud lane still runs in parallel beside it (peak ${maxCloud})`);
+    ok(maxCloud <= 3, `and the cloud lane still honours its arbitrated width (peak ${maxCloud})`);
+  }
+
+  // The whole point of the second lane is that it adds throughput rather than dividing it: a run with
+  // a local lane must have MORE than `width` agents alive at some instant, or the lane is decoration.
+  {
+    let peak = 0, n = 0;
+    const { sup } = rig({
+      laneFor: (p) => (/^local/.test(p.text) ? 'local' : 'cloud'),
+      runAgent: async () => { n++; peak = Math.max(peak, n); await new Promise((r) => setTimeout(r, 20)); n--; return { status: 'done', summary: 'ok' }; },
+    });
+    await sup.run({ goal: 'g', width: 2, plan: ['local a', 'local b', 'research c', 'write code d', 'browse e'] });
+    ok(peak === 3, `the local slot is additive, not carved out of the cloud width: width 2 + 1 local ran ${peak} at once`);
+  }
+
+  // A local agent is not one of the five. If it took a codename the office would render two FORGEs and
+  // the roster would stop meaning "one of each".
+  {
+    const names = [];
+    const { sup } = rig({
+      laneFor: () => 'local',
+      runAgent: async ({ name, lane }) => { names.push({ name, lane }); return { status: 'done', summary: 'ok' }; },
+    });
+    await sup.run({ goal: 'g', plan: ['write the code for a thing'] });
+    ok(names.length === 1 && names[0].lane === 'local' && names[0].name === 'MULE',
+      'the local slot has its own name and does not consume one of the five codenames');
+  }
+
+  // Default behaviour: a caller that knows nothing about lanes must get exactly today's behaviour.
+  {
+    const lanes = new Set();
+    const { sup } = rig({ runAgent: async ({ lane }) => { lanes.add(lane); return { status: 'done', summary: 'ok' }; } });
+    await sup.run({ goal: 'g', plan: ['research a', 'write code b'] });
+    ok(lanes.size === 1 && lanes.has('cloud'), 'with no laneFor injected every item is cloud — lanes are opt-in');
+  }
+
+  // A throwing laneFor must not take the run down with it. The tier readers it consults shell out.
+  {
+    const lanes = [];
+    const { sup } = rig({
+      laneFor: () => { throw new Error('ioreg went away'); },
+      runAgent: async ({ lane }) => { lanes.push(lane); return { status: 'done', summary: 'ok' }; },
+    });
+    const r = await sup.run({ goal: 'g', plan: ['research a', 'research b'] });
+    ok(r.ok && lanes.length === 2 && lanes.every((l) => l === 'cloud'),
+      'a throwing laneFor falls back to cloud rather than failing the run');
+  }
+
+  // The leak this refactor was really about: `workItem`'s catch path returns no `role`, so decrementing
+  // from the RESULT left a role pinned at 1 forever — one desk dark for the rest of the run.
+  {
+    let started = 0;
+    const { sup } = rig({
+      runAgent: async ({ goal }) => {
+        started++;
+        if (goal === 'write the code for the first thing') throw new Error('thrown, not returned');
+        return { status: 'done', summary: 'ok' };
+      },
+    }, { maxItemAttempts: 1, maxConsecutiveFailures: 9 });
+    const r = await sup.run({ goal: 'g', width: 2, plan: [
+      'write the code for the first thing', 'write the code for the second thing', 'write the code for the third thing',
+    ] });
+    ok(started === 3, `a thrown worker releases its role slot: all three coding items ran, not just the first (${started})`);
+    ok(r.done.length === 2 && r.blocked.length === 1,
+      `and the two healthy items are still delivered while only the thrower is blocked (${r.done.length} done, ${r.blocked.length} blocked)`);
+  }
+
+  // Status events have to distinguish the lanes, because "3 in flight" cannot be checked against a
+  // width of 2 without knowing one of them was free.
+  {
+    const { sup, events } = rig({
+      laneFor: (p) => (/^local/.test(p.text) ? 'local' : 'cloud'),
+      runAgent: async () => { await new Promise((r) => setTimeout(r, 15)); return { status: 'done', summary: 'ok' }; },
+    });
+    await sup.run({ goal: 'g', width: 2, plan: ['local a', 'research b', 'write code c'] });
+    const withLanes = events.filter((e) => e.type === 'progress' && e.lanes);
+    ok(withLanes.length > 0, 'progress reports the two lanes separately');
+    // The invariant that makes them useful: the lane counters must SUM to in-flight. If they drift,
+    // "3 in flight against width 2" is unreadable — you cannot tell an over-run from a free local slot.
+    ok(withLanes.every((e) => e.lanes.cloud + e.lanes.local === e.inFlight),
+      'and the two lane counters always sum to in-flight, so either can be checked against width');
+    ok(withLanes.every((e) => e.lanes.local <= 1 && e.lanes.cloud <= 2),
+      'with neither lane ever over its own ceiling');
   }
 
   console.log(`\n${fail === 0 ? '✅' : '❌'} supervisor: ${pass} passed, ${fail} failed`);

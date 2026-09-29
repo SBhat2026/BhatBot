@@ -212,6 +212,14 @@ const forge = createForge({
 
 // The supervised run currently in flight. One at a time: a second hour-long run would double every
 // budget wall while halving the attention either gets, and the walls are the point.
+// Which of the five roles the LOCAL tier can actually serve. Derived from what lib/agents/select.js
+// already records rather than guessed: `local_simple`/`local_code` both point at `qwen3:latest`, which
+// is annotated TOOL-CAPABLE (qwen2.5-coder:7b was demoted precisely because it could not emit ollama
+// `tool_calls`). `browser` is excluded because driving needs a context the local worker does not hold,
+// and `creative` because its real work has no local path at all. Widening this set requires verifying
+// the model's tool-calling first — M5 §5 leaves gemma4's unverified, so nothing here points at it.
+const LOCAL_CAPABLE_ROLES = new Set(['research', 'memory', 'coding']);
+
 let _supervisedRun = null;      // { missionId, goal, startedAt, promise, report }
 const supervisor = createSupervisor({
   missions, escalations, forge,
@@ -226,6 +234,33 @@ const supervisor = createSupervisor({
   // while the rate window said otherwise. Each entry here can only LOWER the requested width, and an
   // absent opinion is `null`, never zero.
   costpilot: { tick: (force) => (_costpilot ? _costpilot.tick(force) : null) },
+  // THE SECOND LANE. The cloud lane is network-bound and genuinely parallel, so the five roles live
+  // there; the local lane is ONE slot because 1, 2 and 4 concurrent local agents were all measured at
+  // ~53 tok/s in aggregate on this machine (decode is memory-bandwidth bound), so a second local agent
+  // buys nothing but halves both. One extra free grinder beside five paid thinkers is the whole idea.
+  //
+  // ADMISSION IS BY CAPABILITY, NOT COST. The tempting rule — "send the cheap items local" — routes
+  // work to a model that cannot do it and then pays twice when it comes back failed. Three gates, in
+  // this order:
+  //   1. Can the local tier serve this role at all? `creative`'s real work has no local path, and
+  //      `browser` needs a driver the local worker does not hold.
+  //   2. Is the local lane allowed right now? `tiers.localLaneEnabled()` is the one genuine width
+  //      opinion in this system that belongs to the machine rather than to the budget: it is false
+  //      under `conservative`, which is exactly when the machine is the owner's and not the run's.
+  //      The governor's `critical` overrides it, because at that point nothing background should add
+  //      a 9.6 GB resident model to the problem.
+  //   3. Is it a first attempt? A retry goes to the cloud. An item the local model already failed is
+  //      the least likely thing for it to succeed at the second time, and a lane that keeps re-serving
+  //      its own failures is a livelock with a progress bar.
+  laneFor: (item, role) => {
+    try {
+      if (!LOCAL_CAPABLE_ROLES.has(role)) return 'cloud';
+      if (governor.poll() && !governor.allowBackgroundTick('supervisor')) return 'cloud';
+      if (!tiers.localLaneEnabled()) return 'cloud';
+      if (String((item && item.note) || '').includes('attempt')) return 'cloud';
+      return 'local';
+    } catch { return 'cloud'; }
+  },
   widthCaps: {
     costpilot: () => { try { return _costpilot ? _costpilot.widthCap() : null; } catch { return null; } },
     admission: () => { try { return admission.width(MODEL_SONNET, 3072, { min: 1, max: FLEET_CAP }); } catch { return null; } },
