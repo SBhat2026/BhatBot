@@ -267,12 +267,15 @@ const supervisor = createSupervisor({
   //   3. Is it a first attempt? A retry goes to the cloud. An item the local model already failed is
   //      the least likely thing for it to succeed at the second time, and a lane that keeps re-serving
   //      its own failures is a livelock with a progress bar.
-  laneFor: (item, role) => {
+  laneFor: (item, role, ctx) => {
     try {
       if (!LOCAL_CAPABLE_ROLES.has(role)) return 'cloud';
       if (governor.poll() && !governor.allowBackgroundTick('supervisor')) return 'cloud';
       if (!tiers.localLaneEnabled()) return 'cloud';
-      if (String((item && item.note) || '').includes('attempt')) return 'cloud';
+      // THE NUMBER, not the prose. The first version of this matched the word "attempt" in the plan
+      // note — but for a partial that note is the worker's own model-written summary, so the word is
+      // usually simply absent, and the rule would have read as implemented while firing almost never.
+      if ((ctx && Number(ctx.attempt)) > 1) return 'cloud';
       return 'local';
     } catch { return 'cloud'; }
   },

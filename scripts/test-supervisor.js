@@ -1176,6 +1176,48 @@ function rig(over = {}, opts = {}) {
       `a run that declared $12 is not retired against the $5 default (${expired ? expired.reason : 'still resumable'})`);
   }
 
+  // A RETRY MUST BE ABLE TO CHANGE LANES. main.js deliberately sends a retry to the cloud: an item the
+  // local model already failed is the least likely thing for it to succeed at the second time, and a
+  // lane that keeps re-serving its own failures is a livelock with a progress bar. The first version of
+  // laneAssign memoized per item for the life of the run, which pinned the item to the lane that had
+  // just failed it and made the caller's rule unreachable — a rule that looks implemented and cannot
+  // fire. Nothing caught it, so this does.
+  {
+    const seen = [];
+    let attempt = 0;
+    const { sup } = rig({
+      // Exactly the real rule now: the attempt NUMBER decides, not a word in a model-written note.
+      laneFor: (item, role, ctx) => ((ctx && ctx.attempt) > 1 ? 'cloud' : 'local'),
+      runAgent: async ({ lane }) => {
+        seen.push(lane);
+        if (++attempt === 1) return { status: 'partial', summary: 'got nowhere on the local model' };
+        return { status: 'done', summary: 'ok' };
+      },
+    }, { maxItemAttempts: 3, maxConsecutiveFailures: 9 });
+    const r = await sup.run({ goal: 'g', plan: ['research something local-capable'] });
+    ok(seen[0] === 'local', `the first attempt went to the free lane (${seen[0]})`);
+    ok(seen.length >= 2 && seen[1] === 'cloud',
+      `and the RETRY moved to the cloud rather than being pinned to the lane that just failed it (${seen.join(' → ')})`);
+    ok(r.ok, 'and the item finishes');
+  }
+
+  // The other half of the same decision: within ONE pass the answer must not change, or an item can be
+  // admitted as cloud and launched as local and overrun the single local slot.
+  {
+    let flip = 0, peakLocal = 0, live = 0;
+    const { sup } = rig({
+      laneFor: () => (++flip % 2 ? 'local' : 'cloud'),   // a tier flapping on every single call
+      runAgent: async ({ lane }) => {
+        if (lane === 'local') { live++; peakLocal = Math.max(peakLocal, live); }
+        await new Promise((r) => setTimeout(r, 12));
+        if (lane === 'local') live--;
+        return { status: 'done', summary: 'ok' };
+      },
+    });
+    await sup.run({ goal: 'g', width: 4, plan: Array.from({ length: 10 }, (_, i) => 'research item ' + (i + 1)) });
+    ok(peakLocal <= 1, `even with laneFor changing its mind on every call, the local slot is never overrun (peak ${peakLocal})`);
+  }
+
   console.log(`\n${fail === 0 ? '✅' : '❌'} supervisor: ${pass} passed, ${fail} failed`);
   process.exit(fail === 0 ? 0 : 1);
 })();
