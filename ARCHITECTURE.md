@@ -45,12 +45,15 @@ the conversation. Five modules, each doing one thing.
 
 | Piece | Status | Notes |
 |---|---|---|
-| `lib/supervisor.js` | ✅ built, tested, soaked | the loop that drives a plan for an hour. Four durable walls — clock, spend, ticks, consecutive failures — all in `mission.json`, so a crash-loop cannot reset them |
+| `lib/supervisor.js` | ✅ built, tested, soaked | the loop that drives a plan for hours. A **DAG**, not a list: items carry `id`/`needs`/`role` and launch when their dependencies settle. **Five roles in the cloud lane, at most one of each in flight, plus one free local slot** — the local lane is exactly one wide because 1, 2 and 4 concurrent local agents were all measured at ~53 tok/s in aggregate, so a second buys nothing. Durable walls — clock, spend, stall *duration*, a rolling failure window — all in `mission.json`, so a crash-loop cannot reset them. The custodian reviews at layer boundaries, not only in the post-mortem |
+| `lib/tiers.js` | ✅ built, tested | allocation tier (conservative/balanced/aggressive) with hysteresis **inverted** against the governor: it drops instantly and raises after a dwell, because heat needs proof of coolness while a coffee break must not thrash a 9.6 GB model load. One-way latch after two drops in a run |
+| `lib/costpilot.js` | ✅ built, tested | reader-only cost watcher over `costledger` + `mission.json`. Never writes the ledger (`recordCost` already fires inside `anthropicRequest`, so a second writer doubles the daily total). Run-scoped spend comes from the mission, not the ledger, which is keyed by day and would make a 22:00 run watch its own spend drop to zero at midnight |
 | `lib/escalate.js` | ✅ built, tested | the one door to Siddhant. Asks and RETURNS; deduped; capped per hour; quiet after 23:00 |
 | `lib/toolforge.js` | ✅ built, tested | the 88th tool, built and proven in `lib/sandbox.js` before it counts |
 | `lib/designation.js` | ✅ built, tested | what an agent is doing, and the one colour that means it |
 | `long_run` / `forge_tool` tools | ✅ wired | `main.js`; found by the retriever from "while I'm asleep", "build a tool for it" |
-| `scripts/soak-supervisor.js` | ✅ built | an hour against a local Ollama model, free, with every item verified independently |
+| `scripts/soak-supervisor.js` | ✅ built | an hour against a local Ollama model, free, with every item verified independently. Reports watts and Wh/item, counts native `tool_calls` separately from content-scraped ones, and shouts if `planMax` ever caps the plan — a capped soak exhausts its work in six minutes and reports "blocked", which reads exactly like a stamina failure |
+| `scripts/bench-power.js` | ✅ built | instantaneous draw from `ioreg -rn AppleSmartBattery`. Honest about its two limits: it reads **null on AC** (the field is charge current there, not system draw), so it measures benchmark sessions, not production |
 
 **Progress is a change in the plan.** Not a tick, not a model reply, not an agent saying it is
 working. This is the load-bearing definition. Two subsystems here have already livelocked by

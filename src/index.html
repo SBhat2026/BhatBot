@@ -2589,8 +2589,14 @@ function renderLongRun(d) {
     const el = document.createElement('div');
     el.className = 'lr-who';
     const dot = document.createElement('i'); dot.style.background = a.color || 'var(--text-dim2)';
+    // THE LOCAL LANE READS DIFFERENTLY ON PURPOSE. Five of these are paid cloud agents thinking in
+    // parallel; the sixth is one free local grinder running beside them. Without the mark, seeing six
+    // names against a width of five looks like a bug in the roster rather than the extra slot working.
+    // Hollow instead of filled, because the distinction is "costs nothing", not "another colour".
+    if (a.lane === 'local') { dot.style.background = 'transparent'; dot.style.boxShadow = 'inset 0 0 0 2px ' + (a.color || 'var(--text-dim2)'); }
     const nm = document.createElement('b'); nm.textContent = a.name;
-    const what = document.createElement('span'); what.textContent = a.step ? `${a.label} · ${a.step}` : a.label;
+    const what = document.createElement('span');
+    what.textContent = (a.step ? `${a.label} · ${a.step}` : a.label) + (a.lane === 'local' ? '  · local, free' : '');
     el.appendChild(dot); el.appendChild(nm); el.appendChild(what);
     wk.appendChild(el);
   }

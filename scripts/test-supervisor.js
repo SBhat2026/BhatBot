@@ -918,13 +918,16 @@ function rig(over = {}, opts = {}) {
   // the roster would stop meaning "one of each".
   {
     const names = [];
+    let snap = null;
     const { sup } = rig({
       laneFor: () => 'local',
-      runAgent: async ({ name, lane }) => { names.push({ name, lane }); return { status: 'done', summary: 'ok' }; },
+      runAgent: async ({ name, lane }) => { names.push({ name, lane }); snap = sup.roster(); return { status: 'done', summary: 'ok' }; },
     });
     await sup.run({ goal: 'g', plan: ['write the code for a thing'] });
     ok(names.length === 1 && names[0].lane === 'local' && names[0].name === 'MULE',
       'the local slot has its own name and does not consume one of the five codenames');
+    ok(snap && snap.length === 1 && snap[0].lane === 'local',
+      'and roster() carries the lane, so the office can render the free slot differently from the five paid ones');
   }
 
   // Default behaviour: a caller that knows nothing about lanes must get exactly today's behaviour.

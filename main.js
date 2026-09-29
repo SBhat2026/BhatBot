@@ -4554,7 +4554,7 @@ function pushLongRun() {
       total: plan.length,
       blocked: plan.filter((p) => p.status === 'blocked').length,
       plan: plan.slice(0, 60).map((p) => ({ text: p.text, status: p.status, note: p.note || '' })),
-      working: supervisor.roster().map((a) => ({ name: a.name, label: a.label, color: a.color, task: a.task, step: a.step })),
+      working: supervisor.roster().map((a) => ({ name: a.name, label: a.label, color: a.color, task: a.task, step: a.step, lane: a.lane })),
       waiting: escalations.pending().map((x) => ({ id: x.id, question: x.question, assumption: x.assumption || '', quiet: !!x.quiet })),
       forged: forge.list().map((t) => t.name),
       stoppedBecause: (_supervisedRun && _supervisedRun.report) ? _supervisedRun.report.stoppedBecause : null,

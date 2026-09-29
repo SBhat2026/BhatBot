@@ -1,6 +1,12 @@
 # BhatBot on the M5 Pro — tuning plan
 
-_Planning only. Nothing in here is implemented yet._
+_**Status, 2026-09-29:** §2–3 (the tiers) and §7 (the 24 GB thresholds) are implemented in
+`lib/tiers.js` and `lib/governor.js`. §5's local-model question is settled: `qwen3:latest` emits
+native ollama `tool_calls` — verified directly against `/api/chat`, and then at scale by a soak that
+logged 557 native calls and 0 content-scrapes. **gemma4's tool-calling is still unverified and nothing
+points at it.** The measured facts below (local parallelism does not exist; the CPU is idle) are what
+the two-lane scheduler in `lib/supervisor.js` is built on._
+_Everything not named above is still planning only._
 _Every number below was measured on this machine on 2026-09-20, not taken from a spec sheet._
 
 The machine BhatBot was tuned for no longer exists. `lib/governor.js` still opens with
