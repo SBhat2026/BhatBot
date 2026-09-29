@@ -1218,6 +1218,50 @@ function rig(over = {}, opts = {}) {
     ok(peakLocal <= 1, `even with laneFor changing its mind on every call, the local slot is never overrun (peak ${peakLocal})`);
   }
 
+  // ── width zero is a CLOUD number ────────────────────────────────────────────────────────────────
+  //
+  // When cost is the binding constraint, stopping the whole run throws away the one lane that cannot
+  // make the problem worse — exactly when it is the only lane that can still make progress. This is
+  // the single most valuable thing about having a free lane, and it did not work: the width-zero wall
+  // stopped the run before the local lane got a look.
+  {
+    const lanes = [];
+    const { sup, events } = rig({
+      widthCaps: { costpilot: () => 0 },        // the money ran out; the machine is fine
+      laneFor: (item, role) => (role === 'research' ? 'local' : 'cloud'),
+      runAgent: async ({ lane }) => { lanes.push(lane); return { status: 'done', summary: 'ok' }; },
+    }, { width: 3 });
+    const r = await sup.run({ goal: 'g', plan: ['research a', 'research b', 'research c'] });
+    ok(lanes.length === 3 && lanes.every((l) => l === 'local'),
+      `with cloud width at zero the free lane carries on alone (${lanes.length} items, lanes: ${[...new Set(lanes)].join(',')})`);
+    ok(r.stoppedBecause === 'complete', `and the run completes instead of parking as throttled (${r.stoppedBecause})`);
+    ok(events.some((e) => e.type === 'throttled-to-local'), 'and it says that is what it is doing');
+  }
+
+  // The other side: when there is no local-capable work, width zero still stops the run. A free lane
+  // that cannot take the work is not a reason to spin.
+  {
+    const { sup } = rig({
+      widthCaps: { costpilot: () => 0 },
+      laneFor: () => 'cloud',                   // nothing is local-capable
+      runAgent: async () => ({ status: 'done', summary: 'ok' }),
+    }, { width: 3 });
+    const r = await sup.run({ goal: 'g', plan: ['research a', 'research b'] });
+    ok(r.stoppedBecause === 'throttled', `with no local-capable work, width zero still parks the run (${r.stoppedBecause})`);
+  }
+
+  // And when the MACHINE is in trouble rather than the budget, everything goes cloud and the run stops
+  // as it always did — adding a 9.6GB resident model to a memory emergency is not a recovery plan.
+  {
+    const { sup } = rig({
+      widthCaps: { tier: () => 0 },
+      laneFor: () => 'cloud',                   // what main.js does when governor.critical fires
+      runAgent: async () => ({ status: 'done', summary: 'ok' }),
+    }, { width: 3 });
+    const r = await sup.run({ goal: 'g', plan: ['research a'] });
+    ok(r.stoppedBecause === 'throttled', `a machine emergency still stops the run outright (${r.stoppedBecause})`);
+  }
+
   console.log(`\n${fail === 0 ? '✅' : '❌'} supervisor: ${pass} passed, ${fail} failed`);
   process.exit(fail === 0 ? 0 : 1);
 })();
