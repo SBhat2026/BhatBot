@@ -1131,6 +1131,51 @@ function rig(over = {}, opts = {}) {
     ok(r.ok && r.done.length === 8, `a throwing interim reviewer does not stop the run (${r.stoppedBecause})`);
   }
 
+  // ── the multi-hour chain, with the lease in the way ─────────────────────────────────────────────
+  //
+  // Hours are chained by parking on the wall clock and resuming, and the mission lease is new to that
+  // path: park() hands the lease back and resume() must take it again. A lease that stuck across a
+  // park would make hop two report "already running in pid N" and the chain would die silently at the
+  // first boundary — which is exactly the shape of the bug the spend cap had.
+  {
+    const { sup, missions } = rig({
+      runAgent: async () => { await new Promise((r) => setTimeout(r, 6)); return { status: 'done', summary: 'ok', spendUsd: 0.01 }; },
+    });
+    const plan = Array.from({ length: 9 }, (_, i) => 'research topic ' + (i + 1));
+    // Three short hops, none of which can finish the plan alone.
+    const hop1 = await sup.run({ goal: 'a long job', plan, wallClockMs: 14, budgetUsd: 4 });
+    ok(hop1.stoppedBecause === 'wall-clock', `hop 1 parks on the clock (${hop1.stoppedBecause})`);
+    const id = hop1.missionId;
+
+    const held = missions.attach(id);
+    ok(held && held.lease() === null, 'and the park hands the lease back, so the next hop can take it');
+
+    let done = hop1.done.length, hops = 1;
+    for (let i = 0; i < 6 && done < 9; i++) {
+      const r = await sup.resume(id, { wallClockMs: 14 });
+      ok(r.ok !== undefined && !r.leaseHeldBy, `hop ${hops + 1} is not refused by a stale lease (${r.error || 'ran'})`);
+      done = r.done.length; hops++;
+      if (r.stoppedBecause === 'complete') break;
+    }
+    ok(done === 9, `the chain finishes all nine items across ${hops} hops (${done})`);
+
+    const meta = missions.attach(id).meta;
+    ok((meta.resumeCount || 0) === hops - 1,
+      `and each hop counted as exactly one resume, so the circuit breaker stays honest (${meta.resumeCount} for ${hops} hops)`);
+  }
+
+  // The declared budget is the ceiling, not the $5 global default. Hours are chained by resuming, so a
+  // run opened with $12 used to be retired at about hop two and told "spend limit ($5)" — a limit
+  // nobody chose for it, reported as an expiry.
+  {
+    const { sup, missions } = rig({ runAgent: async () => ({ status: 'done', summary: 'ok', spendUsd: 3.0 }) });
+    const r = await sup.run({ goal: 'an expensive long job', plan: ['research a', 'research b', 'research c'], wallClockMs: 8, budgetUsd: 12 });
+    const due = missions.dueForResume({ maxSpendUsd: 5, defaultBackoffMs: 0 });
+    const expired = due.expired.find((e) => e.id === r.missionId);
+    ok(!expired || !/spend limit \(\$5\)/.test(expired.reason),
+      `a run that declared $12 is not retired against the $5 default (${expired ? expired.reason : 'still resumable'})`);
+  }
+
   console.log(`\n${fail === 0 ? '✅' : '❌'} supervisor: ${pass} passed, ${fail} failed`);
   process.exit(fail === 0 ? 0 : 1);
 })();
