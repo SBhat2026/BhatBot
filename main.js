@@ -146,6 +146,21 @@ let _costpilot = null;
  * Reports go out at LOW urgency, which is Telegram: a status update every fifteen minutes is exactly
  * the thing that must not ring, and Siddhant asked for the monitoring to be independent of the work.
  */
+// INDEPENDENT OF THE ACTUAL WORKFLOW, which was the explicit ask and is not what ticking from inside
+// the scheduling loop gives you. The loop `await`s: an escalation's idle wait can hold it for five
+// minutes, and a run that goes quiet about money for five minutes is quiet at exactly the moment the
+// spend is least supervised. The cadence itself is enforced inside `tick()`, so this timer and the
+// loop's own call cannot double-report — whichever arrives first wins and the other is a no-op.
+let _costpilotTimer = null;
+function startCostPilotTimer() {
+  if (_costpilotTimer) return;
+  _costpilotTimer = setInterval(() => {
+    if (!_supervisedRun || _supervisedRun.report) return;      // only while a run is actually going
+    try { if (_costpilot) _costpilot.tick(); } catch (e) { console.warn('[costpilot] timer:', e && e.message); }
+  }, 60 * 1000);
+  if (_costpilotTimer.unref) _costpilotTimer.unref();
+}
+
 function buildCostPilot(missionIdOf) {
   const handle = () => { try { const id = missionIdOf(); return id ? missions.attach(id) : null; } catch { return null; } };
   return createCostPilot({
@@ -5525,7 +5540,7 @@ async function executeTool(name, input, opts = {}) {
           const width = Math.max(1, Math.min(12, Math.round(Number(input.width) || 3)));
           const plan = Array.isArray(input.plan) ? input.plan.map(String).filter(Boolean) : [];
           _supervisedRun = { goal, startedAt: Date.now(), missionId: null, report: null, promise: null };
-          _costpilot = buildCostPilot(() => _supervisedRun && _supervisedRun.missionId);
+          _costpilot = buildCostPilot(() => _supervisedRun && _supervisedRun.missionId); startCostPilotTimer();
           // Deliberately NOT awaited. An hour-long run cannot be a tool call the model waits on; it
           // reports through the Activity feed and the office, and `status` is how anyone asks.
           _supervisedRun.promise = supervisor.run({ goal, plan, budgetUsd, wallClockMs: hours * 3600 * 1000, width })
@@ -5587,7 +5602,7 @@ async function executeTool(name, input, opts = {}) {
           if (_supervisedRun && !_supervisedRun.report) { result = { success: false, error: 'a run is already going' }; break; }
           const m = missions.attach(id);
           _supervisedRun = { goal: (m && m.meta && m.meta.goal) || '(resumed)', startedAt: Date.now(), missionId: id, report: null };
-          _costpilot = buildCostPilot(() => id);
+          _costpilot = buildCostPilot(() => id); startCostPilotTimer(); startCostPilotTimer();
           _supervisedRun.promise = supervisor.resume(id, { wallClockMs: Math.max(0.05, Math.min(8, Number(input.hours) || 1)) * 3600 * 1000, width: Number(input.width) || 3 })
             .then((rep) => { _supervisedRun.report = rep; return rep; })
             .catch((e) => { _supervisedRun.report = { ok: false, stoppedBecause: 'crashed', error: String(e && e.message || e) }; return _supervisedRun.report; });
@@ -10318,7 +10333,7 @@ async function resumeMission(id) {
     }
     sendToActivity('tool-update', { type: 'thinking', text: `↩️ continuing the long run — ${String(meta0.goal).slice(0, 120)}` });
     _supervisedRun = { goal: meta0.goal, startedAt: Date.now(), missionId: id, report: null };
-    _costpilot = buildCostPilot(() => id);
+    _costpilot = buildCostPilot(() => id); startCostPilotTimer();
     _supervisedRun.promise = supervisor.resume(id, {})
       .then((rep) => {
         _supervisedRun.report = rep;

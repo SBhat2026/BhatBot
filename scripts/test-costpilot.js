@@ -74,8 +74,17 @@ function rig(over = {}, config = {}) {
 // ── the cadence is the pilot's, not the caller's ─────────────────────────────────────────────────
 {
   const { pilot, reports, advance } = rig();
+  // The window is anchored to construction, so nothing is due yet. This used to report immediately,
+  // but only because `lastReportAt` started at 0 and the wall clock made `t - 0` enormous — the same
+  // code reported at once or waited a full window depending on which clock it was handed.
   for (let i = 0; i < 100; i++) pilot.tick();
-  ok(reports.length === 1, `a hundred ticks inside one window produce one report (${reports.length})`);
+  ok(reports.length === 0, `a hundred ticks inside the first window produce nothing (${reports.length})`);
+  advance(16 * 60000);
+  // Two callers now exist — the scheduling loop and main.js's standalone timer, which is there because
+  // the loop `await`s and an escalation's idle wait can hold it for five minutes. They must not
+  // double-report, which only works because the cadence lives here and not in either caller.
+  for (let i = 0; i < 100; i++) pilot.tick();
+  ok(reports.length === 1, `a hundred ticks once the window opens still produce exactly one (${reports.length})`);
   advance(16 * 60000);
   pilot.tick();
   ok(reports.length === 2, 'and the next window produces the next one');
@@ -89,7 +98,10 @@ function rig(over = {}, config = {}) {
   state.rows = Array.from({ length: 5 }, () => ({ tokensIn: 10000, tokensOut: 600 }));
   state.done = 5; state.spendUsd = 2.0;          // $2 in ten minutes = $12/h, well over
   advance(10 * 60000);
-  const r1 = pilot.tick();
+  // FORCED, because this block is about which lever comes first and not about the cadence. Ten minutes
+  // is inside the fifteen-minute window, and the plain tick() used to return a report here only by
+  // accident — the window opened against a clock that started at zero.
+  const r1 = pilot.tick(true);
   ok(r1 && r1.overRate, 'it notices the rate is over target');
   ok(r1.lever === 'local', 'and reaches for the local lane FIRST — the only lever that removes cost rather than reshaping it');
 
@@ -146,6 +158,7 @@ function rig(over = {}, config = {}) {
   try { pilot.tick(true); } catch (e) { threw = e.message; }
   ok(!threw, `every dependency failing does not throw out of tick() (${threw || 'clean'})`);
 }
+
 
 console.log(`\n${fail === 0 ? '✅' : '❌'} costpilot: ${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);
