@@ -44,6 +44,7 @@ const { createEscalations } = require('../lib/escalate');
 const { createForge } = require('../lib/toolforge');
 const sandbox = require('../lib/sandbox');
 const designation = require('../lib/designation');
+const power = require('./bench-power');
 
 const arg = (k, d) => { const i = process.argv.indexOf('--' + k); return i > 0 ? process.argv[i + 1] : d; };
 const MINUTES = Number(arg('minutes', 60));
@@ -254,6 +255,7 @@ const ITEM_BY_TEXT = new Map();
 
   const events = {};
   const rss = [];
+  const watts = [];
   // The custodian runs with no judge here (no API key in this harness), so it does only its
   // deterministic checks — which is exactly the degraded mode a real unattended run falls into when
   // the budget is gone, and therefore the mode worth soaking.
@@ -289,6 +291,10 @@ const ITEM_BY_TEXT = new Map();
     const mins = (Date.now() - startedAt) / 60000;
     const r = process.memoryUsage().rss;
     rss.push({ mins: +mins.toFixed(1), mb: Math.round(r / 1048576) });
+    // Whole-system draw, and only on battery — on AC the field reports charge current rather than
+    // consumption, so it reads null and the report says "not measured" instead of inventing a number.
+    const pw = power.read();
+    if (pw.ok) watts.push({ mins: +mins.toFixed(1), w: +pw.watts.toFixed(1) });
     const verified = items.filter((i) => i.check()).length;
     while (completionTimes.length < verified) completionTimes.push(mins);
     log(`  ${mins.toFixed(1)}min · verified ${verified}/${items.length} · rss ${Math.round(r / 1048576)}MB · model ${stats.modelCalls} calls (${stats.modelErrors} err) · tools ${stats.toolCalls} · forged ${stats.forgeOk}/${stats.forgeAttempts} · asked ${asked.length}`);
@@ -399,6 +405,24 @@ const ITEM_BY_TEXT = new Map();
   const tokOut = journalRows.reduce((a, r) => a + (r.tokensOut || 0), 0) || stats.tokensOut;
   const perItem = verified.length ? Math.round((tokIn + tokOut) / verified.length) : 0;
 
+  // Wh over the run, trapezoidal over the samples actually taken. Per VERIFIED item, because that is
+  // the only denominator that cannot be inflated by claiming work you did not do.
+  let energy = null;
+  if (watts.length >= 2) {
+    let wh = 0;
+    for (let i = 1; i < watts.length; i++) wh += ((watts[i].w + watts[i - 1].w) / 2) * ((watts[i].mins - watts[i - 1].mins) / 60);
+    const ws = watts.map((x) => x.w);
+    energy = {
+      meanW: +(ws.reduce((a, b) => a + b, 0) / ws.length).toFixed(1),
+      minW: Math.min(...ws), maxW: Math.max(...ws),
+      wh: +wh.toFixed(2),
+      whPerVerifiedItem: verified.length ? +(wh / verified.length).toFixed(4) : null,
+    };
+    log(`energy: ${energy.meanW}W mean (${energy.minW}–${energy.maxW}) · ${energy.wh}Wh · ${energy.whPerVerifiedItem}Wh per verified item`);
+  } else {
+    log('energy: not measured (on AC — the battery field reports charge current there, not draw)');
+  }
+
   const record = {
     at: new Date().toISOString(),
     git: (() => { try { return require('child_process').execSync('git rev-parse --short HEAD', { cwd: ROOT, encoding: 'utf8' }).trim(); } catch { return '(unknown)'; } })(),
@@ -411,7 +435,7 @@ const ITEM_BY_TEXT = new Map();
     modelCalls: stats.modelCalls, modelErrors: stats.modelErrors, toolCalls: stats.toolCalls,
     forged: stats.forgeOk, forgeAttempts: stats.forgeAttempts,
     escalations: { asked: asked.length, open: escalations.pending().length },
-    boardPosts, throughput: { firstHalf: early, secondHalf: late },
+    boardPosts, throughput: { firstHalf: early, secondHalf: late }, energy, watts,
     stoppedBecause: report.stoppedBecause, ticks: report.ticks,
     pass: fails.length === 0, fails,
     report, stats, events, rss, completionTimes,
@@ -437,12 +461,12 @@ const ITEM_BY_TEXT = new Map();
         'itself, never by asking the agent — "the agent said done" is the one signal an endurance test',
         'must not trust. Full records in `~/.bhatbot/bench/`.',
         '',
-        '| when | commit | min | width | verified | false-done | tok/item | $ | rss | fwd/2nd half | stopped | pass |',
-        '|---|---|---|---|---|---|---|---|---|---|---|---|',
+        '| when | commit | min | width | verified | false-done | tok/item | $ | rss | energy | fwd/2nd half | stopped | pass |',
+        '|---|---|---|---|---|---|---|---|---|---|---|---|---|',
         '',
       ].join('\n'));
     }
-    const row = `| ${record.at.slice(0, 16).replace('T', ' ')} | \`${record.git}\` | ${record.elapsedMin} | ${WIDTH} | ${record.verified} | ${record.falseDone} | ${perItem} | ${record.spentUsd} | ${record.rssStartMb}→${record.rssEndMb}MB | ${early}/${late} | ${record.stoppedBecause} | ${record.pass ? '✅' : '❌'} |\n`;
+    const row = `| ${record.at.slice(0, 16).replace('T', ' ')} | \`${record.git}\` | ${record.elapsedMin} | ${WIDTH} | ${record.verified} | ${record.falseDone} | ${perItem} | ${record.spentUsd} | ${record.rssStartMb}→${record.rssEndMb}MB | ${energy ? energy.wh + 'Wh' : '—'} | ${early}/${late} | ${record.stoppedBecause} | ${record.pass ? '✅' : '❌'} |\n`;
     fs.appendFileSync(LOG, row);
   } catch {}
 
