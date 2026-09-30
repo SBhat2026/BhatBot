@@ -1262,6 +1262,46 @@ function rig(over = {}, opts = {}) {
     ok(r.stoppedBecause === 'throttled', `a machine emergency still stops the run outright (${r.stoppedBecause})`);
   }
 
+  // ── work finished during the DRAIN is recorded ──────────────────────────────────────────────────
+  //
+  // When a wall trips, in-flight items are allowed to finish rather than be orphaned — the money is
+  // spent either way. But the results used to be awaited and thrown away, so the item finished, the
+  // artifact was written, the tokens were paid for, and the plan still said `doing`. Hours are chained
+  // by parking on the clock and resuming, so that loss happened at EVERY hour boundary and the next
+  // hop re-ran completed work.
+  {
+    const ran = [];
+    const { sup, missions, events } = rig({
+      runAgent: async ({ goal }) => {
+        ran.push(goal);
+        await new Promise((r) => setTimeout(r, 25));   // still in flight when the clock runs out
+        return { status: 'done', summary: 'finished during the drain', spendUsd: 0 };
+      },
+    });
+    // The wall trips while both items are mid-flight.
+    const r = await sup.run({ goal: 'g', width: 2, plan: ['research a', 'write the code for b'], wallClockMs: 5 });
+    ok(r.stoppedBecause === 'wall-clock', `the clock stopped it (${r.stoppedBecause})`);
+    ok(events.some((e) => e.type === 'draining'), 'it drained rather than orphaning the work');
+
+    // Not a fixed number: how many are mid-flight when the clock trips depends on timing, and one of
+    // these two may already have been collected by the normal path. The invariant is that everything
+    // which WAS in flight is recorded — nothing finished is dropped.
+    const drained = events.find((e) => e.type === 'drained');
+    ok(drained && drained.of >= 1 && drained.recorded === drained.of,
+      `and RECORDED everything that finished during the drain (${drained && drained.recorded} of ${drained && drained.of})`);
+    ok(r.done.length === 2, `so the report credits the finished work (${r.done.length} done)`);
+
+    // The durable record is what a resume reads, so it is the one that actually has to be right.
+    const onDisk = missions.attach(r.missionId).plan.read();
+    ok(onDisk.filter((p) => p.status === 'done').length === 2,
+      `and the plan on disk says done, so the next hop does not pay for it twice (${onDisk.map((p) => p.status).join(',')})`);
+
+    // A resume must now find nothing left to do.
+    const r2 = await sup.resume(r.missionId, { wallClockMs: 5000 });
+    ok(ran.length === 2, `the resumed hop re-ran nothing (${ran.length} worker calls in total, not ${ran.length + 2})`);
+    ok(r2.stoppedBecause === 'complete', `and it completes immediately (${r2.stoppedBecause})`);
+  }
+
   console.log(`\n${fail === 0 ? '✅' : '❌'} supervisor: ${pass} passed, ${fail} failed`);
   process.exit(fail === 0 ? 0 : 1);
 })();
