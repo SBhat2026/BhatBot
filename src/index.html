@@ -2614,6 +2614,10 @@ function renderLongRun(d) {
     wk.appendChild(el);
   }
   if (!desks) {
+    // A filled spare slot (FORGE-2) is a real agent and belongs on the floor, so the table lists the
+    // five named desks and then any doubles beside them — otherwise a run at 99% utilisation would
+    // render as five desks with two lit and look like it was wasting the fleet it was actually using.
+    const extras = (d.working || []).filter((x) => x.lane !== 'local' && /-\d+$/.test(String(x.name || '')));
     for (const [role, codename] of ROLE_DESKS) {
       const a = busyByName.get(codename);
       const el = document.createElement('div');
@@ -2623,8 +2627,22 @@ function renderLongRun(d) {
       dot.style.boxShadow = a ? '' : 'inset 0 0 0 1px var(--text-dim2)';
       const nm = document.createElement('b'); nm.textContent = codename;
       const what = document.createElement('span');
+      // "no work of this kind" is the honest resting state for a role with nothing to do. The other
+      // case is no longer "waiting for its role to free up" — since a busy role became a preference
+      // rather than a wall, a ready item is only blocked by a full lane, so `heldForRole` now reads as
+      // backlog depth: work queued behind the agents that already exist.
       what.textContent = a ? (a.step ? `${a.label} · ${a.step}` : a.label)
-        : (d.heldForRole ? 'waiting for a slot' : 'no work of this kind');
+        : (d.heldForRole ? `idle — ${d.heldForRole} item(s) queued behind the other desks` : 'no work of this kind');
+      el.appendChild(dot); el.appendChild(nm); el.appendChild(what);
+      wk.appendChild(el);
+    }
+    for (const a of extras.slice(0, 6)) {
+      const el = document.createElement('div');
+      el.className = 'lr-who';
+      const dot = document.createElement('i'); dot.style.background = a.color || 'var(--text-dim2)';
+      dot.style.opacity = '.7';                       // a second of its kind, not a sixth role
+      const nm = document.createElement('b'); nm.textContent = a.name;
+      const what = document.createElement('span'); what.textContent = a.step ? `${a.label} · ${a.step}` : a.label;
       el.appendChild(dot); el.appendChild(nm); el.appendChild(what);
       wk.appendChild(el);
     }

@@ -633,15 +633,20 @@ function rig(over = {}, opts = {}) {
     ok(r.open.length === 2, 'with the work left open for a resume');
   }
 
-  // ── ALL ONE ROLE, OR ONE OF EACH. NOTHING BETWEEN. ──────────────────────────────────────────────
+  // ── ONE OF EACH FIRST, THEN FILL ────────────────────────────────────────────────────────────────
   {
-    // THE INVARIANT, checked continuously rather than at the end. In ensemble mode two agents of the
-    // same role must never be in flight at once — that is the "nothing in between" state.
+    // This used to assert that two agents of the same role are NEVER in flight together. That hard cap
+    // made parallelism a function of the plan's role diversity rather than of width — measured, a
+    // two-role plan ran at 40% utilisation at width 5 and finished in exactly the same time as at
+    // width 3, because the spare slots could never be filled by anything. What is actually worth
+    // guaranteeing is FAIRNESS: every role with ready work gets a desk before any role gets a second.
     let worst = 0, sawEnsemble = false;
+    const launchOrder = [];
     const live = new Map();
     const { sup, events } = rig({
       runAgent: async ({ role, id }) => {
         live.set(id, role);
+        if (launchOrder.length < 5) launchOrder.push(role);
         const counts = {};
         for (const r of live.values()) counts[r] = (counts[r] || 0) + 1;
         worst = Math.max(worst, Math.max(...Object.values(counts)));
@@ -657,9 +662,12 @@ function rig(over = {}, opts = {}) {
       'write the second migration', 'read two more papers', 'render a second diagram',
     ] });
     sawEnsemble = events.some((e) => e.type === 'mode' && e.to === 'ensemble');
+    const firstRoundRoles = new Set(launchOrder);
     ok(r.ok && r.done.length === 8, 'an eight-item, five-role plan completes');
     ok(sawEnsemble, 'and it announced ensemble mode');
-    ok(worst === 1, `never two agents of the same role at once (worst concurrent same-role count: ${worst})`);
+    ok(worst >= 1, `a role may take a second agent once every role has its first (worst concurrent same-role count: ${worst})`);
+    ok(firstRoundRoles.size === 5,
+      `but all five roles are served before any role doubles up (first five launches covered ${firstRoundRoles.size} roles: ${[...firstRoundRoles].join(',')})`);
   }
   {
     // UNIFORM: a single-role plan lets all five work it, because there is nothing else to be.
@@ -712,11 +720,14 @@ function rig(over = {}, opts = {}) {
     const seen = [];
     const { sup } = rig({ runAgent: async ({ name, role }) => { seen.push([role, name]); return { status: 'done', summary: 'ok' }; } }, { width: 5 });
     await sup.run({ goal: 'g', plan: ['write the code', 'read the papers', 'write more code'] });
-    const byRole = new Map(seen);
-    ok(byRole.get('coding') === 'FORGE' && byRole.get('research') === 'ORACLE',
+    const names = seen.map(([, n]) => n);
+    ok(names.includes('FORGE') && names.includes('ORACLE'),
       `the role decides the name (${seen.map((x) => x.join('=')).join(', ')})`);
     const coding = seen.filter(([r]) => r === 'coding').map(([, n]) => n);
-    ok(new Set(coding).size === 1, 'and two coding items are worked by the same name, not two invented ones');
+    // A FILLED SPARE SLOT says so rather than being a second thing also called FORGE: the office would
+    // otherwise show two identical names and the roster would stop meaning anything.
+    ok(coding.every((n) => /^FORGE(-\d+)?$/.test(n)),
+      `every coding agent is a FORGE, and a concurrent second one is suffixed rather than renamed (${coding.join(', ')})`);
   }
 
   // ── DEPENDENCIES ─────────────────────────────────────────────────────────────────────────────────
@@ -1343,17 +1354,38 @@ function rig(over = {}, opts = {}) {
       `the TIGHTEST cap wins and is named, not just applied (width ${st && st.width} by ${st && st.bindingConstraint})`);
   }
 
-  // A held item is throughput the per-role cap is costing. It has to be visible or the cap is
-  // unfalsifiable: a run can look healthy while four of five desks sit on work they are not allowed
-  // to start.
+  // BACKLOG DEPTH. `heldForRole` kept its name but no longer means "held by a busy role": since roles
+  // became a preference rather than a wall, the only thing that actually blocks a ready item is a full
+  // lane. So it now reads "ready work with nowhere to put it", which is the number that answers
+  // whether more width would help at all — zero means the plan cannot feed the agents it already has,
+  // and buying more would change nothing.
   {
     let held = 0;
     const { sup } = rig({
-      runAgent: async () => { held = Math.max(held, sup.stats().heldForRole); await new Promise((r) => setTimeout(r, 20)); return { status: 'done', summary: 'ok' }; },
-    }, { width: 4 });
-    // Four items, all the same role: ensemble mode allows one in flight, so three are ready-but-held.
-    await sup.run({ goal: 'g', width: 4, plan: ['research a', 'research b', 'research c', 'write the code for d'] });
-    ok(held >= 1, `items ready but held by their role are counted, so the cap's cost is measurable (${held})`);
+      runAgent: async () => { held = Math.max(held, sup.stats().heldForRole); await new Promise((r) => setTimeout(r, 25)); return { status: 'done', summary: 'ok' }; },
+    }, { width: 2 });
+    // Six ready items against two slots: four have nowhere to go, whatever their roles.
+    await sup.run({ goal: 'g', width: 2, plan: ['research a', 'research b', 'research c', 'write the code for d', 'browse for e', 'remember f'] });
+    ok(held >= 1, `ready work with no free slot is counted, so "would more agents help" is answerable (${held})`);
+  }
+
+  // And the measurement that forced the whole change: role diversity must no longer cap parallelism.
+  // A two-role plan at width 5 used to run two agents and finish in exactly the time it took at
+  // width 3 — asking for more width was a silent no-op, and nothing said so.
+  {
+    const peakOf = async (plan, width) => {
+      let peak = 0, live = 0;
+      const { sup } = rig({
+        runAgent: async () => { live++; peak = Math.max(peak, live); await new Promise((r) => setTimeout(r, 25)); live--; return { status: 'done', summary: 'ok' }; },
+      }, { width });
+      await sup.run({ goal: 'g', width, plan });
+      return peak;
+    };
+    const twoRole = Array.from({ length: 20 }, (_, i) => (i % 2 ? 'write the code for module ' + i : 'research topic ' + i));
+    const p3 = await peakOf(twoRole, 3);
+    const p5 = await peakOf(twoRole, 5);
+    ok(p3 >= 3, `a two-role plan fills width 3 (peak ${p3})`);
+    ok(p5 >= 4, `and still fills width 5 rather than stalling at two (peak ${p5}) — more width is no longer a no-op`);
   }
 
   // The reviewer runs at a quiescence point, so every millisecond it takes is a millisecond nobody is
