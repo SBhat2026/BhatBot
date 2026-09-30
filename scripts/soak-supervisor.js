@@ -213,6 +213,23 @@ function toolCallsOf(msg) {
   return [];
 }
 
+/**
+ * Does one item the way a reliable agent would, with no model in the loop. The harness already holds
+ * the ground truth for every item, so this writes the artifact the item asks for and nothing is
+ * assumed: the caller still verifies by reading the file back.
+ */
+async function cloudDoItem(item) {
+  const out = path.join(WORK, item.id + '.txt');
+  if (item.kind === 'count') {
+    const m = /scripts\/(\S+?)\s/.exec(item.text + ' ');
+    const src = fs.readFileSync(path.join(ROOT, 'scripts', m[1]), 'utf8');
+    fs.writeFileSync(out, String(src.split('\n').length));
+    return;
+  }
+  if (item.kind === 'forge') { fs.writeFileSync(out, item.truth); return; }
+  fs.writeFileSync(out, 'APA');                       // the assumption an unanswered ask proceeds on
+}
+
 // The lane-aware wrapper. It records what each lane did so the report can say whether the second lane
 // actually bought throughput — which is the only question two lanes exist to answer.
 const laneStats = { cloud: { started: 0, done: 0, ms: 0, peak: 0, live: 0 }, local: { started: 0, done: 0, ms: 0, peak: 0, live: 0 } };
@@ -223,11 +240,39 @@ async function laneAwareWorker(spec) {
   const t0 = Date.now();
   try {
     if (lane === 'local') return await worker(spec);
-    // The simulated cloud lane. Jittered, because a constant latency would let the scheduler settle
-    // into a lockstep that no real network ever produces and would hide a refill bug.
+
+    // ── the simulated cloud lane ──────────────────────────────────────────────────────────────────
+    //
+    // ONLY THE LATENCY IS SIMULATED. NEVER THE OUTCOME. The first version of this slept and then
+    // returned `status: 'done'` without doing anything, which produced 112 false "done"s in a 12-minute
+    // run — every single cloud item a fabricated success. The harness's own false-done detector caught
+    // it, which is the one good thing about that afternoon, but it is exactly the failure this project
+    // keeps rediscovering: a benchmark that scores an absence as a success. A simulated lane may stand
+    // in for an agent's SPEED. It may never stand in for its RESULT.
+    //
+    // So this does the item for real — the harness knows the truth, so it writes the correct artifact
+    // and check() then passes on the actual file, verified independently like everything else — and
+    // sleeps for a plausible Sonnet latency instead of thinking. Jittered, because a constant latency
+    // lets the scheduler settle into a lockstep no real network produces and would hide a refill bug.
+    //
+    // What that buys is a RELIABLE stand-in, which is the point: it measures the SCHEDULER (one local
+    // slot, N cloud slots, no borrowing, correct release) without model quality as a confound. It
+    // therefore says nothing about how good Sonnet is at these items, and the report says so.
     await new Promise((r) => setTimeout(r, Math.round(CLOUD_MS * (0.6 + Math.random() * 0.8))));
-    L.done++;
-    return { status: 'done', summary: 'simulated cloud item', spendUsd: 0, tokensIn: 0, tokensOut: 0 };
+    const item = ITEM_BY_TEXT.get(spec.goal);
+    if (!item) return { status: 'partial', summary: 'no such item', spendUsd: 0, tokensIn: 0, tokensOut: 0 };
+    // An `ask` item still escalates exactly once, in either lane: needing a human is not a lane
+    // property, and dropping it here would remove escalation from half the run's coverage.
+    if (item.kind === 'ask' && !item.askedOnce) {
+      item.askedOnce = true;
+      return { status: 'blocked', summary: 'needs Siddhant', spendUsd: 0, tokensIn: 0, tokensOut: 0,
+        need: { kind: 'human', question: `What citation style do you want for item ${item.id}?`, assumption: 'APA' } };
+    }
+    try { await cloudDoItem(item); } catch (e) { return { status: 'partial', summary: 'cloud stand-in failed: ' + e.message, spendUsd: 0, tokensIn: 0, tokensOut: 0 }; }
+    // Verified the same way as every other item: by checking the artifact, never by taking a word for it.
+    const ok = item.check();
+    if (ok) L.done++;
+    return { status: ok ? 'done' : 'partial', summary: (ok ? 'verified: ' : 'not verified: ') + 'cloud stand-in', spendUsd: 0, tokensIn: 0, tokensOut: 0 };
   } finally { L.live--; L.ms += Date.now() - t0; }
 }
 
@@ -356,6 +401,33 @@ const ITEM_BY_TEXT = new Map();
   // confirming it.
   let lastVerified = 0, flatFor = 0;
   let deadlocked = null;
+
+  // ── THE EFFICIENCY INSTRUMENT ───────────────────────────────────────────────────────────────────
+  //
+  // Correctness and throughput are different questions and this harness only answered the first. The
+  // run now carries a width arbiter, a one-agent-per-role cap, a single local slot, admission, a tier
+  // ladder and a cost pilot — six individually-correct brakes — and a stack of correct brakes is
+  // exactly how a system degrades monotonically while every test still passes. A run arbitrated to
+  // width 5 that averages 1.4 agents in flight is a bug, and nothing in a pass/fail suite says so.
+  //
+  // Sampled at 2s rather than on the progress event, because progress only fires when an item lands:
+  // sampling on completions is sampling the busy moments and would report near-perfect utilisation for
+  // a run that spends most of its time idle. The point is to catch the idle.
+  const util = { n: 0, inFlight: 0, width: 0, held: 0, saturated: 0, idle: 0, binding: {}, lanes: { cloud: 0, local: 0 } };
+  const utilBeat = setInterval(() => {
+    let st = null;
+    try { st = sup.stats(); } catch { return; }
+    if (!st || !st.width) return;                      // before the first arbitration there is nothing to say
+    util.n++;
+    util.inFlight += st.inFlight; util.width += st.width; util.held += st.heldForRole || 0;
+    util.lanes.cloud += (st.lanes && st.lanes.cloud) || 0;
+    util.lanes.local += (st.lanes && st.lanes.local) || 0;
+    if (st.inFlight >= st.width) util.saturated++;      // asking for more width would actually help
+    if (st.inFlight === 0) util.idle++;                 // nobody working at all
+    const b = st.bindingConstraint || 'spec';
+    util.binding[b] = (util.binding[b] || 0) + 1;
+  }, 2000);
+  if (utilBeat.unref) utilBeat.unref();
   const beat = setInterval(() => {
     const mins = (Date.now() - startedAt) / 60000;
     const r = process.memoryUsage().rss;
@@ -386,6 +458,7 @@ const ITEM_BY_TEXT = new Map();
 
   const report = await sup.run({ goal: 'Work through the audit checklist', plan: items.map((i) => i.text), budgetUsd: 999, wallClockMs: MINUTES * 60000, width: WIDTH });
   clearInterval(beat);
+  clearInterval(utilBeat);
 
   const elapsedMin = (Date.now() - startedAt) / 60000;
   const endRss = process.memoryUsage().rss;
@@ -408,7 +481,9 @@ const ITEM_BY_TEXT = new Map();
     for (const d of report.doubts.slice(0, 5)) log(`      [${d.verdict}] after ${d.afterDone} done${d.raised > 1 ? `, still true after ${d.raised} checks` : ''}: ${d.reason}`);
   }
   if (LANES) {
-    log('two lanes (the cloud lane is SIMULATED latency, not Anthropic — this measures the SCHEDULER):');
+    log('two lanes — the cloud lane simulates LATENCY ONLY (it does the work for real and is verified');
+    log('like everything else); it is a reliable stand-in, so this measures the SCHEDULER and says');
+    log('nothing about how good a real cloud model would be at these items:');
     for (const k of ['cloud', 'local']) {
       const L = laneStats[k];
       log(`      ${k}: ${L.started} started · peak ${L.peak} concurrent · ${Math.round(L.ms / Math.max(1, L.started))}ms mean`);
@@ -524,7 +599,7 @@ const ITEM_BY_TEXT = new Map();
     modelCalls: stats.modelCalls, modelErrors: stats.modelErrors, toolCalls: stats.toolCalls,
     forged: stats.forgeOk, forgeAttempts: stats.forgeAttempts,
     escalations: { asked: asked.length, open: escalations.pending().length },
-    boardPosts, throughput: { firstHalf: early, secondHalf: late }, energy, watts,
+    boardPosts, throughput: { firstHalf: early, secondHalf: late }, efficiency: U, energy, watts,
     stoppedBecause: report.stoppedBecause, ticks: report.ticks,
     pass: fails.length === 0, fails,
     report, stats, events, rss, completionTimes,

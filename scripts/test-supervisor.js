@@ -1302,6 +1302,74 @@ function rig(over = {}, opts = {}) {
     ok(r2.stoppedBecause === 'complete', `and it completes immediately (${r2.stoppedBecause})`);
   }
 
+  // ── stats(): what the MACHINERY is doing ────────────────────────────────────────────────────────
+  //
+  // Correctness and throughput are different questions and this suite only ever asked the first. The
+  // run carries six individually-correct brakes — width arbiter, one-per-role cap, single local slot,
+  // admission, tier ladder, costpilot — and a stack of correct brakes is how a system degrades
+  // monotonically while every test passes. A run arbitrated to width 5 that averages 1.4 agents is a
+  // bug that nothing here would have caught.
+  {
+    const seen = [];
+    const { sup } = rig({
+      runAgent: async () => { await new Promise((r) => setTimeout(r, 30)); return { status: 'done', summary: 'ok' }; },
+    });
+    ok(sup.stats().width === 0 && sup.stats().bindingConstraint === null,
+      'stats() is safe to read before a run and claims nothing it does not know');
+    // SAMPLED FROM OUTSIDE, on a timer, which is how the instrument is actually used. Reading it from
+    // inside runAgent measures the wrong instant: the worker runs before its own item is registered,
+    // so the peak is always one short — and five roles all reporting one-short is how a healthy run
+    // gets diagnosed as idle.
+    const tick = setInterval(() => { try { seen.push(sup.stats()); } catch {} }, 5);
+    // Five distinct roles, so ensemble mode can genuinely run several at once.
+    await sup.run({ goal: 'g', width: 5, plan: ['research a', 'write the code for b', 'browse for c', 'remember d', 'design e'] });
+    clearInterval(tick);
+    ok(seen.length > 0 && seen.every((x) => x.width === 5), 'it reports the arbitrated width during the run');
+    const peak = Math.max(...seen.map((x) => x.inFlight));
+    ok(peak >= 3, `and the live in-flight count, so utilisation can be computed (peak seen ${peak} of 5)`);
+    ok(seen.every((x) => x.bindingConstraint === 'spec'), 'and names the constraint that is holding the brake');
+  }
+
+  // The name matters more than the number: "who lowered my width" is otherwise an evening of guessing.
+  {
+    const { sup } = rig({ widthCaps: { admission: () => 2, costpilot: () => 4 } }, { width: 5 });
+    let st = null;
+    const { sup: s2 } = rig({
+      widthCaps: { admission: () => 2, costpilot: () => 4 },
+      runAgent: async () => { st = s2.stats(); return { status: 'done', summary: 'ok' }; },
+    }, { width: 5 });
+    await s2.run({ goal: 'g', width: 5, plan: ['research a'] });
+    ok(st && st.width === 2 && st.bindingConstraint === 'admission',
+      `the TIGHTEST cap wins and is named, not just applied (width ${st && st.width} by ${st && st.bindingConstraint})`);
+  }
+
+  // A held item is throughput the per-role cap is costing. It has to be visible or the cap is
+  // unfalsifiable: a run can look healthy while four of five desks sit on work they are not allowed
+  // to start.
+  {
+    let held = 0;
+    const { sup } = rig({
+      runAgent: async () => { held = Math.max(held, sup.stats().heldForRole); await new Promise((r) => setTimeout(r, 20)); return { status: 'done', summary: 'ok' }; },
+    }, { width: 4 });
+    // Four items, all the same role: ensemble mode allows one in flight, so three are ready-but-held.
+    await sup.run({ goal: 'g', width: 4, plan: ['research a', 'research b', 'research c', 'write the code for d'] });
+    ok(held >= 1, `items ready but held by their role are counted, so the cap's cost is measurable (${held})`);
+  }
+
+  // The reviewer runs at a quiescence point, so every millisecond it takes is a millisecond nobody is
+  // working. An advisor is an efficiency question too.
+  {
+    let st = null;
+    const { sup } = rig({
+      review: async (a) => { await new Promise((r) => setTimeout(r, 25)); return { verdict: 'accept' }; },
+      runAgent: async () => { st = sup.stats(); return { status: 'done', summary: 'ok' }; },
+    }, { interimReviewMinDone: 3, width: 1 });
+    await sup.run({ goal: 'g', plan: Array.from({ length: 8 }, (_, i) => 'research topic ' + (i + 1)) });
+    const after = sup.stats();
+    ok(after.reviews >= 1 && after.reviewMs >= 20,
+      `time spent in the custodian is attributed, not invisible (${after.reviews} review(s), ${after.reviewMs}ms)`);
+  }
+
   console.log(`\n${fail === 0 ? '✅' : '❌'} supervisor: ${pass} passed, ${fail} failed`);
   process.exit(fail === 0 ? 0 : 1);
 })();
