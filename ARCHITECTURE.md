@@ -53,6 +53,7 @@ the conversation. Five modules, each doing one thing.
 | `lib/designation.js` | ✅ built, tested | what an agent is doing, and the one colour that means it |
 | `long_run` / `forge_tool` tools | ✅ wired | `main.js`; found by the retriever from "while I'm asleep", "build a tool for it" |
 | `scripts/soak-supervisor.js` | ✅ built | an hour against a local Ollama model, free, with every item verified independently. Reports watts and Wh/item, counts native `tool_calls` separately from content-scraped ones, and shouts if `planMax` ever caps the plan — a capped soak exhausts its work in six minutes and reports "blocked", which reads exactly like a stamina failure |
+| `scripts/efficiency-check.js` | ✅ built | `npm run bench:efficiency` — "is it still fast", which `verify` does not ask. Reads the durable soak records and trends utilisation, throughput and tokens/item; names which brake is binding. Runs nothing itself, because measuring contends for the CPU and Ollama the measurement needs. A run with a false "done" short-circuits every other number rather than reporting figures derived from fabricated successes |
 | `scripts/bench-power.js` | ✅ built | instantaneous draw from `ioreg -rn AppleSmartBattery`. Honest about its two limits: it reads **null on AC** (the field is charge current there, not system draw), so it measures benchmark sessions, not production |
 
 **Progress is a change in the plan.** Not a tick, not a model reply, not an agent saying it is
