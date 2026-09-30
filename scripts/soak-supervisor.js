@@ -258,7 +258,15 @@ Be brief. Do not explain. /no_think`;
   // this asks for the narrowest thing that can be parsed and falls back rather than failing the item —
   // the supervisor is what is under test, not the local model's JSON discipline.
   const item = ITEM_BY_TEXT.get(spec.goal);
-  if (item && item.kind === 'ask') {
+  // CHECK BEFORE ASKING. This used to return `blocked` for an `ask` item unconditionally — after the
+  // tool loop above had already written the file. The result was 114 phantom under-claims in the
+  // baseline (628 verified against 514 claimed), which reads as "the agent cannot tell when it
+  // succeeded" and is really just this early return never looking. A harness that manufactures a
+  // defect it then reports is worse than one that measures nothing, because the number is credible.
+  //
+  // An item that still genuinely needs an answer asks for one; an item that got its answer on a
+  // previous attempt and has now done the work says so.
+  if (item && item.kind === 'ask' && !item.check()) {
     return { status: 'blocked', summary: 'needs Siddhant', turns: 8, ...used(),
       need: { kind: 'human', question: `What citation style do you want for item ${item.id}?`, assumption: 'APA' } };
   }

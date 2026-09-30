@@ -13,11 +13,19 @@ the thing this harness exists to demonstrate. 2,628 model calls, **zero errors**
 
 Three numbers worth keeping separately in mind:
 
-- **`agent CLAIMED done: 514 · INDEPENDENTLY VERIFIED: 628`.** The agent UNDER-claims by 114 items: it
-  did the work, the artifact is on disk and the harness found it, and the agent still reported partial
-  or blocked. With `false "done": 0` this is failing in the safe direction, but a run that cannot tell
-  when it succeeded will re-attempt work it has already finished and burn an hour proving it. This is
-  the most interesting defect in the baseline and it is not a wall, a leak or a cost problem.
+- **`agent CLAIMED done: 514 · INDEPENDENTLY VERIFIED: 628` — and the 114-item gap was THE HARNESS'S
+  OWN FAULT, not the supervisor's.** I first wrote this up as "the agent cannot tell when it
+  succeeded", which was wrong, and the correction is worth keeping because the wrong reading was
+  entirely credible. The gap is exactly the number of `ask` items, and the blocked reasons say so:
+  108 of them read "no answer — proceeding on the assumption". The soak's own worker returned
+  `blocked` for an `ask` item unconditionally, *after* its tool loop had already written the file, and
+  never called `check()`. A harness that manufactures a defect and then reports it is worse than one
+  that measures nothing, because the number looks real. Fixed in the same pass: an `ask` item now
+  checks before it asks. Later rows are not comparable to this one on the claimed/verified axis.
+  Only two real losses were hiding under it, and both are fixed: results finished during the
+  wall-clock DRAIN were awaited and thrown away (so every hour boundary in a chain re-ran completed
+  work — the nine-item chain test now needs two hops where it needed three), and `planMax` capped the
+  direct plan.
 - **Forge: 64 successes in 226 attempts (28%).** Every refusal in the tail is the same thing — qwen3
   writing a roman-numeral converter that fails its own test cases, off by one subtractive pair. That is
   a small-model arithmetic limit, correctly caught by the sandbox before the tool counted, and
