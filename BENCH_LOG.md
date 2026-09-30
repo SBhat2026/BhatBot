@@ -20,8 +20,11 @@ Three numbers worth keeping separately in mind:
   108 of them read "no answer — proceeding on the assumption". The soak's own worker returned
   `blocked` for an `ask` item unconditionally, *after* its tool loop had already written the file, and
   never called `check()`. A harness that manufactures a defect and then reports it is worse than one
-  that measures nothing, because the number looks real. Fixed in the same pass: an `ask` item now
-  checks before it asks. Later rows are not comparable to this one on the claimed/verified axis.
+  that measures nothing, because the number looks real. Fixed in the same pass, and the first fix was
+  also wrong: "check before asking" would have let the model satisfy these items on attempt 1 — the
+  check is `/apa|chicago/` and the item text itself says to assume "APA" — so the soak would have
+  quietly stopped exercising escalation, which is one of the things under test. It now asks exactly
+  once per item, which keeps both properties. Later rows are not comparable to this one on the claimed/verified axis.
   Only two real losses were hiding under it, and both are fixed: results finished during the
   wall-clock DRAIN were awaited and thrown away (so every hour boundary in a chain re-ran completed
   work — the nine-item chain test now needs two hops where it needed three), and `planMax` capped the

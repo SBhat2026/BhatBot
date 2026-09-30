@@ -258,15 +258,21 @@ Be brief. Do not explain. /no_think`;
   // this asks for the narrowest thing that can be parsed and falls back rather than failing the item —
   // the supervisor is what is under test, not the local model's JSON discipline.
   const item = ITEM_BY_TEXT.get(spec.goal);
-  // CHECK BEFORE ASKING. This used to return `blocked` for an `ask` item unconditionally — after the
-  // tool loop above had already written the file. The result was 114 phantom under-claims in the
-  // baseline (628 verified against 514 claimed), which reads as "the agent cannot tell when it
-  // succeeded" and is really just this early return never looking. A harness that manufactures a
-  // defect it then reports is worse than one that measures nothing, because the number is credible.
+  // ASK ONCE, THEN BE HONEST. This used to return `blocked` for an `ask` item on EVERY attempt — after
+  // the tool loop above had already written the file, and without ever calling check(). That produced
+  // 114 phantom under-claims in the baseline (628 verified against 514 claimed), which reads as "the
+  // agent cannot tell when it succeeded" and is really just this early return never looking. A
+  // harness that manufactures a defect and then reports it is worse than one that measures nothing,
+  // because the number looks real.
   //
-  // An item that still genuinely needs an answer asks for one; an item that got its answer on a
-  // previous attempt and has now done the work says so.
-  if (item && item.kind === 'ask' && !item.check()) {
+  // But "check before asking" alone would be the wrong fix, and it was the first one I wrote: this
+  // item's check is `/apa|chicago/` and its own text says to assume "APA" meanwhile, so the model can
+  // satisfy it on the first attempt and the soak would quietly stop exercising escalation at all —
+  // which is one of the things under test. Asking exactly ONCE per item keeps both properties: every
+  // ask item still escalates, and once it has an answer or an assumption it reports what it actually
+  // did rather than asking again forever.
+  if (item && item.kind === 'ask' && !item.askedOnce) {
+    item.askedOnce = true;
     return { status: 'blocked', summary: 'needs Siddhant', turns: 8, ...used(),
       need: { kind: 'human', question: `What citation style do you want for item ${item.id}?`, assumption: 'APA' } };
   }
