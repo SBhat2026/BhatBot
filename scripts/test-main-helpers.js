@@ -615,6 +615,23 @@ ok(Array.isArray(tagCache('nope')) === false, 'cache: non-array → returned as-
     ok(/stop_details = ev\.delta\.stop_details/.test(body), 'the refusal category is read off the stream');
   }
 
+  // ── THE AUTONOMY POLICY SITS IN FRONT OF EVERY TOOL ────────────────────────────────────────────
+  {
+    const body = extract(main, 'executeTool');
+    const iDecide = body.indexOf('autonomy.decide('), iTier = body.indexOf('riskOf('), iRun = body.indexOf('READ_CACHEABLE');
+    ok(iDecide > 0 && iDecide < iTier && iDecide < iRun, 'it is consulted before the tier gate and before anything runs or is served from cache');
+    ok(/verdict\.verdict === 'forbid'[\s\S]{0,900}return result;/.test(body), 'a forbidden target returns before the tool executes');
+    ok(!/forbid[\s\S]{0,400}requestConfirm/.test(body.slice(iDecide, iDecide + 1400)), 'and is never offered for approval — there is no way to say yes to it');
+    ok(/autonomy\.decide\(name, auditInput,/.test(body), 'it judges the input with credential handles intact, so a secret is never part of a reason');
+    ok(/if \(approved !== null\) \{ try \{ autonomy\.learn\(verdict, approved\)/.test(body), 'an answer is learned from; silence is not');
+    ok(/opts\.hermetic \? null/.test(body), 'a drone, which has nobody to ask, is treated as unanswered rather than approved');
+    const ask = extract(main, 'askAboutAction');
+    ok(/isRemote\(\) \|\| isUnattended\(\)\) return Promise\.resolve\(null\)/.test(ask), 'with nobody at the desk it does not pretend to have asked');
+    ok(/notifyUser\(/.test(ask) && /60 \* 1000/.test(ask), 'an unanswered card becomes a Telegram line after a minute');
+    ok(/res\(null\), 10 \* 60 \* 1000/.test(ask), 'and it gives up after ten minutes instead of hanging the turn forever');
+    ok(/brain', 'standard-actions\.json'/.test(main), 'what it learns is stored in the brain directory, as a file he can read and edit');
+  }
+
 console.log(`\n${fail === 0 ? '✅' : '❌'} ${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);
 

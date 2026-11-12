@@ -343,6 +343,7 @@ const scicompute = require('./lib/scicompute');         // quant/numerics/stats/
 const dockerPack = require('./lib/integrations/docker'); // container isolation lane (container_run)
 const { createEndpointer } = require('./lib/endpoint');  // adaptive, speaker-gated utterance endpointing
 const modelpolicy = require('./lib/modelpolicy');        // the ceiling: never Fable, Opus only with a per-task yes
+const { createAutonomy } = require('./lib/autonomy');    // what may be done unasked, what is learned as routine, what is never done
 const voiceid = require('./lib/voiceid');                // T3 — speaker verification (cocktail-party post-filter)
 const { createAudioEnv } = require('./lib/audioenv');    // is THIS machine playing sound the mic can hear?
 const spokenmodel = require('./lib/spokenmodel');        // T5 — learned spoken-length model (density→compression)
@@ -5201,6 +5202,45 @@ function badAccount(sel) {
 // drones call this same executeTool, so a hermetic drone's run_shell ran with BhatBot's full
 // environment, ANTHROPIC_API_KEY included. lib/sandboxexec.js, the wall that was supposed to stop
 // that, was required by nothing. A security claim the code does not back is worse than no claim.
+// ── THE AUTONOMY POLICY ──────────────────────────────────────────────────────────────────────────
+// What it has learned is "standard" lives in the brain directory beside everything else it knows,
+// as plain JSON he can read and edit: delete a line and that action goes back to asking.
+const AUTONOMY_FILE = path.join(os.homedir(), '.bhatbot', 'brain', 'standard-actions.json');
+const autonomy = createAutonomy({
+  load: () => { try { return JSON.parse(fs.readFileSync(AUTONOMY_FILE, 'utf8')); } catch { return null; } },
+  save: (st) => {
+    try {
+      fs.mkdirSync(path.dirname(AUTONOMY_FILE), { recursive: true });
+      const tmp = AUTONOMY_FILE + '.tmp';
+      fs.writeFileSync(tmp, JSON.stringify(st, null, 1));
+      fs.renameSync(tmp, AUTONOMY_FILE);                    // atomic: a crash leaves the old lessons, not half of the new
+    } catch (e) { console.warn('[autonomy] could not save what was learned:', e && e.message); }
+  },
+});
+function autonomyContext() {
+  const c = loadConfig();
+  let pageUrl = '';
+  try { if (page && !page.isClosed()) pageUrl = page.url(); } catch {}
+  const accts = ((c.google || {}).accounts || []).filter((a) => a && a.care === 'high');
+  return { pageUrl, home: os.homedir(), confidential: (c.autonomy || {}).confidential || null,
+    highCare: accts.flatMap((a) => [a.email, a.label]).filter(Boolean) };
+}
+// Ask him, and do not wait forever. The card is on the desktop; if it sits unanswered for a minute he
+// gets a Telegram line saying something is waiting (his rule: when it needs help, text). After ten
+// minutes it gives up — and SILENCE IS NOT A NO: the action does not happen, but nothing is learned
+// from it, because a refusal resets an action's whole track record and he may simply be in a lecture.
+//   → true (yes) | false (no) | null (nobody answered / nobody can)
+function askAboutAction(label, reason) {
+  if (isRemote() || isUnattended()) return Promise.resolve(null);
+  let nudge = null, giveUp = null;
+  const answer = requestConfirm(label, reason, { forceHuman: true });
+  const timeout = new Promise((res) => {
+    nudge = setTimeout(() => { notifyUser(`Waiting on you — I'd like to ${label} (${reason}). There's an approve/decline card on the desktop.`, 'low').catch(() => {}); }, 60 * 1000);
+    giveUp = setTimeout(() => res(null), 10 * 60 * 1000);
+  });
+  return Promise.race([answer, timeout]).finally(() => { clearTimeout(nudge); clearTimeout(giveUp); });
+}
+
 async function executeTool(name, input, opts = {}) {
   let result;
   const __auditT0 = Date.now();
@@ -5213,6 +5253,46 @@ async function executeTool(name, input, opts = {}) {
   // (below) records `input` with the handles intact, never the decrypted secret.
   const auditInput = input;
   if (credentials.hasRef(input)) { try { input = credentials.resolveRefs(input); } catch {} }
+  // ── WHAT IS IT POINTED AT, AND HAS HE SEEN THIS BEFORE? (lib/autonomy.js) ───────────────────────
+  // Runs before the tier gate below, and asks a different question. The tiers ask "is this TOOL
+  // dangerous"; with autonomousMode on they approve every mutating tool, and they never look at the
+  // target — so the path that archives a newsletter would as readily have typed into a bank's login
+  // form. This asks what the call is aimed at and whether the act is routine:
+  //   forbid  financial or confidential. Not approvable: the thing being prevented is BhatBot being
+  //           talked into it, so there is deliberately no way to say yes.
+  //   ask     a send, delete or commit that is important, or that he has not yet made routine.
+  //   allow   everything else, including an act he has approved before.
+  // Judged on the input with credential HANDLES still in place, so a secret is never part of a reason.
+  if (loadConfig().autonomyPolicy !== false) {
+    let verdict = null;
+    try { verdict = autonomy.decide(name, auditInput, autonomyContext()); } catch (e) { console.warn('[autonomy] decide failed:', e && e.message); }
+    if (verdict && verdict.verdict === 'forbid') {
+      const result = { success: false, blocked: true, forbidden: verdict.kind,
+        error: `I won't do that: ${verdict.why}. Financial and confidential things are off limits to me, and that is not something an approval changes. If this is a mistake, the rule lives in lib/autonomy.js and your own list in config.autonomy.confidential.` };
+      sendToActivity('tool-update', { type: 'thinking', text: `⛔ off limits (${verdict.kind}): ${verdict.why}` });
+      try { rstate.event('autonomy-forbid', { tool: name, kind: verdict.kind, why: String(verdict.why).slice(0, 120) }); } catch {}
+      auditLog(name, auditInput, result, Date.now() - __auditT0, _lastUsage);
+      return result;
+    }
+    if (verdict && verdict.verdict === 'ask') {
+      const why = verdict.reasons[0] || 'this is not routine yet';
+      // A drone has nobody to ask, and neither does a run he started so he could walk away.
+      const approved = opts.hermetic ? null : await askAboutAction(verdict.label, why);
+      if (approved !== null) { try { autonomy.learn(verdict, approved); } catch {} }
+      try { rstate.event('autonomy-ask', { tool: name, signature: verdict.signature, answer: approved === null ? 'none' : approved ? 'yes' : 'no' }); } catch {}
+      if (approved !== true) {
+        const result = { success: false, declined: approved === false, unanswered: approved === null,
+          error: approved === false
+            ? `You declined: ${verdict.label}.`
+            : `Not done: ${verdict.label} needs your go-ahead (${why}) and nobody was there to give it. Report this as blocked rather than trying another way.` };
+        auditLog(name, auditInput, result, Date.now() - __auditT0, _lastUsage);
+        return result;
+      }
+    } else if (verdict && verdict.signature) {
+      // Allowed because it is routine — said out loud, so "it just did that" is never a surprise.
+      sendToActivity('tool-update', { type: 'thinking', text: `⚡ ${verdict.label} — ${verdict.reasons[0] || 'routine'}` });
+    }
+  }
   // W3 — key-risk gate. Classify the tool and route high-risk tiers through the confirm machinery
   // BEFORE running. 'auto' falls straight through (run_shell included — its inner command-level gate
   // is stronger). 'confirm' honours autonomousMode locally + the remote guard; 'stepup' forces a
