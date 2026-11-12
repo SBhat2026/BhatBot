@@ -11374,8 +11374,21 @@ function _binExists(bin) {
   try { ok = spawnSync('/usr/bin/which', [bin], { env: { ...process.env, PATH: EXEC_PATH }, timeout: 3000 }).status === 0; } catch {}
   return (_binCache[bin] = ok);
 }
+// WHERE a binary is, not merely whether. The ws transport spawns exactly this path, so the probe and
+// the spawn can no longer disagree about PATH — which is what made every ElevenLabs reply silent in
+// a Finder-launched app (probe: found via EXEC_PATH; spawn: ENOENT on the app's own PATH).
+const _binPathCache = {};
+function _binPath(bin) {
+  if (bin in _binPathCache) return _binPathCache[bin];
+  let found = null;
+  try {
+    const r = spawnSync('/usr/bin/which', [bin], { env: { ...process.env, PATH: EXEC_PATH }, timeout: 3000, encoding: 'utf8' });
+    if (r.status === 0) found = String(r.stdout || '').trim().split('\n')[0] || null;
+  } catch {}
+  return (_binPathCache[bin] = found);
+}
 const _ttsWs = createTtsWs({
-  WebSocket, spawn, which: _binExists,
+  WebSocket, spawn, which: _binPath, env: { ...process.env, PATH: EXEC_PATH },
   getConfig: () => { const c = loadConfig(); return { ...c, jarvisVoiceSettings: jarvisVoiceSettings(c) }; },
   log: (m) => console.warn(m),
   latMark: (m) => { try { latMark(m); } catch {} },
@@ -11402,7 +11415,11 @@ function resolvedTtsProvider() {
 // "Noted", drone notices) goes through synthesizeSpeech in the configured voice (e.g. Kokoro) → two
 // voices in one session. Gating on the provider makes every utterance the SAME voice: Kokoro-default
 // → ws off, everything streams through Kokoro; provider 'elevenlabs' → ws on, everything is EL.
-function ttsWsActive() { return ttsTransportMode() !== 'rest' && resolvedTtsProvider() === 'elevenlabs' && _ttsWs.available(); }
+// A transport that just failed is not offered again for five minutes. Without this every sentence of
+// every reply would re-open the ws, wait out the first-audio watchdog and fall back — four seconds of
+// dead air per turn for as long as whatever is wrong stays wrong.
+let _ttsWsBrokenUntil = 0;
+function ttsWsActive() { return Date.now() >= _ttsWsBrokenUntil && ttsTransportMode() !== 'rest' && resolvedTtsProvider() === 'elevenlabs' && _ttsWs.available(); }
 function ttsWsEnsure(seq) {
   if (_ttsWsSess && _ttsWsSeq === seq) return _ttsWsSess;
   if (_ttsWsSess) { try { _ttsWsSess.close(); } catch {} }
@@ -11411,6 +11428,20 @@ function ttsWsEnsure(seq) {
   const sess = _ttsWs.create(seq);
   sess.onFirstAudio(() => { ttsLastAudioSeq = seq; ttsLastAudioTs = Date.now(); setTtsActive(true); try { latMark('first-audio-playing'); } catch {} });
   sess.onDrained(() => { if (seq === ttsStreamSeq) { setTtsActive(false); emitTtsIdle(seq); } });
+  // THE REPLY STILL GETS SPOKEN. The transport died before any audio (no player, rejected key, a ws
+  // that accepted the text and said nothing), and it has handed back everything it was given. Say it
+  // through the per-sentence REST path instead — slower to first audio, but a slow sentence beats a
+  // silent one, and it is the path that also emits tts-idle so hands-free conversation carries on.
+  sess.onFailed((text, why, st) => {
+    console.warn(`[tts] ws transport failed (${why}); speaking this turn over REST and resting the ws for 5 min`);
+    _ttsWsBrokenUntil = Date.now() + 5 * 60 * 1000;
+    if (_ttsWsSess === sess) { _ttsWsSess = null; _ttsWsSeq = -1; _ttsWsNorm = null; }
+    if (seq !== ttsStreamSeq) return;
+    try { rstate.event('tts-fallback', { why: String(why).slice(0, 120), chars: String(text || '').length }); } catch {}
+    if (text) ttsRestFeed(seq, text);
+    if (st && st.eosSent) ttsStreamFlush(seq);            // the turn had already ended: flush the tail now
+    else if (!text) emitTtsIdle(seq);                     // nothing to say and nothing coming: release the mic
+  });
   _ttsWsSess = sess;
   ttsStreamProduced = true;   // ws will put audio on the wire → reserve the drain→tts-idle contract
   return sess;
@@ -11425,6 +11456,11 @@ function ttsStreamFeed(seq, delta) {
     if (out) sess.feed(out);
     return;
   }
+  ttsRestFeed(seq, delta);
+}
+// The per-sentence REST path, as its own function so the ws transport can fall back INTO it.
+function ttsRestFeed(seq, delta) {
+  if (seq !== ttsStreamSeq) return;
   ttsStreamBuf += delta;
   const re = /[^.!?\n]*[.!?\n]+/g; let m, consumed = 0;
   while ((m = re.exec(ttsStreamBuf))) { const s = m[0].trim(); consumed = re.lastIndex; if (s.length > 2) ttsStreamEnqueue(seq, s); }
