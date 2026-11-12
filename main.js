@@ -310,7 +310,8 @@ const opsstatus = require('./lib/opsstatus');         // Manage — live "what i
 const localstt = require('./lib/localstt');           // Voice — offline mlx-whisper STT fallback (no cloud key)
 let _lastRetryAfterMs = 0;                            // last 429 Retry-After (ms) — self-drive budget governor reads it
 let _pendingSelfDrive = null;                         // Phase 6: a reflection-sanctioned session to start once the turn goes idle
-let _opusApproved = false;                            // session flag: user OK'd Opus for heavy tasks (asked once per session)
+let _opusApproved = false;                            // he said yes to Opus FOR THE CURRENT TASK (cleared at the next turn)
+let _opusGrantTurn = false;                           // this turn is the one that carried the yes — keep the grant through it
 let _pendingOpusTask = null;                          // a heavy turn parked awaiting Opus approval ({history, at})
 let _opusSuppressAsk = false;                         // one-shot: re-run the parked task WITHOUT re-asking (user declined Opus)
 // T5/T6 — learned spoken-length loop. One "just-spoken" turn is held and its OUTCOME (interrupted@N /
@@ -341,6 +342,7 @@ const scholar = require('./lib/integrations/scholar');  // FORGE — scholarly a
 const scicompute = require('./lib/scicompute');         // quant/numerics/stats/MPS-torch compute pack (sci_compute)
 const dockerPack = require('./lib/integrations/docker'); // container isolation lane (container_run)
 const { createEndpointer } = require('./lib/endpoint');  // adaptive, speaker-gated utterance endpointing
+const modelpolicy = require('./lib/modelpolicy');        // the ceiling: never Fable, Opus only with a per-task yes
 const voiceid = require('./lib/voiceid');                // T3 — speaker verification (cocktail-party post-filter)
 const { createAudioEnv } = require('./lib/audioenv');    // is THIS machine playing sound the mic can hear?
 const spokenmodel = require('./lib/spokenmodel');        // T5 — learned spoken-length model (density→compression)
@@ -1815,14 +1817,14 @@ function looksSoloDeep(text) {
 // useFable opt-in → config.heavyRouting ('auto'|'fable'|'opus', default 'auto'). AUTO routes by task
 // shape: solo deep-reasoning → Opus; fan-out/fleet builds → Fable 5 (roomier OTPM for the drones).
 function heavyModel(text = '') {
-  const c = loadConfig();
-  if (c.heavyToolModel) return c.heavyToolModel;         // explicit model override wins
-  if (c.useFable) return MODEL_FABLE;                    // legacy hard opt-in
-  const mode = c.heavyRouting || 'auto';
-  if (mode === 'opus') return MODEL_OPUS;
-  if (mode === 'fable') return MODEL_FABLE;
-  return (looksSoloDeep(text) && !looksFanOut(text)) ? MODEL_OPUS : MODEL_FABLE;   // auto
+  // There is exactly one heavy tier now. This used to choose between Opus and Fable by task shape,
+  // and `config.useFable` / `heavyRouting: 'fable'` could force the latter; Fable is not used at all
+  // any more, so those settings are ignored rather than honoured. (The ceiling in anthropicRequest
+  // would rewrite a Fable request anyway — this just stops the ROUTER from asking for one, so the
+  // approval question names the model that will actually run.)
+  return MODEL_OPUS;
 }
+
 // VANGUARD admission controller (Phase 1) — shared token-reservation ledger over the SAME rolling
 // rate windows as the main preflight (rateBudget). Sub-agent calls acquire/release through this so
 // concurrent suits self-throttle to live budget instead of convoying into the rate limit together.
@@ -1919,7 +1921,33 @@ function explainPairing400(text, messages, where) {
   } catch {}
 }
 
+// THE CLAUDE CODE CLI, PINNED TO SONNET. `claude -p` runs on his Claude subscription rather than the
+// API key — the usage he would rather spend — but it also picks its own model, and its default is
+// whatever the CLI is configured to, which can be the top tier. "Never Fable" is his rule about
+// BhatBot, not about one billing path, so every delegation names the model instead of inheriting it.
+// It is the one Anthropic egress the ceiling below cannot see, because the request leaves from
+// another process.
+const CLAUDE_CLI = 'claude -p --model sonnet ';
+
+// ⚠ THE MODEL CEILING. Siddhant's rule: "never Fable; Opus is the limit and it asks first". A model is
+// chosen in a dozen places — the turn router, the heavy upgrade, three design-synthesis calls that
+// named the top tier directly with no question asked, reflection, eval, the fleet — so a rule in the
+// router was a rule about one of them. It is enforced at the EGRESS instead: every function in this
+// codebase that POSTs to /v1/messages applies it (here twice; lib/adapters.js, lib/eval.js and
+// lib/llm.js for the headless paths, which can never ask and so can never use Opus). A comment in
+// this file used to say every Anthropic call passes through anthropicRequest. Five did not, which is
+// exactly why this is checked by scripts/test-modelpolicy.js rather than asserted in prose.
+// Downgrades, never fails: a refused model is a reason to run on the tier he agreed to.
+function applyModelCeiling(body) {
+  if (!body || !body.model) return body;
+  const pol = modelpolicy.enforce(body.model, { opusApproved: _opusApproved === true, fallback: MODEL_SONNET, ceiling: MODEL_OPUS });
+  if (!pol.changed) return body;
+  console.warn('[model-policy] ' + pol.reason);
+  try { rstate.event('model-policy', { asked: body.model, used: pol.model }); } catch {}
+  return { ...body, model: pol.model };
+}
 async function anthropicRequest(body, apiKey, { retries = 5 } = {}) {
+  body = applyModelCeiling(body);
   // ⚠ THE PAIRING GUARANTEE LIVES HERE, not in capTokens.
   //
   // capTokens carried this repair and a comment claiming it made "EVERY wire path pairing-safe by
@@ -2184,6 +2212,7 @@ async function callClaude(messages, apiKey, model) {
 // ~0.5s instead of waiting ~full generation), then returns the SAME assembled shape as
 // anthropicRequest so the tool loop is unchanged. Used on the desktop chat path.
 async function anthropicStream(body, apiKey, onText, { retries = 3, onThinking = null } = {}) {
+  body = applyModelCeiling(body);
   // THE SAME PAIRING GUARANTEE AS anthropicRequest, because this is a SECOND wire path, not a
   // wrapper around the first. anthropicRequest's comment claimed it was "the actual chokepoint —
   // every Anthropic call in the process passes here". It is not: this function POSTs to
@@ -2781,7 +2810,7 @@ async function selfImproveScan(opts = {}) {
   const proj = process.env.BHATBOT_PROJECT || path.join(os.homedir(), 'bhatbot');
   const prompt = `The tool "${top.tool}" in this codebase has failed ${top.count} times recently with errors like: "${String(top.sample).slice(0, 220)}" (example redacted args: ${String(top.args).slice(0, 220)}). Find the likely root cause in the code and propose a precise fix as a unified diff, with a one-paragraph rationale. Investigate read-only; do NOT modify files — output the proposed diff only.`;
   // --permission-mode plan → Claude Code investigates + proposes WITHOUT applying edits.
-  const r = await runShell('claude -p ' + JSON.stringify(prompt) + ' --permission-mode plan', proj, 300000);
+  const r = await runShell(CLAUDE_CLI + JSON.stringify(prompt) + ' --permission-mode plan', proj, 300000);
   const out = (r && (r.stdout || r.result)) || (r && r.error) || '(no output)';
   const dir = path.join(os.homedir(), '.bhatbot', 'self-improve'); fs.mkdirSync(dir, { recursive: true });
   const file = path.join(dir, `${Date.now()}-${String(top.tool).replace(/[^\w]/g, '_')}.md`);
@@ -2858,7 +2887,7 @@ async function selfFix(input) {
 
   if (!input.apply) {   // draft-only (safe default), mirrors self_improve
     const prompt = `In this repo, diagnose and propose a fix for: ${problem}${fileHint}\n${verify ? `The fix is correct when \`${verify}\` exits 0.` : ''}\nInvestigate read-only; output a precise unified diff + one-paragraph rationale. Do NOT modify files.`;
-    const r = await runShell('claude -p ' + JSON.stringify(prompt) + ' --permission-mode plan', proj, 300000);
+    const r = await runShell(CLAUDE_CLI + JSON.stringify(prompt) + ' --permission-mode plan', proj, 300000);
     const out = (r && (r.stdout || r.result)) || (r && r.error) || '(no output)';
     const dir = path.join(os.homedir(), '.bhatbot', 'self-improve'); fs.mkdirSync(dir, { recursive: true });
     const file = path.join(dir, `${Date.now()}-selffix.md`);
@@ -2880,7 +2909,7 @@ async function selfFix(input) {
     // skipPerms (self-drive, unattended) → --dangerously-skip-permissions so the headless coder can run
     // build/move/test commands without a prompt; else acceptEdits (auto-applies edits, still gated on bash).
     const ccFlag = input.skipPerms ? '--dangerously-skip-permissions' : '--permission-mode acceptEdits';
-    const cc = await runShell('claude -p ' + JSON.stringify(prompt) + ' ' + ccFlag, proj, 300000);
+    const cc = await runShell(CLAUDE_CLI + JSON.stringify(prompt) + ' ' + ccFlag, proj, 300000);
     const v = await runShell(verify, proj, 300000);
     lastVerify = ((v.stdout || '') + '\n' + (v.stderr || '')).trim();
     const passed = v.success && (v.exitCode === 0 || v.exitCode == null);
@@ -4761,7 +4790,7 @@ async function runPhysicsPass(goal, spec, buildNotes, emit) {
   emit('🧮 physics pass — deriving the numbers');
   const sys = 'You write ONE self-contained Python script (numpy/scipy; matplotlib for ONE figure saved to the provided out path or shown) that computes the KEY quantitative characteristics of the described build (e.g. mass, power/energy, thrust-to-weight, thermal, structural, flight/dynamics as relevant) from first principles + the given specs. Print a concise labelled summary of the headline numbers. Output ONLY the Python code, no prose.';
   try {
-    const r = await anthropicRequest({ model: MODEL_FABLE, max_tokens: 2200, system: sys, messages: [{ role: 'user', content: `Build: ${goal}\nSpecs: ${JSON.stringify(spec).slice(0, 800)}\n\nIntegrated design notes:\n${String(buildNotes).slice(0, 6000)}` }] }, getApiKey());
+    const r = await anthropicRequest({ model: MODEL_SONNET, max_tokens: 2200, system: sys, messages: [{ role: 'user', content: `Build: ${goal}\nSpecs: ${JSON.stringify(spec).slice(0, 800)}\n\nIntegrated design notes:\n${String(buildNotes).slice(0, 6000)}` }] }, getApiKey());
     const code = extractCode((r.content || []).filter((b) => b.type === 'text').map((b) => b.text).join(''), 'python');
     if (!code || code.length < 20) return { ok: false, summary: 'physics pass produced no code' };
     const out = await executeTool('simulate', { code });
@@ -4780,8 +4809,8 @@ async function generateStudioArtifact(goal, spec, buildNotes, physics, emit, fix
   const usr = `Build: ${goal}\nSpecs: ${JSON.stringify(spec).slice(0, 900)}\n\nIntegrated design (use these concrete details for the geometry + spec sheet):\n${String(buildNotes).slice(0, 9000)}${physLine}${fixHint ? '\n\nThe previous attempt failed to render with: ' + String(fixHint).slice(0, 300) + ' — fix it and output a corrected, complete document.' : ''}`;
   try {
     // Fable 5 has the OUTPUT headroom (32k OTPM) for a large single-shot HTML; pace against the limit.
-    try { await waitForBudget(MODEL_FABLE, estimateTokens([{ role: 'user', content: usr }]) + 1500, 8000); } catch {}
-    const r = await anthropicRequest({ model: MODEL_FABLE, max_tokens: 8000, system: sys, messages: [{ role: 'user', content: usr }] }, getApiKey());
+    try { await waitForBudget(MODEL_SONNET, estimateTokens([{ role: 'user', content: usr }]) + 1500, 8000); } catch {}
+    const r = await anthropicRequest({ model: MODEL_SONNET, max_tokens: 8000, system: sys, messages: [{ role: 'user', content: usr }] }, getApiKey());
     const html = extractCode((r.content || []).filter((b) => b.type === 'text').map((b) => b.text).join(''), 'html');
     return /<html[\s\S]*<\/html>|<!doctype/i.test(html) ? html : null;
   } catch { return null; }
@@ -4799,7 +4828,7 @@ async function assembleStudioArtifact(goal, spec, buildNotes, physics, lanes, em
     const sys = `You write ONE JavaScript function that adds a single subsystem's 3D geometry to a Three.js scene. Signature EXACTLY: function part_${i}(THREE, scene, group, specs){ ... }. Build real, recognizable geometry for the "${lane.role}" subsystem using THREE primitives (Box/Cylinder/Sphere/Cone/Torus/Lathe/Extrude), MeshStandardMaterial with the specified colours/metalness, and Groups for structure; position parts sensibly (up = +Y, human-ish scale ~1.8 units tall). Add everything to \`group\`. NO imports, NO HTML, NO OrbitControls, NO renderer/scene creation, NO markdown. Output ONLY the function.`;
     const usr = `Overall build: ${goal}\nThis subsystem — ${lane.role}: ${lane.task}\nSpecs: ${specStr}\nDesign notes:\n${studioscene.laneNotes(buildNotes, lane.role)}`;
     try {
-      const r = await anthropicRequest({ model: MODEL_FABLE, max_tokens: 2400, system: sys, messages: [{ role: 'user', content: usr }] }, getApiKey());
+      const r = await anthropicRequest({ model: MODEL_SONNET, max_tokens: 2400, system: sys, messages: [{ role: 'user', content: usr }] }, getApiKey());
       const code = extractCode((r.content || []).filter((b) => b.type === 'text').map((b) => b.text).join(''), 'javascript');
       const fn = code.match(new RegExp('function part_' + i + '\\s*\\([\\s\\S]*'));
       return (fn ? fn[0] : '') && /function part_/.test(fn ? fn[0] : '') ? (fn[0]) : `function part_${i}(THREE,scene,group,specs){}`;
@@ -6348,7 +6377,7 @@ async function executeTool(name, input, opts = {}) {
         break;
       }
       case 'claude_code':
-        result = await runShell('claude -p ' + JSON.stringify(input.prompt), input.cwd || process.env.BHATBOT_PROJECT || os.homedir(), 300000);
+        result = await runShell(CLAUDE_CLI + JSON.stringify(input.prompt), input.cwd || process.env.BHATBOT_PROJECT || os.homedir(), 300000);
         break;
       case 'write_agent_directive': {
         const cfg = loadConfig();
@@ -9499,7 +9528,7 @@ async function selfDriveForge({ desire, report, plan, verify, proj }) {
   ].filter(Boolean).join('\n');
   try {
     sdRelay('🔧 FORGE: editing files via Claude Code (full write access on the isolated branch)…');
-    const r = await runShell('claude -p ' + JSON.stringify(prompt) + ' --dangerously-skip-permissions', proj, 300000);
+    const r = await runShell(CLAUDE_CLI + JSON.stringify(prompt) + ' --dangerously-skip-permissions', proj, 300000);
     try { sdRelay('🔧 Claude Code done — ' + String((r && (r.stdout || r.error)) || '').replace(/\s+/g, ' ').slice(-240)); } catch {}
     return { success: r && r.success !== false, out: (r && (r.stdout || r.error) || '').slice(-400) };
   }
@@ -12440,22 +12469,23 @@ ipcMain.handle('chat', async (event, { history }) => {
   // on Sonnet. Opus stays ENABLED — this only governs the switch. (He'll refine the UX later.)
   {
     const cfgOpus = loadConfig();
+    // "IT SHOULD ASK BEFORE USING THAT" — each time, not once per session. The approval used to be
+    // remembered until the app quit, so one yes in the morning put every heavy-looking request that
+    // day on the most expensive tier he allows without another word. A yes now covers the task it
+    // answered: it is cleared at the start of the next turn unless that turn IS the yes.
+    if (!_opusGrantTurn) _opusApproved = false;
+    _opusGrantTurn = false;
     if (_pendingOpusTask) {
       const yes = /^\s*(use (opus|fable)|opus\b|fable\b|heavy tier|yes|yeah|yep|sure|ok(ay)?|go ahead|go for it|do it|proceed|approved?|permission granted)\b/i.test(ut) && !/\?/.test(ut);
       const no = /^\s*(no|nope|stay on sonnet|sonnet|keep sonnet|don'?t|cheaper|not now)\b/i.test(ut);
-      if (yes) { const p = _pendingOpusTask; _pendingOpusTask = null; _opusApproved = true; history = p.history; }        // re-run on Opus
+      if (yes) { const p = _pendingOpusTask; _pendingOpusTask = null; _opusApproved = true; _opusGrantTurn = true; history = p.history; }   // re-run on Opus
       else if (no) { const p = _pendingOpusTask; _pendingOpusTask = null; _opusSuppressAsk = true; history = p.history; } // re-run on Sonnet
       else { _pendingOpusTask = null; }   // unrelated message → drop the ask, handle it normally
     }
     if (!_opusApproved && !_opusSuppressAsk && cfgOpus.opusRequiresApproval !== false && cfgOpus.allowOpusHeavy !== false
         && !overBudget() && looksLikeToolTask(ut) && looksHeavyTool(ut)) {
       _pendingOpusTask = { history, at: Date.now() };
-      const hm = heavyModel(ut);
-      const hmName = hm === MODEL_FABLE ? 'Fable 5' : hm === MODEL_OPUS ? 'Opus' : 'the heavy tier';
-      const why = hm === MODEL_FABLE
-        ? 'my most capable tier, with the output headroom to fan this out across a research → design → code → test fleet in parallel'
-        : 'my deepest reasoning model, best for a single hard derivation/solve';
-      const q = `This one's heavy — a scientific simulation / deep build. I can run it on **${hmName}** (${why}), which is more capable but costs more, or keep it on Sonnet. Want me on ${hmName}? Say "use ${hm === MODEL_FABLE ? 'fable' : 'opus'}" (or just "yes") or "stay on sonnet".`;
+      const q = `This one's heavy — a scientific simulation or a deep build. I can run it on **Opus** (my deepest reasoning tier, and the most I'm allowed to use), which is more capable but costs more, or keep it on Sonnet. Want me on Opus for this one? Say **"use Opus"** or **"stay on Sonnet"**.`;
       return { text: q, history: [...history, { role: 'assistant', content: q }] };
     }
     _opusSuppressAsk = false;   // one-shot: only suppresses the immediate re-run
