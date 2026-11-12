@@ -97,35 +97,7 @@ if (mode === 'quick') {
   console.log(`\n── verify ── ${fast.length} fast tests + ${AUDITS.length} audits (the ${SLOW.size} slow tests are in \`npm run verify:full\`)\n`);
   failures = run([...AUDITS, ...fast], 'verify');
 }
-// ── THE EFFICIENCY READ, TEMPORARILY WIRED IN ────────────────────────────────────────────────────
-//
-// Siddhant asked for this inside `verify` for the NEXT FIVE PASSES, then back to on-demand
-// (`npm run bench:efficiency`), because building tools without optimising tool usage at the same time
-// has bitten him before. It is exactly the right worry: tonight's 62-minute baseline ran at a "width
-// 3" that was really width 2 for the whole hour, and no amount of green tests said so.
-//
-// It NEVER fails the build. Low utilisation is sometimes correct — a DAG with a narrow dependency
-// frontier genuinely cannot fill five slots — so these numbers are to be explained, not enforced. It
-// reads durable soak records and runs nothing itself, so it costs milliseconds.
-//
-// The counter is durable and the hand-off notice is loud, so "for five passes" cannot quietly become
-// forever.
-try {
-  const os = require('os');
-  const cf = path.join(os.homedir(), '.bhatbot', 'bench', 'verify-efficiency-passes.json');
-  let n = 0;
-  try { n = Number(JSON.parse(fs.readFileSync(cf, 'utf8')).passes) || 0; } catch {}
-  if (n < 5) {
-    n++;
-    try { fs.mkdirSync(path.dirname(cf), { recursive: true }); fs.writeFileSync(cf, JSON.stringify({ passes: n, since: '2026-09-30' })); } catch {}
-    console.log('\n── efficiency ── pass ' + n + ' of 5 wired into verify, then it moves to `npm run bench:efficiency`');
-    try {
-      console.log(execSync('node ' + JSON.stringify(path.join(__dirname, 'efficiency-check.js')), { encoding: 'utf8', timeout: 20000 }));
-    } catch (e) { console.log('  (the efficiency read failed; NOT failing the build: ' + ((e && e.message) || e) + ')'); }
-  } else {
-    console.log('\n── efficiency ── the five agreed passes are done. Per Siddhant this now moves to');
-    console.log('   `npm run bench:efficiency` on demand — remove this block from scripts/verify.js.');
-  }
-} catch {}
-
+// The efficiency read lived here for five passes (2026-09-30 → 2026-11-12), at Siddhant's request,
+// and has moved back to on demand as agreed: `npm run bench:efficiency`. It reads the durable soak
+// records and runs nothing, so run it after a soak or after adding any constraint to the supervisor.
 process.exit(failures ? 1 : 0);
