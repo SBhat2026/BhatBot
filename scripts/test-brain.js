@@ -87,5 +87,78 @@ fs.rmSync(dir, { recursive: true, force: true });
   ok(seen.size === props.length, 'no duplicate pair proposals');
 }
 
+
+// ── THE VECTOR SIDECAR IS BINARY ─────────────────────────────────────────────────────────────────
+//
+// It was JSON: ~17 characters of decimal text per float, 25 KB per vector, a 100 MB file that took
+// half a second and ~400 MB of peak RSS to load and was rewritten whole whenever one embedding
+// changed. vectors.f32 is the same numbers at the precision the model produced them.
+{
+  const os = require('os');
+  const { createBrain, cosine } = brain;
+  const vdir = fs.mkdtempSync(path.join(os.tmpdir(), 'bb-vec-'));
+  const mk = (seed, n) => Array.from({ length: n }, (_, i) => Math.sin(seed * 13 + i) * 0.07);
+  const b = createBrain({ dir: vdir });
+  b.upsertNode({ type: 'file', ref: '/a.js', label: 'a', text: 'a', embedding: mk(1, 1536) }, 1);
+  b.upsertNode({ type: 'file', ref: '/b.js', label: 'b', text: 'b', embedding: mk(2, 768) }, 1);   // a different width
+  b.upsertNode({ type: 'memory', ref: 'm', label: 'm', text: 'no vector yet' }, 1);
+  b.save();
+  ok(fs.existsSync(path.join(vdir, 'vectors.f32')) && !fs.existsSync(path.join(vdir, 'vectors.json')), 'vectors are written as vectors.f32, not JSON');
+  const bytes = fs.statSync(path.join(vdir, 'vectors.f32')).size;
+  ok(bytes < (1536 + 768) * 4 + 400, `at four bytes a float plus a small header (${bytes} bytes for 2,304 floats)`);
+
+  const b2 = createBrain({ dir: vdir });
+  const a2 = b2.nodes().find((n) => n.label === 'a'), bb2 = b2.nodes().find((n) => n.label === 'b'), m2 = b2.nodes().find((n) => n.label === 'm');
+  ok(Array.isArray(a2.embedding) && a2.embedding.length === 1536, 'a reload gives back a PLAIN array — every consumer checks Array.isArray');
+  ok(a2.embedding.every((x, i) => Math.abs(x - mk(1, 1536)[i]) < 1e-7), 'with the same values, to float32 precision');
+  ok(bb2.embedding.length === 768, 'vectors of different widths coexist in one file');
+  ok(!m2.embedding, 'and a node with no vector still has none');
+  ok(Math.abs(cosine(a2.embedding, mk(1, 1536)) - 1) < 1e-6, 'cosine against the original is 1 — similarity is unaffected by the format');
+
+  // A link, a prune or a confirm changes no vector and must not rewrite the file.
+  const m0 = fs.statSync(path.join(vdir, 'vectors.f32')).mtimeMs;
+  b2.prune('node', m2.id); b2.save();
+  ok(fs.statSync(path.join(vdir, 'vectors.f32')).mtimeMs === m0, 'a save that changed no vector does not rewrite the vector file');
+
+  // MIGRATION: a store that only has the old JSON sidecar.
+  const mdir = fs.mkdtempSync(path.join(os.tmpdir(), 'bb-vec-mig-'));
+  const seed = createBrain({ dir: mdir });
+  seed.upsertNode({ type: 'file', ref: '/x.js', label: 'x', text: 'x', embedding: mk(5, 1536) }, 1);
+  seed.save();
+  const xid = seed.nodes()[0].id;
+  fs.rmSync(path.join(mdir, 'vectors.f32'));
+  fs.writeFileSync(path.join(mdir, 'vectors.json'), JSON.stringify({ [xid]: mk(5, 1536) }));     // what an old install has on disk
+  const old = createBrain({ dir: mdir });
+  ok(old.getNode(xid).embedding.length === 1536, 'a store with only vectors.json still loads its vectors');
+  ok(old._vecDirty() === true, 'and is marked for migration');
+  old.save();
+  ok(fs.existsSync(path.join(mdir, 'vectors.f32')), 'the next save writes the binary sidecar');
+  ok(!fs.existsSync(path.join(mdir, 'vectors.json')) && fs.existsSync(path.join(mdir, 'vectors.json.pre-f32')),
+    'and the old JSON is RENAMED, not deleted — those vectors cost money and a format change must not be able to lose them');
+  ok(createBrain({ dir: mdir }).getNode(xid).embedding.length === 1536, 'after which it loads from the binary file alone');
+
+  // CORRUPTION: unreadable is not the same as absent, and must never be overwritten with nothing.
+  const cdir = fs.mkdtempSync(path.join(os.tmpdir(), 'bb-vec-bad-'));
+  const cb = createBrain({ dir: cdir });
+  cb.upsertNode({ type: 'file', ref: '/y.js', label: 'y', text: 'y', embedding: mk(9, 1536) }, 1);
+  cb.save();
+  const good = fs.readFileSync(path.join(cdir, 'vectors.f32'));
+  fs.writeFileSync(path.join(cdir, 'vectors.f32'), good.subarray(0, Math.floor(good.length / 2)));   // a torn write
+  const quiet = console.error; console.error = () => {};
+  const torn = createBrain({ dir: cdir });
+  ok(torn.vecLoadFailed() === true, 'a truncated vector file is detected as unreadable, not read as short vectors');
+  ok(fs.readdirSync(cdir).some((f) => f.startsWith('vectors.f32.corrupt-')), 'a copy of the damaged file is kept');
+  torn.upsertNode({ type: 'file', ref: '/z.js', label: 'z', text: 'z', embedding: mk(3, 1536) }, 2);
+  torn.save();
+  console.error = quiet;
+  ok(fs.statSync(path.join(cdir, 'vectors.f32')).size === Math.floor(good.length / 2), 'and vector writes stay blocked, so the damaged file is not overwritten');
+  fs.writeFileSync(path.join(cdir, 'vectors.f32'), 'this is not a vector file at all');
+  console.error = () => {};
+  ok(createBrain({ dir: cdir }).vecLoadFailed() === true, 'a file with the wrong magic is refused too');
+  console.error = quiet;
+
+  for (const d of [vdir, mdir, cdir]) fs.rmSync(d, { recursive: true, force: true });
+}
+
 fs.rmSync(dir, { recursive: true, force: true });
 console.log(`✅ brain: ${pass} assertions passed`);
