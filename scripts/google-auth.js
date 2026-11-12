@@ -257,9 +257,36 @@ async function main() {
   }
   console.log(`  refresh_token ${vaulted ? 'stored in the vault' : 'saved (PLAINTEXT — run inside the app to vault it)'}.`);
   console.log('  Scopes:', SCOPES.map((s) => s.split('/auth/')[1]).join(', '));
-  console.log(`\n  ${prior.length} account${prior.length === 1 ? '' : 's'} connected:`);
+  // CHECK EVERY ACCOUNT, NOT JUST THE ONE THAT WAS ADDED. This used to print "3 accounts connected"
+  // straight from the saved list — which says what was once stored, not what still works. On
+  // 2026-11-12 it said that while the Princeton token had been dead for weeks: the list was true and
+  // the sentence was false, and the calendar that knows his class schedule stayed dark behind a
+  // reassuring message. A refresh-token exchange is free and takes a moment, so each one is tried.
+  const live = [];
   for (const a of prior) {
-    console.log(`    ${a.primary ? '●' : '○'} ${a.email || a.label}${a.primary ? '  (primary)' : ''}${a.triage ? '  · triage on' : ''}`);
+    let state = 'unknown', why = '';
+    try {
+      const rt = credentials.resolveRefs({ t: a.refreshToken }).t;
+      const o = new google.auth.OAuth2(clientId, clientSecret, REDIRECT);
+      o.setCredentials({ refresh_token: rt });
+      await o.getAccessToken();
+      state = 'live';
+    } catch (e) {
+      const m = String((e && e.message) || e);
+      state = /invalid_grant/.test(m) ? 'expired' : 'unreachable';
+      why = /invalid_grant/.test(m) ? 'token expired or revoked' : m.slice(0, 80);
+    }
+    live.push({ a, state, why });
+  }
+  const dead = live.filter((x) => x.state === 'expired');
+  console.log(`\n  ${live.filter((x) => x.state === 'live').length} of ${prior.length} account${prior.length === 1 ? '' : 's'} working:`);
+  for (const { a, state, why } of live) {
+    const mark = state === 'live' ? '✓' : state === 'expired' ? '✗' : '?';
+    console.log(`    ${mark} ${a.email || a.label}${a.primary ? '  (primary)' : ''}${a.triage ? '  · triage on' : ''}${state === 'live' ? '' : '  — ' + why}`);
+  }
+  if (dead.length) {
+    console.log('\n  ⚠ Still disconnected — run once for each:');
+    for (const { a } of dead) console.log(`      npm run google:auth -- ${a.email || a.label}`);
   }
   console.log('\n  Run this again to add another. Mail triage is OFF for new accounts —');
   console.log('  turn it on per account with config.google.accounts[].triage = true.\n');
