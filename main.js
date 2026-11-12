@@ -8838,13 +8838,27 @@ async function twilioCall(message, { to, name, bypassGate = false } = {}) {
   // If that fails we take the one-shot announcement, which works without a webhook at all.
   const reach = host ? publicHostReachable() : { ok: false, why: 'no public host' };
   let pre = { ok: false, detail: 'not checked' };
-  if (host && c.mcpToken && reach.ok) {
+  if (viaCloud && c.cloudToken) {
+    // THE CLOUD LEG IS PREFLIGHTED TOO. It used to be exempt — `viaCloud || (reach.ok && pre.ok)` —
+    // on the reasoning that the cloud is on the public internet and so is always reachable. Reachable
+    // was never the question: the September calls reached their webhook and still played "an
+    // application error", because the handler answered 200 with something that was not a
+    // conversation. The cloud's handler is different code, it has never once carried a real call
+    // (the ledger holds no `cloud-conversation` row), and the exemption meant the first sign of a
+    // fault there would be his phone ringing with an error. Same test as the Mac leg: a signed,
+    // outbound-shaped request must come back with TwiML that speaks AND listens. No external
+    // reachability probe — that step exists to catch a tailnet name resolving to the laptop itself,
+    // which cannot happen to a public host.
+    pre = await voicepreflight.check({ host, token: c.cloudToken, authToken: c.twilioToken, ownerPhone: target, path: 'outgoing', param: 'purpose', externalProbe: false })
+      .catch((e) => ({ ok: false, stage: 'preflight', detail: String((e && e.message) || e) }));
+    if (!pre.ok) console.warn(`[call] cloud two-way path is not usable (${pre.stage}: ${pre.detail}) — falling back to a one-way announcement`);
+  } else if (host && c.mcpToken && reach.ok) {
     pre = await voicepreflight.check({ host, token: c.mcpToken, authToken: c.twilioToken, ownerPhone: target })
       .catch((e) => ({ ok: false, stage: 'preflight', detail: String((e && e.message) || e) }));
     if (!pre.ok) console.warn(`[call] two-way path is not usable (${pre.stage}: ${pre.detail}) — falling back to a one-way announcement`);
   }
   try {
-    if (host && (viaCloud ? c.cloudToken : c.mcpToken) && (viaCloud || (reach.ok && pre.ok))) {
+    if (host && (viaCloud ? c.cloudToken : c.mcpToken) && pre.ok && (viaCloud || reach.ok)) {
       // Two-way: point Twilio at our webhook, which plays the JARVIS voice + gathers speech.
       // machineDetection=DetectMessageEnd → if voicemail answers, the webhook fires at the
       // BEEP with AnsweredBy=machine_end_*, and /voice/incoming leaves a JARVIS-voice
@@ -8860,7 +8874,7 @@ async function twilioCall(message, { to, name, bypassGate = false } = {}) {
         machineDetection: 'DetectMessageEnd', machineDetectionTimeout: 30,
         statusCallback: `https://${host}/voice/${wtok}/status`, statusCallbackEvent: ['completed']
       });
-      recordCall({ to: target, name: name || null, ok: true, via: viaCloud ? 'cloud-conversation' : 'twilio-conversation', sid: call.sid, preflight: viaCloud ? 'cloud' : pre.stage });
+      recordCall({ to: target, name: name || null, ok: true, via: viaCloud ? 'cloud-conversation' : 'twilio-conversation', sid: call.sid, preflight: pre.stage });
       return { sent: true, via: viaCloud ? 'cloud-conversation' : 'twilio-conversation', sid: call.sid, to: target, name: name || null, host };
     }
     // ONE-SHOT ANNOUNCEMENT. The message is embedded in the TwiML, so Twilio never has to fetch

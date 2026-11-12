@@ -562,6 +562,21 @@ ok(Array.isArray(tagCache('nope')) === false, 'cache: non-array → returned as-
     ok(/startBrowserReaper\(\);\s*\/\/ stops the browser role/.test(main), 'and it is started on the app-ready path');
   }
 
+  // ── NO CALL LEG IS EXEMPT FROM THE PREFLIGHT ───────────────────────────────────────────────────
+  //
+  // The cloud leg used to be: `viaCloud || (reach.ok && pre.ok)`. Seven September calls reached their
+  // webhook and still played "an application error", so reachability was never the question, and the
+  // cloud handler has never carried a real call. An exempt leg means the first sign of a fault is
+  // his phone ringing with an error.
+  {
+    const body = extract(main, 'twilioCall');
+    ok(/voicepreflight\.check\(\{[^}]*c\.cloudToken[^}]*path:\s*'outgoing'[^}]*param:\s*'purpose'/.test(body),
+      'the cloud leg runs a signed preflight shaped like the request Twilio will make');
+    ok(/&& pre\.ok && \(viaCloud \|\| reach\.ok\)/.test(body), 'and BOTH legs require it to pass before a two-way call is placed');
+    ok(/avail\.authDead/.test(body) && /downgrade:\s*'telegram'/.test(body), 'a disconnected calendar texts instead of ringing blind');
+    ok(/calendarEventsOrThrow/.test(body), 'and a failed calendar read can no longer arrive as an empty calendar');
+  }
+
 console.log(`\n${fail === 0 ? '✅' : '❌'} ${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);
 
