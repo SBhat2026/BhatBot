@@ -52,8 +52,10 @@ function row(r) {
     verified: r.verified,
     perMin: +num(rate(r), 1),
     tokPerItem: r.tokensPerVerifiedItem || null,
-    utilPct: e ? e.utilisationPct : null,
-    idlePct: e ? e.idlePct : null,
+    // Utilisation WHILE THERE WAS WORK when the record has it; the raw figure counted a run's wait
+    // for his answers as idleness and blamed the scheduler for it.
+    utilPct: e ? (e.utilisationWhileWorkPct != null ? e.utilisationWhileWorkPct : e.utilisationPct) : null,
+    idlePct: e ? (e.idleWithBacklogPct != null ? e.idleWithBacklogPct : e.idlePct) : null,
     meanAgents: e ? e.meanInFlight : null,
     width: e ? e.meanWidth : null,
     binding: e ? e.binding : null,
@@ -114,7 +116,7 @@ if (INVALID) {
   findings.push(['INFO', 'this run predates the efficiency instrument; utilisation is unknown for it']);
 } else {
   if (L.utilPct < 50) findings.push(['WARN', 'only ' + L.utilPct + '% of arbitrated width was in use (mean ' + L.meanAgents + ' of ' + L.width + '). Either a brake is too tight or the plan frontier is too narrow to fill it — find out which BEFORE adding agents']);
-  if (L.idlePct > 25) findings.push(['WARN', 'nothing was running in ' + L.idlePct + '% of samples — that is wall clock nobody is working']);
+  if (L.idlePct > 5) findings.push(['WARN', 'nothing was running in ' + L.idlePct + '% of samples while work was READY — that is wall clock nobody is working']);
   if (L.utilPct >= 80) findings.push(['GOOD', L.utilPct + '% utilisation — the agents are the bottleneck, not the machinery']);
 }
 
@@ -144,7 +146,12 @@ if (INVALID) {
 // Degradation WITHIN the run is the thing an hours-long workflow actually cares about, and it is
 // independent of how the run compares to any other.
 const t = INVALID ? {} : (last.throughput || {});
-if (t.firstHalf > 10) {
+// A run that FINISHED did not slow down — it ran out of work. Comparing its halves reports the empty
+// tail as an 83% collapse, which is the instrument crying wolf about the best possible outcome.
+const ranOutOfWork = last.stoppedBecause === 'complete';
+if (ranOutOfWork && t.firstHalf > 0) {
+  console.log('  within the run: finished everything it was given (' + (t.firstHalf + t.secondHalf) + ' items) — no second half to compare, so no degradation reading');
+} else if (t.firstHalf > 10) {
   const drop = ((t.firstHalf - t.secondHalf) / t.firstHalf) * 100;
   console.log('  within the run: ' + t.firstHalf + ' verified in the first half, ' + t.secondHalf + ' in the second (' + (drop > 0 ? '-' : '+') + num(Math.abs(drop), 0) + '%)');
   if (drop > 40) findings.push(['WARN', 'the second half did ' + num(drop, 0) + '% less than the first — that is a degradation curve, which is the one thing an hours-long run must not have']);

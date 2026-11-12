@@ -44,6 +44,7 @@ function rig(over = {}, opts = {}) {
     missions,
     widthCaps: over.widthCaps,
     laneFor: over.laneFor,
+    spillToCloud: over.spillToCloud,
     runAgent: over.runAgent || (async ({ goal }) => ({ status: 'done', summary: 'did ' + goal, spendUsd: 0.01 })),
     decompose: over.decompose || (async ({ goal }) => [goal]),
     escalations: over.escalations,
@@ -907,7 +908,10 @@ function rig(over = {}, opts = {}) {
       'local grind one', 'local grind two', 'local grind three',
       'research alpha', 'write the code for beta', 'browse for gamma', 'remember delta', 'design epsilon',
     ] });
-    ok(sawLocal === 3 && sawCloud === 5, `every item ran in the lane it was assigned (local ${sawLocal}, cloud ${sawCloud})`);
+    // Not "every item ran in the lane it was assigned" any more. Local is a PREFERENCE: a
+    // local-preferring item takes the local slot when it is free and spills to an idle cloud slot
+    // when it is not. All eight still run, the local slot still does real work, and it never doubles.
+    ok(sawLocal + sawCloud === 8 && sawLocal >= 1, `all eight items ran, and the free slot was used (local ${sawLocal}, cloud ${sawCloud})`);
     ok(maxLocal === 1, `the local lane is exactly one wide — a second local agent buys nothing, it just halves both (peak ${maxLocal})`);
     ok(maxCloud > 1, `the cloud lane still runs in parallel beside it (peak ${maxCloud})`);
     ok(maxCloud <= 3, `and the cloud lane still honours its arbitrated width (peak ${maxCloud})`);
@@ -1400,6 +1404,118 @@ function rig(over = {}, opts = {}) {
     const after = sup.stats();
     ok(after.reviews >= 1 && after.reviewMs >= 20,
       `time spent in the custodian is attributed, not invisible (${after.reviews} review(s), ${after.reviewMs}ms)`);
+  }
+
+  // ── LOCAL IS A PREFERENCE, NOT AN ASSIGNMENT ────────────────────────────────────────────────────
+  //
+  // The first efficiency reading the soak ever produced: nineteen items ready, 0.56 of five cloud
+  // slots in use, 31% utilisation. Every local-preferring item was queued behind the single local
+  // slot while the paid agents sat idle. In production every first attempt at research, memory or
+  // coding prefers local, so most of a plan would have lined up behind one slow slot.
+  {
+    const run = async (spill) => {
+      let peak = 0, live = 0, local = 0, cloud = 0, peakLocal = 0, liveLocal = 0;
+      const { sup } = rig({
+        laneFor: () => 'local',                      // EVERYTHING would rather run free
+        spillToCloud: () => spill,
+        runAgent: async ({ lane }) => {
+          live++; peak = Math.max(peak, live);
+          if (lane === 'local') { local++; liveLocal++; peakLocal = Math.max(peakLocal, liveLocal); } else cloud++;
+          await new Promise((r) => setTimeout(r, 20));
+          live--; if (lane === 'local') liveLocal--;
+          return { status: 'done', summary: 'ok' };
+        },
+      }, { width: 4 });
+      const t0 = Date.now();
+      const r = await sup.run({ goal: 'g', width: 4, plan: Array.from({ length: 12 }, (_, i) => 'research topic ' + (i + 1)) });
+      return { peak, local, cloud, peakLocal, ms: Date.now() - t0, done: r.done.length };
+    };
+    const on = await run(true), off = await run(false);
+    ok(on.done === 12 && off.done === 12, 'all twelve finish either way');
+    ok(on.peak >= 4, `with spilling, local-preferring work fills the idle cloud slots too (peak ${on.peak} at once)`);
+    ok(on.local >= 1 && on.cloud >= 6, `the free slot is used AND the paid ones are not idle (local ${on.local}, cloud ${on.cloud})`);
+    ok(on.peakLocal === 1 && off.peakLocal === 1, 'and the local slot is still exactly one wide in both modes');
+    ok(off.cloud === 0 && off.peak === 1, `with spilling off — money is the constraint — everything waits for the free slot (cloud ${off.cloud}, peak ${off.peak})`);
+    ok(on.ms < off.ms * 0.6, `spilling is what makes it fast: ${on.ms}ms against ${off.ms}ms serial`);
+  }
+
+  // A spilled item is COUNTED where it ran. If it were counted where it preferred to be, the local
+  // counter would climb past one and the cloud lane would overrun its width.
+  {
+    const { sup, events } = rig({
+      laneFor: () => 'local',
+      runAgent: async () => { await new Promise((r) => setTimeout(r, 15)); return { status: 'done', summary: 'ok' }; },
+    }, { width: 2 });
+    await sup.run({ goal: 'g', width: 2, plan: Array.from({ length: 8 }, (_, i) => 'research topic ' + (i + 1)) });
+    const p = events.filter((e) => e.type === 'progress' && e.lanes);
+    ok(p.every((e) => e.lanes.local <= 1 && e.lanes.cloud <= 2 && e.lanes.local + e.lanes.cloud === e.inFlight),
+      'lane counters stay inside their ceilings and still sum to in-flight when items spill');
+  }
+
+  // A throwing spill policy must fail towards being useful, not towards a stalled queue.
+  {
+    let cloud = 0;
+    const { sup } = rig({
+      laneFor: () => 'local', spillToCloud: () => { throw new Error('costpilot went away'); },
+      runAgent: async ({ lane }) => { if (lane === 'cloud') cloud++; await new Promise((r) => setTimeout(r, 10)); return { status: 'done', summary: 'ok' }; },
+    }, { width: 3 });
+    const r = await sup.run({ goal: 'g', width: 3, plan: Array.from({ length: 6 }, (_, i) => 'research topic ' + (i + 1)) });
+    ok(r.done.length === 6 && cloud >= 1, 'a spill policy that throws still spills — the queue does not stall on a broken cost reader');
+  }
+
+  // ── THE CLOCK DOES NOT RUN WHILE THE MACHINE IS ASLEEP ──────────────────────────────────────────
+  //
+  // A two-minute soak reported 267 minutes: the lid was closed mid-run, and on waking `now -
+  // startedAt` said four and a half hours of work had been done. The wall-clock wall tripped at once.
+  // A real hours-long run would spend its whole budget of hours on a closed lid.
+  {
+    // A fake clock and a fake beat, so a "sleep" is a jump in time between two beats.
+    let t = 1000000, beatFn = null;
+    const rigged = rig({
+      now: () => t,
+      runAgent: async () => { await new Promise((r) => setTimeout(r, 5)); return { status: 'done', summary: 'ok' }; },
+    }, { beatMs: 15000, setInterval: (fn) => { beatFn = fn; return { unref() {} }; }, clearInterval: () => { beatFn = null; }, tickDelayMs: 1 });
+    const p = rigged.sup.run({ goal: 'g', plan: ['research a', 'research b', 'research c'], wallClockMs: 60 * 60 * 1000 });
+    await new Promise((r) => setTimeout(r, 3));
+    t += 15000; beatFn && beatFn();                              // an ordinary beat
+    t += 4 * 3600 * 1000; beatFn && beatFn();                    // …then four hours pass in one step: the lid was closed
+    const r = await p;
+    ok(r.stoppedBecause === 'complete', `four hours asleep does not trip a one-hour wall-clock wall (${r.stoppedBecause})`);
+    ok(r.sleptMs > 3.9 * 3600 * 1000, `the sleep is measured (${Math.round(r.sleptMs / 60000)} min)`);
+    ok(r.elapsedMs < 60 * 1000, `and is NOT charged to the run — elapsed is ${Math.round(r.elapsedMs / 1000)}s, not four hours`);
+    ok(rigged.events.some((e) => e.type === 'slept'), 'it says so, so a report that spans a night is explicable');
+  }
+
+  // A beat that is merely late (a busy event loop) is not a sleep.
+  {
+    let t = 1000000, beatFn = null;
+    const rigged = rig({ now: () => t, runAgent: async () => { await new Promise((r) => setTimeout(r, 5)); return { status: 'done', summary: 'ok' }; } },
+      { beatMs: 15000, setInterval: (fn) => { beatFn = fn; return { unref() {} }; }, clearInterval: () => {}, tickDelayMs: 1 });
+    const p = rigged.sup.run({ goal: 'g', plan: ['research a'] });
+    await new Promise((r) => setTimeout(r, 3));
+    t += 40000; beatFn && beatFn();                              // 40s late on a 15s beat: slow, not asleep
+    const r = await p;
+    ok(r.sleptMs === 0, `a beat arriving 40s late is not counted as sleep (${r.sleptMs}ms)`);
+  }
+
+  // What was in flight across a sleep died with its socket. That is not a failure of the work.
+  {
+    let t = 1000000, beatFn = null, calls = 0;
+    const rigged = rig({
+      now: () => t,
+      runAgent: async () => {
+        calls++;
+        if (calls <= 2) { await new Promise((r) => setTimeout(r, 12)); return { status: 'failed', summary: 'fetch failed: socket hang up' }; }
+        return { status: 'done', summary: 'ok' };
+      },
+    }, { beatMs: 15000, setInterval: (fn) => { beatFn = fn; return { unref() {} }; }, clearInterval: () => {}, tickDelayMs: 1, maxItemAttempts: 2, maxConsecutiveFailures: 2, width: 2 });
+    const p = rigged.sup.run({ goal: 'g', width: 2, plan: ['research a', 'write the code for b'] });
+    await new Promise((r) => setTimeout(r, 3));
+    t += 15000; beatFn && beatFn();
+    t += 2 * 3600 * 1000; beatFn && beatFn();                    // asleep while both were in flight
+    const r = await p;
+    ok(rigged.events.filter((e) => e.type === 'sleep-killed').length === 2, 'both requests that died across the sleep are recognised as sleep-killed');
+    ok(r.stoppedBecause === 'complete' && r.done.length === 2, `they are retried and finish — neither the failure wall nor the attempt cap is charged (${r.stoppedBecause}, ${r.done.length} done)`);
   }
 
   console.log(`\n${fail === 0 ? '✅' : '❌'} supervisor: ${pass} passed, ${fail} failed`);

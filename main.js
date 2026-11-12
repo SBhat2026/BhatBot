@@ -279,6 +279,10 @@ const supervisor = createSupervisor({
       return 'local';
     } catch { return 'cloud'; }
   },
+  // An item that would rather run free spills to a paid agent when the free slot is busy — unless
+  // the run is over its hourly rate, in which case waiting for the free slot is exactly the saving
+  // costpilot's first lever asks for.
+  spillToCloud: () => { try { return !(_costpilot && _costpilot.predict().overRate); } catch { return true; } },
   widthCaps: {
     costpilot: () => { try { return _costpilot ? _costpilot.widthCap() : null; } catch { return null; } },
     admission: () => { try { return admission.width(MODEL_SONNET, 3072, { min: 1, max: FLEET_CAP }); } catch { return null; } },
@@ -4667,9 +4671,37 @@ function pushLongRun() {
   } catch {}
 }
 
+// ── STAY AWAKE WHILE A LONG RUN IS GOING ─────────────────────────────────────────────────────────
+// Nothing held the machine awake during a supervised run. The only `caffeinate` in the app belongs
+// to the cloud bridge and is switched off in his config, so a run started "to go for a few hours"
+// was at the mercy of the idle-sleep timer: the Mac dozes off, every in-flight request dies with
+// its socket, and the hours tick by with nothing running. `prevent-app-suspension` holds off IDLE
+// sleep from run-start to run-end and never outlives the run. It cannot override a closed lid;
+// lib/supervisor.js handles that by not charging time asleep. On battery it is not taken at all —
+// draining a laptop flat while he is out is worse than a run that pauses.
+let _awakeBlocker = null;
+function holdAwake(on) {
+  try {
+    const { powerSaveBlocker } = require('electron');
+    if (on) {
+      if (_awakeBlocker !== null || loadConfig().longRunKeepAwake === false) return;
+      let onAC = true;
+      try { onAC = !/Battery Power/.test(spawnSync('/usr/bin/pmset', ['-g', 'ps'], { encoding: 'utf8', timeout: 1500 }).stdout || ''); } catch {}
+      if (!onAC) { console.log('[long-run] on battery — not holding the machine awake'); return; }
+      _awakeBlocker = powerSaveBlocker.start('prevent-app-suspension');
+      console.log('[long-run] holding the machine awake while the run is live');
+    } else if (_awakeBlocker !== null) {
+      powerSaveBlocker.stop(_awakeBlocker); _awakeBlocker = null;
+      console.log('[long-run] released the keep-awake');
+    }
+  } catch (e) { console.warn('[long-run] keep-awake:', e && e.message); }
+}
 let _lastSupervisorMode = null, _lastHeldForRole = 0;
 function supervisorEvent(e) {
   try {
+    if (e.type === 'run-start' || e.type === 'run-resume') holdAwake(true);
+    if (e.type === 'run-end') holdAwake(false);
+    if (e.type === 'slept') sendToActivity('tool-update', { type: 'thinking', text: `😴 the Mac was asleep for ${Math.round(e.ms / 60000)} min — not charged to the run` });
     if (e.type === 'progress') { if (e.mode) _lastSupervisorMode = e.mode; _lastHeldForRole = Number(e.heldForRole) || 0; }
     if (e.type === 'mode' && e.to) _lastSupervisorMode = e.to;
     if (e.type === 'run-end') { _lastSupervisorMode = null; _lastHeldForRole = 0; }

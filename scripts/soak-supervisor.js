@@ -413,17 +413,29 @@ const ITEM_BY_TEXT = new Map();
   // Sampled at 2s rather than on the progress event, because progress only fires when an item lands:
   // sampling on completions is sampling the busy moments and would report near-perfect utilisation for
   // a run that spends most of its time idle. The point is to catch the idle.
-  const util = { n: 0, inFlight: 0, width: 0, held: 0, saturated: 0, idle: 0, binding: {}, lanes: { cloud: 0, local: 0 } };
+  const util = { n: 0, inFlight: 0, width: 0, held: 0, saturated: 0, idle: 0, binding: {}, lanes: { cloud: 0, local: 0 },
+    // IDLE HAS TWO MEANINGS and only one is a fault. Agents idle while work is ready to start is a
+    // brake that is too tight. Agents idle because everything left is waiting on a dependency or on
+    // an answer from him is the system behaving correctly — and a run that ends with a minute of
+    // waiting for answers would otherwise read as "43% idle" and be blamed on the scheduler.
+    busyN: 0, busyInFlight: 0, busyWidth: 0, idleWithBacklog: 0, idleWaiting: 0 };
   const utilBeat = setInterval(() => {
     let st = null;
     try { st = sup.stats(); } catch { return; }
     if (!st || !st.width) return;                      // before the first arbitration there is nothing to say
     util.n++;
+    // The fleet is the cloud width PLUS the local slot when two lanes are on. Measured against the
+    // cloud width alone, a full house read as 117%.
+    st.width += LANES ? 1 : 0;
     util.inFlight += st.inFlight; util.width += st.width; util.held += st.heldForRole || 0;
     util.lanes.cloud += (st.lanes && st.lanes.cloud) || 0;
     util.lanes.local += (st.lanes && st.lanes.local) || 0;
     if (st.inFlight >= st.width) util.saturated++;      // asking for more width would actually help
     if (st.inFlight === 0) util.idle++;                 // nobody working at all
+    const backlog = (st.ready || 0) + (st.heldForRole || 0);
+    if (st.inFlight > 0 || backlog > 0) { util.busyN++; util.busyInFlight += st.inFlight; util.busyWidth += st.width; }
+    if (st.inFlight === 0 && backlog > 0) util.idleWithBacklog++;       // THE FAULT: work was ready and nobody took it
+    if (st.inFlight === 0 && backlog === 0) util.idleWaiting++;         // not a fault: nothing could start
     const b = st.bindingConstraint || 'spec';
     util.binding[b] = (util.binding[b] || 0) + 1;
   }, 2000);
@@ -480,6 +492,53 @@ const ITEM_BY_TEXT = new Map();
     log(`doubts raised mid-run (${report.doubts.length}) — these are the ones there was still time to act on:`);
     for (const d of report.doubts.slice(0, 5)) log(`      [${d.verdict}] after ${d.afterDone} done${d.raised > 1 ? `, still true after ${d.raised} checks` : ''}: ${d.reason}`);
   }
+  // ── the efficiency verdict ──────────────────────────────────────────────────────────────────────
+  //
+  // Reported whether or not anything is wrong, because a number you only print when it looks bad is a
+  // number nobody trusts when it looks fine.
+  //
+  // THIS BLOCK WAS MISSING FOR SIX WEEKS. The sampler above and the `efficiency: U` field in the
+  // record below were both committed in September; the code between them — this — was in an edit
+  // that failed partway and saved nothing, and only its last line was re-applied. So every soak ran
+  // to the end, printed its report, and then died on `U is not defined` BEFORE writing its record.
+  // The instrument that was meant to catch a silently idle fleet silently never produced a number,
+  // and the on-demand efficiency check had no new record to read. `U` is declared at function scope
+  // so the record cannot reference something that does not exist.
+  const U = (() => {
+    if (!util.n) return null;
+    const meanIn = util.inFlight / util.n, meanW = util.width / util.n;
+    return {
+      samples: util.n,
+      meanInFlight: +meanIn.toFixed(2),
+      meanWidth: +meanW.toFixed(2),
+      utilisationPct: Math.round((meanIn / Math.max(0.01, meanW)) * 100),
+      idlePct: Math.round((util.idle / util.n) * 100),
+      saturatedPct: Math.round((util.saturated / util.n) * 100),
+      meanHeld: +(util.held / util.n).toFixed(2),
+      binding: Object.entries(util.binding).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k} ${Math.round((v / util.n) * 100)}%`).join(', '),
+      meanCloud: +(util.lanes.cloud / util.n).toFixed(2),
+      meanLocal: +(util.lanes.local / util.n).toFixed(2),
+      // The number that matters: how full the fleet was WHILE there was something to do.
+      utilisationWhileWorkPct: util.busyN ? Math.round((util.busyInFlight / Math.max(0.01, util.busyWidth)) * 100) : null,
+      meanInFlightWhileWork: util.busyN ? +(util.busyInFlight / util.busyN).toFixed(2) : null,
+      idleWithBacklogPct: Math.round((util.idleWithBacklog / util.n) * 100),
+      waitingPct: Math.round((util.idleWaiting / util.n) * 100),
+    };
+  })();
+  if (U) {
+    log(`efficiency: ${U.utilisationWhileWorkPct == null ? '—' : U.utilisationWhileWorkPct + '%'} of arbitrated width in use while there was work (mean ${U.meanInFlightWhileWork} agents of ${U.meanWidth}) · saturated ${U.saturatedPct}% of samples`);
+    log(`      waiting on a dependency or an answer: ${U.waitingPct}% of the run (not a fault) · idle WITH work ready: ${U.idleWithBacklogPct}% (a fault)`);
+    log(`      width was limited by: ${U.binding}`);
+    if (U.meanHeld > 0.1) log(`      mean ${U.meanHeld} item(s) READY with no free slot — the backlog behind the agents that exist`);
+    if (LANES) log(`      lanes in flight: ${U.meanCloud} cloud + ${U.meanLocal} local`);
+    // Thresholds, so this is a check and not just telemetry. They fire on utilisation WHILE THERE WAS
+    // WORK and on idle-with-backlog — never on plain idle, which is what a run waiting for him looks
+    // like. Loud, and not a hard failure: a narrow dependency frontier can legitimately leave slots empty.
+    if (U.utilisationWhileWorkPct != null && U.utilisationWhileWorkPct < 50) log('      ⚠️  EFFICIENCY: under half the arbitrated width was in use even while work was available. A brake is too tight, or the plan cannot feed the fleet — find out which before adding agents.');
+    if (U.idleWithBacklogPct > 5) log(`      ⚠️  EFFICIENCY: nothing was running in ${U.idleWithBacklogPct}% of samples while work was READY. That is wall clock nobody is working.`);
+    if (U.saturatedPct > 80) log(`      ✅ width was the binding constraint ${U.saturatedPct}% of the time — this run would go faster with more agents.`);
+  }
+
   if (LANES) {
     log('two lanes — the cloud lane simulates LATENCY ONLY (it does the work for real and is verified');
     log('like everything else); it is a reliable stand-in, so this measures the SCHEDULER and says');
