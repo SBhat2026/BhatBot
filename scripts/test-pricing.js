@@ -43,8 +43,24 @@ const near = (a, b, m) => ok(Math.abs(a - b) < 1e-6, `${m} (got ${a}, want ${b})
   for (const id of p.known()) {
     const x = p.rates(id);
     near(x.cacheWrite, +(x.input * 1.25).toFixed(4), `${id}: cache write is computed`);
-    near(x.cacheRead, +(x.input * 0.1).toFixed(4), `${id}: cache read is computed`);
+    // Computed — EXCEPT where the published rate is not 0.1x input. The 5.5 generation broke the
+    // rule: Sonnet 5.5 reads cache at $0.10 on a $2 input and Opus 5.5 at $0.20 on a $4 one. Those
+    // are listed, not derived, and asserting the multiplier for them would be asserting a wrong bill.
+    const abs = p.CACHE_READ_ABS[id];
+    near(x.cacheRead, abs != null ? abs : +(x.input * 0.1).toFixed(4), `${id}: cache read is ${abs != null ? 'the published exception' : 'computed'}`);
   }
+  // ── the 5.5 generation ────────────────────────────────────────────────────────────────────────
+  near(p.rates('claude-opus-5-5').input, 4, 'Opus 5.5 is $4 in — cheaper than Opus 5');
+  near(p.rates('claude-opus-5-5').output, 20, 'and $20 out');
+  near(p.rates('claude-sonnet-5-5').cacheRead, 0.10, 'Sonnet 5.5 cache reads are $0.10, half of Sonnet 5 at the same input price');
+  near(p.rates('claude-haiku-5-5').input, 0.10, 'Haiku 5.5 is $0.10 in on the short rate card');
+  ok(p.base('claude-haiku-5-5').exact, 'and is priced from the table, not guessed from the old Haiku family rate ($1/$5 — ten times too high)');
+  // Two rate cards, split by PROMPT length. A budget that is wrong only when the bill is largest is
+  // worse than no budget.
+  near(p.usd('claude-haiku-5-5', { input_tokens: 50000, output_tokens: 1000 }), 50000 / 1e6 * 0.10 + 1000 / 1e6 * 0.50, 'a 50K prompt bills at the short card');
+  near(p.usd('claude-haiku-5-5', { input_tokens: 300000, output_tokens: 1000 }), 300000 / 1e6 * 0.50 + 1000 / 1e6 * 2.50, 'a 300K prompt bills at the long card — five times the rate');
+  near(p.usd('claude-haiku-5-5', { input_tokens: 2000, cache_read_input_tokens: 150000, output_tokens: 100 }),
+    2000 / 1e6 * 0.50 + 150000 / 1e6 * 0.05 + 100 / 1e6 * 2.50, 'and cached tokens count toward the prompt length that picks the card');
 }
 
 // ── an unknown model is NEVER free ────────────────────────────────────────────────────────────

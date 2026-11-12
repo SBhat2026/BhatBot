@@ -384,9 +384,21 @@ const HOTKEY = 'CommandOrControl+Shift+B';
 // Sonnet 5 is BOTH newer and cheaper than Sonnet 4.6 ($2/$10 vs $3/$15) — the launch introductory
 // rate became the standard price — so moving the workhorse tier forward cuts ~33% off the model
 // that handles most turns. Opus 5 matches Opus 4.8's $5/$25.
-const MODEL_SONNET = 'claude-sonnet-5';        // workhorse — most turns
-const MODEL_HAIKU = 'claude-haiku-4-5';        // RETIRED from routing — kept only for legacy price/rate maps
-const MODEL_OPUS = 'claude-opus-5';            // deepest reasoning — reserved for HEAVY tasks (sims, heavy coding+interpretation)
+// THE GENERATION SWITCH. config.modelGeneration = '5.5' moves all three tiers to the current lineup
+// — Haiku 5.5 ($0.10/$0.50) as the default, Sonnet 5.5 for significant coding, Opus 5.5 ($4/$20,
+// cheaper than Opus 5) as the ceiling he must approve. It defaults to '5' ON PURPOSE: the 5.5 models
+// change request shapes (disabled thinking is a 400, a reply can begin with a thinking block, effort
+// defaults moved, notes between tool calls arrive as thinking) and the shaping for them in
+// lib/reasoning.js has been checked against the published notes but not yet against the live API.
+// Flipping a default onto unmeasured models is how a voice assistant gets slower without anyone
+// deciding it should; the switch is thrown after a paid smoke test, by a config edit, with no code change.
+const GEN55 = (() => {
+  try { return String(JSON.parse(fs.readFileSync(path.join(os.homedir(), '.bhatbot', 'config.json'), 'utf8')).modelGeneration) === '5.5'; }
+  catch { return false; }
+})();
+const MODEL_SONNET = GEN55 ? 'claude-sonnet-5-5' : 'claude-sonnet-5';   // significant coding, multi-step builds
+const MODEL_HAIKU = GEN55 ? 'claude-haiku-5-5' : 'claude-haiku-4-5';    // 5.5: the DEFAULT tier. 5: retired from routing
+const MODEL_OPUS = GEN55 ? 'claude-opus-5-5' : 'claude-opus-5';         // the ceiling — only with his per-task yes
 const MODEL_FABLE = 'claude-fable-5';          // native subagents + high autonomy — opt-in heavy/autonomous tier (config.useFable)
 const MAX_AGENT_ITERATIONS = 20;   // step ceiling; complex tasks need headroom to retry/replan
 // PERSISTENCE — how hard BhatBot pushes to FINISH a complex task before it reports back. Tunable via
@@ -1938,6 +1950,24 @@ const CLAUDE_CLI = 'claude -p --model sonnet ';
 // this file used to say every Anthropic call passes through anthropicRequest. Five did not, which is
 // exactly why this is checked by scripts/test-modelpolicy.js rather than asserted in prose.
 // Downgrades, never fails: a refused model is a reason to run on the tier he agreed to.
+// A DECLINE IS NOT AN EMPTY ANSWER. Current models can refuse a request with HTTP 200 and
+// `stop_reason: "refusal"` (a safety classifier, with a category in `stop_details`). Nothing here
+// looked at that. Every caller reads the reply by filtering for text blocks, so a refusal arrived as
+// "" — and "" already means "found nothing", "no summary", "nothing to say". A declined request was
+// indistinguishable from a successful one that happened to be empty, which is the worst way to fail:
+// silently, and looking like a result. So the decline is logged, counted, and given a text block that
+// says what happened, in every path at once. It is never retried on a bigger model — that would turn
+// a refusal into a reason to spend more, and the ceiling forbids the models a fallback would reach.
+function noteRefusal(resp, model) {
+  if (!resp || resp.stop_reason !== 'refusal') return resp;
+  const cat = (resp.stop_details && resp.stop_details.category) || 'unspecified';
+  console.warn(`[api] ${model} declined the request (category: ${cat})`);
+  try { rstate.event('model-refusal', { model, category: cat }); } catch {}
+  const hasText = Array.isArray(resp.content) && resp.content.some((b) => b && b.type === 'text' && String(b.text || '').trim());
+  if (hasText) return { ...resp, refused: { category: cat } };
+  const note = `I can't help with that one — the model declined it${cat !== 'unspecified' ? ` (${cat.replace(/_/g, ' ')})` : ''}. If that looks wrong, try rephrasing what you need.`;
+  return { ...resp, refused: { category: cat }, content: [...(Array.isArray(resp.content) ? resp.content : []), { type: 'text', text: note }] };
+}
 function applyModelCeiling(body) {
   if (!body || !body.model) return body;
   const pol = modelpolicy.enforce(body.model, { opusApproved: _opusApproved === true, fallback: MODEL_SONNET, ceiling: MODEL_OPUS });
@@ -2008,7 +2038,7 @@ async function anthropicRequest(body, apiKey, { retries = 5 } = {}) {
     }
     if (res.ok) {
       noteRateHeaders(body.model, res.headers);       // T1 — capture live budget from the response
-      const j = await res.json();
+      const j = noteRefusal(await res.json(), body.model);
       try { const u = j.usage || {}; recordTokens(body.model, (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0), u.output_tokens || 0); recordCost(body.model, u); noteUsage(body.model, u); } catch {}
       return j;
     }
@@ -2256,7 +2286,7 @@ async function anthropicStream(body, apiKey, onText, { retries = 3, onThinking =
     const reader = res.body.getReader();
     const dec = new TextDecoder();
     let buf = '';
-    const blocks = []; let stop_reason = null, usage = {};
+    const blocks = []; let stop_reason = null, stop_details = null, usage = {};
     while (true) {
       const { value, done } = await reader.read();
       if (done) break;
@@ -2318,15 +2348,27 @@ async function anthropicStream(body, apiKey, onText, { retries = 3, onThinking =
           if (b && b.type === 'tool_use') { try { b.input = JSON.parse(b._json || '{}'); } catch { b.input = {}; } delete b._json; }
         } else if (ev.type === 'message_delta') {
           if (ev.delta && ev.delta.stop_reason) stop_reason = ev.delta.stop_reason;
+          if (ev.delta && ev.delta.stop_details) stop_details = ev.delta.stop_details;
           if (ev.usage) usage = { ...usage, ...ev.usage };
         } else if (ev.type === 'error') { throw new Error('stream error: ' + JSON.stringify(ev.error).slice(0, 200)); }
       }
     }
     try { recordTokens(body.model, (usage.input_tokens || 0) + (usage.cache_read_input_tokens || 0) + (usage.cache_creation_input_tokens || 0), usage.output_tokens || 0); recordCost(body.model, usage); noteUsage(body.model, usage); } catch {}
-    return {
-      content: blocks.filter(Boolean).map((b) => b.type === 'tool_use' ? { type: 'tool_use', id: b.id, name: b.name, input: b.input || {} } : { type: 'text', text: b.text }),
-      stop_reason: stop_reason || 'end_turn', usage
-    };
+    // EVERY BLOCK GOES BACK AS WHAT IT IS. This used to map anything that was not a tool_use to
+    // `{ type: 'text', text: b.text }` — so a thinking block, which has no `text`, came back as a text
+    // block with `text: undefined`, and the code thirty lines up that preserves thinking blocks "to
+    // be echoed back UNCHANGED" was undone on the way out. The reasoning was lost from every streamed
+    // turn, and a malformed text block went into history in its place. On the 5.5 generation, where
+    // a response can BEGIN with thinking and the notes between tool calls arrive as thinking blocks,
+    // that would have been most of the turn.
+    const content = blocks.filter(Boolean).map((b) => {
+      if (b.type === 'tool_use') return { type: 'tool_use', id: b.id, name: b.name, input: b.input || {} };
+      if (b.type === 'text') return { type: 'text', text: b.text || '' };
+      if (b.type === 'thinking') return { type: 'thinking', thinking: b.thinking || '', signature: b.signature || '' };
+      const { _json, ...rest } = b;                    // redacted_thinking, compaction, anything newer: as received
+      return rest;
+    });
+    return noteRefusal({ content, stop_reason: stop_reason || 'end_turn', ...(stop_details ? { stop_details } : {}), usage }, body.model);
   }
 }
 async function callClaudeStream(messages, apiKey, model, onText) {
@@ -2456,7 +2498,14 @@ async function callModel(messages, apiKey, allowDarkbloom, onText) {
 
   // Cloud Claude base tier is now SONNET (Haiku fully retired from routing). The complex/heavy
   // upgrades below can push it to Opus/Fable; the local branch above already took the free path.
-  let claudeModel = MODEL_SONNET;
+  // "Default to Haiku, or Sonnet if they need significant coding." On the 5.5 generation the base
+  // tier is decided by lib/modelpolicy.js and can say why; on the older one it is Sonnet, as before.
+  const _base = modelpolicy.defaultTier({
+    gen55: GEN55, text: lastUserText(messages), complexTool: toolish && looksComplexTool(lastUserText(messages)),
+    reasoningRoute: route === 'sonnet', models: { sonnet: MODEL_SONNET, haiku: MODEL_HAIKU },
+  });
+  let claudeModel = overBudget() && GEN55 ? MODEL_HAIKU : _base.model;
+  if (GEN55) { _lastModel = claudeModel; _lastRouterTask = 'base-' + _base.tier; }
 
   // COMPLEX-TOOL ESCALATION: the regex classifier only routes obvious "reasoning" phrasings to Sonnet,
   // so a genuinely hard TOOL task worded plainly ("make a simulation of DNA replication", "build X",

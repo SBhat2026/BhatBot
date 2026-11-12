@@ -130,13 +130,24 @@ const ok = (c, m) => { assert.ok(c, m); pass++; };
 {
   const fs = require('fs'), path = require('path');
   const main = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
-  const routed = [...main.matchAll(/^const MODEL_(SONNET|OPUS|FABLE) = '([^']+)'/gm)].map((m) => [m[1], m[2]]);
-  ok(routed.length >= 3, 'found the router model constants in main.js');
+  // Each constant now names TWO ids — `GEN55 ? 'claude-sonnet-5-5' : 'claude-sonnet-5'` — so the
+  // generation can be switched by config. Both sides are read: a model on the not-yet-active side
+  // that is missing from the matrix would turn the agentic surface off the moment the switch is thrown.
+  const routed = [];
+  for (const m of main.matchAll(/^const MODEL_(SONNET|OPUS|HAIKU|FABLE) = ([^;]+);/gm)) {
+    for (const id of m[2].matchAll(/'(claude-[^']+)'/g)) routed.push([m[1], id[1]]);
+  }
+  ok(routed.length >= 6, `found the router model constants in main.js, both generations (${routed.map((x) => x[1]).join(', ')})`);
+  ok(routed.some((x) => x[1] === 'claude-haiku-5-5') && routed.some((x) => x[1] === 'claude-sonnet-5-5') && routed.some((x) => x[1] === 'claude-opus-5-5'),
+    'the 5.5 lineup is wired behind the switch');
   for (const [name, id] of routed) {
     ok(r.CAPS[id], `MODEL_${name} (${id}) is in the capability matrix — otherwise its agentic surface is silently off`);
   }
   // And the shaping must actually engage for each of them.
   for (const [name, id] of routed) {
+    // Haiku 4.5 has neither thinking nor effort — its row says so — and is retired from routing on
+    // the generation that names it. "Gets shaped" is only a claim about models that can be.
+    if (!r.CAPS[id].thinking && !r.CAPS[id].effort) continue;
     const { body } = r.shapeRequest({ model: id, max_tokens: 8000, messages: [] }, { depth: 'deep' });
     const shaped = !!(body.thinking || (body.output_config && body.output_config.effort));
     ok(shaped, `MODEL_${name} (${id}) actually gets shaped (thinking and/or effort present)`);
@@ -213,4 +224,68 @@ const ok = (c, m) => { assert.ok(c, m); pass++; };
   ok(/\[context\]/.test(main), 'and logs what was actually freed — a feature you cannot observe is one you cannot trust');
 }
 
+// ── THE 5.5 GENERATION ───────────────────────────────────────────────────────────────────────────
+//
+// From the published migration notes. Each rule below is a 400 or a silent behaviour change if the
+// shaper gets it wrong, and none of it has been exercised against the live API yet — these pin the
+// request SHAPE, which is the part that can be checked for free.
+{
+  for (const m of ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5']) {
+    ok(!!r.CAPS[m], `${m} is in the capability table — an unknown id silently disables thinking, effort and compaction`);
+    const s = r.shapeRequest({ model: m, max_tokens: 8000 }, {});
+    ok(s.body.output_config && s.body.output_config.effort, `${m}: effort is always sent explicitly, because its API default moved (${s.body.output_config && s.body.output_config.effort})`);
+    ok(s.body.thinking && s.body.thinking.type === 'adaptive', `${m}: thinking is adaptive`);
+    ok(!('budget_tokens' in (s.body.thinking || {})), `${m}: never a manual budget`);
+  }
+  // The starting points the guide gives, which are per-model on purpose.
+  ok(r.shapeRequest({ model: 'claude-haiku-5-5', max_tokens: 8000 }, {}).body.output_config.effort === 'low', 'Haiku 5.5 defaults to low — it is the chat and routing tier');
+  ok(r.shapeRequest({ model: 'claude-sonnet-5-5', max_tokens: 8000 }, {}).body.output_config.effort === 'medium', 'Sonnet 5.5 defaults to medium — the starting point for agentic coding');
+  ok(r.shapeRequest({ model: 'claude-opus-5-5', max_tokens: 8000 }, {}).body.output_config.effort === 'high', 'Opus 5.5 is sent high — its API default dropped to medium, and he approves Opus for depth');
+  ok(r.shapeRequest({ model: 'claude-sonnet-5-5', max_tokens: 8000 }, { depth: 'ack' }).body.output_config.effort === 'low', 'and a caller that states a depth still wins over the default');
+  ok(r.shapeRequest({ model: 'claude-sonnet-5-5', max_tokens: 8000, output_config: { effort: 'xhigh' } }, {}).body.output_config.effort === 'xhigh', 'as does an effort already on the wire');
+
+  // `disabled` is a 400 on Opus 5.5 and Sonnet 5.5. Forwarding it would fail the request outright.
+  const so = r.shapeRequest({ model: 'claude-sonnet-5-5', max_tokens: 8000, thinking: { type: 'disabled' } }, {});
+  ok(so.body.thinking.type === 'between_tools' && Object.keys(so.body.thinking).length === 1,
+    `Sonnet 5.5: "disabled" becomes between_tools, with no other field (${JSON.stringify(so.body.thinking)})`);
+  const sx = r.shapeRequest({ model: 'claude-sonnet-5-5', max_tokens: 8000, thinking: { type: 'disabled' } }, { effort: 'max' });
+  ok(sx.body.output_config.effort === 'high', `and between_tools is clamped to high effort, the most it accepts (${sx.body.output_config.effort})`);
+  const op = r.shapeRequest({ model: 'claude-opus-5-5', max_tokens: 8000, thinking: { type: 'disabled' } }, {});
+  ok(op.body.thinking.type === 'adaptive' && op.body.output_config.effort === 'low',
+    `Opus 5.5 has no off switch: "disabled" becomes adaptive at LOW effort (${op.body.thinking.type}/${op.body.output_config.effort})`);
+  const hk = r.shapeRequest({ model: 'claude-haiku-5-5', max_tokens: 8000, thinking: { type: 'disabled' } }, {});
+  ok(hk.body.thinking.type === 'disabled', 'Haiku 5.5 still accepts disabled, so it is left alone');
+
+  // A manual budget must never reach the wire on any current model.
+  const mb = r.shapeRequest({ model: 'claude-sonnet-5', max_tokens: 8000, thinking: { type: 'enabled', budget_tokens: 1600 } }, {});
+  ok(mb.body.thinking.type === 'adaptive', `a stray { enabled, budget_tokens } is replaced rather than sent to fail (${JSON.stringify(mb.body.thinking)})`);
+
+  // Thinking counts toward max_tokens on a model that thinks by default: a cap sized for a one-line
+  // answer can be spent entirely on thinking and come back with no text.
+  ok(r.shapeRequest({ model: 'claude-haiku-5-5', max_tokens: 300 }, {}).body.max_tokens === 1024, 'a 300-token cap on a think-first model is raised to leave room for the answer');
+  ok(r.shapeRequest({ model: 'claude-haiku-5-5', max_tokens: 4000 }, {}).body.max_tokens === 4000, 'a cap that is already roomy is not touched');
+  ok(r.shapeRequest({ model: 'claude-sonnet-5', max_tokens: 300 }, {}).body.max_tokens === 300, 'and the current generation is not changed at all');
+  ok(r.shapeRequest({ model: 'claude-haiku-5-5', max_tokens: 1 }, {}).body.max_tokens === 1, 'a keep-alive ping is still passed through untouched');
+}
+
+// (async: this file is CommonJS, so the awaits below live in a function, and the summary line waits
+// inside it — printed at top level it would report the count before the planner block had run.)
+(async () => {
+// ── the planner stopped paying for a guaranteed 400 ──────────────────────────────────────────────
+{
+  const planner = require('../lib/planner');
+  const sent = [];
+  const deps = {
+    apiKey: 'k', models: { sonnet: 'claude-sonnet-5' },
+    anthropicRequest: async (body) => { sent.push(body); return { content: [{ type: 'text', text: '{"steps":[{"id":"s1","role":"research","task":"look it up","dependsOn":[]}],"rationale":"one step"}' }] }; },
+  };
+  await planner.plan('find the thing', deps, {}).catch(() => null);
+  ok(sent.length >= 1, 'the planner made its call');
+  ok(sent.every((b) => !(b.thinking && 'budget_tokens' in b.thinking)), 'and never sends budget_tokens — every current model answers that with a 400');
+  ok(sent[0].output_config && sent[0].output_config.effort === 'high', `it asks for depth the way the API takes it now (effort ${sent[0].output_config && sent[0].output_config.effort})`);
+  ok(sent.length === 1, `so a plan costs one request, not a failed one plus a retry (${sent.length})`);
+}
+
 console.log(`✅ reasoning: ${pass} assertions passed`);
+})().catch((e) => { console.error(e); process.exit(1); });
+

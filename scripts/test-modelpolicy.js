@@ -82,5 +82,32 @@ ok(enforce('claude-fable-5', {}).model === 'claude-sonnet-5', 'with no context a
   ok(/const CLAUDE_CLI = 'claude -p --model sonnet '/.test(main), 'they are pinned to Sonnet');
 }
 
+// ── WHICH TIER BY DEFAULT ─────────────────────────────────────────────────────────────────────────
+// "Most calls should default to Haiku, or Sonnet if they need significant coding."
+{
+  const { defaultTier } = require('../lib/modelpolicy');
+  const M = { sonnet: 'claude-sonnet-5-5', haiku: 'claude-haiku-5-5' };
+  const t = (text, x = {}) => defaultTier({ gen55: true, text, models: M, ...x });
+  for (const q of ["what's on my calendar tomorrow", 'play something quieter', 'remind me to call mom at six', 'summarise that email', 'how far is Princeton from here']) {
+    ok(t(q).tier === 'haiku', `everyday turn → Haiku: "${q}"`);
+  }
+  for (const q of ['refactor the supervisor into two modules', 'debug why the build fails on main', 'write a function that parses the plan file', 'fix the bug in the retry loop', 'open a pull request for this']) {
+    const r = t(q);
+    ok(r.tier === 'sonnet' && /coding/.test(r.why), `significant coding → Sonnet, and says so: "${q}" (${r.why})`);
+  }
+  ok(t('make me a dashboard of my spending', { complexTool: true }).tier === 'sonnet', 'a multi-step build goes to Sonnet');
+  ok(t('why does this happen', { reasoningRoute: true }).tier === 'sonnet', 'and so does a turn the classifier marked for reasoning');
+  ok(t('anything at all').model === 'claude-haiku-5-5', 'the Haiku it picks is the 5.5 one');
+  ok(!/opus|fable/.test(JSON.stringify([t('refactor everything'), t('hi')])), 'the default tier is never Opus or Fable — those are never a default');
+  // The older generation is untouched until the switch is thrown.
+  const old = defaultTier({ gen55: false, text: 'hi there', models: { sonnet: 'claude-sonnet-5', haiku: 'claude-haiku-4-5' } });
+  ok(old.model === 'claude-sonnet-5', 'on the current generation the base tier is still Sonnet — nothing changes before the switch');
+
+  const main = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
+  ok(/const GEN55 = /.test(main) && /modelGeneration\)\s*===\s*'5\.5'/.test(main), 'the generation is a config switch');
+  ok(/catch \{ return false; \}/.test(main.slice(main.indexOf('const GEN55 = '), main.indexOf('const GEN55 = ') + 400)), 'and it defaults to the measured generation when the config cannot be read');
+  ok(/modelpolicy\.defaultTier\(/.test(main), 'the turn router takes its base tier from the policy');
+}
+
 console.log(`\n${fail === 0 ? '✅' : '❌'} modelpolicy: ${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);

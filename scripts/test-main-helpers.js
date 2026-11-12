@@ -577,6 +577,44 @@ ok(Array.isArray(tagCache('nope')) === false, 'cache: non-array → returned as-
     ok(/calendarEventsOrThrow/.test(body), 'and a failed calendar read can no longer arrive as an empty calendar');
   }
 
+  // ── A DECLINE IS NOT AN EMPTY ANSWER ───────────────────────────────────────────────────────────
+  //
+  // Current models can refuse with HTTP 200 and stop_reason "refusal". Every caller reads a reply by
+  // filtering for text blocks, so a refusal arrived as "" — which already means "found nothing".
+  {
+    const noteRefusal = load('noteRefusal');
+    const quiet = console.warn; console.warn = () => {};
+    const plain = { content: [{ type: 'text', text: 'hello' }], stop_reason: 'end_turn' };
+    ok(noteRefusal(plain, 'm') === plain, 'an ordinary reply passes through untouched — same object');
+    const r = noteRefusal({ content: [], stop_reason: 'refusal', stop_details: { type: 'refusal', category: 'general_harms' } }, 'claude-sonnet-5-5');
+    const text = r.content.filter((b) => b.type === 'text').map((b) => b.text).join('');
+    ok(text.length > 20 && /declined/.test(text), `a refusal with no text gets one that says what happened ("${text.slice(0, 60)}…")`);
+    ok(/general harms/.test(text), 'and names the category in plain words');
+    ok(r.refused && r.refused.category === 'general_harms', 'the response is marked refused, so a caller can branch on it');
+    const withThinking = noteRefusal({ content: [{ type: 'thinking', thinking: '', signature: 's' }], stop_reason: 'refusal' }, 'm');
+    ok(withThinking.content[0].type === 'thinking' && withThinking.content.length === 2, 'existing blocks are kept — the note is appended, not substituted');
+    const partial = noteRefusal({ content: [{ type: 'text', text: 'Here is part of it' }], stop_reason: 'refusal' }, 'm');
+    ok(partial.content.length === 1 && partial.refused, 'a refusal that already carries text keeps its own words and is only marked');
+    ok(noteRefusal(null, 'm') === null, 'and a missing response does not throw');
+    console.warn = quiet;
+    ok(/noteRefusal\(await res\.json\(\), body\.model\)/.test(main) && /return noteRefusal\(\{ content, stop_reason/.test(main),
+      'both the request and the stream path run every response through it');
+  }
+
+  // ── A STREAMED THINKING BLOCK COMES BACK AS A THINKING BLOCK ───────────────────────────────────
+  //
+  // The stream's return mapped anything that was not a tool_use to { type:'text', text: b.text }. A
+  // thinking block has no `text`, so it came back as a text block with text undefined — the reasoning
+  // was dropped from every streamed turn and a malformed block went into history in its place.
+  {
+    const body = extract(main, 'anthropicStream');
+    ok(!/:\s*\{ type: 'text', text: b\.text \}\)/.test(body), 'the stream no longer flattens every non-tool block to text');
+    ok(/if \(b\.type === 'thinking'\) return \{ type: 'thinking', thinking: b\.thinking \|\| '', signature: b\.signature \|\| '' \}/.test(body),
+      'a thinking block is returned with its thinking and its signature');
+    ok(/const \{ _json, \.\.\.rest \} = b;/.test(body), 'and anything it does not recognise goes back as received rather than coerced');
+    ok(/stop_details = ev\.delta\.stop_details/.test(body), 'the refusal category is read off the stream');
+  }
+
 console.log(`\n${fail === 0 ? '✅' : '❌'} ${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);
 
