@@ -78,5 +78,76 @@ console.log('[availability]');
     assert.strictEqual(r.free, true, 'undated events cannot be said to be happening');
     ok('events with no usable times are ignored rather than crashing the check');
   }
+
+  // ── THE SHAPE THE GATE IS ACTUALLY GIVEN ─────────────────────────────────────────────────────────
+  //
+  // Everything above feeds the gate RAW Google events ({ start: { dateTime } }). Nothing in the app
+  // does: lib/google.js calendarList() flattens them first, so `start` is already a string. The gate
+  // read `start.dateTime` off that string, got undefined, and skipped every event as "undated" — with
+  // three lectures and a lab on the calendar it reported him free in 48 of 48 half-hour slots, and
+  // these tests were green the whole time because they agreed with the gate rather than its caller.
+  // So these run real Google-shaped events THROUGH the real flattener and gate on the result.
+  {
+    const { flattenEvent } = require('../lib/google');
+    const { span } = require('../lib/availability');
+    const raw = [
+      { id: '1', summary: 'Lecture', status: 'confirmed', start: { dateTime: '2026-11-12T10:40:00-05:00' }, end: { dateTime: '2026-11-12T12:00:00-05:00' } },
+      { id: '2', summary: 'Lab', status: 'confirmed', start: { dateTime: '2026-11-12T13:30:00-05:00' }, end: { dateTime: '2026-11-12T16:20:00-05:00' } },
+      { id: '3', summary: 'Birthday', status: 'confirmed', start: { date: '2026-11-12' }, end: { date: '2026-11-13' } },
+      { id: '4', summary: 'Hold', status: 'confirmed', transparency: 'transparent', start: { dateTime: '2026-11-12T12:15:00-05:00' }, end: { dateTime: '2026-11-12T13:05:00-05:00' } },
+      { id: '5', summary: 'Declined', status: 'confirmed', start: { dateTime: '2026-11-12T17:00:00-05:00' }, end: { dateTime: '2026-11-12T18:30:00-05:00' }, attendees: [{ email: 'me@x.edu', self: true, responseStatus: 'declined' }] },
+      { id: '6', summary: 'Cancelled', status: 'cancelled', start: { dateTime: '2026-11-12T09:00:00-05:00' }, end: { dateTime: '2026-11-12T10:00:00-05:00' } },
+    ];
+    const flat = raw.map(flattenEvent);
+    assert.strictEqual(typeof flat[0].start, 'string', 'the flattener really does produce string times — the premise of this block');
+    const at = (hhmm) => Date.parse(`2026-11-12T${hhmm}:00-05:00`);
+    const chk = (hhmm) => check({ listEvents: async () => flat, now: at(hhmm) });
+
+    let r = await chk('11:00');
+    assert.strictEqual(r.free, false, 'mid-lecture, on FLATTENED events, he is busy');
+    assert.strictEqual(r.until, at('12:00'), 'and it knows when the lecture ends');
+    ok('a lecture blocks a call when the gate is fed what calendarList really returns');
+
+    r = await chk('14:45'); assert.strictEqual(r.free, false); ok('so does the lab');
+    r = await chk('12:05'); assert.strictEqual(r.free, true); ok('the gap between classes is free');
+    r = await chk('08:00'); assert.strictEqual(r.free, true); ok('an all-day event (a date-only string after flattening) does not silence the phone all day');
+    r = await chk('12:30'); assert.strictEqual(r.free, true); ok('"show me as free" survives the flattening and is honoured');
+    r = await chk('17:30'); assert.strictEqual(r.free, true); ok('a meeting he declined survives the flattening and does not block');
+    r = await chk('09:30'); assert.strictEqual(r.free, true); ok('a cancelled event does not block');
+
+    // The measurement that exposed it, as an assertion: walk the day in half-hours.
+    let blocked = 0;
+    for (let t = at('08:00'); t < at('20:00'); t += 30 * 60000) { if (!(await check({ listEvents: async () => flat, now: t })).free) blocked++; }
+    assert.ok(blocked >= 8, `a day with a lecture and a lab must block SOME slots (blocked ${blocked}) — zero is the bug`);
+    ok(`walking the day in half-hours, the gate refuses ${blocked} slots (it used to refuse 0)`);
+
+    assert.deepStrictEqual(span({ start: '2026-11-12', end: '2026-11-13' }).allDay, true);
+    assert.strictEqual(span({ start: null, end: null }), null);
+    ok('span() reads both shapes and still refuses an event with no times');
+  }
+
+  // ── a broken instrument is not an uncertain moment ───────────────────────────────────────────────
+  {
+    let r = await check({ listEvents: async () => { throw new Error('invalid_grant'); }, now: Date.now() });
+    assert.strictEqual(r.free, true); assert.strictEqual(r.authDead, true); assert.strictEqual(r.unknown, true);
+    ok('a revoked grant is reported as authDead — the caller can refuse to ring blind');
+    r = await check({ listEvents: async () => { throw new Error('getaddrinfo ENOTFOUND www.googleapis.com'); }, now: Date.now() });
+    assert.strictEqual(r.free, true); assert.strictEqual(r.authDead, false); assert.strictEqual(r.unknown, true);
+    ok('a network blip is NOT authDead — it still fails open, because it says nothing about his day');
+    r = await check({ listEvents: async () => [], now: Date.now() });
+    assert.strictEqual(r.unknown, undefined);
+    ok('and a genuinely empty calendar is neither');
+  }
+  // ── the minutes before it starts ─────────────────────────────────────────────────────────────────
+  {
+    const ev = [{ summary: 'Lecture', start: '2026-11-12T10:40:00-05:00', end: '2026-11-12T12:00:00-05:00' }];
+    const at = (hhmm) => Date.parse(`2026-11-12T${hhmm}:00-05:00`);
+    let r = await check({ listEvents: async () => ev, now: at('10:36') });
+    assert.strictEqual(r.free, false); ok('four minutes before a lecture he is walking in — no call');
+    r = await check({ listEvents: async () => ev, now: at('10:30') });
+    assert.strictEqual(r.free, true); ok('ten minutes before is still free');
+    r = await check({ listEvents: async () => ev, now: at('10:36'), leadMin: 0 });
+    assert.strictEqual(r.free, true); ok('and the lead-in is a setting, off when asked');
+  }
   console.log(`[availability] ${pass} assertions passed`);
 })();

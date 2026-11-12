@@ -8782,12 +8782,21 @@ async function twilioCall(message, { to, name, bypassGate = false } = {}) {
       const avail = await availability.check({
         // Reads every connected calendar — his Princeton teaching schedule is not on the personal
         // account, and checking only one would be worse than not checking at all.
-        listEvents: async ({ timeMin, timeMax }) => {
-          const r = await google.calendarList({ timeMin, timeMax, limit: 20 });
-          return (r && (r.events || r.results)) || [];
-        },
+        listEvents: (range) => calendarEventsOrThrow(range),
         now: Date.now(),
       });
+      // THE CALENDAR IS DISCONNECTED, not merely slow. He asked not to be rung in meetings or class,
+      // and with no calendar there is no way to know — so the message goes by text, and he is told
+      // ONCE a day that the gate is blind and how to fix it, rather than being rung on a guess.
+      if (avail.authDead) {
+        recordCall({ to: target, name: name || null, ok: false, blocked: true, reason: 'calendar disconnected' });
+        const today = new Date().toDateString();
+        if (_calendarDeadNoticeDay !== today) {
+          _calendarDeadNoticeDay = today;
+          notifyUser('My Google Calendar access has expired, so I cannot tell when you are in class — I will text instead of calling until it is reconnected. Fix: `npm run google:auth -- <address>` in ~/bhatbot.', 'low').catch(() => {});
+        }
+        return { sent: false, blocked: true, busy: false, downgrade: 'telegram', error: 'calendar disconnected — not calling blind' };
+      }
       if (!avail.free) {
         recordCall({ to: target, name: name || null, ok: false, blocked: true, reason: 'busy: ' + avail.reason });
         console.warn('[call] not calling — he is busy with ' + avail.reason);
@@ -11915,6 +11924,16 @@ async function transcribeAudio(audioBuffer, mimeType) {
 const _audioEnv = createAudioEnv({
   exec: () => { const r = spawnSync('/usr/bin/pmset', ['-g', 'assertions'], { encoding: 'utf8', timeout: 1500 }); return r.status === 0 ? r.stdout : null; },
 });
+// A FAILED READ IS NOT AN EMPTY CALENDAR. google.calendarList() reports failure as
+// `{ success: false, error }` with no events, and both callers took `events || []` — so a revoked
+// grant arrived at the gate as "calendar is clear" and was indistinguishable from a free afternoon.
+// Throwing here is what lets lib/availability.js say "disconnected" instead of "free".
+let _calendarDeadNoticeDay = '';
+async function calendarEventsOrThrow({ timeMin, timeMax }) {
+  const r = await google.calendarList({ timeMin, timeMax, limit: 20 });
+  if (!r || r.success === false) throw new Error((r && (r.error || r.reason)) || 'calendar read failed');
+  return r.events || r.results || [];
+}
 // On a call or in a meeting he is talking to people. Two sources, because neither is complete: the
 // calendar knows about classes and scheduled meetings and nothing about an impromptu call, and the
 // process list knows a Zoom meeting is live and nothing about a lecture hall. NEVER on the voice
@@ -11924,10 +11943,7 @@ let _meeting = { at: 0, busy: false, reason: '' }, _meetingBusy = false, _callAp
 function meetingNow() {
   if (Date.now() - _meeting.at > 120000 && !_meetingBusy) {
     _meetingBusy = true;
-    Promise.resolve().then(() => availability.check({
-      listEvents: async ({ timeMin, timeMax }) => { const r = await google.calendarList({ timeMin, timeMax, limit: 20 }); return (r && (r.events || r.results)) || []; },
-      now: Date.now(),
-    })).then((a) => { _meeting = { at: Date.now(), busy: !!(a && a.free === false), reason: (a && a.reason) || '' }; })
+    Promise.resolve().then(() => availability.check({ listEvents: (range) => calendarEventsOrThrow(range), now: Date.now(), leadMin: 0 })).then((a) => { _meeting = { at: Date.now(), busy: !!(a && a.free === false), reason: (a && a.reason) || '' }; })
       .catch(() => { _meeting = { at: Date.now(), busy: false, reason: '' }; })
       .finally(() => { _meetingBusy = false; });
   }
