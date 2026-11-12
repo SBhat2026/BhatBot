@@ -543,6 +543,25 @@ ok(Array.isArray(tagCache('nope')) === false, 'cache: non-array → returned as-
   }
 }
 
+  // ── A FUNCTION NOBODY CALLS IS NOT A FEATURE ───────────────────────────────────────────────────
+  //
+  // The browser page reaper was written, unit-tested and committed in September, and never ran: the
+  // edit that added its timer failed an unrelated assertion and saved nothing, while the tests above
+  // call reapBrowserPages directly and so stayed green. A test that calls the function for you cannot
+  // tell whether anything else does. This is the missing half: every `start…` in main.js — the
+  // convention for "begin a background loop" — must be CALLED somewhere other than its own definition.
+  {
+    const starts = [...main.matchAll(/^(?:async\s+)?function\s+(start[A-Z]\w*)\s*\(/gm)].map((m) => m[1]);
+    ok(starts.length >= 5, `found the background-loop starters (${starts.length})`);
+    const orphans = starts.filter((name) => {
+      const calls = [...main.matchAll(new RegExp('(?<![\\w$.])' + name + '\\s*\\(', 'g'))].length;
+      return calls < 2;                                   // one match is the definition itself
+    });
+    ok(orphans.length === 0, `every start…() is actually called (orphans: ${orphans.join(', ') || 'none'})`);
+    ok(starts.includes('startBrowserReaper'), 'the browser reaper has a starter at all');
+    ok(/startBrowserReaper\(\);\s*\/\/ stops the browser role/.test(main), 'and it is started on the app-ready path');
+  }
+
 console.log(`\n${fail === 0 ? '✅' : '❌'} ${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);
 

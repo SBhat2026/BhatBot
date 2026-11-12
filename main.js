@@ -342,6 +342,7 @@ const scicompute = require('./lib/scicompute');         // quant/numerics/stats/
 const dockerPack = require('./lib/integrations/docker'); // container isolation lane (container_run)
 const { createEndpointer } = require('./lib/endpoint');  // adaptive, speaker-gated utterance endpointing
 const voiceid = require('./lib/voiceid');                // T3 — speaker verification (cocktail-party post-filter)
+const { createAudioEnv } = require('./lib/audioenv');    // is THIS machine playing sound the mic can hear?
 const spokenmodel = require('./lib/spokenmodel');        // T5 — learned spoken-length model (density→compression)
 
 const DB_MODELS = { db_speech: 'gpt-oss-20b', db_directive: 'gemma-4-26b' };
@@ -5625,7 +5626,7 @@ async function executeTool(name, input, opts = {}) {
           if (_supervisedRun && !_supervisedRun.report) { result = { success: false, error: 'a run is already going' }; break; }
           const m = missions.attach(id);
           _supervisedRun = { goal: (m && m.meta && m.meta.goal) || '(resumed)', startedAt: Date.now(), missionId: id, report: null };
-          _costpilot = buildCostPilot(() => id); startCostPilotTimer(); startCostPilotTimer();
+          _costpilot = buildCostPilot(() => id); startCostPilotTimer();
           _supervisedRun.promise = supervisor.resume(id, { wallClockMs: Math.max(0.05, Math.min(8, Number(input.hours) || 1)) * 3600 * 1000, width: Number(input.width) || 3 })
             .then((rep) => { _supervisedRun.report = rep; return rep; })
             .catch((e) => { _supervisedRun.report = { ok: false, stoppedBecause: 'crashed', error: String(e && e.message || e) }; return _supervisedRun.report; });
@@ -9711,6 +9712,32 @@ process.on('unhandledRejection', (e) => {
   try { selfheal.enqueue({ key: 'reject:' + String(e && e.message).slice(0, 60), source: 'runtimeErrors', problem: 'BhatBot had an unhandled promise rejection: ' + (e && e.stack ? e.stack.slice(0, 600) : String(e)) + '. Find and fix the root cause.', verify: 'node scripts/verify-syntax.js' }, loadConfig); } catch {}
 });
 
+// THE BROWSER PAGE REAPER'S TIMER. `reapBrowserPages` has existed and been tested since September;
+// this — the thing that actually CALLS it — was never written to disk. The edit that added it failed
+// an unrelated assertion and saved nothing, the tests exercised the function directly so they stayed
+// green, and the commit message described a reaper that never once ran. A function nobody calls is
+// not a feature, and a test that calls it for you cannot tell the difference.
+//
+// NOT wrapped in bgTick, deliberately: bgTick refuses to run when the governor is shedding load for
+// memory pressure, so routing the reaper through it would disable the one thing that RELIEVES the
+// pressure at exactly the moment it is needed. It reaps harder as the machine tightens.
+let _browserReaperTimer = null;
+function startBrowserReaper() {
+  if (_browserReaperTimer) return;
+  const tick = async () => {
+    if (!browserContext) return;
+    let level = 'ok';
+    try { level = governor.poll() || 'ok'; } catch {}
+    const cfg = level === 'critical' ? { idleMs: 0, maxPages: 2, force: true }
+      : level === 'hot' ? { idleMs: 30 * 1000, maxPages: 3 }
+      : level === 'warm' ? { idleMs: 2 * 60 * 1000, maxPages: 4 }
+      : { idleMs: 5 * 60 * 1000, maxPages: 6 };
+    try { await reapBrowserPages(cfg); } catch (e) { console.warn('[browser] reaper:', e && e.message); }
+  };
+  _browserReaperTimer = setInterval(tick, 60 * 1000);
+  if (_browserReaperTimer.unref) _browserReaperTimer.unref();
+}
+
 function startScheduler() {
   if (schedulerTimer) return;
   schedulerTimer = setInterval(bgTick('scheduler', tickScheduler), 30000);   // B2: lock-guarded
@@ -10672,6 +10699,9 @@ ipcMain.handle('get-voice-config', () => {
     hasSTT: hasCloudStt || hasLocalStt,   // renderer arms MediaRecorder→Whisper whenever ANY STT exists
     picovoiceKey: c.picovoiceKey || null, wakeWord: c.wakeWord || 'jarvis', silenceMs: c.silenceMs || 2000,
     vadFloorMargin: (c.vad && c.vad.floorMargin) || 1.8, verifyUser: !!(c.voice && c.voice.verifyUser),
+    // How long after BhatBot stops speaking a follow-up needs no wake word. After it, the session
+    // closes on its own and only the name reopens it.
+    followUpMs: Math.max(5000, Math.min(120000, Number(c.voice && c.voice.followUpMs) || 20000)),
     ttsEnabled: c.ttsEnabled !== false, ttsProvider, hasTTS,
     ttsSpeed: c.ttsSpeed != null ? c.ttsSpeed : 1.05,
     ttsTransport: ttsWsActive() ? 'ws' : 'rest',   // T1 transport, RESOLVED (auto→ws when usable) — surfaced for the ops panel
@@ -11321,6 +11351,7 @@ async function speakDesktop(text, opts = {}) {
   let t = String(text || '').trim();
   if (!t) return { success: false };
   stopDesktopTTS();
+  _lastSpoken = t.replace(/<\/?speak>/g, '').slice(-600);
   const seq = ++ttsPlaySeq;
   // Single consistent voice: always synthesize through the configured provider (no more
   // macOS `say` shortcut for short text — that was a second, different voice).
@@ -11356,6 +11387,7 @@ ipcMain.handle('play-tts', (_e, { text, full }) => speakDesktop(text, { full: !!
 let ttsStreamSeq = 0, ttsStreamBuf = '', ttsStreamQ = [], ttsStreamDraining = false, ttsStreamProduced = false;
 function ttsStreamStart() {
   stopDesktopTTS();
+  _lastSpoken = '';
   ttsStreamSeq = ++ttsPlaySeq; ttsStreamBuf = ''; ttsStreamQ = []; ttsStreamDraining = false; ttsStreamProduced = false;
   return ttsStreamSeq;
 }
@@ -11449,6 +11481,7 @@ function ttsWsEnsure(seq) {
 function ttsWsClose() { if (_ttsWsSess) { try { _ttsWsSess.close(); } catch {} _ttsWsSess = null; _ttsWsSeq = -1; _ttsWsNorm = null; } }
 function ttsStreamFeed(seq, delta) {
   if (seq !== ttsStreamSeq) return;
+  _lastSpoken = (_lastSpoken + String(delta || '')).slice(-600);
   if (loadConfig().ttsEnabled === false) return;
   if (ttsWsActive()) {                                        // ws path: normalize to token boundaries, stream raw
     const sess = ttsWsEnsure(seq);
@@ -11847,6 +11880,40 @@ async function transcribeAudio(audioBuffer, mimeType) {
     return { error: e.message };
   }
 }
+// ── THE EVIDENCE FOR "IS THIS ONE FOR ME?" ───────────────────────────────────────────────────────
+// Everything lib/addressee.js weighs that is not the words themselves. Gathered here because it
+// needs the OS; decided in the renderer because that is where the session state lives.
+const _audioEnv = createAudioEnv({
+  exec: () => { const r = spawnSync('/usr/bin/pmset', ['-g', 'assertions'], { encoding: 'utf8', timeout: 1500 }); return r.status === 0 ? r.stdout : null; },
+});
+// On a call or in a meeting he is talking to people. Two sources, because neither is complete: the
+// calendar knows about classes and scheduled meetings and nothing about an impromptu call, and the
+// process list knows a Zoom meeting is live and nothing about a lecture hall. NEVER on the voice
+// path: the calendar is a network call, so it is refreshed in the background and the last answer is
+// what gets used — a stale "free" is better than making every utterance wait on Google.
+let _meeting = { at: 0, busy: false, reason: '' }, _meetingBusy = false, _callApp = { at: 0, on: false };
+function meetingNow() {
+  if (Date.now() - _meeting.at > 120000 && !_meetingBusy) {
+    _meetingBusy = true;
+    Promise.resolve().then(() => availability.check({
+      listEvents: async ({ timeMin, timeMax }) => { const r = await google.calendarList({ timeMin, timeMax, limit: 20 }); return (r && (r.events || r.results)) || []; },
+      now: Date.now(),
+    })).then((a) => { _meeting = { at: Date.now(), busy: !!(a && a.free === false), reason: (a && a.reason) || '' }; })
+      .catch(() => { _meeting = { at: Date.now(), busy: false, reason: '' }; })
+      .finally(() => { _meetingBusy = false; });
+  }
+  if (Date.now() - _callApp.at > 5000) {
+    let on = false;
+    // CptHost exists only while a Zoom meeting is actually in progress; the Zoom app itself, Teams'
+    // widget and avconferenced are all running whether or not anybody is talking.
+    try { on = spawnSync('/usr/bin/pgrep', ['-x', 'CptHost'], { timeout: 1000 }).status === 0; } catch {}
+    _callApp = { at: Date.now(), on };
+  }
+  return { inCall: _meeting.busy || _callApp.on, why: _callApp.on ? 'a Zoom meeting is live' : _meeting.reason };
+}
+// What BhatBot last said aloud, so a bare "yes" can be recognised as the answer to its question.
+let _lastSpoken = '';
+
 // COCKTAIL-PARTY post-filter (T3, config.voice.verifyUser): after transcribing, verify the clip is the
 // ENROLLED user's voice; if it clearly isn't (someone else in the room talking), discard so BhatBot
 // never acts on a background speaker. Off by default (voiceid is a slow venv); fail-OPEN on any error
@@ -11858,8 +11925,12 @@ async function verifyEnrolledSpeaker(buf, ext) {
     try { fs.writeFileSync(tmp, buf); } catch { return { ok: true, skipped: 'tmp-write' }; }
     const r = await voiceid.verify(tmp).catch(() => null);
     fs.unlink(tmp, () => {});
-    if (!r || r.ok === false || typeof r.match !== 'boolean') return { ok: true, skipped: 'verify-error' };  // fail-open
-    return { ok: r.match, score: r.score, threshold: r.threshold };
+    if (!r || r.ok === false) return { ok: true, skipped: 'verify-error' };  // fail-open
+    // Too little voiced audio to make a meaningful voiceprint. That is "cannot tell", which is a
+    // different thing from "failed" and from "matched", and the caller needs to know which.
+    if (r.short) return { ok: true, short: true, threshold: r.threshold };
+    if (typeof r.match !== 'boolean') return { ok: true, skipped: 'verify-error' };
+    return { ok: r.match, score: r.score, best: r.best, threshold: r.threshold, ms: r.ms, via: r.via };
   } catch { return { ok: true, skipped: 'exception' }; }
 }
 // PASSIVE SPEAKER LEARNING (Siddhant's pick): with no enrollment session, quietly bank the first N
@@ -11890,14 +11961,33 @@ async function passiveSpeakerLearn(buf, ext, text) {
   } catch { _spkLearnBusy = false; }
 }
 ipcMain.handle('transcribe-audio', async (_e, { audioBuffer, mimeType }) => {
-  const res = await transcribeAudio(audioBuffer, mimeType);
   const c = loadConfig();
   const mt = (mimeType || 'audio/webm').split(';')[0].trim();
   const ext = mt === 'audio/mp4' || mt === 'audio/m4a' ? 'm4a' : mt === 'audio/wav' ? 'wav' : mt === 'audio/ogg' ? 'ogg' : 'webm';
-  if (res && res.success && res.text && c.voice && c.voice.verifyUser) {
-    const v = await verifyEnrolledSpeaker(Buffer.from(audioBuffer), ext);
-    if (!v.ok) { console.log(`[voiceid] discarded non-enrolled speaker (score ${v.score}, thr ${v.threshold})`); return { success: true, text: '', _dropped: 'not_enrolled_speaker', score: v.score }; }
-  } else if (res && res.success && res.text) {
+  // IN PARALLEL. Voice ID used to run AFTER speech-to-text and in series with it: 1.7 s of Python
+  // start-up and model load on every utterance, measured, before the words were even returned. It is
+  // now a resident daemon (~50 ms) started alongside the transcription, so it finishes first and adds
+  // nothing to the wait.
+  const wantVoice = !!(c.voice && c.voice.verifyUser);
+  const voiceP = wantVoice ? verifyEnrolledSpeaker(Buffer.from(audioBuffer), ext).catch(() => null) : Promise.resolve(null);
+  const res = await transcribeAudio(audioBuffer, mimeType);
+  // The evidence travels WITH the transcript. The decision is lib/addressee.js's, made with the
+  // session state, rather than a hard drop here on one number: the enrolled threshold sits at the
+  // edge of his own score distribution (one of his eight enrollment clips scores 0.7398 against a
+  // threshold of 0.739), so a switch at that line discards him in any room that is not the one he
+  // enrolled in.
+  if (res && res.success && res.text) {
+    const v = await voiceP;
+    let audio = null, call = { inCall: false, why: '' };
+    try { audio = _audioEnv.sample(); } catch {}
+    try { call = meetingNow(); } catch {}
+    res.evidence = {
+      voice: v && !v.skipped && typeof v.threshold === 'number' ? { score: v.score, best: v.best, threshold: v.threshold, match: v.ok, short: !!v.short } : null,
+      audio, inCall: !!call.inCall, inCallWhy: call.why || '',
+      lastReply: String(_lastSpoken || '').slice(-400),
+    };
+  }
+  if (!wantVoice && res && res.success && res.text) {
     passiveSpeakerLearn(Buffer.from(audioBuffer), ext, res.text);   // fire-and-forget: build the voiceprint
   }
   return res;
@@ -12599,6 +12689,15 @@ app.whenReady().then(() => {
     } catch (e) { console.warn('[jobs] hydrate failed:', e.message); }
     reapOrphanMissions();   // adopt missions orphaned by a crash/quit BEFORE the scheduler starts ticking
     startScheduler();   // proactive recurring/one-off tasks (also drives mission resume — tickMissions)
+    startBrowserReaper();   // stops the browser role's 0.6–1.2GB/hour leak from starting the RAM spiral
+    // Pay voice ID's model load now, off the conversation path. Cold, the first verification of a
+    // session cost 5.8 s — on exactly the utterance where a wake word had just fired.
+    setTimeout(() => {
+      try {
+        const vc = loadConfig().voice;
+        if (vc && vc.verifyUser && voiceid.isEnrolled()) voiceid.warm().then((ok) => console.log('[voiceid] daemon ' + (ok ? 'warm' : 'unavailable — one-shot fallback'))).catch(() => {});
+      } catch {}
+    }, 6000);
     startAmbient();     // #18 opt-in ambient awareness (no-op unless config.ambient.enabled)
     startTriage();      // Phase A — proactive mail triage (no-op unless config.triage.enabled)
     startMemoryMaintenance();   // always-on memory upkeep (runs on a timer, independent of the window)
@@ -12673,6 +12772,7 @@ app.whenReady().then(() => {
 });
 app.on('will-quit', async () => {
   globalShortcut.unregisterAll();
+  try { voiceid.stop(); } catch {}
   try { await saveBrowserBounds(); } catch {}
   try { await saveBrowserState(); } catch {}
   try { if (browserContext) await browserContext.close(); else if (browser) await browser.close(); } catch {}

@@ -4007,11 +4007,29 @@ function looksIncompleteUtterance(t) {
 // `said.length < 40` so desktop and phone end-phrases stay consistent.
 const STOP_RE = /\b(that'?s (all|it|everything)|that'?ll (be all|do)|that will be all|we'?re done|we are done|i'?m done|i am done|all done|done for now|done with (the|this|my) project( for now)?|go ?to sleep|stop listening|stop the conversation|stand down|dismissed|good ?bye|bye bye|bye( bhatbot| jarvis)?|nothing else|talk later|see you|you can stop|that is all|(i'?m|i am) (satisfied|good|all set))\b/i;
 const STOP_MAXLEN = 48;        // an end-phrase is a short utterance; longer = a real request
+// THE FOLLOW-UP WINDOW. A wake word opens a session; the session then stays open for `followUpMs`
+// after BhatBot last stopped speaking, and CLOSES ON ITS OWN. It used to stay open until told
+// "that's all", re-arming the microphone after every reply for as long as the app ran — so one wake
+// in the morning made everything said in the room that day a candidate command. `convoAnchor` is
+// when the clock last started: on opening, and again each time speech drains.
+let convoAnchor = 0;
+const followUpMs = () => Math.max(5000, Number(voiceCfg && voiceCfg.followUpMs) || 20000);
+const windowExpired = () => convoMode && !voiceLocked && (Date.now() - convoAnchor) > followUpMs();
+// Closing because time ran out is not an event worth announcing. The spoken "Very good, sir" belongs
+// to being dismissed; a window lapsing in an empty room should make no sound at all.
+function closeConvoQuiet() {
+  if (!convoMode || voiceLocked) return;
+  setConvo(false); _voiceCarry = ''; _goOnCount = 0;
+  tbar.textContent = '🎧 listening window closed — say "Jarvis" when you need me';
+}
 function setConvo(on) {
+  if (on) convoAnchor = Date.now();
   convoMode = on;
   document.body.classList.toggle('convo', on);
   if (mic) mic.title = on ? 'Conversation mode ON — say "that\'s all" to stop' : 'Voice';
-  if (on) tbar.textContent = '🎧 conversation open — talk freely, say "that\'s all" to end';
+  if (on) tbar.textContent = voiceLocked
+    ? '🔒 voice locked — listening continuously'
+    : `🎧 listening for a follow-up (${Math.round(followUpMs() / 1000)}s) — say "that\'s all" to end sooner`;
 }
 // Close conversation mode: stop re-arming the mic and give a brief JARVIS ack in the ONE voice
 // (ElevenLabs/Kokoro via speak() — never the rogue macOS `say`). setConvo(false) FIRST so the
@@ -4024,9 +4042,16 @@ function endConvo() {
 // Re-arm the mic for the next turn once: nothing is busy/recording and speech has drained.
 function maybeRearm() {
   if (!convoMode || busy || recording || !ttsIdle) return;
-  setTimeout(() => { if (convoMode && !busy && !recording && ttsIdle) startVoice(); }, 450);
+  if (windowExpired()) { closeConvoQuiet(); return; }     // nobody followed up: stop holding the mic
+  setTimeout(() => {
+    if (!(convoMode && !busy && !recording && ttsIdle)) return;
+    if (windowExpired()) { closeConvoQuiet(); return; }
+    startVoice();
+  }, 450);
 }
-window.bhatbot.onTtsIdle(() => { ttsIdle = true; setSpeaking(false); setOrbState('idle'); showToolLine(''); maybeRearm(); });
+// The window counts from when BhatBot STOPS speaking, not from when he last spoke — a long answer
+// must not use up the time he has to reply to it.
+window.bhatbot.onTtsIdle(() => { ttsIdle = true; if (convoMode) convoAnchor = Date.now(); setSpeaking(false); setOrbState('idle'); showToolLine(''); maybeRearm(); });
 
 // VOICE LOCK — one-time activation that drops the wake word and listens continuously until unlocked
 // ("lock in" / ⌘⇧L on, "unlock" / "that's all" / ⌘⇧L off). Reuses conversation mode's re-arm loop.
@@ -4461,14 +4486,18 @@ async function onRecStop() {
   tbar.classList.remove('on'); tbar.textContent = '';
   // A wake that produced no transcript must not leave _fromWake armed — it would make the NEXT
   // utterance, spoken with no wake word at all, prove addressivity and almost certainly fail.
-  if (res && res.text) submitVoice(res.text);
-  else { _fromWake = false; if (res && res.error) addErr('STT: ' + res.error); }
+  // The evidence (whose voice, what the machine was playing, whether he is on a call) rides along,
+  // and so does when the utterance STARTED — an utterance begun inside the window counts as inside
+  // it, however long it took to say and transcribe.
+  if (res && res.text) submitVoice(res.text, { evidence: res.evidence || null, startedAt: recStartAt });
+  else { _fromWake = false; if (res && res.error) addErr('STT: ' + res.error); else if (convoMode || voiceLocked) { ttsIdle = true; maybeRearm(); } }
 }
 // Voice input router: while the agent is WORKING, a spoken instruction is injected as live
 // guidance into the running task (barge-in steering) instead of starting a new request.
 const LOCK_RE = /\b(lock in|lock voice|lock the mic|stay listening|keep listening|hold the line)\b/i;
 const UNLOCK_RE = /\b(unlock|stop listening|stand down|dismiss(ed)?)\b/i;
-function submitVoice(text) {
+function submitVoice(text, opts) {
+  opts = opts || {};
   let t = (text || '').trim(); if (!t) return;
   // Voice-lock commands (one-time activation → continuous, no wake word; local only, never blocks Telegram/phone).
   if (t.length <= 40 && LOCK_RE.test(t)) { lockVoice(); return; }
@@ -4477,6 +4506,55 @@ function submitVoice(text) {
   if (convoMode && !voiceLocked && t.length <= STOP_MAXLEN && STOP_RE.test(t)) { _voiceCarry = ''; _goOnCount = 0; endConvo(); return; }
   // Stitch any fragment carried from a prior "Go on, sir?" onto this utterance.
   if (_voiceCarry) { t = (_voiceCarry + ' ' + t).trim(); _voiceCarry = ''; }
+  // ── IS THIS ONE FOR ME? (lib/addressee.js) ─────────────────────────────────────────────────────
+  //
+  // Asked of EVERY utterance. It used to be asked only of the one a wake word started; inside
+  // conversation mode nothing was asked at all, on the grounds that demanding the name again would
+  // make the assistant deaf mid-conversation. That was right about the name and wrong about the
+  // question: once a session was open, a remark to somebody on the sofa, a line from the television
+  // and half of a phone call were all commands. So the question stays, and what changes is the
+  // evidence — whose voice it was, whether this computer was playing sound the mic could hear,
+  // whether he is on a call, how the sentence is shaped, and how long ago BhatBot last spoke.
+  //
+  // The one case that is NOT gated is a tap on the mic with no session open: that is him pressing a
+  // button, and second-guessing a button is how an assistant becomes something you argue with.
+  //
+  // It runs BEFORE the trailed-off check below, which speaks ("Go on, sir?"). Asked in the other
+  // order, a sentence trailing off on the television got a spoken reply from BhatBot.
+  const gateMode = voiceLocked ? 'locked' : (_fromWake && !convoMode) ? 'wake' : convoMode ? 'followup' : null;
+  if (gateMode && !opts.gated) {
+    const wasWake = gateMode === 'wake';
+    _fromWake = false;
+    const ev = opts.evidence || {};
+    const since = gateMode === 'followup' ? Math.max(0, (opts.startedAt || Date.now()) - convoAnchor) : null;
+    const a = (window.bhatbot.addressee && window.bhatbot.addressee({
+      text: t, mode: gateMode, sinceReplyMs: since, lastReply: ev.lastReply || '',
+      voice: ev.voice || null, audio: ev.audio || null, inCall: !!ev.inCall, opts: { followUpMs: followUpMs() },
+    })) || { verdict: 'yes', score: 0, reasons: [], command: t };
+    const why = (a.reasons && a.reasons.length) ? a.reasons[a.reasons.length - 1].replace(/^[+-]?\d+\s*/, '') : 'not addressed to me';
+    const keepListening = () => { if (convoMode || voiceLocked) { ttsIdle = true; maybeRearm(); } };
+    if (a.verdict === 'no') {
+      addThought('· stood down (' + why + ')');
+      try { window.bhatbot.logWakeDecision({ kept: false, why: a.expired ? 'window closed' : 'not addressed', mode: gateMode, text: t, score: a.score, reasons: a.reasons }); } catch {}
+      if (a.expired) closeConvoQuiet(); else keepListening();
+      return;
+    }
+    const accept = () => { if (wasWake) setConvo(true); submitVoice(a.command || t, { gated: true }); };
+    if (a.verdict === 'unsure') {
+      // The genuine middle goes to the cheap local model rather than a coin flip. If that model is
+      // unreachable, a wake utterance is still accepted — he said the name — but a nameless
+      // follow-up is not: he can repeat it with the name, and the television cannot.
+      try { window.bhatbot.logWakeDecision({ kept: 'deferred', why: 'ambiguous', mode: gateMode, text: t, score: a.score, reasons: a.reasons }); } catch {}
+      window.bhatbot.voiceIntent(t).then((r) => {
+        if (r && r.ok === false) { addThought('· stood down (not addressed to me)'); keepListening(); }
+        else accept();
+      }).catch(() => { if (wasWake) accept(); else { addThought('· stood down (could not tell who that was for)'); keepListening(); } });
+      return;
+    }
+    try { window.bhatbot.logWakeDecision({ kept: true, mode: gateMode, text: t, score: a.score }); } catch {}
+    if (wasWake) setConvo(true);          // addressed → the session is genuinely open now
+    t = a.command || t;                   // act on the request, not on the vocative in front of it
+  }
   // TRAILED-OFF gate: in a listening session, if you stopped mid-thought (dangling "…and I want you
   // to—"), don't act or discard it — carry the fragment, ask "Go on, sir?", and keep listening so the
   // next utterance completes it. Capped at 2 nudges, then we act on whatever we have.
@@ -4488,33 +4566,6 @@ function submitVoice(text) {
     return;
   }
   _goOnCount = 0;   // completed (or hit the cap) → reset the nudge counter for the next turn
-  // ADDRESSIVITY GATE — was that said TO me, or ABOUT me? (lib/addressivity.js)
-  //
-  // ONLY for utterances the wake word started. In conversation mode or under a voice lock you have
-  // already said you are talking to it, and demanding the name again there would make the assistant
-  // deaf mid-conversation — which is a far worse failure than one false wake.
-  if (_fromWake && !convoMode && !voiceLocked) {
-    _fromWake = false;
-    const a = (window.bhatbot.addressivity && window.bhatbot.addressivity(t)) || { verdict: 'yes' };
-    if (a.verdict === 'no') {
-      addThought('· stood down (' + (a.reasons && a.reasons[0] ? a.reasons[a.reasons.length - 1].replace(/^[+-]\d+\s*/, '') : 'not addressed to me') + ')');
-      try { window.bhatbot.logWakeDecision({ kept: false, why: 'not addressed', text: t, score: a.score, reasons: a.reasons }); } catch {}
-      return;
-    }
-    // The genuinely ambiguous middle goes to the cheap local model rather than a coin flip. Same
-    // escape hatch the clarity gate's 'borderline' branch already uses.
-    if (a.verdict === 'unsure') {
-      try { window.bhatbot.logWakeDecision({ kept: 'deferred', why: 'ambiguous', text: t, score: a.score, reasons: a.reasons }); } catch {}
-      window.bhatbot.voiceIntent(t).then((r) => {
-        if (r && r.ok === false) addThought('· stood down (not addressed to me)');
-        else { setConvo(true); submitVoice(a.command || t); }
-      }).catch(() => { setConvo(true); submitVoice(a.command || t); });
-      return;
-    }
-    try { window.bhatbot.logWakeDecision({ kept: true, text: t, score: a.score }); } catch {}
-    setConvo(true);                       // addressed → the conversation is genuinely open now
-    t = a.command || t;                   // act on the request, not on the vocative in front of it
-  }
   // CLARITY GATE — discard rambling / thinking-aloud instead of acting on it (heuristic first,
   // cheap model for borderline). Keep listening after a drop so the flow isn't broken.
   const gate = (window.bhatbot.voiceGate && window.bhatbot.voiceGate(t)) || { action: 'ok' };

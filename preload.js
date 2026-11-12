@@ -97,6 +97,10 @@ contextBridge.exposeInMainWorld('bhatbot', {
   // Was that said TO me or ABOUT me? Pure + synchronous, so the mic path never waits on IPC to
   // decide. Fails OPEN ('yes') — going deaf is a worse failure than one false wake.
   addressivity: (text) => { try { return require('./lib/addressivity').score(text, { hadWake: true }); } catch { return { verdict: 'yes', score: 0, reasons: ['gate-error'], command: text }; } },
+  // "Is this one for me?", asked of EVERY utterance — not only the one a wake word started. Pure, so
+  // it runs here with no round trip. On any error it answers 'unsure', never 'yes': the gate failing
+  // must not be the thing that opens the microphone to the room.
+  addressee: (input) => { try { return require('./lib/addressee').decide(input); } catch { return { verdict: 'unsure', score: 0, reasons: ['gate-error'], command: (input && input.text) || '', expired: false }; } },
   logWakeDecision: (d) => ipcRenderer.send('wake-decision', d),
   voiceIntent: (text) => ipcRenderer.invoke('voice-intent', { text }),
   onToggleVoiceLock: (cb) => ipcRenderer.on('toggle-voice-lock', () => cb()),
