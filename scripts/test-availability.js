@@ -149,5 +149,21 @@ console.log('[availability]');
     r = await check({ listEvents: async () => ev, now: at('10:36'), leadMin: 0 });
     assert.strictEqual(r.free, true); ok('and the lead-in is a setting, off when asked');
   }
+
+  // ── a timed event that spans days is not a meeting ──────────────────────────────────────────────
+  {
+    const ev = [{ summary: 'Block', start: '2026-11-12T17:30:00-05:00', end: '2026-11-18T19:00:00-05:00' }];
+    const at = (iso) => Date.parse(iso);
+    let r = await check({ listEvents: async () => ev, now: at('2026-11-14T16:37:00-05:00') });
+    assert.strictEqual(r.free, true);
+    ok('a six-day TIMED event (the real one on his calendar, Nov 12 → Nov 18) does not block calls all week');
+    const lab = [{ summary: 'Lab', start: '2026-11-14T13:00:00-05:00', end: '2026-11-14T22:00:00-05:00' }];
+    r = await check({ listEvents: async () => lab, now: at('2026-11-14T16:00:00-05:00') });
+    assert.strictEqual(r.free, false);
+    ok('while a nine-hour lab still does');
+    r = await check({ listEvents: async () => ev, now: at('2026-11-14T16:37:00-05:00'), allDayCounts: true });
+    assert.strictEqual(r.free, false);
+    ok('and the caller who asked for all-day events to count gets the long one too');
+  }
   console.log(`[availability] ${pass} assertions passed`);
 })();
