@@ -256,6 +256,14 @@ const ok = (c, m) => { assert.ok(c, m); pass++; };
   const hk = r.shapeRequest({ model: 'claude-haiku-5-5', max_tokens: 8000, thinking: { type: 'disabled' } }, {});
   ok(hk.body.thinking.type === 'disabled', 'Haiku 5.5 still accepts disabled, so it is left alone');
 
+  // Found by the PAID smoke test, not this one — which is the argument for having both. between_tools
+  // plus a clear_thinking edit is a 400 on the live API.
+  const bt = r.shapeRequest({ model: 'claude-sonnet-5-5', max_tokens: 8000, thinking: { type: 'disabled' } }, {}).body;
+  const edits = ((bt.context_management || {}).edits || []).map((e) => e.type);
+  ok(!edits.includes('clear_thinking_20251015'), `thinking off sends no clear_thinking edit — the API rejects that pair (${edits.join(',') || 'no edits'})`);
+  const on = r.shapeRequest({ model: 'claude-sonnet-5-5', max_tokens: 8000 }, {}).body;
+  ok(((on.context_management || {}).edits || []).some((e) => e.type === 'clear_thinking_20251015'), 'while a thinking-on request still clears old thinking');
+
   // A manual budget must never reach the wire on any current model.
   const mb = r.shapeRequest({ model: 'claude-sonnet-5', max_tokens: 8000, thinking: { type: 'enabled', budget_tokens: 1600 } }, {});
   ok(mb.body.thinking.type === 'adaptive', `a stray { enabled, budget_tokens } is replaced rather than sent to fail (${JSON.stringify(mb.body.thinking)})`);

@@ -397,11 +397,15 @@ const HOTKEY = 'CommandOrControl+Shift+B';
 // lib/reasoning.js has been checked against the published notes but not yet against the live API.
 // Flipping a default onto unmeasured models is how a voice assistant gets slower without anyone
 // deciding it should; the switch is thrown after a paid smoke test, by a config edit, with no code change.
-const GEN55 = (() => {
-  try { return String(JSON.parse(fs.readFileSync(path.join(os.homedir(), '.bhatbot', 'config.json'), 'utf8')).modelGeneration) === '5.5'; }
-  catch { return false; }
-})();
-const MODEL_SONNET = GEN55 ? 'claude-sonnet-5-5' : 'claude-sonnet-5';   // significant coding, multi-step builds
+const _genCfg = (() => { try { return JSON.parse(fs.readFileSync(path.join(os.homedir(), '.bhatbot', 'config.json'), 'utf8')); } catch { return {}; } })();
+const GEN55 = String(_genCfg.modelGeneration) === '5.5';
+// SONNET IS SWITCHED SEPARATELY, and stays on Sonnet 5 by default even on the 5.5 generation. The
+// paid smoke test (2026-11-14, scripts/smoke-models.js) found Sonnet 5.5 SLOWER to its first word
+// than Sonnet 5 in both runs (+92 ms, +35 ms), and his standing rule is that nothing makes a response
+// slower without asking. Haiku 5.5 was not slower and Opus 5.5 is cheaper, so those move; Sonnet
+// moves when config.sonnetGeneration = '5.5', which is his call.
+const SONNET55 = GEN55 && String(_genCfg.sonnetGeneration) === '5.5';
+const MODEL_SONNET = SONNET55 ? 'claude-sonnet-5-5' : 'claude-sonnet-5';   // significant coding, multi-step builds
 const MODEL_HAIKU = GEN55 ? 'claude-haiku-5-5' : 'claude-haiku-4-5';    // 5.5: the DEFAULT tier. 5: retired from routing
 const MODEL_OPUS = GEN55 ? 'claude-opus-5-5' : 'claude-opus-5';         // the ceiling — only with his per-task yes
 const MODEL_FABLE = 'claude-fable-5';          // native subagents + high autonomy — opt-in heavy/autonomous tier (config.useFable)

@@ -104,8 +104,9 @@ ok(enforce('claude-fable-5', {}).model === 'claude-sonnet-5', 'with no context a
   ok(old.model === 'claude-sonnet-5', 'on the current generation the base tier is still Sonnet — nothing changes before the switch');
 
   const main = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
-  ok(/const GEN55 = /.test(main) && /modelGeneration\)\s*===\s*'5\.5'/.test(main), 'the generation is a config switch');
-  ok(/catch \{ return false; \}/.test(main.slice(main.indexOf('const GEN55 = '), main.indexOf('const GEN55 = ') + 400)), 'and it defaults to the measured generation when the config cannot be read');
+  ok(/const GEN55 = String\(_genCfg\.modelGeneration\) === '5\.5'/.test(main), 'the generation is a config switch');
+  ok(/catch \{ return \{\}; \}/.test(main.slice(main.indexOf('const _genCfg'), main.indexOf('const _genCfg') + 300)), 'and an unreadable config means the measured generation, not the new one');
+  ok(/const SONNET55 = GEN55 && String\(_genCfg\.sonnetGeneration\) === '5\.5'/.test(main), 'Sonnet 5.5 is a SEPARATE switch — it measured slower to first word, and that is his call');
   ok(/modelpolicy\.defaultTier\(/.test(main), 'the turn router takes its base tier from the policy');
 }
 
