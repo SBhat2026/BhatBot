@@ -632,6 +632,20 @@ ok(Array.isArray(tagCache('nope')) === false, 'cache: non-array → returned as-
     ok(/brain', 'standard-actions\.json'/.test(main), 'what it learns is stored in the brain directory, as a file he can read and edit');
   }
 
+  // ── EVERY ROUTED MODEL HAS A RATE-LIMIT ROW ────────────────────────────────────────────────────
+  // Found by LAUNCHING the packaged app after the 5.5 switch: the first scheduled task died on
+  // `Cannot read properties of undefined (reading 'itpm')`. No unit test had loaded the table with
+  // the new ids, because nothing tested the table at all.
+  {
+    const rl = main.slice(main.indexOf('const RATE_LIMITS = {'), main.indexOf('function rateLimitsFor('));
+    const rows = new Set([...rl.matchAll(/'(claude-[a-z0-9-]+)':/g)].map((m) => m[1]));
+    const routed = [];
+    for (const m of main.matchAll(/^const MODEL_(SONNET|OPUS|HAIKU) = ([^;]+);/gm)) for (const id of m[2].matchAll(/'(claude-[^']+)'/g)) routed.push(id[1]);
+    const missing = routed.filter((id) => !rows.has(id));
+    ok(routed.length >= 6 && missing.length === 0, `every routed model, both generations, has a rate-limit row (missing: ${missing.join(', ') || 'none'})`);
+    ok(/RATE_LIMITS\[MODEL_HAIKU\] \|\| \{ itpm: \d+, otpm: \d+ \}/.test(main), 'and the fallback for an unknown model is a literal, so it cannot itself be missing');
+  }
+
 console.log(`\n${fail === 0 ? '✅' : '❌'} ${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);
 

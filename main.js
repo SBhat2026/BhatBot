@@ -1498,6 +1498,11 @@ function recordTokens(model, inTok, outTok) { _winPush(_win.in, model, inTok); _
 // and previous generation, so a config that pins an older model still paces correctly instead of
 // falling through to a default.
 const RATE_LIMITS = {
+  // 5.5 generation. Each has its OWN rate-limit pool; these are starting estimates (Haiku 5.5 is
+  // documented as having Haiku 4.5's defaults) and lib/rate.js replaces them with the live headers.
+  'claude-haiku-5-5':  { itpm: 100000, otpm: 50000 },
+  'claude-sonnet-5-5': { itpm: 450000, otpm: 90000 },
+  'claude-opus-5-5':   { itpm: 100000, otpm: 16000 },
   'claude-sonnet-5':   { itpm: 450000, otpm: 90000 },
   'claude-sonnet-4-6': { itpm: 450000, otpm: 90000 },
   'claude-haiku-4-5':  { itpm: 100000, otpm: 50000 },
@@ -1508,7 +1513,11 @@ const RATE_LIMITS = {
 function rateLimitsFor(model) {
   const c = loadConfig();
   const override = (c.rateLimits && c.rateLimits[model]) || {};
-  const base = RATE_LIMITS[model] || RATE_LIMITS[MODEL_HAIKU];
+  // The fallback was `RATE_LIMITS[MODEL_HAIKU]`, which is only safe while MODEL_HAIKU is in the table.
+  // Turning on the 5.5 generation made MODEL_HAIKU 'claude-haiku-5-5', the fallback became
+  // `undefined`, and the very first scheduled task after launch died reading `.itpm` of it. A
+  // fallback that can itself be missing is not a fallback; this one is a literal.
+  const base = RATE_LIMITS[model] || RATE_LIMITS[MODEL_HAIKU] || { itpm: 100000, otpm: 16000 };
   // legacy single knob still respected as an ITPM floor if someone set it
   const itpm = override.itpm || base.itpm || c.rateLimitTokens || 100000;
   const otpm = override.otpm || base.otpm || 0;        // 0 ⇒ OTPM untracked for this model
