@@ -346,7 +346,8 @@ const scholar = require('./lib/integrations/scholar');  // FORGE — scholarly a
 const scicompute = require('./lib/scicompute');         // quant/numerics/stats/MPS-torch compute pack (sci_compute)
 const dockerPack = require('./lib/integrations/docker'); // container isolation lane (container_run)
 const { createEndpointer } = require('./lib/endpoint');  // adaptive, speaker-gated utterance endpointing
-const { createWorldWatch } = require('./lib/worldwatch');   // "show me Tokyo" → the nearest live camera on worldwatcher.live
+const { createWorldWatch } = require('./lib/worldwatch');
+const tidy = require('./lib/tidy');                          // BhatBot's own file janitor: find, move aside, ask, purge   // "show me Tokyo" → the nearest live camera on worldwatcher.live
 const modelpolicy = require('./lib/modelpolicy');        // the ceiling: never Fable, Opus only with a per-task yes
 const { createAutonomy } = require('./lib/autonomy');    // what may be done unasked, what is learned as routine, what is never done
 const voiceid = require('./lib/voiceid');                // T3 — speaker verification (cocktail-party post-filter)
@@ -4729,6 +4730,88 @@ ipcMain.handle('world-find', async (_e, { place } = {}) => { const r = await wor
 ipcMain.handle('world-context', async () => { const v = await worldContextPick().catch(() => null); if (v) _worldLast = v; return v; });
 setInterval(() => { worldContextPick().then((v) => { if (v && (!_worldLast || v.url !== _worldLast.url)) showWorld(v); }).catch(() => {}); }, 30 * 60 * 1000).unref();
 
+// ── THE JANITOR ──────────────────────────────────────────────────────────────────────────────────
+// "I want BhatBot to be making the decisions, not Claude" (2026-11-14). So the cleanup is BhatBot's
+// job, on its own clock: once a week it scans his files by its rules (lib/tidy.js), MOVES what is
+// redundant into ~/BhatBot-Cleanup-Review, draws the review page, and asks on its approval card
+// whether to delete. The ask goes through the same autonomy gate as every other delete, so his
+// yeses are learned: after a few, a routine purge just happens and is reported. A "no" puts the
+// files back. Silence does nothing, and it asks again the next day. Never in quiet hours.
+const TIDY_DEST = path.join(os.homedir(), 'BhatBot-Cleanup-Review');
+const TIDY_STATE = path.join(os.homedir(), '.bhatbot', 'tidy-state.json');
+const tidyGb = (b) => (b >= 1e9 ? (b / 1e9).toFixed(1) + ' GB' : Math.max(0, Math.round(b / 1e6)) + ' MB');
+const tidySummary = (p) => Object.entries(p.byCat).map(([c, v]) => `${c}: ${v.n} (${tidyGb(v.bytes)})`).join(', ');
+function tidyState() { try { return JSON.parse(fs.readFileSync(TIDY_STATE, 'utf8')); } catch { return {}; } }
+function tidySaveState(patch) { try { fs.writeFileSync(TIDY_STATE, JSON.stringify({ ...tidyState(), ...patch }, null, 1)); } catch {} }
+function tidyWritePage() {
+  const p = tidy.pending(TIDY_DEST), st = tidyState();
+  const f = path.join(TIDY_DEST, 'review.html');
+  try { fs.mkdirSync(TIDY_DEST, { recursive: true }); fs.writeFileSync(f, tidy.reviewPage({ items: p.items, skipped: st.skipped || {}, filesWalked: st.filesWalked || 0, home: os.homedir(), dest: TIDY_DEST })); } catch {}
+  return f;
+}
+// The walk reads tens of thousands of files and lists every archive it checks, so it runs in a child
+// process: the window never stutters while BhatBot tidies.
+let _tidyBusy = false;
+function tidyRun(arg) {
+  const { fork } = require('child_process');
+  return new Promise((resolve) => {
+    let out = '';
+    const ch = fork(path.join(__dirname, 'scripts', 'tidy.js'), [arg], { silent: true });
+    ch.stdout.on('data', (d) => { out += d; }); ch.stderr.on('data', (d) => { out += d; });
+    const kill = setTimeout(() => { try { ch.kill(); } catch {} }, 20 * 60 * 1000);
+    ch.on('exit', (code) => { clearTimeout(kill); resolve({ code, out }); });
+  });
+}
+async function tidyCollect() {
+  if (_tidyBusy) return { ok: false, error: 'a cleanup scan is already running' };
+  _tidyBusy = true;
+  try {
+    const s = await tidyRun('scan');
+    if (s.code !== 0) return { ok: false, error: 'scan failed: ' + s.out.slice(-200) };
+    let plan = {}; try { plan = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.bhatbot', 'tidy-plan.json'), 'utf8')); } catch {}
+    tidySaveState({ lastCollectAt: Date.now(), skipped: plan.skipped || {}, filesWalked: (plan.stats || {}).filesWalked || 0 });
+    if (!(plan.findings || []).length) return { ok: true, moved: 0 };
+    const a = await tidyRun('apply');
+    const moved = +((a.out.match(/moved (\d+)/) || [])[1] || 0);
+    console.log(`[janitor] collected ${moved} item(s) into the review folder`);
+    return { ok: a.code === 0, moved, error: a.code === 0 ? undefined : a.out.slice(-200) };
+  } finally { _tidyBusy = false; }
+}
+async function janitorTick() {
+  const c = loadConfig();
+  if (c.janitor === false) return;
+  const h = new Date().getHours(), m = new Date().getMinutes();
+  if (h >= 23 || h < 6 || (h === 22 && m >= 30) || (h === 6 && m < 30)) return;   // quiet hours 22:30–06:30
+  const st = tidyState();
+  let p = tidy.pending(TIDY_DEST);
+  if (!p.items.length && Date.now() - (st.lastCollectAt || 0) > 7 * 86400000) {
+    const r = await tidyCollect();
+    if (!r.ok) { console.warn('[janitor] ' + r.error); return; }
+    p = tidy.pending(TIDY_DEST);
+  }
+  if (!p.items.length) return;
+  if (Date.now() - (st.lastAskAt || 0) < 20 * 3600000) return;             // asked today; let him answer
+  // With the autonomy policy switched off nothing would ask him, and an unasked permanent delete is
+  // not what that switch was for. Show the page and leave the decision to him.
+  if (c.autonomyPolicy === false) { tidySaveState({ lastAskAt: Date.now() }); try { shell.openPath(tidyWritePage()); } catch {} return; }
+  tidySaveState({ lastAskAt: Date.now() });
+  const page = tidyWritePage();
+  // The visual comes first, so the card is never a question about things he cannot see. A purge he
+  // has made routine skips the card — then the page is the report, not the question.
+  try { shell.openPath(page); } catch {}
+  const r = await executeTool('tidy_files', { action: 'purge', count: p.items.length, bytes: p.bytes, judgement: !!p.byCat.dependencies });
+  if (r && r.success) {
+    notifyUser(`🧹 Cleared ${r.purged} redundant item(s), ${r.freed} freed. ${tidySummary(p)}.`, 'low').catch(() => {});
+  } else if (r && r.declined) {
+    const back = tidy.restore(TIDY_DEST);
+    tidyWritePage();
+    tidySaveState({ lastDeclinedAt: Date.now() });
+    console.log(`[janitor] declined — put ${back.restored} item(s) back where they were`);
+  }
+}
+setTimeout(() => { janitorTick().catch((e) => console.warn('[janitor] ' + e.message)); }, 3 * 60 * 1000).unref();
+setInterval(() => { janitorTick().catch((e) => console.warn('[janitor] ' + e.message)); }, 6 * 3600 * 1000).unref();
+
 // ── STAY AWAKE WHILE A LONG RUN IS GOING ─────────────────────────────────────────────────────────
 // Nothing held the machine awake during a supervised run. The only `caffeinate` in the app belongs
 // to the cloud bridge and is switched off in his config, so a run started "to go for a few hours"
@@ -5952,6 +6035,36 @@ async function executeTool(name, input, opts = {}) {
           ? { success: true, showing: r.name, place: r.place, url: r.url,
               note: r.distanceKm > 25 ? `No camera in ${r.resolved || r.asked}; the nearest is ${r.name} in ${r.place}, about ${r.distanceKm} km away. Say that.` : `Showing ${r.name}, ${r.place}.` }
           : { success: false, error: r.why };
+        break;
+      }
+      case 'tidy_files': {
+        const act = String((input && input.action) || 'review');
+        const only = (input && input.category) || null;
+        if (act === 'collect') {
+          const c = await tidyCollect();
+          if (!c.ok) { result = { success: false, error: c.error }; break; }
+          const p = tidy.pending(TIDY_DEST);
+          const page = tidyWritePage();
+          if (p.items.length) { try { shell.openPath(page); } catch {} }
+          result = { success: true, collected: c.moved, inFolder: p.items.length, size: tidyGb(p.bytes), byCategory: tidySummary(p), reviewPage: page,
+            note: p.items.length ? 'The review page is open for him. Tell him what you collected and why in a sentence, then call purge — the approval card asks him.' : 'Nothing redundant found.' };
+        } else if (act === 'purge') {
+          const before = tidy.pending(TIDY_DEST);
+          if (!before.items.length) { result = { success: true, purged: 0, note: 'The review folder is already empty.' }; break; }
+          const r = tidy.purge(TIDY_DEST, { only });
+          tidyWritePage();
+          tidySaveState({ lastPurgeAt: Date.now() });
+          result = { success: r.failed.length === 0, purged: r.purged, freed: tidyGb(r.bytes), failed: r.failed.length ? r.failed.slice(0, 5) : undefined };
+        } else if (act === 'restore') {
+          let r = { restored: 0, failed: [] };
+          try { r = tidy.restore(TIDY_DEST, { only }); } catch (e) { result = { success: false, error: 'nothing to restore: ' + e.message }; break; }
+          tidyWritePage();
+          result = { success: r.failed.length === 0, restored: r.restored, failed: r.failed.length ? r.failed.slice(0, 5) : undefined };
+        } else {
+          const p = tidy.pending(TIDY_DEST);
+          result = { success: true, inFolder: p.items.length, size: tidyGb(p.bytes), byCategory: tidySummary(p), lastCollectAt: tidyState().lastCollectAt || null,
+            reviewPage: p.items.length ? path.join(TIDY_DEST, 'review.html') : undefined };
+        }
         break;
       }
       case 'google_accounts': {

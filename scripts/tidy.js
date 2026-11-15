@@ -17,40 +17,15 @@ const cmd = process.argv[2] || 'scan';
 // Scanned: his own documents and projects. NOT scanned: the system's and apps' own data, the photo
 // and music libraries, Python installs and environments, ~/vec (it has its own retention rules),
 // BhatBot itself (a build is written into it), and the review folder.
-const SKIP_TOP = new Set(['Library', 'Pictures', 'Music', 'Movies', 'Applications', 'Public', 'vec', 'bhatbot',
-  'miniforge3', 'anaconda3', 'miniconda3', 'BhatBot-Cleanup-Review']);
-function roots() {
-  const out = [{ path: HOME, shallow: true }];
-  for (const e of fs.readdirSync(HOME, { withFileTypes: true })) {
-    if (!e.isDirectory() || e.name.startsWith('.') || SKIP_TOP.has(e.name)) continue;
-    if (fs.existsSync(path.join(HOME, e.name, 'pyvenv.cfg'))) continue;           // a Python environment, not files
-    out.push({ path: path.join(HOME, e.name) });
-  }
-  return out;
-}
+// (lib/tidy.js defaultRoots — the same choice the app's own janitor makes.)
+const roots = () => tidy.defaultRoots(HOME);
 
 if (cmd === 'scan') {
   let conf = null;
   try { conf = (JSON.parse(fs.readFileSync(path.join(HOME, '.bhatbot', 'config.json'), 'utf8')).autonomy || {}).confidential || null; } catch {}
   const t0 = Date.now();
   const r = tidy.scan({ roots: roots(), home: HOME, exclude: [DEST], confidential: conf });
-  // Installers get an honest reason: whether the app is actually in Applications, and where the file
-  // came from (macOS records the download URL), so "can I get it back?" is answered on the card.
-  const apps = (() => { try { return fs.readdirSync('/Applications').map((a) => a.toLowerCase()); } catch { return []; } })();
-  const { spawnSync } = require('child_process');
-  for (const f of r.findings.filter((x) => x.category === 'installers' && /\.dmg$/i.test(x.path))) {
-    let from = '';
-    try { from = ((spawnSync('/usr/bin/mdls', ['-raw', '-name', 'kMDItemWhereFroms', f.path], { encoding: 'utf8', timeout: 4000 }).stdout || '').match(/https?:\/\/([^/"]+)/) || [])[1] || ''; } catch {}
-    const stem = path.basename(f.path).replace(/[-_ ]?v?\d[\d.]*\.dmg$|\.dmg$/i, '').toLowerCase();
-    const site = from.replace(/^www\./, '');
-    // A file named by its platform ("mac-arm64.dmg") says nothing about what it installs; the
-    // download path does. Known sources first, then a name match.
-    const fromPath = (() => { try { return (spawnSync('/usr/bin/mdls', ['-raw', '-name', 'kMDItemWhereFroms', f.path], { encoding: 'utf8', timeout: 4000 }).stdout || ''); } catch { return ''; } })();
-    const installed = /claude-science/.test(fromPath) ? apps.find((a) => a === 'claude science.app')
-      : stem && !/^mac-?arm/.test(stem) ? apps.find((a) => a.endsWith('.app') && a.includes(stem)) : null;
-    f.reason = (installed ? `installer for ${installed.replace(/\.app$/, '')}, which is already installed` : 'installer for an app that is not installed')
-      + (site ? ` — re-downloadable from ${site}` : '');
-  }
+  tidy.labelInstallers(r.findings);
   const byCat = {};
   for (const f of r.findings) { const c = byCat[f.category] || (byCat[f.category] = { n: 0, bytes: 0 }); c.n++; c.bytes += f.bytes; }
   fs.writeFileSync(PLAN, JSON.stringify({ at: Date.now(), ...r }, null, 1));

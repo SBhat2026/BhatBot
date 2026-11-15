@@ -95,6 +95,13 @@ ok(enforce('claude-fable-5', {}).model === 'claude-sonnet-5', 'with no context a
     const r = t(q);
     ok(r.tier === 'sonnet' && /coding/.test(r.why), `significant coding → Sonnet, and says so: "${q}" (${r.why})`);
   }
+  for (const q of ['write me a quick python script to rename these files', 'what regex matches an email', 'make this css button rounder', 'give me a bash one-liner to count lines', 'what does this error message mean: TypeError undefined', 'convert this to json']) {
+    const r = t(q);
+    ok(r.tier === 'sonnet' && /coding/.test(r.why), `basic coding → Sonnet too (2026-11-14): "${q}"`);
+  }
+  for (const q of ['text Johnny that I am running late', 'what is the weather in Tokyo', 'add milk to my shopping list', 'show me Amsterdam']) {
+    ok(t(q).tier === 'haiku', `and everyday turns stay on Haiku: "${q}"`);
+  }
   ok(t('make me a dashboard of my spending', { complexTool: true }).tier === 'sonnet', 'a multi-step build goes to Sonnet');
   ok(t('why does this happen', { reasoningRoute: true }).tier === 'sonnet', 'and so does a turn the classifier marked for reasoning');
   ok(t('anything at all').model === 'claude-haiku-5-5', 'the Haiku it picks is the 5.5 one');
