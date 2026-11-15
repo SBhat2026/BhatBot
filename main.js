@@ -4727,6 +4727,7 @@ async function worldContextPick() {
   return null;
 }
 ipcMain.handle('world-find', async (_e, { place } = {}) => { const r = await worldwatch.find(String(place || '')); if (r.ok) showWorld({ ...r, reason: 'asked' }); return r; });
+ipcMain.handle('world-mentions', async (_e, text) => worldwatch.mentions(String(text || '').slice(0, 6000)).catch(() => null));
 ipcMain.handle('world-context', async () => { const v = await worldContextPick().catch(() => null); if (v) _worldLast = v; return v; });
 setInterval(() => { worldContextPick().then((v) => { if (v && (!_worldLast || v.url !== _worldLast.url)) showWorld(v); }).catch(() => {}); }, 30 * 60 * 1000).unref();
 

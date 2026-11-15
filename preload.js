@@ -22,6 +22,7 @@ contextBridge.exposeInMainWorld('bhatbot', {
   getVoiceConfig: () => ipcRenderer.invoke('get-voice-config'),
   // World zone: a live camera, on request or tied to his day.
   worldFind: (place) => ipcRenderer.invoke('world-find', { place }),
+  worldMentions: (text) => ipcRenderer.invoke('world-mentions', text),
   worldContext: () => ipcRenderer.invoke('world-context'),
   onWorldShow: (cb) => ipcRenderer.on('world-show', (_e, v) => cb(v)),
   getCapabilities: () => ipcRenderer.invoke('get-capabilities'),

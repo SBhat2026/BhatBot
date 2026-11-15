@@ -75,6 +75,14 @@ const CAMS = [
   r = await W4.find('Princeton');
   ok(r.ok && r.id === 'prIN0001', 'without a home, the camera list match stands');
 
+  // Offers: a reply that names a camera city can offer a live view; ordinary words never do.
+  let mm = await W.mentions('Thousands gathered in Tokyo tonight as the new rail line opened.');
+  ok(mm && mm.ok && mm.city.trim() === 'Tokyo' && /OElNZpiX/.test(mm.url), `a reply mentioning Tokyo offers its camera (${mm && mm.name})`);
+  mm = await W.mentions('Rain is expected across New York and Philadelphia this weekend.');
+  ok(mm && /New York|Philadelphia/.test(mm.city), `the first whole city name wins, multi-word names included (${mm && mm.city})`);
+  ok(await W.mentions('I finished the report and sent it to your advisor.') === null, 'text with no camera city offers nothing');
+  ok(await W.mentions('Amsterdamned is not a city') === null, 'only whole names match');
+
   const n = await W.nearest(39.7698, -74.8874);
   ok(n && /Philadelphia/.test(n.place), `nearest to home (Atco, NJ) is Philadelphia (${n && n.place}, ${n && n.distanceKm} km)`);
   ok(Math.round(haversineKm([0, 0], [0, 1])) === 111, 'one degree of longitude at the equator is ~111 km');

@@ -783,30 +783,71 @@
      so the classic layout is one class away (palette → "Classic layout"). */
   .zone-only { display: none; }
   body.zones .zone-only { display: flex; }
-  body.zones #rail { display: none; }
-  body.zones #cmdstage.l1 { grid-template-areas: "ccenter cleft cright";
-    grid-template-columns: minmax(300px, 1.15fr) minmax(300px, 1.1fr) minmax(260px, .95fr); }
-  @media (max-width: 1100px) {
-    body.zones #cmdstage.l1 { grid-template-areas: "ccenter ccenter" "cleft cright"; grid-template-columns: 1fr 1fr;
-      grid-template-rows: minmax(320px, 1fr) minmax(260px, auto); }
-  }
-  body.zones #cmd-center { border: 1px solid var(--line); border-radius: 6px; background: var(--surface); overflow: hidden; }
-  body.zones #cmd-center::before { content: '⚛ TALK'; font: 10px/1 var(--font-system); letter-spacing: .18em; color: var(--text-dim);
-    padding: 13px 14px 0; flex-shrink: 0; }
-  body.zones #cmd-center #vstage { flex: 0 0 auto; gap: 8px; padding: 6px 12px 4px; }
-  body.zones #cmd-center #orb { width: 112px; height: 112px; }
-  body.zones #cmd-center #vhint { display: none; }
-  body.zones #cmd-center #chat { flex: 1; min-height: 0; border-top: 1px solid var(--line); display: block; }
-  body.zones #fleetmini-card, body.zones #cmdstage .stage-head { display: none; }
+  /* FOCUS LAYOUT (2026-11-14, replacing the three fixed zones). One stage — the orb when nothing is
+     happening, the turn's content when something is — plus a side column that exists only while it
+     has something relevant in it: agents working, a live view he opened, vitals when performance is
+     the topic, background jobs. The rail is a compact dock so every view is one click away. */
+  body.zones #command-home > .stage-head { display: none; }
+  body.zones #rail { width: 60px; }
+  body.zones #rail .rl-sec, body.zones #rail .rl-meta { display: none; }
+  body.zones #rail .navbtn { font-size: 0; justify-content: center; padding: 11px 0; gap: 0; }
+  body.zones #rail .navbtn .g { font-size: 16px; margin: 0; width: auto; }
+  body.zones #cmd-left { display: none; }
+  body.zones #cmdstage.l1 { grid-template-areas: "ccenter"; grid-template-columns: minmax(0, 1fr); }
+  body.zones.side-on #cmdstage.l1 { grid-template-areas: "ccenter cright"; grid-template-columns: minmax(0, 1fr) minmax(320px, 400px); }
+  @media (max-width: 900px) { body.zones.side-on #cmdstage.l1 { grid-template-areas: "ccenter" "cright"; grid-template-columns: 1fr; grid-template-rows: minmax(0, 1fr) minmax(0, 1fr); } }
+  body.zones #cmd-right > .hcard:not(.show) { display: none !important; }
+  body.zones:not(.side-on) #cmd-right { display: none; }
+  body.zones #fleetmini-card { display: none !important; }
+  /* the stage */
+  body.zones #cmd-center { border: 1px solid var(--line); border-radius: 8px; background: var(--surface); overflow: hidden; }
+  #stage-bar { align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid transparent; flex-shrink: 0; min-height: 44px; }
+  #sb-title { font: 10px/1 var(--font-system); letter-spacing: .18em; color: var(--text-dim); margin-right: 4px; }
+  #sb-chips { display: flex; gap: 6px; flex-wrap: wrap; flex: 1; min-width: 0; }
+  .sb-btn, .sb-chip { border: 1px solid var(--line); background: transparent; color: var(--text-dim); border-radius: 999px; padding: 4px 10px;
+    font: 11.5px var(--font-ui); cursor: pointer; white-space: nowrap; }
+  .sb-btn:hover, .sb-chip:hover { color: var(--text); border-color: var(--accent); }
+  .sb-chip { color: var(--text); border-color: color-mix(in oklab, var(--accent) 45%, var(--line)); }
+  #sb-floor.on { color: var(--text); border-color: var(--accent); }
+  body.zones:not(.stage-content) #sb-clear { display: none; }
+  /* idle: the orb owns the stage */
+  body.zones:not(.stage-content) #cmd-center #vstage { flex: 1; justify-content: center; }
+  body.zones:not(.stage-content) #cmd-center #chat, body.zones:not(.stage-content) #cmd-center #media-card { display: none !important; }
+  /* content: the orb steps aside to a small live indicator and the turn's material takes the stage */
+  body.zones.stage-content #stage-bar { border-bottom-color: var(--line); }
+  body.zones.stage-content #cmd-center #vstage { flex: 0 0 auto; flex-direction: row; align-items: center; gap: 10px; padding: 8px 14px; min-height: 0; }
+  body.zones.stage-content #cmd-center #vstage { justify-content: flex-start; }
+  body.zones.stage-content #cmd-center #vstage::before, body.zones.stage-content #cmd-center #vstage::after { display: none; }
+  body.zones.stage-content #cmd-center #orb { zoom: .2; flex-shrink: 0; margin: 0; }
+  body.zones.stage-content #cmd-center #vstatus { margin: 0; font-size: 11px; }
+  body.zones.stage-content #cmd-center #wavebars, body.zones.stage-content #cmd-center #vhint { display: none; }
+  body.zones.stage-content #cmd-center #vcap { text-align: left; margin: 0; flex: 1; min-width: 0; font-size: 13px; }
+  body.zones.stage-content #cmd-center #chat { flex: 1; min-height: 0; display: block !important; overflow-y: auto; }
+  body.zones #cmd-center #media-card { margin: 0 12px 12px; flex: 0 1 auto; max-height: 45%; }
+  body.zones #media-card:has(#vvis:empty) { display: none !important; }
+  /* side cards */
+  body.zones #cmd-right { gap: 12px; }
   body.zones #cmd-right #vitals-card #gauges { grid-template-columns: repeat(4, 1fr); gap: 8px; }
   body.zones #cmd-right #vitals-card .gauge { flex-direction: column; gap: 4px; }
   body.zones #cmd-right #vitals-card .gauge .gring { width: 44px; height: 44px; }
   body.zones #cmd-right #vitals-card .glab i { display: none; }
-  body.zones #cmd-right #media-card { flex: 0 1 auto; max-height: 34%; }
-  body.zones #media-card:has(#vvis:empty) { display: none; }
+  body.zones #cmd-right #floor-card { flex: 1 1 55%; }
+  body.zones #cmd-right #jobs-card { flex: 0 1 auto; max-height: 40%; }
+  .card-x, .xp-btn { margin-left: 8px; border: 0; background: transparent; color: var(--text-dim2); cursor: pointer; font-size: 12px; padding: 0 2px; line-height: 1; }
+  .card-x:hover, .xp-btn:hover { color: var(--text); }
+  .hcard-h .hc-r { margin-left: auto; }
+  /* expand: any card (and the stage) can take the whole window, Esc or ⤡ to put it back */
+  body.zones .xp { position: fixed !important; inset: 56px 20px 96px 80px; z-index: 8000; display: flex !important; max-height: none !important;
+    box-shadow: 0 24px 80px rgba(0,0,0,.35); }
+  #xp-scrim { position: fixed; inset: 0; z-index: 7999; background: color-mix(in oklab, var(--bg) 70%, transparent); }
+  #xp-scrim[hidden] { display: none; }
+  /* the floor: the 3D office, plus a chip per agent at work */
+  #floor-3d-wrap { position: relative; flex: 1; min-height: 200px; border-radius: 6px; overflow: hidden; background: var(--bg); }
+  #floor3d { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
   /* the floor */
   #floor-card { flex: 0 0 auto; }
-  #floor-desks { display: grid; grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); gap: 8px; }
+  #floor-desks { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; margin-top: 10px; }
+  #floor-desks:empty { display: none; }
   .desk { border: 1px solid var(--line); border-radius: 6px; padding: 9px 10px; min-height: 64px; display: flex; flex-direction: column; gap: 4px;
     font-family: var(--font-system); transition: border-color .3s, background .3s, opacity .3s; opacity: .45; }
   .desk .dn { display: flex; align-items: center; gap: 7px; font-size: 11px; letter-spacing: .12em; color: var(--text); }
@@ -1444,6 +1485,7 @@
                  free local slot. Rendered from the long-run payload and the fleet updates. -->
             <div class="hcard zone-only" id="floor-card">
               <div class="hcard-h">⬡ AGENT FLOOR<span class="hc-r" id="floor-count"></span></div>
+              <div id="floor-3d-wrap"><iframe id="floor3d" title="Agent floor" scrolling="no"></iframe></div>
               <div id="floor-desks"></div>
               <div id="floor-slot"></div>
             </div>
@@ -1462,6 +1504,14 @@
             </div>
           </div>
           <div id="cmd-center">
+            <!-- FOCUS LAYOUT stage bar: what the stage is showing, offers (a live view of a city that came
+                 up, the agent floor), back-to-orb and expand. -->
+            <div id="stage-bar" class="zone-only">
+              <span id="sb-title">⚛ TALK</span>
+              <span id="sb-chips"></span>
+              <button class="sb-btn" id="sb-floor" title="Show the agent floor">⬡ <span>Agent floor · idle</span></button>
+              <button class="sb-btn" id="sb-clear" title="Back to the voice orb">◉ Orb</button>
+            </div>
             <!-- voice stage: orb + status word + ephemeral caption (⌘K types; 📄 flips to transcript) -->
             <div id="vstage">
               <div id="attpin"></div>
@@ -1484,7 +1534,7 @@
             <!-- WORLD (zones layout): a live public webcam from worldwatcher.live — the place he asked
                  to see, else the city of his next event, else the nearest camera to home. -->
             <div class="hcard zone-only" id="world-card">
-              <div class="hcard-h">◈ WORLD<span class="hc-r" id="world-why"></span></div>
+              <div class="hcard-h">◈ LIVE VIEW<span class="hc-r" id="world-why"></span><button class="card-x" id="world-close" title="Close the live view">✕</button></div>
               <div id="world-frame-wrap"><iframe id="world-frame" title="Live camera" allow="autoplay; fullscreen" referrerpolicy="no-referrer" sandbox="allow-scripts allow-same-origin allow-popups"></iframe><div id="world-empty">Loading a live camera…</div></div>
               <div id="world-cap"></div>
               <form id="world-form" autocomplete="off"><input id="world-q" placeholder="show me… (Tokyo, Amsterdam, New York)" aria-label="Show a place" /></form>
@@ -2789,17 +2839,21 @@ window.bhatbot.onLongRun && window.bhatbot.onLongRun(renderLongRun);
 
 // Forward live fleet state into the 3D presence iframe (the-delegation office in the FLEET tab).
 let _lastPresence = null;
+// Two offices share one feed: the Fleet panel's and the agent floor on the command stage.
+const OFFICES = ['fleet3d', 'floor3d'];
 function pushPresenceToIframe(snap) {
-  const f = document.getElementById('fleet3d');
-  try { if (f && f.contentWindow) f.contentWindow.postMessage({ type: 'presence', agents: (snap && snap.agents) || [] }, '*'); } catch {}
+  for (const id of OFFICES) {
+    const f = document.getElementById(id);
+    try { if (f && f.contentWindow && f.getAttribute('src')) f.contentWindow.postMessage({ type: 'presence', agents: (snap && snap.agents) || [] }, '*'); } catch {}
+  }
 }
-window.bhatbot.onPresenceUpdate && window.bhatbot.onPresenceUpdate((snap) => { _lastPresence = snap; pushPresenceToIframe(snap); });
+window.bhatbot.onPresenceUpdate && window.bhatbot.onPresenceUpdate((snap) => { _lastPresence = snap; pushPresenceToIframe(snap); try { window.onFloorPresence && window.onFloorPresence(snap); } catch {} });
 // The office is an iframe on file://, so it cannot read the app's CSS variables. Push them in, on
 // load and on every theme change, or it stays the dark scene it was authored as while the rest of
 // the window is light — which is exactly how it looked: a gloomy hole in a bright page.
-function pushThemeToIframe() {
-  const f = document.getElementById('fleet3d');
-  if (!f || !f.contentWindow) return;
+function pushThemeToIframe() { for (const id of OFFICES) pushThemeTo(document.getElementById(id)); }
+function pushThemeTo(f) {
+  if (!f || !f.contentWindow || !f.getAttribute('src')) return;
   const cs = getComputedStyle(document.documentElement);
   const v = (n, d) => (cs.getPropertyValue(n) || d).trim();
   try {
@@ -2814,7 +2868,7 @@ function pushThemeToIframe() {
 }
 try { document.documentElement.addEventListener('bhatbot-theme', () => setTimeout(pushThemeToIframe, 30)); } catch {}
 // Replay the latest snapshot once the iframe has (re)loaded so it isn't blank on first open.
-document.getElementById('fleet3d') && document.getElementById('fleet3d').addEventListener('load', () => { pushThemeToIframe(); if (_lastPresence) pushPresenceToIframe(_lastPresence); });
+for (const id of OFFICES) { const f = document.getElementById(id); if (f) f.addEventListener('load', () => { pushThemeToIframe(); if (_lastPresence) pushPresenceToIframe(_lastPresence); }); }
 // Click-to-inspect from the 3D office: clicking a character focuses that agent's steer-card
 // (scroll + flash + focus its input) and opens its live monitor window.
 //
@@ -5137,115 +5191,213 @@ window.holoSpin = function (mount, model) {
   </div>
 
 <script>
-// ══ THE THREE ZONES ══════════════════════════════════════════════════════════════════════════════
-// TALK | AGENT FLOOR | WORLD, everything else behind ⌘K (Siddhant, 2026-11-12). Layout is a class on
-// <body>; the classic rail layout is one palette command away and remembered per machine.
-(function zones() {
+// ══ FOCUS LAYOUT ═════════════════════════════════════════════════════════════════════════════════
+// Siddhant, 2026-11-14: "each independent section is good on its own but the combination of them is
+// the problem … only show the most relevant information at any given time." So: one stage that is
+// the orb until a turn brings material, then the material; a side column that appears only while it
+// has something worth reading (agents at work, a live view, vitals when performance is the topic,
+// background jobs); the rail as a compact dock; and every card expandable. The classic layout is one
+// palette command away. Elements keep their ids and code — this only moves and shows/hides them.
+(function focusLayout() {
   const $ = (q) => document.querySelector(q);
+  const body = document.body;
+  const side = $('#cmd-right'), center = $('#cmd-center');
+  const card = { floor: $('#floor-card'), world: $('#world-card'), vitals: $('#vitals-card'), jobs: $('#jobs-card'), media: $('#media-card') };
+  const homes = new Map();
+  for (const el of [...Object.values(card), $('#longrun')]) if (el) homes.set(el, { parent: el.parentElement, next: el.nextElementSibling });
+  const putBack = () => { for (const [el, h] of homes) { try { h.parent.insertBefore(el, h.next && h.next.parentElement === h.parent ? h.next : null); } catch {} } };
   let classic = false; try { classic = localStorage.getItem('bb.layout') === 'classic'; } catch {}
-  const longrun = $('#longrun'), lrHome = longrun && longrun.parentElement, lrNext = longrun && longrun.nextElementSibling;
+
   function setLayout(z) {
-    document.body.classList.toggle('zones', z);
+    body.classList.toggle('zones', z);
     try { localStorage.setItem('bb.layout', z ? 'zones' : 'classic'); } catch {}
-    // The long-run plan belongs on the floor in this layout and in the Fleet panel in the classic one.
-    if (longrun) { if (z) $('#floor-slot').appendChild(longrun); else if (lrHome) lrHome.insertBefore(longrun, lrNext); }
-    if (z && typeof showPanel === 'function' && typeof curPanel !== 'undefined' && curPanel !== 'chat') showPanel('chat');
+    if (z) {
+      for (const k of ['floor', 'world', 'vitals', 'jobs']) if (card[k]) side.appendChild(card[k]);
+      if (card.media) center.appendChild(card.media);
+      const lr = $('#longrun'); if (lr) $('#floor-slot').appendChild(lr);
+      if (typeof showPanel === 'function' && typeof curPanel !== 'undefined' && curPanel !== 'chat') showPanel('chat');
+    } else { putBack(); body.classList.remove('side-on', 'stage-content'); }
+    relayout();
   }
-  setLayout(!classic);
   window.setZonesLayout = setLayout;
 
-  // ── the floor: one desk per role, plus the free local slot ──
-  const DESKS = [
-    ['coding', 'FORGE', 'CODE', '#aeb40d'], ['research', 'ORACLE', 'RESEARCH', '#61c55e'], ['browser', 'SCOUT', 'BROWSER', '#fd8537'],
-    ['memory', 'VAULT', 'MEMORY', '#87a7fe'], ['creative', 'ATELIER', 'CREATE', '#24b7ff'], ['local', 'MULE', 'LOCAL · FREE', '#9aa4ad'],
-  ];
-  const ROLE_OF = { forge: 'coding', oracle: 'research', scout: 'browser', vault: 'memory', atelier: 'creative', mule: 'local',
-    coding: 'coding', code: 'coding', research: 'research', browser: 'browser', web: 'browser', memory: 'memory', creative: 'creative', design: 'creative', create: 'creative' };
+  // ── which side cards are relevant right now ──
+  const want = { floor: false, world: false, vitals: false, jobs: false };
+  let floorPinned = false, floorWorking = false, presenceN = 0, liveN = 0, vitalsUntil = 0, cpuHot = 0;
+  function relayout() {
+    if (!body.classList.contains('zones')) return;
+    floorWorking = presenceN > 0 || liveN > 0; floorCount = Math.max(presenceN, liveN);
+    want.floor = floorPinned || floorWorking || !!($('#longrun') && !$('#longrun').hidden);
+    want.jobs = !!($('#jobs-board') && $('#jobs-board').children.length);
+    want.vitals = Date.now() < vitalsUntil || cpuHot >= 3;
+    let any = false;
+    for (const k of Object.keys(want)) { if (card[k]) card[k].classList.toggle('show', want[k]); any = any || want[k]; }
+    body.classList.toggle('side-on', any);
+    const fb = $('#sb-floor'); if (fb) { fb.classList.toggle('on', want.floor); fb.querySelector('span').textContent = floorWorking ? `Agent floor · ${floorCount} working` : want.floor ? 'Hide agent floor' : 'Agent floor · idle'; }
+    floorLoad(want.floor);
+  }
+  window.focusRelayout = relayout;
+
+  // ── the agent floor: the real 3D office, loaded only while it is on screen ──
+  const f3d = $('#floor3d'); let unloadTimer = null, floorCount = 0;
+  function floorLoad(on) {
+    if (!f3d) return;
+    if (on) { clearTimeout(unloadTimer); unloadTimer = null; if (!f3d.getAttribute('src')) f3d.setAttribute('src', 'presence.html'); }
+    else if (f3d.getAttribute('src') && !unloadTimer) unloadTimer = setTimeout(() => { f3d.removeAttribute('src'); f3d.src = 'about:blank'; f3d.removeAttribute('src'); unloadTimer = null; }, 60000);
+  }
+  $('#sb-floor').addEventListener('click', () => { floorPinned = !want.floor; relayout(); });
+  const ACTIVE = /^(working|running|active|busy|thinking|tool|queued|starting)/i;
+  window.onFloorPresence = (snap) => {
+    const n = ((snap && snap.agents) || []).filter((a) => ACTIVE.test(String(a.status || a.state || ''))).length;
+    if (n !== presenceN) { presenceN = n; relayout(); }
+  };
+  // Chips name who is working and on what; idle desks are not news.
+  const DESKS = { coding: ['FORGE', '#aeb40d'], research: ['ORACLE', '#61c55e'], browser: ['SCOUT', '#fd8537'], memory: ['VAULT', '#87a7fe'], creative: ['ATELIER', '#24b7ff'], local: ['MULE', '#9aa4ad'] };
+  const ROLE_OF = { forge: 'coding', oracle: 'research', scout: 'browser', vault: 'memory', atelier: 'creative', mule: 'local', coding: 'coding', code: 'coding',
+    research: 'research', browser: 'browser', web: 'browser', memory: 'memory', creative: 'creative', design: 'creative', create: 'creative' };
   const roleOf = (x) => ROLE_OF[String(x || '').toLowerCase().replace(/[-\s]\d+$/, '').replace(/^🦾\s*/, '')] || null;
   window.renderFloor = function renderFloor() {
     const box = $('#floor-desks'); if (!box) return;
-    const live = {};
+    const live = [];
     const lr = window._floorLR;
-    if (lr && !lr.stoppedBecause) {
-      for (const a of (lr.working || [])) {
-        const r = a.lane === 'local' ? 'local' : roleOf(a.name) || roleOf(a.role);
-        if (!r) continue;
-        (live[r] = live[r] || []).push(a.step ? `${a.label || ''} · ${a.step}` : (a.task || a.label || 'working'));
-      }
-    }
+    if (lr && !lr.stoppedBecause) for (const a of (lr.working || [])) { const r = a.lane === 'local' ? 'local' : roleOf(a.name) || roleOf(a.role); if (r) live.push([r, a.step ? `${a.label || ''} · ${a.step}` : (a.task || a.label || 'working')]); }
     const fm = window._floorFleet;
-    if (fm && fm.forEach) fm.forEach((a) => {
-      if (['done', 'failed', 'stopped'].includes(a.status)) return;
-      const r = roleOf(a.role); if (r) (live[r] = live[r] || []).push(a.task || a.status || 'working');
-    });
+    if (fm && fm.forEach) fm.forEach((a) => { if (['done', 'failed', 'stopped'].includes(a.status)) return; const r = roleOf(a.role); if (r) live.push([r, a.task || a.status || 'working']); });
     box.innerHTML = '';
-    let n = 0;
-    for (const [role, name, label, col] of DESKS) {
-      const tasks = live[role] || [];
-      if (tasks.length) n += tasks.length;
+    for (const [r, task] of live.slice(0, 6)) {
+      const [name, col] = DESKS[r];
       const d = document.createElement('div');
-      d.className = 'desk' + (tasks.length ? ' on' : '') + (role === 'local' ? ' local' : '');
-      d.style.setProperty('--dc', col);
-      d.innerHTML = '<div class="dn"><i></i><span></span></div><div class="dr"></div><div class="dt"></div>';
-      d.querySelector('.dn span').textContent = name + (tasks.length > 1 ? ` ×${tasks.length}` : '');
-      d.querySelector('.dr').textContent = label;
-      d.querySelector('.dt').textContent = tasks.length ? String(tasks[0]).slice(0, 120) : (role === 'local' ? 'free slot — idle' : 'idle');
+      d.className = 'desk on' + (r === 'local' ? ' local' : ''); d.style.setProperty('--dc', col);
+      d.innerHTML = '<div class="dn"><i></i><span></span></div><div class="dt"></div>';
+      d.querySelector('.dn span').textContent = name; d.querySelector('.dt').textContent = String(task).slice(0, 120);
       box.appendChild(d);
     }
-    const c = $('#floor-count'); if (c) c.textContent = n ? `${n} WORKING` : 'IDLE';
+    const c = $('#floor-count'); if (c) c.textContent = live.length ? `${live.length} WORKING` : 'IDLE';
+    if (live.length !== liveN) { liveN = live.length; relayout(); }
   };
-  window.renderFloor();
 
-  // ── the world ──
+  // ── the stage: orb by default, the turn's material when there is some ──
+  let lastContent = 0;
+  function contentArrived() { lastContent = Date.now(); if (body.classList.contains('zones') && !body.classList.contains('stage-content')) { body.classList.add('stage-content'); const ch = $('#chat'); if (ch) ch.scrollTop = ch.scrollHeight; } }
+  $('#sb-clear').addEventListener('click', () => body.classList.remove('stage-content'));
+  // Back to the orb on its own once the material has sat untouched for a while and nothing is running.
+  setInterval(() => {
+    const orb = $('#orb');
+    if (body.classList.contains('stage-content') && Date.now() - lastContent > 4 * 60 * 1000 && (!orb || orb.dataset.state === 'idle') && !document.querySelector('.xp')) body.classList.remove('stage-content');
+  }, 20000);
+
+  // ── watch what the conversation is about: live-view offers and vitals ──
+  const PERF = /\b(cpu|ram|memory (?:usage|pressure)|battery|overheat\w*|thermal|fan|lag+y?|slow(?:ing)? down|running slow|performance|disk space|storage space|activity monitor|frozen|beach ?ball)\b/i;
+  const offered = new Set();
+  function offerWorld(v, label) {
+    if (!v || !v.url || offered.has(v.url)) return;
+    offered.add(v.url);
+    const chips = $('#sb-chips');
+    const b = document.createElement('button'); b.className = 'sb-chip'; b.textContent = label || `📍 ${v.place || v.name} live`;
+    b.title = `Open a live camera: ${v.name} · ${v.place}`;
+    b.addEventListener('click', () => { showWorld({ ...v, reason: 'asked' }); b.remove(); });
+    chips.appendChild(b);
+    while (chips.children.length > 3) chips.firstElementChild.remove();
+  }
+  const chat = $('#chat');
+  if (chat) new MutationObserver((muts) => {
+    for (const m of muts) for (const n of m.addedNodes) {
+      if (!(n instanceof HTMLElement) || !n.classList.contains('msg')) continue;
+      contentArrived();
+      // Read the message once it has finished streaming in.
+      setTimeout(() => {
+        const t = n.textContent || '';
+        if (PERF.test(t)) { vitalsUntil = Date.now() + 3 * 60 * 1000; relayout(); }
+        if (n.classList.contains('bot') && t.length > 60 && window.bhatbot.worldMentions) {
+          window.bhatbot.worldMentions(t).then((v) => { if (v && v.ok) offerWorld(v, `📍 See ${v.city} live`); }).catch(() => {});
+        }
+      }, 2500);
+    }
+  }).observe(chat, { childList: true });
+  const vvis = $('#vvis');
+  if (vvis) new MutationObserver(() => { if (vvis.children.length) contentArrived(); }).observe(vvis, { childList: true });
+  const jb = $('#jobs-board');
+  if (jb) new MutationObserver(relayout).observe(jb, { childList: true });
+  const lrEl = $('#longrun');
+  if (lrEl) new MutationObserver(relayout).observe(lrEl, { attributes: true, attributeFilter: ['hidden'] });
+  // A machine that is genuinely struggling is relevant whatever the topic: CPU over 90% for ~10 s.
+  setInterval(() => {
+    const v = parseInt((($('#g-cpu .gring b') || {}).textContent || ''), 10);
+    if (!Number.isFinite(v)) return;
+    const before = cpuHot >= 3;
+    cpuHot = v >= 90 ? cpuHot + 1 : v < 70 ? 0 : cpuHot;
+    if (before !== (cpuHot >= 3)) relayout();
+  }, 3500);
+  setInterval(() => { if (vitalsUntil && Date.now() > vitalsUntil) { vitalsUntil = 0; relayout(); } }, 15000);
+
+  // ── the live view: opened on request; otherwise only ever offered ──
   const frame = $('#world-frame'), wrap = $('#world-frame-wrap'), cap = $('#world-cap'), why = $('#world-why');
   function showWorld(v) {
     if (!v || !v.url || !frame) return;
+    // Not asked for: offer it only when it is about something — the place of his next meeting.
+    // "The nearest camera to home" is not news, so it is never even offered.
+    if (v.reason !== 'asked') { if (/event/.test(v.why || '')) offerWorld(v, `📍 Live view near ${String(v.why).replace(/^near your next event, /, '')}`); return; }
     if (frame.src !== v.url) { wrap.classList.remove('live'); frame.src = v.url; }
     const far = v.distanceKm > 25 && (v.resolved || v.asked);
     cap.innerHTML = '';
-    const b = document.createElement('b'); b.textContent = v.name || 'Live camera';
-    cap.appendChild(b);
+    const b = document.createElement('b'); b.textContent = v.name || 'Live camera'; cap.appendChild(b);
     cap.appendChild(document.createTextNode(' · ' + (v.place || '') + (far ? ` — nearest to ${v.resolved || v.asked}, ${v.distanceKm} km away` : '')));
-    if (why) why.textContent = v.reason === 'asked' ? 'ON REQUEST' : (v.why ? v.why.toUpperCase().slice(0, 34) : 'LIVE');
+    if (why) why.textContent = 'LIVE';
+    want.world = true; card.world.classList.add('show'); relayout();
   }
-  if (frame) frame.addEventListener('load', () => wrap.classList.add('live'));
+  $('#world-close').addEventListener('click', () => { want.world = false; frame.src = 'about:blank'; wrap.classList.remove('live'); relayout(); });
+  if (frame) frame.addEventListener('load', () => { if (frame.src !== 'about:blank') wrap.classList.add('live'); });
   if (window.bhatbot && window.bhatbot.onWorldShow) window.bhatbot.onWorldShow(showWorld);
-  if (window.bhatbot && window.bhatbot.worldContext) window.bhatbot.worldContext().then(showWorld).catch(() => {});
   const form = $('#world-form');
   if (form) form.addEventListener('submit', async (e) => {
     e.preventDefault();
     const q = $('#world-q').value.trim(); if (!q) return;
     cap.textContent = 'Finding a camera…';
     const r = await window.bhatbot.worldFind(q).catch(() => null);
-    if (r && r.ok) { showWorld({ ...r, reason: 'asked' }); $('#world-q').value = ''; }
-    else cap.textContent = (r && r.why) || 'No camera found.';
+    if (r && r.ok) { showWorld({ ...r, reason: 'asked' }); $('#world-q').value = ''; } else cap.textContent = (r && r.why) || 'No camera found.';
   });
   window.worldShowPlace = async (q) => { const r = await window.bhatbot.worldFind(q).catch(() => null); if (r && r.ok) showWorld({ ...r, reason: 'asked' }); return r; };
+
+  // ── expand: every card, and the stage, can take the window ──
+  const scrim = document.createElement('div'); scrim.id = 'xp-scrim'; scrim.hidden = true; document.body.appendChild(scrim);
+  function collapse() { const x = document.querySelector('.xp'); if (x) { x.classList.remove('xp'); const b = x.querySelector('.xp-btn'); if (b) { b.textContent = '⤢'; b.title = 'Expand'; } } scrim.hidden = true; }
+  function addExpand(host, target) {
+    if (!host || host.querySelector('.xp-btn')) return;
+    const b = document.createElement('button'); b.className = 'xp-btn'; b.textContent = '⤢'; b.title = 'Expand';
+    b.addEventListener('click', (e) => { e.stopPropagation(); const on = target.classList.contains('xp'); collapse(); if (!on) { target.classList.add('xp'); b.textContent = '⤡'; b.title = 'Collapse (Esc)'; scrim.hidden = false; } });
+    host.appendChild(b);
+  }
+  addExpand($('#stage-bar'), center);
+  for (const k of ['floor', 'world', 'vitals', 'jobs', 'media']) if (card[k]) addExpand(card[k].querySelector('.hcard-h'), card[k]);
+  scrim.addEventListener('click', collapse);
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && document.querySelector('.xp') && (!$('#palette') || $('#palette').hidden)) collapse(); });
+
+  setLayout(!classic);
+  window.renderFloor();
 
   // ── ⌘K palette ──
   const pal = $('#palette'), pq = $('#pal-q'), pl = $('#pal-list');
   const panels = [...document.querySelectorAll('#rail .navbtn')].map((b) => ({
-    g: (b.querySelector('.g') || {}).textContent || '·', label: b.textContent.replace((b.querySelector('.g') || {}).textContent || '', '').trim(),
-    hint: (b.title || '').split('—')[0].trim(), run: () => b.click(),
+    g: (b.querySelector('.g') || {}).textContent || '·', label: (b.title || '').split('—')[0].trim() || b.textContent.trim(),
+    hint: ((b.title || '').split('—')[1] || '').replace(/\(.*\)/, '').trim().slice(0, 40).toUpperCase(), run: () => b.click(),
   }));
   const fixed = () => [
-    { g: '◈', label: 'Show me a place…', hint: 'WORLD', run: (q) => window.worldShowPlace(q.replace(/^show me\s*/i, '') || 'Tokyo'), match: /^(show me|what'?s it like in)\b/i },
-    { g: '⌨', label: document.body.classList.contains('ambient') ? 'Show the text bar (type + read replies)' : 'Hide the text bar (voice only)', hint: 'TALK', run: () => { const b = document.getElementById('kb'); if (b) b.click(); } },
-    { g: '▦', label: document.body.classList.contains('zones') ? 'Classic layout (navigation rail)' : 'Three-zone layout', hint: 'LAYOUT', run: () => setLayout(!document.body.classList.contains('zones')) },
+    { g: '◈', label: 'Show me a place live…', hint: 'LIVE VIEW', run: (q) => window.worldShowPlace(q.replace(/^show me\s*/i, '') || 'Tokyo'), match: /^(show me|what'?s it like in)\b/i },
+    { g: '⬡', label: want.floor ? 'Hide the agent floor' : 'Show the agent floor', hint: 'AGENTS', run: () => { floorPinned = !want.floor; relayout(); } },
+    { g: '◔', label: want.vitals ? 'Hide system vitals' : 'Show system vitals', hint: 'MAC', run: () => { vitalsUntil = want.vitals ? 0 : Date.now() + 10 * 60 * 1000; cpuHot = 0; relayout(); } },
+    { g: '⌨', label: body.classList.contains('ambient') ? 'Show the text bar (type + read replies)' : 'Hide the text bar (voice only)', hint: 'TALK', run: () => { const b = document.getElementById('kb'); if (b) b.click(); } },
+    { g: '▦', label: body.classList.contains('zones') ? 'Classic layout (all panels at once)' : 'Focus layout', hint: 'LAYOUT', run: () => setLayout(!body.classList.contains('zones')) },
   ];
   let items = [], sel = 0;
   function build() {
-    const q = pq.value.trim();
+    const q = pq.value.trim(), ql = q.toLowerCase();
     const all = [...fixed(), ...panels];
-    const ql = q.toLowerCase();
     const hits = q ? all.filter((it) => (it.match && it.match.test(q)) || it.label.toLowerCase().includes(ql) || (it.hint || '').toLowerCase().includes(ql)) : all;
     items = q ? [{ g: '⚛', label: `Ask BhatBot: “${q}”`, hint: 'ENTER', run: () => { if (typeof send === 'function') send(q); } }, ...hits] : all;
-    // "show me X" goes to the World first, not to chat.
     if (q && /^(show me|what'?s it like in)\b/i.test(q)) items.sort((a, b) => (b.match ? 1 : 0) - (a.match ? 1 : 0));
-    sel = 0;
-    pl.innerHTML = '';
+    sel = 0; pl.innerHTML = '';
     items.forEach((it, i) => {
-      const li = document.createElement('li'); li.role = 'option'; if (i === sel) li.className = 'sel';
+      const li = document.createElement('li'); li.setAttribute('role', 'option'); if (i === sel) li.className = 'sel';
       li.innerHTML = '<span class="pg"></span><span class="pl"></span><span class="ph"></span>';
       li.querySelector('.pg').textContent = it.g; li.querySelector('.pl').textContent = it.label; li.querySelector('.ph').textContent = it.hint || '';
       li.addEventListener('mousedown', (e) => { e.preventDefault(); sel = i; run(); });
