@@ -149,7 +149,21 @@ const key = _key;                                            // existing referen
 const _hemi = new THREE.HemisphereLight(0x9fc4e0, 0x0a1420, 0.6); scene.add(_hemi);
 const _rim = new THREE.PointLight(0x4a7bd6, 0.7, 80); _rim.position.set(-8, 5, -8); scene.add(_rim);
 const rim = _rim;
-const _officeMats = [];                                      // every office material, for the light themes
+const _officeMats = [];
+// COLOUR IN THE ROOM (2026-11-14: "add color to the 3D office"). Every desk, chair and plant in
+// office.glb samples one white grid atlas, so the room rendered as grey clay whatever the theme. Each
+// piece now gets its own copy of the material with a colour multiplier by what it IS — warm wood,
+// upholstered seats, green plants, dark screens — so the office reads as a place. The atlas still
+// supplies the grid and shading; the multiplier only colours it. Night mode keeps the hues and
+// lowers them, so the room dims with the window rather than turning back into grey.
+// (None of these may be a designation colour — scripts/test-designation.js checks — so agents stay
+// the most saturated thing on the floor and are never mistaken for furniture.)
+const ROOM_COLORS = [
+  [/floor/, '#e9dcc6'], [/work-desk/, '#c08a58'], [/cafe-table|counter/, '#b9835a'], [/cabinet/, '#7fa391'],
+  [/work-chair/, '#3b8f8a'], [/chair/, '#d9725a'], [/sofa/, '#5470a8'], [/plant/, '#4f9e5b'],
+  [/pc|laptop/, '#3a404c'], [/flexo/, '#e8a93d'], [/board/, '#f3f1ea'],
+];
+const _roomMats = [];                                        // [{ m, light, night }] — the coloured pieces                                      // every office material, for the light themes
 let _officeRoot = null;                                      // the loaded office scene, for measurement
 const WHITE = new THREE.Color(0xffffff);                     // the neutral end of the room tint
 
@@ -997,6 +1011,11 @@ function applyPalette(t) {
     if ('metalness' in m) m.metalness = light ? 0.04 : 0.4;
     if ('roughness' in m) m.roughness = light ? 0.86 : 0.5;
   }
+  for (const r of _roomMats) {
+    r.m.color.copy(light ? r.light : r.night);
+    if ('metalness' in r.m) r.m.metalness = 0.05;
+    if ('roughness' in r.m) r.m.roughness = light ? 0.82 : 0.7;
+  }
   // Repaint every nameplate so labels re-read against the new ground.
   PLATE_INK = PALETTE.text;
   // Re-target every LIVE agent. Without this the palette only applies to agents that arrive after
@@ -1060,6 +1079,13 @@ Promise.all([ load('./vendor/presence3d/models/office.glb').catch(() => null),
       else if (n.startsWith('poi-')) { poiNodes.push(o); toHide.push(o); }
       else if (o.isMesh) {
         o.receiveShadow = true; o.castShadow = true;
+        const rc = ROOM_COLORS.find(([re]) => re.test(n));
+        if (rc && o.material && !Array.isArray(o.material)) {
+          o.material = o.material.clone();                   // shared atlas → this piece's own material
+          const c = new THREE.Color(rc[1]);
+          _roomMats.push({ m: o.material, light: c, night: c.clone().multiplyScalar(0.62) });
+          return;
+        }
         // Keep every office material so applyPalette can lift the room on a light theme. Relighting
         // alone is not enough: these materials are authored dark, and a dark material under a bright
         // key reads as grey clay rather than as a lit room.
@@ -1073,6 +1099,7 @@ Promise.all([ load('./vendor/presence3d/models/office.glb').catch(() => null),
     });
     scene.add(office.scene);
     office.scene.updateMatrixWorld(true);
+    try { applyPalette(PALETTE); } catch {}                  // the room's colours need the materials, which only exist now
     for (const o of toHide) o.visible = false;
     // Parse `poi-<kind>-<n>`: poi-sit_work-3 → kind 'sit_work'; poi-idle-spawn-2 and
     // poi-idle-area-hub both → kind 'idle'. World transforms, so the anchors survive any

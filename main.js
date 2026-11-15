@@ -347,7 +347,10 @@ const scicompute = require('./lib/scicompute');         // quant/numerics/stats/
 const dockerPack = require('./lib/integrations/docker'); // container isolation lane (container_run)
 const { createEndpointer } = require('./lib/endpoint');  // adaptive, speaker-gated utterance endpointing
 const { createWorldWatch } = require('./lib/worldwatch');
-const tidy = require('./lib/tidy');                          // BhatBot's own file janitor: find, move aside, ask, purge   // "show me Tokyo" → the nearest live camera on worldwatcher.live
+const tidy = require('./lib/tidy');
+const contactsLib = require('./lib/contacts');
+const memrelief = require('./lib/memrelief');
+const xcodeLib = require('./lib/xcode');                     // xcodebuild + simctl: status, list, build, test, run                // short of memory → offer to quit the biggest apps, on his yes               // his whole address book, from macOS Contacts                          // BhatBot's own file janitor: find, move aside, ask, purge   // "show me Tokyo" → the nearest live camera on worldwatcher.live
 const modelpolicy = require('./lib/modelpolicy');        // the ceiling: never Fable, Opus only with a per-task yes
 const { createAutonomy } = require('./lib/autonomy');    // what may be done unasked, what is learned as routine, what is never done
 const voiceid = require('./lib/voiceid');                // T3 — speaker verification (cocktail-party post-filter)
@@ -4731,6 +4734,102 @@ ipcMain.handle('world-mentions', async (_e, text) => worldwatch.mentions(String(
 ipcMain.handle('world-context', async () => { const v = await worldContextPick().catch(() => null); if (v) _worldLast = v; return v; });
 setInterval(() => { worldContextPick().then((v) => { if (v && (!_worldLast || v.url !== _worldLast.url)) showWorld(v); }).catch(() => {}); }, 30 * 60 * 1000).unref();
 
+// ── XCODE ────────────────────────────────────────────────────────────────────────────────────────
+// Long builds stream their progress to the activity feed and never block the window; a 25-minute
+// ceiling stops a hung build, and only the useful part of the log (errors, verdict) goes back.
+function runCapture(cmd, args, { cwd, timeoutMs = 120000, onLine } = {}) {
+  return new Promise((res) => {
+    let out = '', tail = '';
+    const ch = spawn(cmd, args, { cwd, env: { ...process.env, PATH: EXEC_PATH } });
+    const eat = (d) => { const t = String(d); out += t; if (out.length > 8e6) out = out.slice(-4e6); if (onLine) { tail += t; const ls = tail.split('\n'); tail = ls.pop(); for (const l of ls) onLine(l); } };
+    ch.stdout.on('data', eat); ch.stderr.on('data', eat);
+    const kill = setTimeout(() => { try { ch.kill('SIGTERM'); } catch {} out += '\n[timed out]'; }, timeoutMs);
+    ch.on('close', (code) => { clearTimeout(kill); res({ code, out }); });
+    ch.on('error', (e) => { clearTimeout(kill); res({ code: -1, out: String(e.message) }); });
+  });
+}
+async function xcodeTool(input) {
+  const act = String(input.action || 'status');
+  if (act === 'status') {
+    const v = await runCapture('xcodebuild', ['-version']);
+    if (v.code !== 0) return { success: false, ready: false, error: 'Xcode is not usable: ' + v.out.slice(0, 200), fix: 'Install Xcode from the App Store, then `sudo xcode-select -s /Applications/Xcode.app` (Siddhant runs this — it needs his password).' };
+    const fl = await runCapture('xcodebuild', ['-checkFirstLaunchStatus']);
+    const sims = await runCapture('xcrun', ['simctl', 'list', 'devices', 'available', '-j']);
+    let pick = null, count = 0; try { const j = JSON.parse(sims.out); pick = xcodeLib.pickSimulator(j); count = Object.values(j.devices || {}).flat().length; } catch {}
+    return { success: true, ready: fl.code === 0, version: v.out.trim().split('\n').join(' · '), simulators: count, defaultSimulator: pick && pick.name,
+      ...(fl.code !== 0 ? { fix: 'Xcode needs its first-launch setup: Siddhant runs `sudo xcodebuild -runFirstLaunch`.' } : {}) };
+  }
+  let p = String(input.path || '').replace(/^~(?=\/|$)/, os.homedir());
+  if (!p) return { success: false, error: 'path is required — the project folder, .xcodeproj or .xcworkspace' };
+  p = path.resolve(p);
+  const container = /\.(xcodeproj|xcworkspace)$/.test(p) ? { kind: p.endsWith('.xcworkspace') ? 'workspace' : 'project', path: p } : xcodeLib.findContainer(p, (d) => fs.readdirSync(d));
+  if (!container) return { success: false, error: `no .xcworkspace, .xcodeproj or Package.swift in ${p}` };
+  const cwd = container.kind === 'package' ? container.path : path.dirname(container.path);
+  const listed = await runCapture('xcodebuild', ['-list', '-json', ...xcodeLib.containerArgs(container)], { cwd, timeoutMs: 120000 });
+  let info = {}; try { const j = JSON.parse(listed.out.slice(listed.out.indexOf('{'))); info = j.workspace || j.project || {}; } catch {}
+  if (act === 'list') return listed.code === 0 ? { success: true, container: container.path, schemes: info.schemes || [], targets: info.targets || [], configurations: info.configurations || [] } : { success: false, error: listed.out.slice(-400) };
+  const scheme = input.scheme || (info.schemes || [])[0];
+  if (!scheme && container.kind !== 'package') return { success: false, error: 'no scheme found — open the project in Xcode once so it creates one, or name it' };
+  const target = input.target || 'simulator';
+  let sim = null;
+  if (target === 'simulator') { const s = await runCapture('xcrun', ['simctl', 'list', 'devices', 'available', '-j']); try { sim = xcodeLib.pickSimulator(JSON.parse(s.out), input.simulator); } catch {} }
+  const configuration = input.configuration || 'Debug';
+  const derived = xcodeLib.derivedData(os.homedir(), container);
+  const action = act === 'test' ? 'test' : 'build';
+  sendToActivity('tool-update', { type: 'thinking', text: `🔨 xcodebuild ${action} ${scheme || ''}${sim ? ' → ' + sim.name : ''}…` });
+  let lastShown = 0;
+  const b = await runCapture('xcodebuild', xcodeLib.buildArgs({ container, scheme, action, destination: xcodeLib.destinationFor(target, sim), configuration, derived }), {
+    cwd, timeoutMs: 25 * 60 * 1000,
+    onLine: (l) => { if (/^(CompileSwift|Ld |CodeSign|ProcessInfoPlistFile|Test Case)/.test(l) && Date.now() - lastShown > 2500) { lastShown = Date.now(); sendToActivity('tool-update', { type: 'thinking', text: '🔨 ' + l.slice(0, 110) }); } },
+  });
+  const sum = xcodeLib.summarize(b.out);
+  if (!sum.ok) return { success: false, action, scheme, errors: sum.errors.length ? sum.errors : [b.out.slice(-800)], warnings: sum.warnings, tests: sum.tests };
+  if (act !== 'run') return { success: true, action, scheme, warnings: sum.warnings, tests: sum.tests, simulator: sim && sim.name };
+  if (target !== 'simulator' || !sim) return { success: false, error: 'run launches in a simulator — use target simulator' };
+  const prod = xcodeLib.productsDir(derived, configuration, target);
+  const appName = (fs.readdirSync(prod).find((f) => f.endsWith('.app')) || '');
+  if (!appName) return { success: false, error: 'built, but no .app was produced (is this a library or test-only scheme?)' };
+  const appPath = path.join(prod, appName);
+  const bid = (await runCapture('/usr/libexec/PlistBuddy', ['-c', 'Print CFBundleIdentifier', path.join(appPath, 'Info.plist')])).out.trim();
+  await runCapture('xcrun', ['simctl', 'boot', sim.udid]);               // already booted is fine
+  await runCapture('open', ['-a', 'Simulator']);
+  const inst = await runCapture('xcrun', ['simctl', 'install', sim.udid, appPath]);
+  if (inst.code !== 0) return { success: false, error: 'install failed: ' + inst.out.slice(-300) };
+  const la = await runCapture('xcrun', ['simctl', 'launch', sim.udid, bid]);
+  return la.code === 0 ? { success: true, action: 'run', app: appName, bundleId: bid, simulator: sim.name, warnings: sum.warnings } : { success: false, error: 'launch failed: ' + la.out.slice(-300) };
+}
+
+// ── MEMORY RELIEF ────────────────────────────────────────────────────────────────────────────────
+// The governor sheds BhatBot's own load first. If memory is still short (under the governor's "hot"
+// line), offer to quit the single biggest app — by name and size, on the approval card, one at a time,
+// at most every 20 minutes, and never the same app twice within two hours of a "no".
+function psText() { return new Promise((res) => require('child_process').execFile('ps', ['-axo', 'pid=,rss=,comm='], { maxBuffer: 16 << 20 }, (e, out) => res(e ? '' : out))); }
+function quitApp(name) {
+  return new Promise((res) => require('child_process').execFile('osascript', ['-e', memrelief.quitScript(name)], { timeout: 20000 }, (e, _o, err) => res(e ? { ok: false, error: String(err || e.message).slice(0, 160) } : { ok: true })));
+}
+let _memAskAt = 0; const _memDeclined = new Map();
+async function memReliefTick() {
+  const c = loadConfig();
+  if ((c.memoryRelief || {}).enabled === false) return;
+  const freePct = readMemFreePct();
+  const hotPct = (c.memoryRelief || {}).belowPct || 11;
+  if (!memrelief.shouldOffer({ freePct, hotPct, lastAskAt: _memAskAt })) return;
+  const apps = memrelief.topApps(await psText(), { minMb: 700, protect: (c.memoryRelief || {}).protect || [] })
+    .filter((a) => !(_memDeclined.get(a.name) > Date.now()));
+  if (!apps.length) return;
+  _memAskAt = Date.now();
+  const top = apps[0];
+  console.log(`[memory] ${freePct}% free — offering to quit ${top.name} (${memrelief.fmt(top.mb)})`);
+  // Through executeTool, so the card, the audit log and the activity feed all see it.
+  const r = await executeTool('free_memory', { action: 'quit', app: top.name });
+  if (r && r.success) {
+    sendToActivity('tool-update', { type: 'thinking', text: `🧠 quit ${top.name} — about ${r.freed} back` });
+  } else if (r && r.declined) {
+    _memDeclined.set(top.name, Date.now() + 2 * 3600 * 1000);
+  }
+}
+setInterval(() => { memReliefTick().catch((e) => console.warn('[memory] ' + e.message)); }, 60 * 1000).unref();
+
 // ── THE JANITOR ──────────────────────────────────────────────────────────────────────────────────
 // "I want BhatBot to be making the decisions, not Claude" (2026-11-14). So the cleanup is BhatBot's
 // job, on its own clock: once a week it scans his files by its rules (lib/tidy.js), MOVES what is
@@ -6036,6 +6135,66 @@ async function executeTool(name, input, opts = {}) {
           ? { success: true, showing: r.name, place: r.place, url: r.url,
               note: r.distanceKm > 25 ? `No camera in ${r.resolved || r.asked}; the nearest is ${r.name} in ${r.place}, about ${r.distanceKm} km away. Say that.` : `Showing ${r.name}, ${r.place}.` }
           : { success: false, error: r.why };
+        break;
+      }
+      case 'xcode': {
+        result = await xcodeTool(input || {});
+        break;
+      }
+      case 'free_memory': {
+        const act = String((input && input.action) || 'top');
+        if (act === 'quit') {
+          const app = String((input && input.app) || '').trim();
+          const live = memrelief.topApps(await psText(), { minMb: 0 });
+          const hit = live.find((a) => a.name.toLowerCase() === app.toLowerCase());
+          if (!hit) { result = { success: false, error: `${app || 'that app'} is not running (or is protected)` }; break; }
+          const q = await quitApp(hit.name);
+          result = q.ok ? { success: true, quit: hit.name, freed: memrelief.fmt(hit.mb) } : { success: false, error: q.error };
+          break;
+        }
+        const apps = memrelief.topApps(await psText(), { minMb: 150 }).slice(0, 8).map((a) => ({ app: a.name, memory: memrelief.fmt(a.mb) }));
+        result = { success: true, freePct: readMemFreePct(), apps, note: 'freePct is the system-wide free-memory figure macOS itself reports (memory_pressure).' };
+        break;
+      }
+      case 'contacts': {
+        if (String((input && input.action) || 'search') === 'sync') {
+          const r = await syncContacts();
+          result = r.ok ? { success: true, synced: r.count, note: `Address book refreshed: ${r.count} contacts with phone numbers.` } : { success: false, error: r.error };
+          break;
+        }
+        const hits = searchContacts((input && input.query) || '', Math.min(Number(input && input.limit) || 8, 25));
+        result = { success: true, total: loadContacts().length, contacts: hits };
+        break;
+      }
+      case 'phone_call': {
+        const c = loadConfig();
+        const via = String((input && input.via) || 'bhatbot').toLowerCase();
+        const toRaw = String((input && input.to) || '').trim();
+        let target = { ok: true, name: 'Siddhant', number: c.myPhone, self: true };
+        if (toRaw && !/^(me|myself|siddhant)$/i.test(toRaw)) {
+          target = contactsLib.resolve(toRaw, searchContacts);
+          // A name he says may be newer than the list — refresh once before giving up.
+          if (!target.ok && !target.candidates) { const s = await syncContacts().catch(() => null); if (s && s.ok) target = contactsLib.resolve(toRaw, searchContacts); }
+          if (target.ok) target.self = digitsOf(target.number) === digitsOf(c.myPhone || '');
+        }
+        if (!target.ok) { result = { success: false, error: target.error, candidates: target.candidates }; break; }
+        if (!target.number) { result = { success: false, error: 'No number for Siddhant — set myPhone in Settings.' }; break; }
+        if (via === 'iphone') {
+          // His own phone, his own voice: macOS hands the number to FaceTime, which shows a Call button.
+          const num = String(target.number).replace(/[^\d+]/g, '');
+          await new Promise((res) => require('child_process').execFile('open', ['tel://' + num], () => res()));
+          result = { success: true, dialing: target.name || target.number, note: 'The Call prompt is on his Mac; he places the call from his iPhone and talks himself.' };
+          break;
+        }
+        const purpose = String((input && input.purpose) || '').trim();
+        if (!target.self && !purpose) { result = { success: false, error: 'purpose is required when BhatBot calls someone — what should it say and get done?' }; break; }
+        sendToActivity('tool-update', { type: 'thinking', text: `📞 calling ${target.name || target.number}…` });
+        const opening = target.self ? (purpose || 'Good day, sir. You asked me to ring you.') : purpose;
+        const r = await twilioCall(opening, { to: target.number, name: target.name, bypassGate: !target.self });
+        try { rstate.event('call', { to: target.number, name: target.name || null, via: r.via, sid: r.sid, self: !!target.self, tool: true }); } catch {}
+        result = r.sent
+          ? { success: true, calling: target.name || target.number, twoWay: /conversation/.test(r.via || ''), note: /conversation/.test(r.via || '') ? 'Ringing. BhatBot holds the conversation itself and sends Siddhant a summary when it ends.' : (r.note || 'One-way announcement only.') }
+          : { success: false, blocked: r.blocked, error: r.error };
         break;
       }
       case 'tidy_files': {
@@ -8914,9 +9073,13 @@ function startTelegramBridge() {
   try { TelegramBot = require('node-telegram-bot-api'); }
   catch { console.warn('[telegram] node-telegram-bot-api not installed'); return; }
   try {
-    telegramBot = new TelegramBot(cfg.telegramToken, { polling: true });
+    // eduroam resets every connection to api.telegram.org's IP (SNI or not), so on campus the bot
+    // could neither poll nor send. telegramApiBase points it at BhatBot's own Cloudflare relay
+    // (relay/telegram — forwards only this bot's requests); unset, it talks to Telegram directly.
+    const base = String(cfg.telegramApiBase || '').replace(/\/+$/, '');
+    telegramBot = new TelegramBot(cfg.telegramToken, { polling: true, ...(base ? { baseApiUrl: base } : {}) });
   } catch (e) { console.error('[telegram] init failed:', e.message); return; }
-  console.log('[telegram] bridge active');
+  console.log('[telegram] bridge active' + (cfg.telegramApiBase ? ' (via relay)' : ''));
 
   telegramBot.on('message', async (msg) => {
     tgMarkUp();
@@ -8926,6 +9089,7 @@ function startTelegramBridge() {
     if (!c.telegramChatId) {
       saveConfig({ telegramChatId: chatId });
       telegramBot.sendMessage(chatId, '✓ Bhatbot connected. This device is now authorized.');
+      setTimeout(tgFlushOutbox, 1500);           // anything that waited for this chat goes out now
       return;
     }
     if (chatId !== c.telegramChatId) return;   // ignore everyone else
@@ -9000,7 +9164,7 @@ function tgMarkUp() {
   _tgDownSince = 0;
   setTimeout(tgFlushOutbox, 500);
 }
-function telegramDown() { return !!_tgDownSince; }
+function telegramDown() { return !!_tgDownSince || !loadConfig().telegramChatId; }
 function tgOutbox() { try { return JSON.parse(fs.readFileSync(TG_OUTBOX, 'utf8')); } catch { return []; } }
 function tgHold(text) {
   const box = tgOutbox(); box.push({ at: new Date().toISOString(), text: String(text).slice(0, 4000) });
@@ -9023,8 +9187,9 @@ setInterval(() => {
 function telegramNotify(text) {
   try {
     const c = loadConfig();
-    if (!telegramBot || !c.telegramChatId) return;
-    if (_tgDownSince) { tgHold(text); return; }
+    if (!telegramBot) return;
+    // No chat yet (he has never messaged the bot) is the same as unreachable: hold it, don't drop it.
+    if (!c.telegramChatId || _tgDownSince) { tgHold(text); return; }
     telegramBot.sendMessage(c.telegramChatId, String(text).slice(0, 4000))
       .then(() => { if (_tgDownSince) tgMarkUp(); })
       .catch((e) => { tgMarkDown(e && e.message); tgHold(text); });
@@ -12610,6 +12775,24 @@ function searchContacts(q, limit = 20) {
     .map(({ score, ...c }) => c);
 }
 
+// The address book lives in macOS Contacts; this mirrors it into contacts.json (what the call
+// button and the phone_call tool read). Refreshed on launch when stale, and on demand.
+let _contactsSyncing = null;
+function syncContacts() {
+  if (_contactsSyncing) return _contactsSyncing;
+  _contactsSyncing = contactsLib.sync({
+    run: (script) => new Promise((res, rej) => require('child_process').execFile('osascript', ['-l', 'JavaScript', '-e', script], { timeout: 90000, maxBuffer: 32 << 20 }, (e, out, err) => (e ? rej(new Error(String(err || e.message))) : res(out)))),
+    write: (obj) => { fs.mkdirSync(path.dirname(CONTACTS_PATH), { recursive: true }); fs.writeFileSync(CONTACTS_PATH + '.tmp', JSON.stringify(obj)); fs.renameSync(CONTACTS_PATH + '.tmp', CONTACTS_PATH); },
+  }).then((r) => { console.log('[contacts] ' + (r.ok ? `synced ${r.count} from macOS Contacts` : r.error)); return r; }).finally(() => { _contactsSyncing = null; });
+  return _contactsSyncing;
+}
+setTimeout(() => {
+  try {
+    const raw = JSON.parse(fs.readFileSync(CONTACTS_PATH, 'utf8'));
+    if (raw.source === 'macOS Contacts' && Date.now() - Date.parse(raw.updated) < 3 * 86400000) return;
+  } catch {}
+  syncContacts().catch(() => {});
+}, 90 * 1000).unref();
 ipcMain.handle('contacts-search', (_e, { query, limit } = {}) => {
   try { return { ok: true, contacts: searchContacts(query, Math.min(Number(limit) || 20, 50)), total: loadContacts().length }; }
   catch (e) { return { ok: false, error: e.message }; }

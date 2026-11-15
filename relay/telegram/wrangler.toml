@@ -1,0 +1,9 @@
+# Telegram Bot API relay for networks that block api.telegram.org (eduroam resets every connection
+# to its IP, with or without SNI). BhatBot talks to this Worker instead; it forwards only requests
+# for Siddhant's own bot (ALLOWED_BOT_ID secret) and refuses everything else, so it is not an open proxy.
+#   deploy:  npx wrangler deploy        (from this folder)
+#   secret:  npx wrangler secret put ALLOWED_BOT_ID
+name = "bhatbot-telegram-relay"
+main = "worker.js"
+compatibility_date = "2026-10-01"
+workers_dev = true
