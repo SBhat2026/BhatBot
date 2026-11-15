@@ -346,6 +346,7 @@ const scholar = require('./lib/integrations/scholar');  // FORGE — scholarly a
 const scicompute = require('./lib/scicompute');         // quant/numerics/stats/MPS-torch compute pack (sci_compute)
 const dockerPack = require('./lib/integrations/docker'); // container isolation lane (container_run)
 const { createEndpointer } = require('./lib/endpoint');  // adaptive, speaker-gated utterance endpointing
+const { createWorldWatch } = require('./lib/worldwatch');   // "show me Tokyo" → the nearest live camera on worldwatcher.live
 const modelpolicy = require('./lib/modelpolicy');        // the ceiling: never Fable, Opus only with a per-task yes
 const { createAutonomy } = require('./lib/autonomy');    // what may be done unasked, what is learned as routine, what is never done
 const voiceid = require('./lib/voiceid');                // T3 — speaker verification (cocktail-party post-filter)
@@ -4684,6 +4685,50 @@ function pushLongRun() {
   } catch {}
 }
 
+// ── WORLD WATCHER ────────────────────────────────────────────────────────────────────────────────
+// The World zone shows a live public webcam. On request it is whatever he asked for; otherwise it is
+// tied to his day — the city of his next timed event that has a location, else the camera nearest
+// home — and refreshed every half hour. A camera he ASKED for is never replaced by the context pick
+// for twenty minutes: changing the view under him would be the assistant overruling him.
+const WORLD_CACHE = path.join(os.homedir(), '.bhatbot', 'cache', 'worldwatch-cameras.json');
+const worldwatch = createWorldWatch({
+  fetchJson: async (u) => { const r = await fetch(u, { signal: AbortSignal.timeout(12000) }); if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); },
+  cache: {
+    get: () => { try { return JSON.parse(fs.readFileSync(WORLD_CACHE, 'utf8')); } catch { return null; } },
+    set: (v) => { try { fs.mkdirSync(path.dirname(WORLD_CACHE), { recursive: true }); fs.writeFileSync(WORLD_CACHE, JSON.stringify(v)); } catch {} },
+  },
+  log: (m) => console.warn(m),
+  home: () => { const g = loadConfig().geo || {}; return Number.isFinite(g.latitude) && Number.isFinite(g.longitude) ? [g.latitude, g.longitude] : null; },
+});
+let _worldAskedAt = 0, _worldLast = null;
+function showWorld(view) {
+  if (!view || !view.url) return;
+  if (view.reason === 'asked') _worldAskedAt = Date.now();
+  _worldLast = view;
+  try { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('world-show', view); } catch {}
+}
+async function worldContextPick() {
+  if (Date.now() - _worldAskedAt < 20 * 60 * 1000) return _worldLast;
+  // The next timed event in the coming six hours that names a place.
+  try {
+    const r = await google.calendarList({ timeMin: new Date().toISOString(), timeMax: new Date(Date.now() + 6 * 3600e3).toISOString(), limit: 10 });
+    const ev = ((r && r.events) || []).find((e) => e && e.location && !e.allDay && !/zoom|meet\.google|teams|http/i.test(e.location));
+    if (ev) {
+      const f = await worldwatch.find(String(ev.location).split(',').slice(-3).join(','));
+      if (f.ok && f.distanceKm < 150) return { ...f, reason: 'context', why: `near your next event, ${String(ev.summary || '').slice(0, 40)}` };
+    }
+  } catch {}
+  const g = loadConfig().geo || {};
+  if (Number.isFinite(g.latitude) && Number.isFinite(g.longitude)) {
+    const n = await worldwatch.nearest(g.latitude, g.longitude, { reason: 'context', why: `nearest live camera to ${g.city || 'home'}` });
+    if (n) return n;
+  }
+  return null;
+}
+ipcMain.handle('world-find', async (_e, { place } = {}) => { const r = await worldwatch.find(String(place || '')); if (r.ok) showWorld({ ...r, reason: 'asked' }); return r; });
+ipcMain.handle('world-context', async () => { const v = await worldContextPick().catch(() => null); if (v) _worldLast = v; return v; });
+setInterval(() => { worldContextPick().then((v) => { if (v && (!_worldLast || v.url !== _worldLast.url)) showWorld(v); }).catch(() => {}); }, 30 * 60 * 1000).unref();
+
 // ── STAY AWAKE WHILE A LONG RUN IS GOING ─────────────────────────────────────────────────────────
 // Nothing held the machine awake during a supervised run. The only `caffeinate` in the app belongs
 // to the cloud bridge and is switched off in his config, so a run started "to go for a few hours"
@@ -5898,6 +5943,15 @@ async function executeTool(name, input, opts = {}) {
               call_with: r.callWith, note: 'It is registered and persistent. Use it now.' }
           : { success: false, stage: r.stage, errors: r.errors, ...(r.cases ? { cases: r.cases.map((c) => ({ case: c.i, pass: c.pass, why: c.why || undefined })) } : {}),
               note: r.note || 'Nothing was registered. Fix it and forge again.' };
+        break;
+      }
+      case 'world_view': {
+        const r = await worldwatch.find(String((input && input.place) || ''));
+        if (r.ok) showWorld({ ...r, reason: 'asked' });
+        result = r.ok
+          ? { success: true, showing: r.name, place: r.place, url: r.url,
+              note: r.distanceKm > 25 ? `No camera in ${r.resolved || r.asked}; the nearest is ${r.name} in ${r.place}, about ${r.distanceKm} km away. Say that.` : `Showing ${r.name}, ${r.place}.` }
+          : { success: false, error: r.why };
         break;
       }
       case 'google_accounts': {
@@ -8751,6 +8805,7 @@ function startTelegramBridge() {
   console.log('[telegram] bridge active');
 
   telegramBot.on('message', async (msg) => {
+    tgMarkUp();
     const chatId = msg.chat.id.toString();
     const c = loadConfig();
     // First message authorizes this chat.
@@ -8810,15 +8865,55 @@ function startTelegramBridge() {
       try { telegramBot.stopPolling(); } catch {}
       return;
     }
+    tgMarkDown(msg);
     if (Date.now() - _tgLastLog < 60000) return;
     _tgLastLog = Date.now();
     console.warn('[telegram] polling:', msg);
   });
 }
+// ── IS TELEGRAM ACTUALLY REACHABLE? ──
+// Telegram was the help channel, and sends were fire-and-forget: on a network that resets TLS to
+// api.telegram.org (2026-11-14: TCP connects, the handshake is reset — the network, not the token)
+// every "I need help" went nowhere while notifyUser reported { sent: true, via: 'telegram' }.
+// Now a failed send is held in an outbox and re-sent when Telegram answers again, and a question
+// that needs his answer goes out by SMS while Telegram is down (see notifyUser).
+const TG_OUTBOX = path.join(os.homedir(), '.bhatbot', 'telegram-outbox.json');
+let _tgDownSince = 0;
+function tgMarkDown(why) { if (!_tgDownSince) { _tgDownSince = Date.now(); console.warn('[telegram] unreachable — holding messages in the outbox (' + String(why || '').slice(0, 60) + ')'); } }
+function tgMarkUp() {
+  if (!_tgDownSince) return;
+  console.log('[telegram] reachable again after ' + Math.round((Date.now() - _tgDownSince) / 60000) + ' min — flushing the outbox');
+  _tgDownSince = 0;
+  setTimeout(tgFlushOutbox, 500);
+}
+function telegramDown() { return !!_tgDownSince; }
+function tgOutbox() { try { return JSON.parse(fs.readFileSync(TG_OUTBOX, 'utf8')); } catch { return []; } }
+function tgHold(text) {
+  const box = tgOutbox(); box.push({ at: new Date().toISOString(), text: String(text).slice(0, 4000) });
+  try { fs.writeFileSync(TG_OUTBOX, JSON.stringify(box.slice(-50))); } catch {}
+}
+async function tgFlushOutbox() {
+  const box = tgOutbox(); if (!box.length || !telegramBot) return;
+  const c = loadConfig(); if (!c.telegramChatId) return;
+  try { fs.writeFileSync(TG_OUTBOX, '[]'); } catch {}
+  for (let i = 0; i < box.length; i++) {
+    try { await telegramBot.sendMessage(c.telegramChatId, `(held since ${box[i].at.slice(11, 16)}) ` + box[i].text); }
+    catch (e) { tgMarkDown(e && e.message); const rest = box.slice(i); try { fs.writeFileSync(TG_OUTBOX, JSON.stringify(rest.concat(tgOutbox()).slice(-50))); } catch {} return; }
+  }
+}
+// Polling errors say "down"; nothing says "up" except a message arriving, so probe while down.
+setInterval(() => {
+  if (!telegramBot || !_tgDownSince) return;
+  telegramBot.getMe().then(tgMarkUp).catch(() => {});
+}, 3 * 60 * 1000).unref();
 function telegramNotify(text) {
   try {
     const c = loadConfig();
-    if (telegramBot && c.telegramChatId) telegramBot.sendMessage(c.telegramChatId, String(text).slice(0, 4000)).catch(() => {});
+    if (!telegramBot || !c.telegramChatId) return;
+    if (_tgDownSince) { tgHold(text); return; }
+    telegramBot.sendMessage(c.telegramChatId, String(text).slice(0, 4000))
+      .then(() => { if (_tgDownSince) tgMarkUp(); })
+      .catch((e) => { tgMarkDown(e && e.message); tgHold(text); });
   } catch {}
 }
 
@@ -9307,6 +9402,15 @@ async function notifyUser(message, urgency, opts = {}) {
   // low / info / medium-during-quiet-hours → Telegram only
   telegramNotify((urgency === 'medium' ? '🟡 (quiet hours) ' : '⚪ ') + 'BhatBot: ' + msg);
   mirror();
+  // A question that is waiting on HIM cannot sit in an outbox. Outside quiet hours it goes by SMS
+  // while Telegram is unreachable; everything else waits and is delivered when Telegram is back.
+  if (telegramDown()) {
+    if (opts.awaitReply && !quiet) {
+      const r = await twilioSMS('❓ BhatBot (Telegram unreachable): ' + msg);
+      if (r.sent) return done({ ...r, telegram: 'held' });
+    }
+    return done({ sent: false, via: 'telegram-outbox', held: true, error: 'Telegram unreachable — held, delivers when it reconnects' });
+  }
   return done({ sent: true, via: 'telegram', ...(urgency === 'medium' ? { downgraded: 'quiet-hours' } : {}) });
 }
 

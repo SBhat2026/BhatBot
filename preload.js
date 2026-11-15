@@ -20,6 +20,10 @@ contextBridge.exposeInMainWorld('bhatbot', {
   getContextPath: () => ipcRenderer.invoke('get-context-path'),
   getMemoryPath: () => ipcRenderer.invoke('get-memory-path'),
   getVoiceConfig: () => ipcRenderer.invoke('get-voice-config'),
+  // World zone: a live camera, on request or tied to his day.
+  worldFind: (place) => ipcRenderer.invoke('world-find', { place }),
+  worldContext: () => ipcRenderer.invoke('world-context'),
+  onWorldShow: (cb) => ipcRenderer.on('world-show', (_e, v) => cb(v)),
   getCapabilities: () => ipcRenderer.invoke('get-capabilities'),
   endpointThreshold: () => ipcRenderer.invoke('endpoint-threshold'),                 // adaptive silence-wait (learned per user)
   endpointObserve: (ms, resumed) => ipcRenderer.invoke('endpoint-observe', { ms, resumed }), // report a mid-utterance pause to learn

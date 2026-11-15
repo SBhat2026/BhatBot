@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta http-equiv="Content-Security-Policy"
-  content="default-src 'self' file:; style-src 'self' 'unsafe-inline' file: https://fonts.googleapis.com; font-src 'self' file: https://fonts.gstatic.com; script-src 'self' 'unsafe-inline' file:; img-src 'self' file: data: blob:; connect-src 'self';" />
+  content="default-src 'self' file:; style-src 'self' 'unsafe-inline' file: https://fonts.googleapis.com; font-src 'self' file: https://fonts.gstatic.com; script-src 'self' 'unsafe-inline' file:; img-src 'self' file: data: blob:; connect-src 'self'; frame-src 'self' file: https://worldwatcher.live;" />
 <title>Bhatbot</title>
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -777,6 +777,75 @@
   #cmdstage.l1.focus-media { grid-template-columns: 240px minmax(0,.8fr) minmax(0,1.1fr); }
   #cmdstage.l1.focus-jobs  { grid-template-columns: 420px minmax(0,1fr) 260px; }
   #cmdstage.l1.focus-orb   { grid-template-columns: 240px minmax(0,1.6fr) 260px; }
+  /* ══ THE THREE ZONES ═══════════════════════════════════════════════════════════════════════════
+     TALK | AGENT FLOOR | WORLD, with everything else behind ⌘K. Chosen by Siddhant 2026-11-12. It is
+     a re-zoning of the existing columns, not new widgets: every element keeps its id and its code,
+     so the classic layout is one class away (palette → "Classic layout"). */
+  .zone-only { display: none; }
+  body.zones .zone-only { display: flex; }
+  body.zones #rail { display: none; }
+  body.zones #cmdstage.l1 { grid-template-areas: "ccenter cleft cright";
+    grid-template-columns: minmax(300px, 1.15fr) minmax(300px, 1.1fr) minmax(260px, .95fr); }
+  @media (max-width: 1100px) {
+    body.zones #cmdstage.l1 { grid-template-areas: "ccenter ccenter" "cleft cright"; grid-template-columns: 1fr 1fr;
+      grid-template-rows: minmax(320px, 1fr) minmax(260px, auto); }
+  }
+  body.zones #cmd-center { border: 1px solid var(--line); border-radius: 6px; background: var(--surface); overflow: hidden; }
+  body.zones #cmd-center::before { content: '⚛ TALK'; font: 10px/1 var(--font-system); letter-spacing: .18em; color: var(--text-dim);
+    padding: 13px 14px 0; flex-shrink: 0; }
+  body.zones #cmd-center #vstage { flex: 0 0 auto; gap: 8px; padding: 6px 12px 4px; }
+  body.zones #cmd-center #orb { width: 112px; height: 112px; }
+  body.zones #cmd-center #vhint { display: none; }
+  body.zones #cmd-center #chat { flex: 1; min-height: 0; border-top: 1px solid var(--line); display: block; }
+  body.zones #fleetmini-card, body.zones #cmdstage .stage-head { display: none; }
+  body.zones #cmd-right #vitals-card #gauges { grid-template-columns: repeat(4, 1fr); gap: 8px; }
+  body.zones #cmd-right #vitals-card .gauge { flex-direction: column; gap: 4px; }
+  body.zones #cmd-right #vitals-card .gauge .gring { width: 44px; height: 44px; }
+  body.zones #cmd-right #vitals-card .glab i { display: none; }
+  body.zones #cmd-right #media-card { flex: 0 1 auto; max-height: 34%; }
+  body.zones #media-card:has(#vvis:empty) { display: none; }
+  /* the floor */
+  #floor-card { flex: 0 0 auto; }
+  #floor-desks { display: grid; grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); gap: 8px; }
+  .desk { border: 1px solid var(--line); border-radius: 6px; padding: 9px 10px; min-height: 64px; display: flex; flex-direction: column; gap: 4px;
+    font-family: var(--font-system); transition: border-color .3s, background .3s, opacity .3s; opacity: .45; }
+  .desk .dn { display: flex; align-items: center; gap: 7px; font-size: 11px; letter-spacing: .12em; color: var(--text); }
+  .desk .dn i { width: 8px; height: 8px; border-radius: 50%; background: var(--dc); box-shadow: 0 0 0 1px var(--dc) inset; flex-shrink: 0; }
+  .desk .dr { font-size: 9px; letter-spacing: .14em; color: var(--text-dim2); }
+  .desk .dt { font: 11px/1.35 var(--font-ui); color: var(--text-dim); overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  .desk.on { opacity: 1; border-color: var(--dc); background: color-mix(in oklab, var(--dc) 9%, var(--surface)); }
+  .desk.on .dn i { box-shadow: 0 0 10px var(--dc); animation: deskpulse 1.6s ease-in-out infinite; }
+  .desk.local { border-style: dashed; }
+  .desk.local .dn i { background: transparent; }
+  @keyframes deskpulse { 50% { opacity: .45; } }
+  #floor-slot:not(:empty) { margin-top: 10px; }
+  body.zones #longrun { margin: 0 0 0; }
+  /* the world */
+  #world-card { flex: 1 1 auto; min-height: 220px; }
+  #world-frame-wrap { position: relative; flex: 1; min-height: 160px; border-radius: 5px; overflow: hidden; background: #000; }
+  #world-frame { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
+  #world-empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--text-dim2);
+    font: 11px var(--font-system); letter-spacing: .1em; pointer-events: none; }
+  #world-frame-wrap.live #world-empty { display: none; }
+  #world-cap { font-size: 12px; color: var(--text-dim); margin-top: 8px; min-height: 16px; }
+  #world-cap b { color: var(--text); font-weight: 500; }
+  #world-form { margin-top: 8px; }
+  #world-q { width: 100%; background: transparent; border: 1px solid var(--line); border-radius: 5px; padding: 7px 9px; color: var(--text);
+    font: 12px var(--font-ui); outline: none; }
+  #world-q:focus { border-color: var(--accent); }
+  /* ⌘K palette */
+  #palette { position: fixed; inset: 0; z-index: 9000; background: rgba(0,0,0,.42); display: flex; justify-content: center; align-items: flex-start; padding-top: 14vh; }
+  #palette[hidden] { display: none; }
+  .pal-box { width: min(620px, calc(100vw - 32px)); background: var(--surface); border: 1px solid var(--line); border-radius: 10px;
+    box-shadow: 0 24px 60px rgba(0,0,0,.45); overflow: hidden; }
+  #pal-q { width: 100%; border: 0; border-bottom: 1px solid var(--line); background: transparent; color: var(--text); padding: 15px 16px;
+    font: 15px var(--font-ui); outline: none; }
+  #pal-list { list-style: none; max-height: 52vh; overflow-y: auto; padding: 6px; margin: 0; }
+  #pal-list li { display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 6px; cursor: pointer; font-size: 13px; color: var(--text); }
+  #pal-list li .pg { width: 20px; text-align: center; opacity: .8; }
+  #pal-list li .ph { margin-left: auto; color: var(--text-dim2); font: 10px var(--font-system); letter-spacing: .1em; }
+  #pal-list li.sel { background: color-mix(in oklab, var(--accent) 16%, transparent); }
+  .pal-foot { border-top: 1px solid var(--line); padding: 8px 14px; color: var(--text-dim2); font: 10px var(--font-system); letter-spacing: .08em; }
   #cmd-left   { grid-area: cleft;   display: flex; flex-direction: column; gap: 14px; min-height: 0; min-width: 0; }
   #cmd-center { grid-area: ccenter; display: flex; flex-direction: column; min-height: 0; min-width: 0; position: relative; }
   #cmd-right  { grid-area: cright;  display: flex; flex-direction: column; gap: 14px; min-height: 0; min-width: 0; }
@@ -1371,6 +1440,13 @@
         </div>
         <div id="cmdstage" class="l1">
           <div id="cmd-left">
+            <!-- AGENT FLOOR (zones layout): one desk per role, lit while that role is working, plus the
+                 free local slot. Rendered from the long-run payload and the fleet updates. -->
+            <div class="hcard zone-only" id="floor-card">
+              <div class="hcard-h">⬡ AGENT FLOOR<span class="hc-r" id="floor-count"></span></div>
+              <div id="floor-desks"></div>
+              <div id="floor-slot"></div>
+            </div>
             <div class="hcard" id="vitals-card">
               <div class="hcard-h">⬡ SYSTEM VITALS</div>
               <div id="gauges">
@@ -1405,6 +1481,14 @@
             <div id="chat"></div>
           </div>
           <div id="cmd-right">
+            <!-- WORLD (zones layout): a live public webcam from worldwatcher.live — the place he asked
+                 to see, else the city of his next event, else the nearest camera to home. -->
+            <div class="hcard zone-only" id="world-card">
+              <div class="hcard-h">◈ WORLD<span class="hc-r" id="world-why"></span></div>
+              <div id="world-frame-wrap"><iframe id="world-frame" title="Live camera" allow="autoplay; fullscreen" referrerpolicy="no-referrer" sandbox="allow-scripts allow-same-origin allow-popups"></iframe><div id="world-empty">Loading a live camera…</div></div>
+              <div id="world-cap"></div>
+              <form id="world-form" autocomplete="off"><input id="world-q" placeholder="show me… (Tokyo, Amsterdam, New York)" aria-label="Show a place" /></form>
+            </div>
             <div class="hcard" id="media-card">
               <div class="hcard-h">◈ VISUAL FEED<span class="hc-r">HOLO</span></div>
               <div class="holo-stage"><span class="hs-ring a"></span><span class="hs-ring b"></span><div id="vvis"></div></div>
@@ -2567,6 +2651,7 @@ document.getElementById('caps-q') && document.getElementById('caps-q').addEventL
 // because a question that has been waiting twenty minutes is the only part that is urgent.
 const MARK = { done: '✓', doing: '▸', blocked: '!', todo: '·' };
 function renderLongRun(d) {
+  window._floorLR = d; try { window.renderFloor && window.renderFloor(); } catch {}
   const box = document.getElementById('longrun');
   if (!box) return;
   if (!d || (!d.running && !d.goal)) { box.hidden = true; return; }
@@ -4257,6 +4342,7 @@ if (spd) {
   // COMMAND-tab fleet summary: mirror the suit roster as a mini list + status-bar count.
   const fleetMini = new Map();   // id → { role, status }
   function renderFleetMini() {
+    window._floorFleet = fleetMini; try { window.renderFloor && window.renderFloor(); } catch {}
     const box = document.getElementById('fleet-mini'); if (!box) return;
     const rows = [...fleetMini.values()];
     box.innerHTML = '';
@@ -4395,7 +4481,7 @@ function summonInput(on) {
 }
 document.addEventListener('keydown', (e) => {
   const typing = /^(INPUT|TEXTAREA)$/.test((e.target && e.target.tagName) || '');
-  if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) { e.preventDefault(); summonInput(true); return; }
+  if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) { e.preventDefault(); if (window.openPalette) window.openPalette(); else summonInput(true); return; }
   if (e.key === 'Escape' && document.body.classList.contains('summon')) { summonInput(false); return; }
   // A printable keystroke while idle in ambient → summon + seed the character.
   if (!typing && document.body.classList.contains('ambient') && e.key.length === 1 && !e.metaKey && !e.ctrlKey && !e.altKey) {
@@ -5032,6 +5118,14 @@ window.holoSpin = function (mount, model) {
 
   <!-- CALL — ring Siddhant's own phone, or have BhatBot call someone in his address book.
        The Twilio conversation webhook is the same either way, so both are real two-way calls. -->
+  <!-- ⌘K: everything that is not one of the three zones lives behind this. -->
+  <div id="palette" hidden role="dialog" aria-modal="true" aria-label="Command palette">
+    <div class="pal-box">
+      <input id="pal-q" placeholder="Ask BhatBot, or jump to… (Fleet, Health, Settings, show me Tokyo)" autocomplete="off" aria-label="Command" />
+      <ul id="pal-list" role="listbox"></ul>
+      <div class="pal-foot">↵ run · ↑↓ choose · esc close · ⌘1–9 still jump straight to a panel</div>
+    </div>
+  </div>
   <div id="call-scrim" style="display:none"></div>
   <div id="call-card" style="display:none" role="dialog" aria-modal="true" aria-label="Place a call">
     <div class="cl-q">📞 Place a call</div>
@@ -5041,5 +5135,138 @@ window.holoSpin = function (mount, model) {
     <div id="call-list"></div>
     <div class="cl-foot"><div class="cl-status" id="call-status"></div><button class="cl-x" id="call-close">Close</button></div>
   </div>
+
+<script>
+// ══ THE THREE ZONES ══════════════════════════════════════════════════════════════════════════════
+// TALK | AGENT FLOOR | WORLD, everything else behind ⌘K (Siddhant, 2026-11-12). Layout is a class on
+// <body>; the classic rail layout is one palette command away and remembered per machine.
+(function zones() {
+  const $ = (q) => document.querySelector(q);
+  let classic = false; try { classic = localStorage.getItem('bb.layout') === 'classic'; } catch {}
+  const longrun = $('#longrun'), lrHome = longrun && longrun.parentElement, lrNext = longrun && longrun.nextElementSibling;
+  function setLayout(z) {
+    document.body.classList.toggle('zones', z);
+    try { localStorage.setItem('bb.layout', z ? 'zones' : 'classic'); } catch {}
+    // The long-run plan belongs on the floor in this layout and in the Fleet panel in the classic one.
+    if (longrun) { if (z) $('#floor-slot').appendChild(longrun); else if (lrHome) lrHome.insertBefore(longrun, lrNext); }
+    if (z && typeof showPanel === 'function' && typeof curPanel !== 'undefined' && curPanel !== 'chat') showPanel('chat');
+  }
+  setLayout(!classic);
+  window.setZonesLayout = setLayout;
+
+  // ── the floor: one desk per role, plus the free local slot ──
+  const DESKS = [
+    ['coding', 'FORGE', 'CODE', '#aeb40d'], ['research', 'ORACLE', 'RESEARCH', '#61c55e'], ['browser', 'SCOUT', 'BROWSER', '#fd8537'],
+    ['memory', 'VAULT', 'MEMORY', '#87a7fe'], ['creative', 'ATELIER', 'CREATE', '#24b7ff'], ['local', 'MULE', 'LOCAL · FREE', '#9aa4ad'],
+  ];
+  const ROLE_OF = { forge: 'coding', oracle: 'research', scout: 'browser', vault: 'memory', atelier: 'creative', mule: 'local',
+    coding: 'coding', code: 'coding', research: 'research', browser: 'browser', web: 'browser', memory: 'memory', creative: 'creative', design: 'creative', create: 'creative' };
+  const roleOf = (x) => ROLE_OF[String(x || '').toLowerCase().replace(/[-\s]\d+$/, '').replace(/^🦾\s*/, '')] || null;
+  window.renderFloor = function renderFloor() {
+    const box = $('#floor-desks'); if (!box) return;
+    const live = {};
+    const lr = window._floorLR;
+    if (lr && !lr.stoppedBecause) {
+      for (const a of (lr.working || [])) {
+        const r = a.lane === 'local' ? 'local' : roleOf(a.name) || roleOf(a.role);
+        if (!r) continue;
+        (live[r] = live[r] || []).push(a.step ? `${a.label || ''} · ${a.step}` : (a.task || a.label || 'working'));
+      }
+    }
+    const fm = window._floorFleet;
+    if (fm && fm.forEach) fm.forEach((a) => {
+      if (['done', 'failed', 'stopped'].includes(a.status)) return;
+      const r = roleOf(a.role); if (r) (live[r] = live[r] || []).push(a.task || a.status || 'working');
+    });
+    box.innerHTML = '';
+    let n = 0;
+    for (const [role, name, label, col] of DESKS) {
+      const tasks = live[role] || [];
+      if (tasks.length) n += tasks.length;
+      const d = document.createElement('div');
+      d.className = 'desk' + (tasks.length ? ' on' : '') + (role === 'local' ? ' local' : '');
+      d.style.setProperty('--dc', col);
+      d.innerHTML = '<div class="dn"><i></i><span></span></div><div class="dr"></div><div class="dt"></div>';
+      d.querySelector('.dn span').textContent = name + (tasks.length > 1 ? ` ×${tasks.length}` : '');
+      d.querySelector('.dr').textContent = label;
+      d.querySelector('.dt').textContent = tasks.length ? String(tasks[0]).slice(0, 120) : (role === 'local' ? 'free slot — idle' : 'idle');
+      box.appendChild(d);
+    }
+    const c = $('#floor-count'); if (c) c.textContent = n ? `${n} WORKING` : 'IDLE';
+  };
+  window.renderFloor();
+
+  // ── the world ──
+  const frame = $('#world-frame'), wrap = $('#world-frame-wrap'), cap = $('#world-cap'), why = $('#world-why');
+  function showWorld(v) {
+    if (!v || !v.url || !frame) return;
+    if (frame.src !== v.url) { wrap.classList.remove('live'); frame.src = v.url; }
+    const far = v.distanceKm > 25 && (v.resolved || v.asked);
+    cap.innerHTML = '';
+    const b = document.createElement('b'); b.textContent = v.name || 'Live camera';
+    cap.appendChild(b);
+    cap.appendChild(document.createTextNode(' · ' + (v.place || '') + (far ? ` — nearest to ${v.resolved || v.asked}, ${v.distanceKm} km away` : '')));
+    if (why) why.textContent = v.reason === 'asked' ? 'ON REQUEST' : (v.why ? v.why.toUpperCase().slice(0, 34) : 'LIVE');
+  }
+  if (frame) frame.addEventListener('load', () => wrap.classList.add('live'));
+  if (window.bhatbot && window.bhatbot.onWorldShow) window.bhatbot.onWorldShow(showWorld);
+  if (window.bhatbot && window.bhatbot.worldContext) window.bhatbot.worldContext().then(showWorld).catch(() => {});
+  const form = $('#world-form');
+  if (form) form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const q = $('#world-q').value.trim(); if (!q) return;
+    cap.textContent = 'Finding a camera…';
+    const r = await window.bhatbot.worldFind(q).catch(() => null);
+    if (r && r.ok) { showWorld({ ...r, reason: 'asked' }); $('#world-q').value = ''; }
+    else cap.textContent = (r && r.why) || 'No camera found.';
+  });
+  window.worldShowPlace = async (q) => { const r = await window.bhatbot.worldFind(q).catch(() => null); if (r && r.ok) showWorld({ ...r, reason: 'asked' }); return r; };
+
+  // ── ⌘K palette ──
+  const pal = $('#palette'), pq = $('#pal-q'), pl = $('#pal-list');
+  const panels = [...document.querySelectorAll('#rail .navbtn')].map((b) => ({
+    g: (b.querySelector('.g') || {}).textContent || '·', label: b.textContent.replace((b.querySelector('.g') || {}).textContent || '', '').trim(),
+    hint: (b.title || '').split('—')[0].trim(), run: () => b.click(),
+  }));
+  const fixed = () => [
+    { g: '◈', label: 'Show me a place…', hint: 'WORLD', run: (q) => window.worldShowPlace(q.replace(/^show me\s*/i, '') || 'Tokyo'), match: /^(show me|what'?s it like in)\b/i },
+    { g: '⌨', label: document.body.classList.contains('ambient') ? 'Show the text bar (type + read replies)' : 'Hide the text bar (voice only)', hint: 'TALK', run: () => { const b = document.getElementById('kb'); if (b) b.click(); } },
+    { g: '▦', label: document.body.classList.contains('zones') ? 'Classic layout (navigation rail)' : 'Three-zone layout', hint: 'LAYOUT', run: () => setLayout(!document.body.classList.contains('zones')) },
+  ];
+  let items = [], sel = 0;
+  function build() {
+    const q = pq.value.trim();
+    const all = [...fixed(), ...panels];
+    const ql = q.toLowerCase();
+    const hits = q ? all.filter((it) => (it.match && it.match.test(q)) || it.label.toLowerCase().includes(ql) || (it.hint || '').toLowerCase().includes(ql)) : all;
+    items = q ? [{ g: '⚛', label: `Ask BhatBot: “${q}”`, hint: 'ENTER', run: () => { if (typeof send === 'function') send(q); } }, ...hits] : all;
+    // "show me X" goes to the World first, not to chat.
+    if (q && /^(show me|what'?s it like in)\b/i.test(q)) items.sort((a, b) => (b.match ? 1 : 0) - (a.match ? 1 : 0));
+    sel = 0;
+    pl.innerHTML = '';
+    items.forEach((it, i) => {
+      const li = document.createElement('li'); li.role = 'option'; if (i === sel) li.className = 'sel';
+      li.innerHTML = '<span class="pg"></span><span class="pl"></span><span class="ph"></span>';
+      li.querySelector('.pg').textContent = it.g; li.querySelector('.pl').textContent = it.label; li.querySelector('.ph').textContent = it.hint || '';
+      li.addEventListener('mousedown', (e) => { e.preventDefault(); sel = i; run(); });
+      pl.appendChild(li);
+    });
+  }
+  function mark() { [...pl.children].forEach((li, i) => li.classList.toggle('sel', i === sel)); const el = pl.children[sel]; if (el) el.scrollIntoView({ block: 'nearest' }); }
+  function close() { pal.hidden = true; pq.value = ''; }
+  function run() { const it = items[sel]; const q = pq.value.trim(); close(); if (it) try { it.run(q); } catch (e) { console.warn(e); } }
+  window.openPalette = () => { pal.hidden = false; pq.value = ''; build(); setTimeout(() => pq.focus(), 0); };
+  if (pq) {
+    pq.addEventListener('input', build);
+    pq.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowDown') { e.preventDefault(); sel = Math.min(items.length - 1, sel + 1); mark(); }
+      else if (e.key === 'ArrowUp') { e.preventDefault(); sel = Math.max(0, sel - 1); mark(); }
+      else if (e.key === 'Enter') { e.preventDefault(); run(); }
+      else if (e.key === 'Escape') { e.preventDefault(); close(); }
+    });
+  }
+  if (pal) pal.addEventListener('mousedown', (e) => { if (e.target === pal) close(); });
+})();
+</script>
 </body>
 </html>
