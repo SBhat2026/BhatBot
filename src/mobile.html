@@ -325,24 +325,7 @@
   <div class="sheet cf">
     <div class="sh-h">SETTINGS <span class="x" id="setclose">✕</span></div>
     <label for="voicesel">Voice</label>
-    <select id="voicesel">
-      <optgroup label="British — male">
-        <option value="bm_george">George (British, deep — JARVIS)</option>
-        <option value="bm_lewis">Lewis (British)</option>
-        <option value="bm_daniel">Daniel (British)</option>
-        <option value="bm_fable">Fable (British)</option>
-      </optgroup>
-      <optgroup label="British — female">
-        <option value="bf_emma">Emma (British)</option>
-        <option value="bf_isabella">Isabella (British)</option>
-      </optgroup>
-      <optgroup label="American">
-        <option value="am_michael">Michael (US, male)</option>
-        <option value="am_adam">Adam (US, male)</option>
-        <option value="af_bella">Bella (US, female)</option>
-        <option value="af_nicole">Nicole (US, female)</option>
-      </optgroup>
-    </select>
+    <select id="voicesel" disabled><option value="">JARVIS (server-selected ElevenLabs voice)</option></select>
     <label for="spdrange">Speed — <span id="spdval">1.0×</span> <span style="color:var(--dim)">(lower = calmer)</span></label>
     <input id="spdrange" type="range" min="0.6" max="1.4" step="0.05" value="1">
     <button id="vtest" class="testbtn">▶ Test voice</button>
@@ -514,11 +497,11 @@ function stopSpeaking() { ttsSeq++; if (curSrc) { try { curSrc.stop(); } catch {
 // Voice prefs (persisted) — customizable from the ⚙ settings panel.
 // Cloud uses ElevenLabs (Jarvis). Don't default to a local Kokoro voice name — it 404s on EL.
 // Only honor a stored voice if it's a real EL voice id (20-char alnum); else let the cloud pick.
-let voicePref = (function(){ const v = localStorage.getItem('bb_voice') || ''; return /^[A-Za-z0-9]{20}$/.test(v) ? v : ''; })();
+const voicePref = ''; // Server owns the single voice; ignore stale local preferences.
 let speedPref = parseFloat(localStorage.getItem('bb_speed') || '1');
 async function ttsOne(s) {
-  try { const r = await fetch(API + '/tts', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ text: s, voice: voicePref, speed: speedPref }) }).then(x => x.json()); return (r && r.audio) ? b64ToBuf(r.audio) : null; }
-  catch { return null; }
+  try { const r = await fetch(API + '/tts', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ text: s, speed: speedPref }) }).then(x => x.json()); if (!r || !r.audio) throw new Error((r && r.error) || 'No audio returned'); return b64ToBuf(r.audio); }
+  catch (e) { add('err', 'Voice unavailable: ' + e.message); return null; }
 }
 function playBuf(arrBuf, seq) {
   return new Promise((res) => {
@@ -585,7 +568,7 @@ document.getElementById('srvsave').addEventListener('click', () => {
   location.reload();
 });
 settings.addEventListener('click', (e) => { if (e.target === settings) settings.style.display = 'none'; });
-voicesel.addEventListener('change', () => { voicePref = voicesel.value; localStorage.setItem('bb_voice', voicePref); });
+// Voice selection is owned by the server.
 spdrange.addEventListener('input', () => { speedPref = parseFloat(spdrange.value); spdval.textContent = speedPref.toFixed(2) + '×'; localStorage.setItem('bb_speed', String(speedPref)); });
 document.getElementById('vtest').addEventListener('click', async () => {
   ensureCtx(); stopSpeaking(); const seq = ++ttsSeq;

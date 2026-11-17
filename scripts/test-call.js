@@ -101,13 +101,13 @@ ok(digitsOf(null) === '', 'digitsOf: null → ""');
   ok(/publicHostReachable\(\)/.test(fn), 'twilioCall: proves the webhook host is reachable from outside');
   ok(/if \(host && c\.mcpToken && reach\.ok\)/.test(fn),
     'twilioCall: two-way requires a REACHABLE host, not merely a hostname');
-  ok(/oneWay: true/.test(fn), 'twilioCall: the announcement fallback says it is one-way');
+  ok(!/oneWay: true/.test(fn) && /call not placed/.test(fn), 'twilioCall: refuses a call without the selected voice rather than substituting another');
 
   ok(/const target = to \|\| c\.myPhone/.test(fn), 'twilioCall: DEFAULTS to myPhone (every existing caller depends on this)');
   ok(!/to: c\.myPhone/.test(fn), 'twilioCall: no longer hardcodes myPhone as the dialed number');
   // Both real dial sites — the conversation webhook path and the one-shot announcement fallback.
   const dialSites = (fn.match(/calls\.create\(\{[\s\S]{0,200}?to: target/g) || []).length;
-  ok(dialSites === 2, `twilioCall: BOTH dial paths use the target (found ${dialSites})`);
+  ok(dialSites === 1, `twilioCall: only the verified selected-voice path dials the target (found ${dialSites})`);
   ok(/machineDetection/.test(fn), 'twilioCall: voicemail detection is preserved on the two-way path');
 
   const gph = main.slice(main.indexOf('function publicHostReachable('), main.indexOf('const CALL_LOG'));
@@ -171,7 +171,7 @@ try { fs.rmSync(TMP, { recursive: true, force: true }); } catch {}
   // success and the phone played an error. Only an end-to-end probe settles it.
   ok(/voicepreflight\.check\(/.test(fn), 'twilioCall: runs the end-to-end preflight before choosing two-way');
   ok(/reach\.ok && pre\.ok/.test(fn), 'twilioCall: two-way requires the preflight to PASS, not just a reachable host');
-  ok(/falling back to a one-way announcement/.test(fn), 'twilioCall: a failed preflight degrades instead of dialling into an error');
+  ok(/no verified audio webhook; call not placed/.test(fn), 'twilioCall: a failed preflight reports the voice problem without placing a call');
 
   const mcp = fs.readFileSync(path.join(__dirname, '..', 'mcp-server.js'), 'utf8');
   ok(/const ownerParty = \(req\) =>/.test(mcp), 'voice webhook: the owner party is derived, not assumed to be From');

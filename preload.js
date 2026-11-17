@@ -66,6 +66,10 @@ contextBridge.exposeInMainWorld('bhatbot', {
   getBiometrics: (opts) => ipcRenderer.invoke('get-biometrics', opts),                  // Health panel — Garmin biometrics
   onBiometricsUpdate: (cb) => ipcRenderer.on('biometrics-update', (_e, d) => cb(d)),     // proactive monitor pushes
   getOpsStatus: () => ipcRenderer.invoke('get-ops-status'),                              // Manage panel — what BhatBot is running
+  openBrain: () => ipcRenderer.invoke('open-brain'),
+  arrangeWindows: () => ipcRenderer.invoke('arrange-windows'),
+  syncWorkspaceTheme: () => ipcRenderer.send('workspace-theme'),
+  onMemoryPressure: (cb) => { ipcRenderer.on('memory-pressure', (_e, v) => cb(v)); },
   getVitals: () => ipcRenderer.invoke('get-vitals'),                                     // HUD gauges — CPU/MEM/NET/PWR
   onHudCommand: (cb) => ipcRenderer.on('hud-command', (_e, c) => cb(c)),                 // hud_control tool — agent reshapes the HUD
   transcribeAudio: (data) => ipcRenderer.invoke('transcribe-audio', data),

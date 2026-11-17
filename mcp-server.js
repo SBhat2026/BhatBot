@@ -379,7 +379,7 @@ self.addEventListener('fetch', (e) => {
   const xmlEsc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
   // Synthesize `text` in the Jarvis voice → cache → return a <Play>…</Play> element.
-  // Falls back to Twilio <Say> if synthesis is unavailable so the call never goes silent.
+  // Fail the voice leg explicitly rather than substituting a Twilio voice.
   async function sayElement(req, text) {
     const t = String(text || '').trim();
     if (!t) return '';
@@ -395,7 +395,7 @@ self.addEventListener('fetch', (e) => {
         }
       } catch {}
     }
-    return `<Say voice="Google.en-US-Neural2-D">${xmlEsc(t)}</Say>`;
+    throw new Error('Selected ElevenLabs voice unavailable');
   }
   // Voice-recognition tuning (config-driven, sensible defaults). These directly improve how well
   // the call LISTENS: speech `hints` bias Twilio's recognizer toward BhatBot's own vocabulary
@@ -443,7 +443,7 @@ self.addEventListener('fetch', (e) => {
     try {
       if (!twilioVerified(req)) return res.status(403).type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Reject/></Response>');
       const from = req.body.From || '';
-      if (!ownerOk(req)) { console.warn(`[voice] refused ${String(req.body.Direction || '?')} call — ${ownerParty(req)} is not the owner`); return res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Say>Unauthorized.</Say><Hangup/></Response>'); }
+      if (!ownerOk(req)) { console.warn(`[voice] refused ${String(req.body.Direction || '?')} call — ${ownerParty(req)} is not the owner`); return res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>'); }
       const callSid = req.body.CallSid || '';
       const answeredBy = String(req.body.AnsweredBy || '');
       const reason = String(req.query.msg || '').trim();
@@ -481,7 +481,8 @@ self.addEventListener('fetch', (e) => {
       const play = await sayElement(req, opener);
       res.type('text/xml').send(gatherTwiml(req, play, false));
     } catch (e) {
-      res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?><Response><Say>System error.</Say><Hangup/></Response>`);
+      console.warn('[voice] selected voice failed:', e.message);
+      res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>`);
     }
   });
 
@@ -490,7 +491,7 @@ self.addEventListener('fetch', (e) => {
     try {
       if (!twilioVerified(req)) return res.status(403).type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Reject/></Response>');
       const from = req.body.From || '';
-      if (!ownerOk(req)) { console.warn(`[voice] refused ${String(req.body.Direction || '?')} call — ${ownerParty(req)} is not the owner`); return res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Say>Unauthorized.</Say><Hangup/></Response>'); }
+      if (!ownerOk(req)) { console.warn(`[voice] refused ${String(req.body.Direction || '?')} call — ${ownerParty(req)} is not the owner`); return res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>'); }
       const callSid = req.body.CallSid || '';
       const speech = req.body.SpeechResult || '';
       if (!speech.trim()) {
@@ -537,7 +538,8 @@ self.addEventListener('fetch', (e) => {
       if (r.hangup && endVoiceCall) endVoiceCall(callSid);
       res.type('text/xml').send(gatherTwiml(req, play, r.hangup));
     } catch (e) {
-      res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?><Response><Say>System error.</Say><Hangup/></Response>`);
+      console.warn('[voice] selected voice failed:', e.message);
+      res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>`);
     }
   });
 
@@ -560,7 +562,8 @@ self.addEventListener('fetch', (e) => {
       const play = p.text ? await sayElement(req, p.text) : '';
       res.type('text/xml').send(gatherTwiml(req, play, false));
     } catch (e) {
-      res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?><Response><Say>System error.</Say><Hangup/></Response>`);
+      console.warn('[voice] selected voice failed:', e.message);
+      res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>`);
     }
   });
 

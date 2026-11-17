@@ -50,7 +50,9 @@ async function sayEl(host, text) {
     const r = await voice.tts(t);
     if (r && r.audio) { const id = (++clipSeq).toString(36) + Date.now().toString(36); clips.set(id, { buf: Buffer.from(r.audio, 'base64'), at: Date.now() }); return `<Play>https://${host}/vc/${id}.mp3</Play>`; }
   } catch {}
-  return `<Say voice="Google.en-US-Neural2-D">${xmlEsc(t)}</Say>`;   // fallback so the call never goes silent
+  console.warn('[voice] selected ElevenLabs voice unavailable; ending call');
+  try { db.pushActivity('voice-error', 'Selected ElevenLabs voice unavailable; call ended.'); } catch {}
+  return '<Hangup/>';
 }
 // Turn-taking knobs (env-tunable): the caller fed back that BhatBot interrupted + missed speech.
 //  • speechTimeout = seconds of trailing SILENCE before we treat the turn as done. "auto" uses
@@ -64,7 +66,7 @@ const GATHER_TIMEOUT = process.env.GATHER_SPEECH_TIMEOUT || '3';
 const GATHER_MODEL = process.env.GATHER_SPEECH_MODEL || 'phone_call';
 const GATHER_ENHANCED = process.env.GATHER_ENHANCED !== '0';
 const GATHER_BARGEIN = process.env.GATHER_BARGEIN !== '0';
-const gather = (host, token, playEl, leg) => `<?xml version="1.0" encoding="UTF-8"?><Response>` +
+const gather = (host, token, playEl, leg) => playEl === '<Hangup/>' ? hangup('') : `<?xml version="1.0" encoding="UTF-8"?><Response>` +
   `<Gather input="speech" action="https://${host}/voice/${token}/gather?leg=${leg}" method="POST" speechTimeout="${GATHER_TIMEOUT}" speechModel="${GATHER_MODEL}" enhanced="${GATHER_ENHANCED}" bargeIn="${GATHER_BARGEIN}" actionOnEmptyResult="true">${playEl}</Gather>` +
   `<Redirect method="POST">https://${host}/voice/${token}/gather?leg=${leg}</Redirect></Response>`;
 const hangup = (playEl) => `<?xml version="1.0" encoding="UTF-8"?><Response>${playEl}<Hangup/></Response>`;

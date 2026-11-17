@@ -241,6 +241,12 @@
 
   #synapse-panel .sy-btn { background: var(--surface); border: 1px solid var(--line); color: var(--text-dim); border-radius: 7px; padding: 4px 10px; font-size: 11.5px; cursor: pointer; }
   #synapse-panel .sy-btn:hover { color: var(--text); border-color: var(--accent-dim); }
+  #sy-search { width: 160px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); color: var(--text); padding: 5px 9px; }
+  #sy-legend { position: absolute; left: 20px; bottom: 45px; display: flex; gap: 14px; flex-wrap: wrap; max-width: 65%; pointer-events: none; font: 12px var(--font-ui); color: var(--text-dim); }
+  #sy-legend span { display: flex; gap: 5px; align-items: center; } #sy-legend i { width: 7px; height: 7px; border-radius: 50%; }
+  #sy-guide { position: absolute; left: 20px; bottom: 18px; color: var(--text-dim2); font: 11px var(--font-ui); pointer-events: none; }
+  .brain-cluster { position: absolute; transform: translate(-50%,-50%); color: var(--text); border-left: 3px solid; padding: 3px 7px; background: var(--surface); border-radius: 3px; font: 12px var(--font-ui); pointer-events: none; }
+  #synapse-panel .panel-head { flex-wrap: wrap; height: auto; min-height: 48px; gap: 8px; padding: 10px 12px; } #synapse-panel .sy-tools { flex-wrap: wrap; }
   #sy-body { position: relative; flex: 1; min-height: 0; }
   #sy-empty { position: absolute; inset: 0; display: none; align-items: center; justify-content: center;
     text-align: center; padding: 0 32px; color: var(--text-dim); font-size: 12.5px; letter-spacing: .04em; pointer-events: none; }
@@ -781,6 +787,9 @@
      TALK | AGENT FLOOR | WORLD, with everything else behind ⌘K. Chosen by Siddhant 2026-11-12. It is
      a re-zoning of the existing columns, not new widgets: every element keeps its id and its code,
      so the classic layout is one class away (palette → "Classic layout"). */
+  body.zones .panel-head, body.zones .hcard-h { font-family: var(--font-ui); letter-spacing: .02em; }
+  body.zones .panel-head { background: var(--surface); border-bottom: 1px solid var(--line); }
+  body.memory-constrained *, body.memory-constrained *::before, body.memory-constrained *::after { animation-play-state: paused !important; }
   .zone-only { display: none; }
   body.zones .zone-only { display: flex; }
   /* FOCUS LAYOUT (2026-11-14, replacing the three fixed zones). One stage — the orb when nothing is
@@ -1462,7 +1471,7 @@
       <button class="navbtn" data-panel="code"     title="Code — embedded Claude Code terminal (⌘5)"><span class="g">⌗</span>CODE</button>
       <button class="navbtn" data-panel="synapse"  title="Synapse — the second brain (⌘6)"><span class="g">✸</span>SYNAPSE</button>
       <button class="navbtn" data-panel="projects" title="Projects — everything the second brain has aggregated, by project (⌘7)"><span class="g">▤</span>PROJECTS</button>
-      <div class="rl-foot">
+      <div class="rl-foot"><button class="navbtn" id="arrange-windows" title="Arrange BhatBot windows"><span class="g">▧</span>Arrange windows</button>
         <button class="navbtn" id="callbtn" title="Call — ring your phone, or have BhatBot call a contact (⌘⇧C)"><span class="g">📞</span>CALL</button>
         <button class="navbtn" data-panel="voice"    title="Voice — tune JARVIS (⌘8)"><span class="g">🎚</span>VOICE</button>
         <button class="navbtn" data-panel="settings" title="Settings — API key & config (⌘9)"><span class="g">⚙</span>SETTINGS</button>
@@ -1695,14 +1704,14 @@
   </div>
 
   <!-- SYNAPSE — the second brain: hybrid knowledge graph (2D force-graph + 3D toggle + prune/inbox) -->
-  <div id="synapse-panel" class="stage-panel">
+  <div id="synapse-panel" class="stage-panel mode3d">
     <div class="panel-head"><b>✸ SYNAPSE · SECOND BRAIN</b>
       <span class="sy-tools">
         <span id="sy-budget"></span>
         <span id="sy-stats" class="sy-stats"></span>
         <span id="sy-weave" class="sy-stats sy-weave"></span>
         <button id="sy-build" class="sy-btn" title="Import memory + find connections">⟳ Build</button>
-        <button id="sy-mode" class="sy-btn" title="Toggle 2D / 3D">3D</button>
+        <input id="sy-search" aria-label="Search memories" placeholder="Find a memory…" /><button id="sy-popout" class="sy-btn" title="Open brain in an automatically arranged window">Open window</button><button id="sy-reset" class="sy-btn">Reset view</button><button id="sy-mode" class="sy-btn" title="Toggle 2D / 3D">2D map</button>
       </span>
       <span class="panel-back" data-back>← Command</span>
     </div>
@@ -1714,7 +1723,7 @@
            the way the office says "no agents deployed" rather than showing an empty room. -->
       <div id="sy-empty"><span>Nothing in the second brain yet — press <b>⟳ Build</b> to import memory and find connections.</span></div>
       <canvas id="sy-canvas"></canvas>
-      <div id="sy-3d"></div>
+      <div id="sy-3d"></div><div id="sy-legend"></div><div id="sy-guide">Drag to orbit · scroll to zoom · select a memory to see its connections</div>
       <div id="sy-suggest" class="empty">
         <div class="sy-sg-h"><span>◆ MOVE AHEAD ON</span></div>
         <div id="sy-suggest-list"></div>
@@ -2562,6 +2571,7 @@ async function initHomeSetting() {
 function showPanel(id) {
   if (id === 'command') id = 'chat';   // hud_control speaks tab names; 'chat' is the historical home id
   curPanel = id;
+  window.dispatchEvent(new CustomEvent('bhatbot-panel', { detail: id }));
   applyStageVisibility();
   document.querySelectorAll('.stage-panel').forEach((p) => p.classList.toggle('active', p.id === id + '-panel'));
   // Rail highlights its own tabs; agent-surfaced panels (activity/canvas/…) light nothing.
@@ -2916,6 +2926,7 @@ window.bhatbot.onStudioReload && window.bhatbot.onStudioReload(() => reloadStudi
     // An empty graph draws nothing, which is indistinguishable from a panel that failed to load.
     // Say which, on every ingest, so the answer is never inferred from a blank canvas.
     try { document.getElementById('sy-body').classList.toggle('is-empty', !G.nodes.length); } catch {}
+    if (three) update3D();
     recomputeDegree();          // hover explains a node's ROLE, which is degree-relative
     invalidate();               // new data always earns one repaint, settled or not
 
@@ -3151,8 +3162,8 @@ window.bhatbot.onStudioReload && window.bhatbot.onStudioReload(() => reloadStudi
   }
   const bBtn = document.getElementById('sy-build');
   bBtn.onclick = async () => { bBtn.textContent = 'building…'; bBtn.disabled = true; try { await window.bhatbot.synapseBuild(); } catch {} bBtn.textContent = '⟳ Build'; bBtn.disabled = false; };
-  document.getElementById('sy-mode').onclick = () => { panel.classList.toggle('mode3d'); if (panel.classList.contains('mode3d')) init3D(); else invalidate(); };
-  window.bhatbot.onSynapseUpdate && window.bhatbot.onSynapseUpdate((g) => { ingest(g); if (panel.classList.contains('mode3d')) update3D(); });
+  document.getElementById('sy-mode').onclick = () => { panel.classList.toggle('mode3d'); document.getElementById('sy-mode').textContent = panel.classList.contains('mode3d') ? '2D map' : '3D network'; if (panel.classList.contains('mode3d')) init3D(); else { size(); invalidate(); } };
+  window.bhatbot.onSynapseUpdate && window.bhatbot.onSynapseUpdate((g) => { ingest(g); });
   // ── THE WEAVER'S LIVE FEED ───────────────────────────────────────────────────────────────────────
   // Connections are found continuously in the background; this is where you watch it happen. A new
   // link REHEATS the layout slightly rather than re-running it, so the graph nudges into its new
@@ -3173,7 +3184,7 @@ window.bhatbot.onStudioReload && window.bhatbot.onStudioReload(() => reloadStudi
   window._syFlash = _flash;
   const navBtn = document.querySelector('.navbtn[data-panel="synapse"]');
   // On open: ensure the graph is populated (free import if empty) so it's never blank.
-  if (navBtn) navBtn.addEventListener('click', () => setTimeout(async () => { size(); ingest(await (window.bhatbot.synapseEnsure ? window.bhatbot.synapseEnsure() : window.bhatbot.synapseGraph())); }, 60));
+  if (navBtn) navBtn.addEventListener('click', () => setTimeout(async () => { size(); ingest(await (window.bhatbot.synapseEnsure ? window.bhatbot.synapseEnsure() : window.bhatbot.synapseGraph())); if (panel.classList.contains('mode3d')) init3D(); }, 60));
   // size() reassigns cv.width, which CLEARS the canvas — so a resize must always earn a repaint,
   // otherwise an on-demand loop leaves the graph blank until something else happens to move.
   window.addEventListener('resize', () => { if (panel.classList.contains('active')) { size(); invalidate(); } });
@@ -3246,165 +3257,32 @@ window.bhatbot.onStudioReload && window.bhatbot.onStudioReload(() => reloadStudi
   }
   cv.addEventListener('mouseleave', () => showTip(null));
 
-  // ---- 3D constellation (reuses the 2D positions + a hashed z spread) ----
-  //
-  // INSTANCED. The old renderer built one Mesh per node and one Line per edge, rebuilding all of
-  // them on every update — at real scale that is ~4,100 objects and ~4,100 draw calls per frame for
-  // a graph that is mostly dots. Nodes are now a single InstancedMesh and edges a single
-  // LineSegments: two draw calls, which is also what makes per-frame raycast hovering affordable.
-  let three = null;
-  const hashCode = (s) => { let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0; return Math.abs(h); };
-  async function init3D() { if (three) { update3D(); return; }
-    try { const THREE = await import('./vendor/three/three.module.js'); const host = document.getElementById('sy-3d');
-      const rn = new THREE.WebGLRenderer({ antialias: true, alpha: true });
-      rn.setPixelRatio(Math.min(devicePixelRatio, 2));
-      rn.setSize(host.clientWidth, host.clientHeight); host.innerHTML = ''; host.appendChild(rn.domElement);
-      const sc = new THREE.Scene();
-      const cam = new THREE.PerspectiveCamera(55, host.clientWidth / host.clientHeight, 0.1, 8000);
-      const grp = new THREE.Group(); sc.add(grp);
-      const ray = new THREE.Raycaster(); ray.params.Points = { threshold: 6 };
-      three = { THREE, rn, sc, cam, grp, host, ray, dist: 660, drag: null, spin: true,
-                inst: null, lines: null, order: [], hover: -1, pointer: null, baseColor: null };
-      rn.domElement.style.cursor = 'grab';
-
-      // ---- hold-and-drag to turn it in ANY direction; slow drift when you let go ------------------
-      // The previous version orbited a camera by azimuth and elevation, with elevation clamped to
-      // ±72° to stop the view flipping over the poles — so "rotate it any way you like" was not
-      // actually true, and the top and bottom of the graph were unreachable. This applies the drag
-      // as an incremental rotation of the GROUP about the camera's own right and up axes, which has
-      // no poles and no clamp: every orientation is reachable, and the idle drift simply continues
-      // from wherever you left it rather than snapping back to a clock-driven angle.
-      const axisX = new THREE.Vector3(1, 0, 0), axisY = new THREE.Vector3(0, 1, 0);
-      const qTmp = new THREE.Quaternion();
-      const rotate = (dx, dy) => {
-        qTmp.setFromAxisAngle(axisY, dx); grp.quaternion.premultiply(qTmp);
-        qTmp.setFromAxisAngle(axisX, dy); grp.quaternion.premultiply(qTmp);
-        lastPick.moving = true;    // the graph moved under a stationary cursor → the hit can change
-      };
-      const onDown = (ev) => { if (ev.button) return;
-        three.drag = { id: ev.pointerId, x: ev.clientX, y: ev.clientY, moved: 0 };
-        try { rn.domElement.setPointerCapture(ev.pointerId); } catch {}
-        rn.domElement.style.cursor = 'grabbing'; showTip(null); };
-      const onMove = (ev) => {
-        three.pointer = { x: ev.clientX, y: ev.clientY };
-        const d = three.drag;
-        if (!d || ev.pointerId !== d.id) return;
-        const dx = ev.clientX - d.x, dy = ev.clientY - d.y; d.x = ev.clientX; d.y = ev.clientY;
-        d.moved += Math.abs(dx) + Math.abs(dy);
-        rotate((dx / Math.max(1, host.clientWidth)) * Math.PI * 2.2,
-               (dy / Math.max(1, host.clientHeight)) * Math.PI * 2.2);
-      };
-      const onUp = (ev) => { const d = three.drag; if (!d || (ev && ev.pointerId !== d.id)) return;
-        try { rn.domElement.releasePointerCapture(d.id); } catch {}
-        // A drag that barely moved was a CLICK on a node, not an attempt to turn the graph.
-        if (d.moved < 4 && three.hover >= 0) { const n = byId[three.order[three.hover]]; if (n) showDetail(n); }
-        three.drag = null; rn.domElement.style.cursor = 'grab'; };
-      rn.domElement.addEventListener('pointerdown', onDown);
-      rn.domElement.addEventListener('pointermove', onMove);
-      rn.domElement.addEventListener('pointerup', onUp);
-      rn.domElement.addEventListener('pointercancel', onUp);
-      rn.domElement.addEventListener('pointerleave', () => { three.pointer = null; showTip(null); });
-      rn.domElement.addEventListener('wheel', (ev) => { ev.preventDefault();
-        three.dist = Math.max(120, Math.min(2600, three.dist * (ev.deltaY < 0 ? 0.9 : 1.1))); }, { passive: false });
-
-      const HOVER_COLOR = new THREE.Color('#ffffff');
-      const tmpColor = new THREE.Color();
-      // Raycasting an InstancedMesh tests every instance behind the bounding sphere, so at ~1,800
-      // nodes it is not free. It only ever changes when the pointer moves or the graph turns, so it
-      // runs on those and not on every frame of an idle drift.
-      let lastPick = { x: -1, y: -1, moving: true };
-      function pick() {
-        if (!three.inst || !three.pointer || three.drag) return -1;
-        if (!lastPick.moving && three.pointer.x === lastPick.x && three.pointer.y === lastPick.y) return three.hover;
-        lastPick = { x: three.pointer.x, y: three.pointer.y, moving: false };
-        const r = rn.domElement.getBoundingClientRect();
-        const nx = ((three.pointer.x - r.left) / r.width) * 2 - 1;
-        const ny = -((three.pointer.y - r.top) / r.height) * 2 + 1;
-        ray.setFromCamera({ x: nx, y: ny }, cam);
-        const hits = ray.intersectObject(three.inst, false);
-        return hits.length ? hits[0].instanceId : -1;
-      }
-      (function anim() { if (!three) return;
-        requestAnimationFrame(anim);
-        // Held = frozen, so you can actually look at what you brought round. Hovering also pauses
-        // the drift: a tooltip attached to a node that keeps sliding away is worse than no tooltip.
-        if (!three.drag && three.hover < 0) rotate(0.0016, 0);
-        cam.position.set(0, 0, three.dist); cam.lookAt(0, 0, 0);
-
-        const hit = pick();
-        if (hit !== three.hover) {
-          if (three.inst && three.baseColor) {
-            const restore = (i) => { if (i >= 0 && i < three.order.length) {
-              tmpColor.setHex(three.baseColor[i]); three.inst.setColorAt(i, tmpColor); } };
-            restore(three.hover);
-            if (hit >= 0) three.inst.setColorAt(hit, HOVER_COLOR);
-            if (three.inst.instanceColor) three.inst.instanceColor.needsUpdate = true;
-          }
-          three.hover = hit;
-          rn.domElement.style.cursor = hit >= 0 ? 'pointer' : (three.drag ? 'grabbing' : 'grab');
-          const n = hit >= 0 ? byId[three.order[hit]] : null;
-          if (n && three.pointer) showTip(n, three.pointer.x, three.pointer.y); else showTip(null);
-        } else if (hit >= 0 && three.pointer) {
-          const n = byId[three.order[hit]];
-          if (n) showTip(n, three.pointer.x, three.pointer.y);
-        }
-        rn.render(sc, cam); })();
+  // The real 3D network owns its geometry and releases old buffers on updates.
+  let three = null, loading3D = null;
+  async function init3D() {
+    if (three) { three.refresh(); return; }
+    if (loading3D) return loading3D;
+    loading3D = import('./brain-network.mjs').then(({ createNetwork }) => {
+      three = createNetwork(document.getElementById('sy-3d'), {
+        colors: TYPE_COLOR, onHover: showTip, onSelect: showDetail,
+        isVisible: () => panel.classList.contains('active') && panel.classList.contains('mode3d'),
+      });
       update3D();
-      window.addEventListener('resize', () => { if (!three) return;
-        rn.setSize(host.clientWidth, host.clientHeight);
-        cam.aspect = host.clientWidth / Math.max(1, host.clientHeight); cam.updateProjectionMatrix(); });
-    } catch (e) { console.warn('synapse 3d unavailable', e); }
+    }).catch(e => { console.warn('brain 3D unavailable', e); panel.classList.remove('mode3d'); document.getElementById('sy-mode').textContent = 'Retry 3D'; }).finally(() => { loading3D = null; });
+    return loading3D;
   }
-
   function update3D() {
     if (!three) return;
-    const { THREE, grp } = three;
-    for (const c of [...grp.children]) { grp.remove(c); c.geometry && c.geometry.dispose(); c.material && c.material.dispose(); }
-    const N = G.nodes.length;
-    if (!N) { three.inst = null; three.lines = null; three.order = []; return; }
-
-    // Nodes: one instanced sphere, scaled per node by importance. Radius 1 in the geometry so the
-    // per-instance matrix carries the size.
-    const geo = new THREE.SphereGeometry(1, 12, 10);
-    const mat = new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.95 });
-    const inst = new THREE.InstancedMesh(geo, mat, N);
-    const m4 = new THREE.Matrix4(), col = new THREE.Color();
-    const pos = {}, order = new Array(N), base = new Int32Array(N);
-    for (let i = 0; i < N; i++) {
-      const n = G.nodes[i];
-      const z = (hashCode(n.id) % 400) - 200;
-      pos[n.id] = [n.x, -n.y, z];
-      order[i] = n.id;
-      const r = 3 + (n.importance || 1) * 1.3;
-      m4.makeScale(r, r, r); m4.setPosition(n.x, -n.y, z);
-      inst.setMatrixAt(i, m4);
-      col.set(TYPE_COLOR[n.type] || '#8a94a6');
-      inst.setColorAt(i, col);
-      base[i] = col.getHex();
-    }
-    inst.instanceMatrix.needsUpdate = true;
-    if (inst.instanceColor) inst.instanceColor.needsUpdate = true;
-    grp.add(inst);
-
-    // Edges: one LineSegments for everything, with per-vertex colour carrying confirmed-vs-proposed
-    // instead of a material per edge.
-    const drawn = G.edges.filter((e) => pos[e.from] && pos[e.to]);
-    const verts = new Float32Array(drawn.length * 6);
-    const cols = new Float32Array(drawn.length * 6);
-    for (let i = 0; i < drawn.length; i++) {
-      const a = pos[drawn[i].from], b = pos[drawn[i].to];
-      verts.set([a[0], a[1], a[2], b[0], b[1], b[2]], i * 6);
-      const c = drawn[i].status === 'confirmed' ? 0.42 : 0.16;
-      cols.set([c * 0.55, c * 0.82, c, c * 0.55, c * 0.82, c], i * 6);
-    }
-    const lgeo = new THREE.BufferGeometry();
-    lgeo.setAttribute('position', new THREE.BufferAttribute(verts, 3));
-    lgeo.setAttribute('color', new THREE.BufferAttribute(cols, 3));
-    const lines = new THREE.LineSegments(lgeo, new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.85 }));
-    grp.add(lines);
-
-    three.inst = inst; three.lines = lines; three.order = order; three.baseColor = base; three.hover = -1;
+    const query = document.getElementById('sy-search').value.trim().toLowerCase();
+    three.update(query ? { nodes: G.nodes.filter(n => [n.label,n.text,n.type].join(' ').toLowerCase().includes(query)), edges: G.edges } : G);
   }
+  new MutationObserver(() => { if (panel.classList.contains('active') && panel.classList.contains('mode3d')) { init3D(); if (!G.nodes.length) (window.bhatbot.synapseEnsure ? window.bhatbot.synapseEnsure() : window.bhatbot.synapseGraph()).then(ingest).catch(() => {}); } }).observe(panel, { attributes: true, attributeFilter: ['class'] });
+  document.getElementById('sy-popout').onclick = () => window.bhatbot.openBrain();
+  document.getElementById('sy-reset').onclick = () => three && three.reset();
+  document.getElementById('sy-search').oninput = update3D;
+  document.getElementById('sy-legend').innerHTML = Object.entries(TYPE_COLOR).map(([kind, color]) => `<span><i style="background:${color}"></i>${kind}</span>`).join('');
+  window.addEventListener('bhatbot-pressure', e => { if (three) three.setPressure(e.detail.level === 'hot' || e.detail.level === 'critical'); });
+
 })();
 
 // ── SLASH-COMMAND AUTOCOMPLETE ──────────────────────────────────────────────────────────────────
@@ -4912,6 +4790,7 @@ function resetWave() {
     if (document.hidden || !window.bhatbot.getVitals) return;
     let v; try { v = await window.bhatbot.getVitals(); } catch { return; }
     if (!v) return;
+    window.dispatchEvent(new CustomEvent('bhatbot-pressure', { detail: { level: v.pressure || 'nominal' } }));
     setG(G.cpu, v.cpu != null ? v.cpu : '—', v.cpu || 0);
     setG(G.mem, v.mem != null ? v.mem : '—', v.mem || 0);
     setG(G.net, v.net != null ? v.net : '—', Math.min(100, (v.net || 0) * 2.5));
@@ -5237,6 +5116,12 @@ window.holoSpin = function (mount, model) {
     floorLoad(want.floor);
   }
   window.focusRelayout = relayout;
+  window.bhatbot.onMemoryPressure && window.bhatbot.onMemoryPressure(v => {
+    body.classList.toggle('memory-constrained', v.active);
+    for (const id of ['fleet3d','floor3d']) { const f=document.getElementById(id); if (f && f.contentWindow) f.contentWindow.postMessage({ type:'memory-pressure', level:v.level }, '*'); }
+    window.dispatchEvent(new CustomEvent('bhatbot-pressure', { detail: v }));
+    if (v.active) { vitalsUntil=Date.now()+60000; relayout(); }
+  });
 
   // ── the agent floor: the real 3D office, loaded only while it is on screen ──
   const f3d = $('#floor3d'); let unloadTimer = null, floorCount = 0;
@@ -5372,6 +5257,7 @@ window.holoSpin = function (mount, model) {
   scrim.addEventListener('click', collapse);
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && document.querySelector('.xp') && (!$('#palette') || $('#palette').hidden)) collapse(); });
 
+  document.getElementById('arrange-windows').onclick = () => window.bhatbot.arrangeWindows();
   setLayout(!classic);
   window.renderFloor();
 

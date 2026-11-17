@@ -4165,6 +4165,19 @@ const wm = require('./window-manager')({
   getMainWindow: () => mainWindow, createWindow,
   paths: { STUDIO_DIR, STUDIO_INDEX, CHESS_HTML, NEXUS_URL },
 });
+const smartWindows = require('./lib/smart-windows').createSmartWindows({
+  screen, getMainWindow: () => mainWindow, themeCSS: fs.readFileSync(path.join(__dirname, 'src/theme.css'), 'utf8'),
+});
+app.on('browser-window-created', (_event, win) => smartWindows.track(win));
+ipcMain.handle('arrange-windows', () => smartWindows.arrange());
+let brainWindow = null;
+ipcMain.handle('open-brain', () => {
+  if (brainWindow && !brainWindow.isDestroyed()) { brainWindow.show(); brainWindow.focus(); return; }
+  brainWindow = new BrowserWindow({ width: 1000, height: 760, title: 'BhatBot · Brain', webPreferences: { contextIsolation: true, nodeIntegration: false, preload: path.join(__dirname, 'src/preload-brain.js') } });
+  brainWindow.loadFile(path.join(__dirname, 'src/brain.html'));
+  brainWindow.on('closed', () => { brainWindow=null; });
+});
+ipcMain.on('workspace-theme', () => smartWindows.syncThemes());
 const { toggleWindow, studioWebContents, openNexusWindow, ensureStudio, openStudioWindow,
   openChessWindow, openChessApplet, openWorldCupWindow, openInteractive3D,
   openMoleculeWindow, openMapsWindow, openMapsWindowSnapshot, openPresenceWindow } = wm;
@@ -4807,11 +4820,30 @@ function psText() { return new Promise((res) => require('child_process').execFil
 function quitApp(name) {
   return new Promise((res) => require('child_process').execFile('osascript', ['-e', memrelief.quitScript(name)], { timeout: 20000 }, (e, _o, err) => res(e ? { ok: false, error: String(err || e.message).slice(0, 160) } : { ok: true })));
 }
-let _memAskAt = 0; const _memDeclined = new Map();
+let _memAskAt = 0, _memRelieving = false, _memShedAt = 0; const _memDeclined = new Map();
+const pressureTracker = memrelief.createPressureTracker();
+async function shedOwnMemory() {
+  if (Date.now() - _memShedAt < 120000) return;
+  _memShedAt = Date.now();
+  // Evict all models held by BhatBot's local Ollama service, without touching other apps.
+  try {
+    const r = await fetch('http://127.0.0.1:11434/api/ps', { signal: AbortSignal.timeout(1500) });
+    const j = await r.json();
+    const configured = new Set([loadConfig().cheapModel, loadConfig().localModel].filter(Boolean));
+    for (const m of (j.models || [])) if (configured.has(m.name) || configured.has(m.model)) {
+      await fetch('http://127.0.0.1:11434/api/generate', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ model: m.name, keep_alive: 0 }), signal: AbortSignal.timeout(2000) }).catch(() => {});
+    }
+  } catch {}
+}
 async function memReliefTick() {
   const c = loadConfig();
   if ((c.memoryRelief || {}).enabled === false) return;
   const freePct = readMemFreePct();
+  const pressure = pressureTracker(freePct);
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('memory-pressure', { ...pressure, freePct });
+  if (brainWindow && !brainWindow.isDestroyed()) brainWindow.webContents.send('memory-pressure', { ...pressure, freePct });
+  if (!pressure.active || _memRelieving) return;
+  await shedOwnMemory();
   const hotPct = (c.memoryRelief || {}).belowPct || 11;
   if (!memrelief.shouldOffer({ freePct, hotPct, lastAskAt: _memAskAt })) return;
   const apps = memrelief.topApps(await psText(), { minMb: 700, protect: (c.memoryRelief || {}).protect || [] })
@@ -4821,14 +4853,16 @@ async function memReliefTick() {
   const top = apps[0];
   console.log(`[memory] ${freePct}% free — offering to quit ${top.name} (${memrelief.fmt(top.mb)})`);
   // Through executeTool, so the card, the audit log and the activity feed all see it.
-  const r = await executeTool('free_memory', { action: 'quit', app: top.name });
+  _memRelieving = true;
+  let r;
+  try { r = await executeTool('free_memory', { action: 'quit', app: top.name }); } finally { _memRelieving = false; }
   if (r && r.success) {
     sendToActivity('tool-update', { type: 'thinking', text: `🧠 quit ${top.name} — about ${r.freed} back` });
-  } else if (r && r.declined) {
+  } else {
     _memDeclined.set(top.name, Date.now() + 2 * 3600 * 1000);
   }
 }
-setInterval(() => { memReliefTick().catch((e) => console.warn('[memory] ' + e.message)); }, 60 * 1000).unref();
+setInterval(() => { memReliefTick().catch((e) => console.warn('[memory] ' + e.message)); }, 15 * 1000).unref();
 
 // ── THE JANITOR ──────────────────────────────────────────────────────────────────────────────────
 // "I want BhatBot to be making the decisions, not Claude" (2026-11-14). So the cleanup is BhatBot's
@@ -6145,11 +6179,17 @@ async function executeTool(name, input, opts = {}) {
         const act = String((input && input.action) || 'top');
         if (act === 'quit') {
           const app = String((input && input.app) || '').trim();
-          const live = memrelief.topApps(await psText(), { minMb: 0 });
+          const live = memrelief.topApps(await psText(), { minMb: 0, protect: (loadConfig().memoryRelief || {}).protect || [] });
           const hit = live.find((a) => a.name.toLowerCase() === app.toLowerCase());
           if (!hit) { result = { success: false, error: `${app || 'that app'} is not running (or is protected)` }; break; }
+          // Ask even if the general autonomy policy is disabled. This permission never becomes routine.
+          if (loadConfig().autonomyPolicy === false && await askAboutAction(`quit ${hit.name}`, `using about ${memrelief.fmt(hit.mb)}; it may have unsaved work`) !== true) { result = { success: false, declined: true, error: 'App left open' }; break; }
           const q = await quitApp(hit.name);
-          result = q.ok ? { success: true, quit: hit.name, freed: memrelief.fmt(hit.mb) } : { success: false, error: q.error };
+          if (!q.ok) { result = { success: false, error: q.error }; break; }
+          const remaining = memrelief.topApps(await psText(), { minMb: 0 }).find(a => a.name === hit.name);
+          result = remaining
+            ? { success: false, pendingSave: true, error: `${hit.name} is still open — check its save or quit dialog.`, estimatedMemory: memrelief.fmt(remaining.mb) }
+            : { success: true, quit: hit.name, freed: memrelief.fmt(hit.mb), note: 'Estimated app memory; system recovery is checked on the next reading.' };
           break;
         }
         const apps = memrelief.topApps(await psText(), { minMb: 150 }).slice(0, 8).map((a) => ({ app: a.name, memory: memrelief.fmt(a.mb) }));
@@ -9371,7 +9411,10 @@ async function twilioCall(message, { to, name, bypassGate = false } = {}) {
   try { twilio = require('twilio'); } catch { return { sent: false, error: 'twilio package not installed (npm i twilio)' }; }
   const client = twilio(c.twilioSid, c.twilioToken);
   const greeting = String(message).slice(0, 600);
-  const host = getPublicHost();
+  const cloudHost = (c.cloudUrl && c.cloudToken && !/^CRED_REF/.test(String(c.cloudToken)))
+    ? String(c.cloudUrl).replace(/^https?:\/\//, '').replace(/\/+$/, '') : '';
+  const viaCloud = !!cloudHost;
+  const host = cloudHost || getPublicHost();
   // A host we cannot prove is reachable is worse than no host at all, because the two-way branch
   // SKIPS the one-shot fallback — which needs no webhook and would have delivered every one of
   // those eight messages perfectly.
@@ -9384,7 +9427,7 @@ async function twilioCall(message, { to, name, bypassGate = false } = {}) {
   // So the two-way branch is now gated on the only thing that actually settles it: a signed request,
   // shaped like the call we are about to place, coming back with TwiML that speaks AND listens.
   // If that fails we take the one-shot announcement, which works without a webhook at all.
-  const reach = host ? publicHostReachable() : { ok: false, why: 'no public host' };
+  const reach = viaCloud ? { ok: true } : host ? publicHostReachable() : { ok: false, why: 'no public host' };
   let pre = { ok: false, detail: 'not checked' };
   if (viaCloud && c.cloudToken) {
     // THE CLOUD LEG IS PREFLIGHTED TOO. It used to be exempt — `viaCloud || (reach.ok && pre.ok)` —
@@ -9399,11 +9442,11 @@ async function twilioCall(message, { to, name, bypassGate = false } = {}) {
     // which cannot happen to a public host.
     pre = await voicepreflight.check({ host, token: c.cloudToken, authToken: c.twilioToken, ownerPhone: target, path: 'outgoing', param: 'purpose', externalProbe: false })
       .catch((e) => ({ ok: false, stage: 'preflight', detail: String((e && e.message) || e) }));
-    if (!pre.ok) console.warn(`[call] cloud two-way path is not usable (${pre.stage}: ${pre.detail}) — falling back to a one-way announcement`);
+    if (!pre.ok) console.warn(`[call] cloud two-way path is not usable (${pre.stage}: ${pre.detail}) — selected voice unavailable; no call will be placed`);
   } else if (host && c.mcpToken && reach.ok) {
     pre = await voicepreflight.check({ host, token: c.mcpToken, authToken: c.twilioToken, ownerPhone: target })
       .catch((e) => ({ ok: false, stage: 'preflight', detail: String((e && e.message) || e) }));
-    if (!pre.ok) console.warn(`[call] two-way path is not usable (${pre.stage}: ${pre.detail}) — falling back to a one-way announcement`);
+    if (!pre.ok) console.warn(`[call] two-way path is not usable (${pre.stage}: ${pre.detail}) — selected voice unavailable; no call will be placed`);
   }
   try {
     if (host && (viaCloud ? c.cloudToken : c.mcpToken) && pre.ok && (viaCloud || reach.ok)) {
@@ -9425,16 +9468,9 @@ async function twilioCall(message, { to, name, bypassGate = false } = {}) {
       recordCall({ to: target, name: name || null, ok: true, via: viaCloud ? 'cloud-conversation' : 'twilio-conversation', sid: call.sid, preflight: pre.stage });
       return { sent: true, via: viaCloud ? 'cloud-conversation' : 'twilio-conversation', sid: call.sid, to: target, name: name || null, host };
     }
-    // ONE-SHOT ANNOUNCEMENT. The message is embedded in the TwiML, so Twilio never has to fetch
-    // anything from us — which is exactly why it works when the funnel is down, and why taking this
-    // branch is the fix rather than the degradation. It is one-way: he hears it, he cannot reply.
-    const safe = greeting.replace(/[<>&]/g, ' ');
-    const twiml = '<Response><Say voice="Google.en-US-Neural2-D">' + safe + '</Say></Response>';
-    const call = await client.calls.create({ twiml, to: target, from: c.twilioFrom });
-    const why = !reach.ok ? reach.why : (pre.ok ? 'no public host' : `${pre.stage}: ${pre.detail}`);
-    recordCall({ to: target, name: name || null, ok: true, via: 'twilio', sid: call.sid, oneWay: true, why });
-    return { sent: true, via: 'twilio', sid: call.sid, to: target, name: name || null,
-      oneWay: true, note: `one-way announcement — two-way unavailable (${why})` };
+    const error = 'Selected ElevenLabs voice unavailable: no verified audio webhook; call not placed';
+    recordCall({ to: target, name: name || null, ok: false, error });
+    return { sent: false, downgrade: 'sms', error };
   } catch (e) {
     recordCall({ to: target, name: name || null, ok: false, error: e.message });
     return { sent: false, error: e.message };
@@ -10386,7 +10422,7 @@ function synapse() {
         semanticStorePath: semantic.STORE_PATH,
         loadConfig,
         log: (m) => console.log(m),
-        onUpdate: (g) => { try { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('synapse-update', g); } catch {} },
+        onUpdate: (g) => { try { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('synapse-update', g); if (brainWindow && !brainWindow.isDestroyed()) brainWindow.webContents.send('synapse-update', g); } catch {} },
         isIdle: () => agentState !== 'running' && agentState !== 'paused',
       },
     });
@@ -11295,11 +11331,8 @@ ipcMain.handle('get-capabilities', () => {
 });
 ipcMain.handle('get-voice-config', () => {
   const c = loadConfig();
-  const ttsProvider = c.ttsProvider || (kokoroAvailable() ? 'kokoro' : (c.elevenLabsKey ? 'elevenlabs' : (c.openaiKey ? 'openai' : (c.piperBin ? 'piper' : null))));
-  const hasTTS = ttsProvider === 'kokoro' ? kokoroAvailable()
-    : ttsProvider === 'elevenlabs' ? !!c.elevenLabsKey
-    : ttsProvider === 'openai' ? !!c.openaiKey
-    : ttsProvider === 'piper' ? !!c.piperBin : false;
+  const ttsProvider = 'elevenlabs';
+  const hasTTS = !!c.elevenLabsKey;
   const hasCloudStt = !!(c.openaiKey || (c.sttProvider === 'groq' && c.groqKey));
   let hasLocalStt = false; try { hasLocalStt = localstt.available(); } catch {}
   return {
@@ -11359,8 +11392,8 @@ ipcMain.handle('set-tts-speed', (_e, v) => {
 // per-utterance, so a change takes effect on the very next spoken line — no restart).
 ipcMain.handle('get-voice-settings', () => {
   const c = loadConfig();
-  return { ...jarvisVoiceSettings(c), provider: c.ttsProvider || (c.elevenLabsKey ? 'elevenlabs' : null),
-    voiceId: c.ttsVoice || c.elevenLabsVoiceId || 'pNInz6obpgDQGcFmaJgB', hasElevenLabs: !!c.elevenLabsKey };
+  return { ...jarvisVoiceSettings(c), provider: 'elevenlabs',
+    voiceId: c.ttsVoice || c.elevenLabsVoiceId || 'nuIFNGEZkRGoYBg8iBYe', hasElevenLabs: !!c.elevenLabsKey };
 });
 const VOICE_SETTING_KEYS = {
   ttsStability: [0, 1], ttsSimilarity: [0, 1], ttsStyle: [0, 1], ttsSpeed: [0.7, 1.2],
@@ -11429,11 +11462,11 @@ ipcMain.handle('list-voices', async () => {
       voice_id: v.voice_id, name: v.name, category: v.category,
       labels: v.labels || {}, preview: v.preview_url || null,
     }));
-    return { voices, active: c.ttsVoice || c.elevenLabsVoiceId || 'pNInz6obpgDQGcFmaJgB', model: c.ttsModel || 'eleven_flash_v2_5' };
+    return { voices, active: c.ttsVoice || c.elevenLabsVoiceId || 'nuIFNGEZkRGoYBg8iBYe', model: c.ttsModel || 'eleven_flash_v2_5' };
   } catch (e) { return { error: e.message, voices: [] }; }
 });
 ipcMain.handle('set-voice', (_e, { voiceId }) => {
-  if (!voiceId || typeof voiceId !== 'string') return { error: 'no voiceId' };
+  if (typeof voiceId !== 'string' || !/^[A-Za-z0-9]{20}$/.test(voiceId)) return { error: 'invalid ElevenLabs voiceId' };
   saveConfig({ ttsProvider: 'elevenlabs', ttsVoice: voiceId, elevenLabsVoiceId: voiceId });
   return { ok: true, voiceId };
 });
@@ -11635,7 +11668,7 @@ function jarvisVoiceSettings(c) {
 async function elevenLabsSynth(t, c, opts = {}) {
   if (!c.elevenLabsKey) return { error: 'no elevenLabsKey' };
   if (Date.now() < _elDeadUntil) return { error: 'elevenlabs cooling down (quota/auth)', cooldown: true };
-  const voiceId = c.ttsVoice || c.elevenLabsVoiceId || 'pNInz6obpgDQGcFmaJgB';
+  const voiceId = c.ttsVoice || c.elevenLabsVoiceId || 'nuIFNGEZkRGoYBg8iBYe';
   // flash_v2_5 = ElevenLabs' lowest-latency model (~75ms vs turbo's ~250-400ms), same
   // voices. optimize_streaming_latency=3 trims first-byte time further. Big speaking-speed win.
   const model = c.ttsModel || 'eleven_flash_v2_5';
@@ -11675,7 +11708,7 @@ async function synthesizeUlaw(text, opts = {}) {
   if (!t) return { error: 'empty text' };
   if (!c.elevenLabsKey) return { error: 'no elevenLabsKey (ElevenLabs voice is required for calls)' };
   if (Date.now() < _elDeadUntil) return { error: 'elevenlabs cooling down', cooldown: true };
-  const voiceId = c.ttsVoice || c.elevenLabsVoiceId || 'pNInz6obpgDQGcFmaJgB';
+  const voiceId = c.ttsVoice || c.elevenLabsVoiceId || 'nuIFNGEZkRGoYBg8iBYe';
   const model = c.ttsModel || 'eleven_flash_v2_5';
   const supportsBreaks = c.ttsCadence !== false && /flash|turbo/i.test(model);
   const body = {
@@ -11793,50 +11826,11 @@ function humanizeCadence(input, { breaks = false } = {}) {
 // Plain function so both the IPC handler (desktop HUD) and the express server (phone PWA) can call it.
 async function synthesizeSpeech(text, opts = {}) {
   const c = loadConfig();
-  const t = normalizeForSpeech((text || '').trim());   // humanize symbols/markdown for the spoken audio
+  const t = normalizeForSpeech((text || '').trim());
   if (!t) return { error: 'empty text' };
-  // Default to local Kokoro when installed (free, offline); honor explicit ttsProvider otherwise.
-  const provider = c.ttsProvider || (kokoroAvailable() ? 'kokoro' : (c.elevenLabsKey ? 'elevenlabs' : (c.openaiKey ? 'openai' : (c.piperBin ? 'piper' : null))));
-  const stitch = { previousText: opts.previousText, nextText: opts.nextText };
+  // One selected ElevenLabs voice, including transport retries. Never change providers.
   try {
-    if (provider === 'kokoro') {
-      // kokoro can't parse SSML, but it does honor punctuation timing → punctuation-cadence.
-      const r = await kokoroSynth(c.ttsCadence !== false ? humanizeCadence(t, { breaks: false }) : t, opts);
-      if (r.success) return r;
-      // worker died / not installed → fall back to cloud so voice never goes silent
-      console.error('[tts] kokoro failed, falling back:', r.error);
-      if (c.elevenLabsKey) { const e = await elevenLabsSynth(t, c, stitch); if (e.success) return e; }
-      if (c.openaiKey) return await openaiSynth(t, c);
-      return { error: 'kokoro failed and no cloud fallback: ' + r.error };
-    }
-    if (provider === 'elevenlabs') {
-      const e = await elevenLabsSynth(t, c, stitch);
-      if (e.success) return e;
-      console.error('[tts] elevenlabs failed:', e.error);
-      // STRICT (default): ElevenLabs-or-nothing — never substitute a different voice (user pays
-      // for the EL subscription and wants exactly one voice). Set ttsStrict:false in config to
-      // re-enable the Kokoro→OpenAI fallback if quota/network ever takes EL down.
-      if (c.ttsStrict === false) {
-        if (kokoroAvailable()) { const k = await kokoroSynth(t); if (k.success) return k; }
-        if (c.openaiKey) return await openaiSynth(t, c);
-      }
-      return { error: e.error };
-    }
-    if (provider === 'piper') {
-      if (!c.piperBin) return { error: 'no piperBin' };
-      const model = c.piperModel || path.join(os.homedir(), '.bhatbot', 'piper', 'jarvis.onnx');
-      const out = path.join(os.tmpdir(), `bhatbot-tts-${Date.now()}.wav`);
-      await new Promise((res, rej) => {
-        const p = spawn(c.piperBin, ['--model', model, '--output_file', out], { env: { ...process.env, PATH: EXEC_PATH } });
-        p.on('error', rej); p.on('close', (code) => code === 0 ? res() : rej(new Error('piper exit ' + code)));
-        p.stdin.write(t); p.stdin.end();
-      });
-      const buf = fs.readFileSync(out); fs.unlink(out, () => {});
-      return { success: true, audio: buf.toString('base64'), mimeType: 'audio/wav' };
-    }
-    // default: OpenAI
-    if (!c.openaiKey) return { error: 'no TTS provider configured (set kokoro model, openaiKey, elevenLabsKey, or piperBin)' };
-    return await openaiSynth(t, c);
+    return await elevenLabsSynth(t, c, { previousText: opts.previousText, nextText: opts.nextText });
   } catch (e) { return { error: e.message }; }
 }
 ipcMain.handle('synthesize-speech', (_e, { text }) => synthesizeSpeech(text));
@@ -11899,7 +11893,12 @@ function playFile(file, seq, text) {
   });
 }
 function ackSlug(line) { return slugify(line); }
-function ackFilePath(line) { return path.join(ACKS_DIR, ackSlug(line) + '.mp3'); }
+function ackFilePath(line, c = loadConfig()) {
+  const identity = JSON.stringify([c.ttsVoice || c.elevenLabsVoiceId || 'nuIFNGEZkRGoYBg8iBYe',
+    c.ttsModel || 'eleven_flash_v2_5', jarvisVoiceSettings(c), c.ttsCadence !== false]);
+  const key = crypto.createHash('sha256').update(identity).digest('hex').slice(0, 24);
+  return path.join(ACKS_DIR, key, ackSlug(line) + '.mp3');
+}
 // Play a PRE-RENDERED ack clip directly (single afplay, zero synth latency). Mirrors playFile's
 // barge-in/wake-mute bookkeeping and counts as this turn's first audio for the watchdog. Tracked in
 // ttsPlayProc so stopDesktopTTS()/barge-in kills it. Returns true if it started.
@@ -11929,7 +11928,8 @@ async function maybeRenderAcks() {
   if (c.prerenderAcks === false || !c.elevenLabsKey || _ackRendering) return;
   _ackRendering = true;
   try {
-    fs.mkdirSync(ACKS_DIR, { recursive: true });
+    const cacheDir = path.dirname(ackFilePath('', c));
+    fs.mkdirSync(cacheDir, { recursive: true });
     // The VOICE SESSION register library joins the ack lines here. Every one of them is a fixed
     // phrase said at a known moment in a conversation — a greeting, a half-beat after being
     // interrupted, a sign-off — so they are exactly the same shape as an ack: worth rendering once
@@ -11942,17 +11942,24 @@ async function maybeRenderAcks() {
     const lines = [...new Set([...ACKS, ...HOLDING, ...registerLines])];
     let rendered = 0;
     for (const line of lines) {
-      const f = ackFilePath(line);
+      const f = ackFilePath(line, c);
       if (fs.existsSync(f)) continue;
       const r = await elevenLabsSynth(normalizeForSpeech(line), c, {});
       if (r && r.success && r.audio) { try { fs.writeFileSync(f, Buffer.from(r.audio, 'base64')); rendered++; } catch {} }
       else if (r && r.cooldown) break;   // EL cooling down (quota/auth) → try again next boot
       await sleep(300);
     }
-    try { fs.writeFileSync(path.join(ACKS_DIR, 'index.json'), JSON.stringify(lines.map((l) => ({ slug: ackSlug(l), text: l })), null, 2)); } catch {}
+    try { fs.writeFileSync(path.join(cacheDir, 'index.json'), JSON.stringify(lines.map((l) => ({ slug: ackSlug(l), text: l })), null, 2)); } catch {}
     if (rendered) console.log(`[acks] pre-rendered ${rendered} ack clip(s) → ${ACKS_DIR}`);
   } catch (e) { console.warn('[acks] render failed:', e.message); }
   finally { _ackRendering = false; }
+}
+function reportTtsFailure(error) {
+  const message = 'Voice unavailable: ' + String(error || 'ElevenLabs produced no audio');
+  console.warn('[tts] ' + message);
+  try { rstate.event('tts-error', { error: message }); } catch {}
+  try { sendToActivity('tool-update', { type: 'thinking', text: message }); } catch {}
+  return { success: false, error: message };
 }
 async function speakDesktop(text, opts = {}) {
   const c = loadConfig();
@@ -11962,31 +11969,35 @@ async function speakDesktop(text, opts = {}) {
   stopDesktopTTS();
   _lastSpoken = t.replace(/<\/?speak>/g, '').slice(-600);
   const seq = ++ttsPlaySeq;
-  // Single consistent voice: always synthesize through the configured provider (no more
-  // macOS `say` shortcut for short text — that was a second, different voice).
-  // Long → condense for speech (full text still on screen / "read full"). Threshold 500
-  // (was 300): most replies now skip the extra summarize LLM round-trip → speaks sooner.
-  if (!opts.full && t.length > 500) {
-    try { const s = await summarizeForSpeech(t); if (s && s.success && s.text) t = s.text; } catch {}
-  }
-  if (seq !== ttsPlaySeq) return { success: false, superseded: true };
-  // Short text → ONE synth call so Kokoro keeps continuous, natural prosody (chunking
-  // resets intonation each sentence → robotic). Only long full-reads stream sentence
-  // chunks (to start audio sooner). 350 chars ≈ a few smooth sentences.
-  const chunks = t.length <= 350 ? [t] : splitForSpeech(t);
-  if (!chunks.length) return { success: false };
-  const jobs = chunks.map((s) => synthesizeSpeech(s).catch(() => null)); // prefetch in parallel
-  for (let i = 0; i < jobs.length; i++) {
-    const r = await jobs[i];
+  try {
+    // Single consistent voice: always synthesize through the configured provider (no more
+    // macOS `say` shortcut for short text — that was a second, different voice).
+    // Long → condense for speech (full text still on screen / "read full"). Threshold 500
+    // (was 300): most replies now skip the extra summarize LLM round-trip → speaks sooner.
+    if (!opts.full && t.length > 500) {
+      try { const s = await summarizeForSpeech(t); if (s && s.success && s.text) t = s.text; } catch {}
+    }
     if (seq !== ttsPlaySeq) return { success: false, superseded: true };
-    if (!r || !r.success) continue;
-    const ext = (r.mimeType || '').includes('wav') ? 'wav' : 'mp3';
-    const out = path.join(os.tmpdir(), `bhatbot-say-${seq}-${i}.${ext}`);
-    try { fs.writeFileSync(out, Buffer.from(r.audio, 'base64')); } catch { continue; }
-    await playFile(out, seq, chunks[i]);
-    if (seq !== ttsPlaySeq) return { success: false, superseded: true };
+    // Short text → ONE synth call so Kokoro keeps continuous, natural prosody (chunking
+    // resets intonation each sentence → robotic). Only long full-reads stream sentence
+    // chunks (to start audio sooner). 350 chars ≈ a few smooth sentences.
+    const chunks = t.length <= 350 ? [t] : splitForSpeech(t);
+    if (!chunks.length) return { success: false };
+    const jobs = chunks.map((s) => synthesizeSpeech(s).catch(() => null)); // prefetch in parallel
+    for (let i = 0; i < jobs.length; i++) {
+      const r = await jobs[i];
+      if (seq !== ttsPlaySeq) return { success: false, superseded: true };
+      if (!r || !r.success || !r.audio) return reportTtsFailure(r && r.error);
+      const ext = (r.mimeType || '').includes('wav') ? 'wav' : 'mp3';
+      const out = path.join(os.tmpdir(), `bhatbot-say-${seq}-${i}.${ext}`);
+      try { fs.writeFileSync(out, Buffer.from(r.audio, 'base64')); } catch (e) { return reportTtsFailure(e.message); }
+      await playFile(out, seq, chunks[i]);
+      if (seq !== ttsPlaySeq) return { success: false, superseded: true };
+    }
+    return { success: true, via: 'tts' };
+  } finally {
+    if (seq === ttsPlaySeq) emitTtsIdle(seq);
   }
-  return { success: true, via: 'tts' };
 }
 ipcMain.handle('play-tts', (_e, { text, full }) => speakDesktop(text, { full: !!full }));
 
@@ -12047,10 +12058,7 @@ function ttsTransportMode() {
 }
 // The one resolved TTS voice for THIS config (same precedence synthesizeSpeech uses). Default is
 // local Kokoro when installed; explicit ttsProvider overrides.
-function resolvedTtsProvider() {
-  const c = loadConfig();
-  return c.ttsProvider || (kokoroAvailable() ? 'kokoro' : (c.elevenLabsKey ? 'elevenlabs' : (c.openaiKey ? 'openai' : (c.piperBin ? 'piper' : null))));
-}
+function resolvedTtsProvider() { return 'elevenlabs'; }
 // ONE VOICE: the ws stream IS an ElevenLabs transport, so only use it when EL is the chosen voice.
 // Otherwise streamed replies would speak in EL while side-channel speech (acks, plan read-out,
 // "Noted", drone notices) goes through synthesizeSpeech in the configured voice (e.g. Kokoro) → two
@@ -12383,7 +12391,7 @@ async function ttsStreamDrain(seq) {
       prevSpoken = s;
       latMark('tts-synth-done');
       if (seq !== ttsStreamSeq) break;
-      if (!r || !r.success) continue;
+      if (!r || !r.success || !r.audio) { reportTtsFailure(r && r.error); ttsStreamQ.length = 0; break; }
       const ext = (r.mimeType || '').includes('wav') ? 'wav' : 'mp3';
       const out = path.join(os.tmpdir(), `bb-stream-${seq}-${Math.random().toString(36).slice(2)}.${ext}`);
       try { fs.writeFileSync(out, Buffer.from(r.audio, 'base64')); } catch { continue; }
@@ -12664,23 +12672,11 @@ ipcMain.handle('summarize-for-speech', (_e, { text }) => summarizeForSpeech(text
 // so a briefing announce can't talk over the greeting. macOS `say` is a last resort only when
 // no real TTS provider is configured or TTS is muted — it was the rogue second/third voice and
 // ran as its own process that stopDesktopTTS couldn't cancel (→ overlapping voices).
-function sayLocal(text) {
-  const c = loadConfig();
+async function sayLocal(text) {
   const t = String(text || '').slice(0, 600);
   if (!t.trim()) return { success: false };
-  const hasProvider = c.ttsProvider || c.elevenLabsKey || c.openaiKey || c.piperBin || kokoroAvailable();
-  if (c.ttsEnabled !== false && hasProvider) {
-    speakDesktop(t, { full: true }).catch(() => {
-      try { const p = spawn('say', ['-v', c.ttsLocalVoice || 'Daniel', t]); p.on('error', () => {}); } catch {}
-    });
-    return { success: true };
-  }
-  const v = c.ttsLocalVoice || 'Daniel';
-  try {
-    const p = spawn('say', ['-v', v, t]);
-    p.on('error', () => { try { spawn('say', [t]); } catch {} });   // voice missing → default
-  } catch { try { spawn('say', [t]); } catch {} }
-  return { success: true };
+  try { return await speakDesktop(t, { full: true }); }
+  catch (e) { return reportTtsFailure(e.message); }
 }
 ipcMain.handle('say-local', (_e, { text }) => sayLocal(text));
 
@@ -13000,7 +12996,7 @@ ipcMain.handle('get-vitals', () => {
     netMbs = Math.max(0, Math.round(((now.rx + now.tx) - (_netPrev.rx + _netPrev.tx)) / dt / 1024 / 1024 * 10) / 10);
   }
   if (now) _netPrev = now;
-  return { cpu, mem, net: netMbs, pwr, charging, cores, uptime: os.uptime() };
+  return { cpu, mem, net: netMbs, pwr, charging, cores, uptime: os.uptime(), freePct: readMemFreePct(), pressure: governor.poll() };
 });
 ipcMain.handle('hide-window', () => mainWindow && mainWindow.hide());
 ipcMain.handle('minimize-window', () => mainWindow && mainWindow.minimize());
@@ -13400,8 +13396,7 @@ app.whenReady().then(() => {
     // so the greeting tells you BhatBot is live and listening). Fires once.
     let greeted = false;
     const greet = () => { if (greeted) return; greeted = true; try { speakDesktop('BhatBot online. Say Jarvis when you need me.', { full: true }); } catch {} };
-    if (kokoroAvailable()) kokoroStart().then(() => { console.log('[tts] kokoro warm (local)'); greet(); }).catch((e) => { console.error('[tts] kokoro warmup failed:', e.message); greet(); });
-    else setTimeout(greet, 900);   // cloud TTS (ElevenLabs/OpenAI): no local warmup needed
+    setTimeout(greet, 900);   // ElevenLabs needs no local voice worker.
   } catch (e) { console.error('Startup error:', e); }
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 });

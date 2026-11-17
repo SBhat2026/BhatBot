@@ -1180,10 +1180,13 @@ addEventListener('resize', () => {
 // ---- frame ----------------------------------------------------------------
 const WALK_SPEED = 1.25;                                   // m/s — reads as purposeful, not scurrying
 const clockT0 = performance.now(); let prev = clockT0;
+let memoryConstrained = false;
+window.addEventListener('message', e => { if (e.data?.type === 'memory-pressure') { memoryConstrained = /hot|critical/.test(e.data.level); renderer.setPixelRatio(memoryConstrained ? 1 : Math.min(devicePixelRatio, 1.5)); } });
 const _tmp = new THREE.Vector3();
 (function animate(now){
   requestAnimationFrame(animate);
   now = now || performance.now();
+  if (document.hidden || (memoryConstrained && now - prev < 100)) return;
   const t = (now - clockT0) / 1000, dt = Math.min(0.05, (now - prev) / 1000); prev = now;
 
   // Slow cinematic orbit, now around USER-OWNED azimuth/elevation. Advancing azimuth only while

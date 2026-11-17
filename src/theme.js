@@ -84,14 +84,16 @@
   function resolve() {
     if (pinned) return pinned;
     if (!cfg.enabled) return 'night';                                 // opt-out keeps the original HUD
+    if (isAfterDark()) return 'night';
     if (!agentBusy && (Date.now() - lastActivity) >= cfg.idleStandbyMs) return 'standby';
-    return isAfterDark() ? 'night' : 'day';
+    return 'day';
   }
 
   function apply(mode, why) {
     if (!MODES.includes(mode) || mode === current) return current;
     current = mode;
     HTML.setAttribute('data-theme', mode);
+    try { window.bhatbot && window.bhatbot.syncWorkspaceTheme && window.bhatbot.syncWorkspaceTheme(); } catch {}
     try {
       HTML.dispatchEvent(new CustomEvent('bhatbot-theme', { detail: { mode: mode, why: why || '' } }));
     } catch (e) { /* older webview */ }

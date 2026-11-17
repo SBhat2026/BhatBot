@@ -3,9 +3,8 @@
 // Whisper STT. Lifted from the original server.js so it stays the same voice as the desktop.
 const EL_KEY = process.env.ELEVENLABS_API_KEY || '';
 const EL_VOICE = process.env.ELEVENLABS_VOICE_ID || 'nuIFNGEZkRGoYBg8iBYe';
-// turbo_v2_5 is materially warmer/less synthetic than flash while staying low-latency enough for
-// a live call (flash trades quality for the last ~100ms). Override with ELEVENLABS_MODEL.
-const EL_MODEL = process.env.ELEVENLABS_MODEL || 'eleven_turbo_v2_5';
+// Match desktop's low-latency default; deployments may explicitly select another EL model.
+const EL_MODEL = process.env.ELEVENLABS_MODEL || 'eleven_flash_v2_5';
 const TTS_SPEED = Math.max(0.7, Math.min(1.2, parseFloat(process.env.TTS_SPEED) || 1.03));
 // Voice character (all env-tunable so cadence/warmth can be dialed in without a redeploy).
 // Defaults follow the J.A.R.V.I.S. humanization guide §3 — the target for a Bettany-style clone:
@@ -74,17 +73,18 @@ async function tts(text, opts = {}) {
   if (!t) return { error: 'empty' };
   if (!EL_KEY) return { error: 'no ELEVENLABS_API_KEY' };
   const speed = opts.speed != null ? Math.max(0.7, Math.min(1.2, Number(opts.speed))) : TTS_SPEED;
-  // Strict ElevenLabs-only: ignore any client voice that isn't a real EL voice id (20-char
-  // alnum). Phones/old installs send local Kokoro names like "bm_george" → those 404'd on EL
-  // and produced silence. Anything not an EL id falls back to the canonical Jarvis voice.
-  const voice = /^[A-Za-z0-9]{20}$/.test(opts.voice || '') ? opts.voice : EL_VOICE;
-  const r = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voice}?output_format=mp3_44100_128&optimize_streaming_latency=2`, {
-    method: 'POST', headers: { 'xi-api-key': EL_KEY, 'content-type': 'application/json' },
-    body: JSON.stringify({ text: t, model_id: EL_MODEL, voice_settings: { stability: EL_STABILITY, similarity_boost: EL_SIMILARITY, style: EL_STYLE, use_speaker_boost: EL_SPEAKER_BOOST, speed } })
-  });
-  if (!r.ok) return { error: 'elevenlabs ' + r.status + ': ' + (await r.text()).slice(0, 160) };
-  const buf = Buffer.from(await r.arrayBuffer());
-  return { audio: buf.toString('base64'), mimeType: 'audio/mpeg', via: 'elevenlabs' };
+  // Server owns voice selection. Stale mobile preferences cannot switch identities.
+  const voice = EL_VOICE;
+  if (!/^[A-Za-z0-9]{20}$/.test(voice)) return { error: 'invalid ELEVENLABS_VOICE_ID' };
+  try {
+    const r = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voice}?output_format=mp3_44100_128&optimize_streaming_latency=2`, {
+      method: 'POST', headers: { 'xi-api-key': EL_KEY, 'content-type': 'application/json' },
+      body: JSON.stringify({ text: t, model_id: EL_MODEL, voice_settings: { stability: EL_STABILITY, similarity_boost: EL_SIMILARITY, style: EL_STYLE, use_speaker_boost: EL_SPEAKER_BOOST, speed } })
+    });
+    if (!r.ok) return { error: 'elevenlabs ' + r.status + ': ' + (await r.text()).slice(0, 160) };
+    const buf = Buffer.from(await r.arrayBuffer());
+    return { audio: buf.toString('base64'), mimeType: 'audio/mpeg', via: 'elevenlabs' };
+  } catch (e) { return { error: 'elevenlabs: ' + e.message }; }
 }
 
 async function stt(buf, mime) {
