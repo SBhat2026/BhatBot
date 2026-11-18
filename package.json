@@ -182,6 +182,7 @@
     "node-telegram-bot-api": "^0.67.0",
     "otpauth": "^9.5.1",
     "playwright": "^1.60.0",
+    "qrcode": "^1.5.4",
     "three": "^0.184.0",
     "twilio": "^6.0.2",
     "ws": "^8.21.0",

@@ -99,15 +99,20 @@ ok(digitsOf(null) === '', 'digitsOf: null → ""');
   // MagicDNS name resolves inside the tailnet and not from Twilio, and taking that branch on an
   // unreachable host skips the one-shot fallback — which needs no webhook and works.
   ok(/publicHostReachable\(\)/.test(fn), 'twilioCall: proves the webhook host is reachable from outside');
-  ok(/if \(host && c\.mcpToken && reach\.ok\)/.test(fn),
-    'twilioCall: two-way requires a REACHABLE host, not merely a hostname');
-  ok(!/oneWay: true/.test(fn) && /call not placed/.test(fn), 'twilioCall: refuses a call without the selected voice rather than substituting another');
+  ok(/if \(macHost && c\.mcpToken && reach\.ok\)/.test(fn),
+    'twilioCall: the Mac leg requires a REACHABLE host, not merely a hostname');
+  // Another voice is allowed for one thing only: reaching HIM on the reach ladder when no two-way
+  // leg passed preflight. A call to anyone else is refused rather than placed in a substitute voice.
+  ok(/if \(allowPlainVoice && digitsOf\(target\) === digitsOf\(c\.myPhone/.test(fn) && /call not placed/.test(fn),
+    'twilioCall: a substitute voice only to reach Siddhant himself, and only when the reach ladder asks; otherwise refused');
 
   ok(/const target = to \|\| c\.myPhone/.test(fn), 'twilioCall: DEFAULTS to myPhone (every existing caller depends on this)');
   ok(!/to: c\.myPhone/.test(fn), 'twilioCall: no longer hardcodes myPhone as the dialed number');
   // Both real dial sites — the conversation webhook path and the one-shot announcement fallback.
   const dialSites = (fn.match(/calls\.create\(\{[\s\S]{0,200}?to: target/g) || []).length;
-  ok(dialSites === 1, `twilioCall: only the verified selected-voice path dials the target (found ${dialSites})`);
+  const webhookDials = (fn.match(/calls\.create\(\{\s*url,/g) || []).length;
+  ok(dialSites === 2 && webhookDials === 1, `twilioCall: one webhook dial site (the proven two-way leg) plus the guarded fallback (found ${dialSites}/${webhookDials})`);
+  ok((fn.match(/calls\.create\(\{ twiml, to: target/g) || []).length === 1, 'twilioCall: and exactly one guarded one-way fallback');
   ok(/machineDetection/.test(fn), 'twilioCall: voicemail detection is preserved on the two-way path');
 
   const gph = main.slice(main.indexOf('function publicHostReachable('), main.indexOf('const CALL_LOG'));
@@ -116,10 +121,11 @@ ok(digitsOf(null) === '', 'digitsOf: null → ""');
 
 // ---- the gate is consulted by the notify path, and a refusal still delivers ----
 {
-  const n = main.slice(main.indexOf("if (urgency === 'call')"), main.indexOf("if (urgency === 'high'"));
-  ok(/r\.blocked/.test(n), 'notifyUser: handles a gated call rather than treating it as sent');
-  ok(/twilioSMS\(/.test(n) && /downgraded: 'call-gate'/.test(n),
-    'notifyUser: a gated call DOWNGRADES to SMS — the gate is a cap, never a mute');
+  const n = main.slice(main.indexOf('async function notifyUser('), main.indexOf('async function notifyUser(') + 2500);
+  ok(/reachCreate\(/.test(n) && /reachAdvance\(/.test(n), 'notifyUser: every message is a reach ticket that is followed until confirmed');
+  const send = main.slice(main.indexOf('async function reachSend('), main.indexOf('let _reachRunning'));
+  ok(/r\.busy && r\.until/.test(send) && /placed: false, reached: false/.test(send),
+    'reach: a gated or refused call is recorded as NOT reached, and a calendar block becomes a later retry');
 }
 
 // ---- the place-call handler ----
@@ -170,8 +176,8 @@ try { fs.rmSync(TMP, { recursive: true, force: true }); } catch {}
   // owner check read `From`, which on an outbound call is the Twilio number. Every layer reported
   // success and the phone played an error. Only an end-to-end probe settles it.
   ok(/voicepreflight\.check\(/.test(fn), 'twilioCall: runs the end-to-end preflight before choosing two-way');
-  ok(/reach\.ok && pre\.ok/.test(fn), 'twilioCall: two-way requires the preflight to PASS, not just a reachable host');
-  ok(/no verified audio webhook; call not placed/.test(fn), 'twilioCall: a failed preflight reports the voice problem without placing a call');
+  ok(/if \(pre\.ok\) leg = \{ kind: 'cloud'/.test(fn) && /if \(p2\.ok\) \{ leg = \{ kind: 'mac'/.test(fn), 'twilioCall: each two-way leg is used only after its preflight PASSES');
+  ok(/no call leg passed preflight[^']*call not placed/.test(fn), 'twilioCall: with no leg proven, the call is not placed (unless it is the guarded reach fallback)');
 
   const mcp = fs.readFileSync(path.join(__dirname, '..', 'mcp-server.js'), 'utf8');
   ok(/const ownerParty = \(req\) =>/.test(mcp), 'voice webhook: the owner party is derived, not assumed to be From');

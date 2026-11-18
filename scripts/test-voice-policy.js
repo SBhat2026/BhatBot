@@ -95,7 +95,9 @@ test('Mac phone synthesis failure throws into route Hangup handling',async()=>{
 });
 test('stream keeps auto_mode and same selected voice; no alternate voice outputs remain',()=>{
  const ws=read('lib/ttsws.js');assert.ok(ws.includes("c.ttsVoice || c.elevenLabsVoiceId || '"+JARVIS+"'"));assert.ok(ws.includes('auto_mode=true'));
- assert.doesNotMatch(main,/spawn\('say'|<Say/);assert.ok(extract(main,'ttsWsEnsure').includes('ttsRestFeed(seq, text)'));
+ // One guarded exception: reaching Siddhant on an urgent ladder when no two-way leg passed preflight.
+ const guarded=main.match(/if \(allowPlainVoice && digitsOf\(target\)[\s\S]*?\n    \}\n/);assert.ok(guarded,'the substitute-voice branch is guarded');
+ assert.doesNotMatch(main.replace(guarded[0],''),/spawn\('say'|<Say/);assert.ok(extract(main,'ttsWsEnsure').includes('ttsRestFeed(seq, text)'));
  for(const f of ['src/mobile.html','phone-app/Web/mobile.html','cloud/public/mobile.html']){const ui=read(f);assert.ok(ui.includes('JARVIS (server-selected ElevenLabs voice)'));assert.ok(!ui.includes('voice: voicePref'));}
 });
 

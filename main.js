@@ -350,7 +350,8 @@ const { createWorldWatch } = require('./lib/worldwatch');
 const tidy = require('./lib/tidy');
 const contactsLib = require('./lib/contacts');
 const memrelief = require('./lib/memrelief');
-const xcodeLib = require('./lib/xcode');                     // xcodebuild + simctl: status, list, build, test, run                // short of memory → offer to quit the biggest apps, on his yes               // his whole address book, from macOS Contacts                          // BhatBot's own file janitor: find, move aside, ask, purge   // "show me Tokyo" → the nearest live camera on worldwatcher.live
+const xcodeLib = require('./lib/xcode');
+const reachLib = require('./lib/reach');                     // confirmed delivery: tickets walk desktop → Telegram → call                     // xcodebuild + simctl: status, list, build, test, run                // short of memory → offer to quit the biggest apps, on his yes               // his whole address book, from macOS Contacts                          // BhatBot's own file janitor: find, move aside, ask, purge   // "show me Tokyo" → the nearest live camera on worldwatcher.live
 const modelpolicy = require('./lib/modelpolicy');        // the ceiling: never Fable, Opus only with a per-task yes
 const { createAutonomy } = require('./lib/autonomy');    // what may be done unasked, what is learned as routine, what is never done
 const voiceid = require('./lib/voiceid');                // T3 — speaker verification (cocktail-party post-filter)
@@ -6181,6 +6182,22 @@ async function executeTool(name, input, opts = {}) {
           : { success: false, error: r.why };
         break;
       }
+      case 'reach': {
+        const act = String((input && input.action) || 'status');
+        if (act === 'test') {
+          const ch = String((input && input.channel) || 'telegram');
+          if (ch === 'call' && quietWindow().quiet) { result = { success: false, error: 'quiet hours — not ringing him now' }; break; }
+          const t = reachCreate(`Test from BhatBot: this is how I reach you by ${ch === 'call' ? 'phone' : 'Telegram'}. Reply or say anything to confirm.`, ch === 'call' ? 'call' : 'medium');
+          t.sent = ch === 'call' ? { desktop: 1, telegram: 1, sms: 1 } : { desktop: 1, sms: 1 };   // test only the channel asked for
+          const step = await reachAdvance(t);
+          result = { success: true, ticket: t.id, delivered: t.delivered, called: t.calls.length > 0, next: step.why || null };
+          break;
+        }
+        const st = await reachStatus({ fresh: !!(input && input.fresh) });
+        if (st.telegram) delete st.telegram.qr;
+        result = { success: true, ...st };
+        break;
+      }
       case 'xcode': {
         result = await xcodeTool(input || {});
         break;
@@ -7698,6 +7715,7 @@ function turnNeedsRecall(text) {
 async function agentLoop(history, apiKey, event, opts = {}) {
   agentState = 'running';
   _userSpokeSinceOpen = true;     // Feat-1: the user engaged → don't pop the idle briefing offer
+  try { reachAck('desktop'); } catch {}   // talking to BhatBot at the Mac = he has seen what it put on screen
   try { _lastUserText = lastUserText(history) || _lastUserText; } catch {}
   markActivity();   // Task 5 — mark the burst so the cache keep-alive stays warm between turns
   // TRACE: one id for this whole turn. Every rstate.event() below is auto-stamped with it (ambient),
@@ -9135,14 +9153,23 @@ function startTelegramBridge() {
     tgMarkUp();
     const chatId = msg.chat.id.toString();
     const c = loadConfig();
-    // First message authorizes this chat.
+    // LINKING. The bot used to adopt whoever messaged it first — anyone who found @-name could have
+    // become "Siddhant". Now only the link BhatBot shows him (t.me/<bot>?start=<code>) links a chat.
     if (!c.telegramChatId) {
-      saveConfig({ telegramChatId: chatId });
-      telegramBot.sendMessage(chatId, '✓ Bhatbot connected. This device is now authorized.');
-      setTimeout(tgFlushOutbox, 1500);           // anything that waited for this chat goes out now
+      const code = telegramLinkCode();
+      const said = String(msg.text || '').trim();
+      if (said === '/start ' + code || said === code) {
+        saveConfig({ telegramChatId: chatId });
+        telegramBot.sendMessage(chatId, '✓ BhatBot linked. Alerts and questions will come here, and you can text me back.');
+        setTimeout(tgFlushOutbox, 1500);           // anything that waited for this chat goes out now
+        try { setChannelHealth('telegram', { ok: true }); } catch {}
+      } else {
+        telegramBot.sendMessage(chatId, 'This assistant is private. Use the link from BhatBot on your Mac to connect.').catch(() => {});
+      }
       return;
     }
     if (chatId !== c.telegramChatId) return;   // ignore everyone else
+    try { reachAck('telegram'); } catch {}       // any message from him = he has the alerts
 
     let userText = msg.text || '';
     if (msg.voice) {
@@ -9213,6 +9240,18 @@ function tgMarkUp() {
   console.log('[telegram] reachable again after ' + Math.round((Date.now() - _tgDownSince) / 60000) + ' min — flushing the outbox');
   _tgDownSince = 0;
   setTimeout(tgFlushOutbox, 500);
+}
+// The one-time link that pairs his Telegram with BhatBot (shown in the app and the reach status).
+function telegramLinkCode() {
+  let code = loadConfig().telegramLinkCode;
+  if (!code) { code = crypto.randomBytes(9).toString('base64url'); saveConfig({ telegramLinkCode: code }); }
+  return code;
+}
+let _tgUsername = null;
+async function telegramLinkUrl() {
+  if (!telegramBot) return null;
+  if (!_tgUsername) { try { _tgUsername = (await telegramBot.getMe()).username; } catch { return null; } }
+  return `https://t.me/${_tgUsername}?start=${telegramLinkCode()}`;
 }
 function telegramDown() { return !!_tgDownSince || !loadConfig().telegramChatId; }
 function tgOutbox() { try { return JSON.parse(fs.readFileSync(TG_OUTBOX, 'utf8')); } catch { return []; } }
@@ -9363,7 +9402,7 @@ function endVoiceCall(callSid) { if (callSid) voiceCalls.delete(callSid); }
 // `to` defaults to Siddhant's own phone (every existing caller relies on that). Passing an explicit
 // number is what lets the call button ring someone in his contacts instead — the conversation webhook
 // is identical either way, so a call to a third party is still a real two-way JARVIS conversation.
-async function twilioCall(message, { to, name, bypassGate = false } = {}) {
+async function twilioCall(message, { to, name, bypassGate = false, allowPlainVoice = false } = {}) {
   const c = loadConfig();
   const target = to || c.myPhone;
   if (!c.twilioSid || !c.twilioToken || !c.twilioFrom || !target) {
@@ -9437,48 +9476,54 @@ async function twilioCall(message, { to, name, bypassGate = false } = {}) {
   // So the two-way branch is now gated on the only thing that actually settles it: a signed request,
   // shaped like the call we are about to place, coming back with TwiML that speaks AND listens.
   // If that fails we take the one-shot announcement, which works without a webhook at all.
-  const reach = viaCloud ? { ok: true } : host ? publicHostReachable() : { ok: false, why: 'no public host' };
-  let pre = { ok: false, detail: 'not checked' };
+  // THE LEGS, in order, each proven by a signed preflight before a phone rings (see voicepreflight):
+  //   1. the cloud's conversation webhook (public, does not depend on the Mac's network);
+  //   2. the Mac's own webhook over the Tailscale funnel — so a cloud outage or an unpaid host does
+  //      not silence him;
+  //   3. only when reaching HIM matters more than the voice (allowPlainVoice — the reach ladder sets
+  //      it), a one-way spoken message in Twilio's own voice. A missed urgent call is worse than one
+  //      in the wrong voice. Calls to other people never take this leg.
+  let pre = { ok: false, detail: 'not checked' }, leg = null;
   if (viaCloud && c.cloudToken) {
-    // THE CLOUD LEG IS PREFLIGHTED TOO. It used to be exempt — `viaCloud || (reach.ok && pre.ok)` —
-    // on the reasoning that the cloud is on the public internet and so is always reachable. Reachable
-    // was never the question: the September calls reached their webhook and still played "an
-    // application error", because the handler answered 200 with something that was not a
-    // conversation. The cloud's handler is different code, it has never once carried a real call
-    // (the ledger holds no `cloud-conversation` row), and the exemption meant the first sign of a
-    // fault there would be his phone ringing with an error. Same test as the Mac leg: a signed,
-    // outbound-shaped request must come back with TwiML that speaks AND listens. No external
-    // reachability probe — that step exists to catch a tailnet name resolving to the laptop itself,
-    // which cannot happen to a public host.
-    pre = await voicepreflight.check({ host, token: c.cloudToken, authToken: c.twilioToken, ownerPhone: target, path: 'outgoing', param: 'purpose', externalProbe: false })
+    pre = await voicepreflight.check({ host: cloudHost, token: c.cloudToken, authToken: c.twilioToken, ownerPhone: target, path: 'outgoing', param: 'purpose', externalProbe: false })
       .catch((e) => ({ ok: false, stage: 'preflight', detail: String((e && e.message) || e) }));
-    if (!pre.ok) console.warn(`[call] cloud two-way path is not usable (${pre.stage}: ${pre.detail}) — selected voice unavailable; no call will be placed`);
-  } else if (host && c.mcpToken && reach.ok) {
-    pre = await voicepreflight.check({ host, token: c.mcpToken, authToken: c.twilioToken, ownerPhone: target })
-      .catch((e) => ({ ok: false, stage: 'preflight', detail: String((e && e.message) || e) }));
-    if (!pre.ok) console.warn(`[call] two-way path is not usable (${pre.stage}: ${pre.detail}) — selected voice unavailable; no call will be placed`);
+    if (pre.ok) leg = { kind: 'cloud', host: cloudHost, token: c.cloudToken };
+    else console.warn(`[call] cloud leg not usable (${pre.stage}: ${pre.detail}) — trying the Mac's own webhook`);
+  }
+  if (!leg) {
+    const macHost = getPublicHost();
+    const reach = macHost ? publicHostReachable() : { ok: false, why: 'no public host' };
+    if (macHost && c.mcpToken && reach.ok) {
+      const p2 = await voicepreflight.check({ host: macHost, token: c.mcpToken, authToken: c.twilioToken, ownerPhone: target })
+        .catch((e) => ({ ok: false, stage: 'preflight', detail: String((e && e.message) || e) }));
+      if (p2.ok) { leg = { kind: 'mac', host: macHost, token: c.mcpToken }; pre = p2; }
+      else console.warn(`[call] Mac leg not usable (${p2.stage}: ${p2.detail})`);
+    } else if (macHost) console.warn(`[call] Mac leg not reachable (${reach.why || 'unknown'})`);
   }
   try {
-    if (host && (viaCloud ? c.cloudToken : c.mcpToken) && pre.ok && (viaCloud || reach.ok)) {
-      // Two-way: point Twilio at our webhook, which plays the JARVIS voice + gathers speech.
-      // machineDetection=DetectMessageEnd → if voicemail answers, the webhook fires at the
-      // BEEP with AnsweredBy=machine_end_*, and /voice/incoming leaves a JARVIS-voice
-      // voicemail instead of gathering. Humans resolve in ~3-5s and get the conversation.
-      // The cloud's outbound leg is `/outgoing` and it takes `purpose`; the Mac's is `/incoming`
-      // with `msg`. Same contract either way — Twilio fetches TwiML and the conversation begins.
-      const wtok = viaCloud ? c.cloudToken : c.mcpToken;
-      const url = viaCloud
-        ? `https://${host}/voice/${wtok}/outgoing?purpose=${encodeURIComponent(greeting)}`
-        : `https://${host}/voice/${wtok}/incoming?msg=${encodeURIComponent(greeting)}`;
+    if (leg) {
+      // machineDetection=DetectMessageEnd → voicemail answers fire the webhook at the BEEP, which
+      // leaves a message instead of gathering. Humans resolve in ~3-5s and get the conversation.
+      const url = leg.kind === 'cloud'
+        ? `https://${leg.host}/voice/${leg.token}/outgoing?purpose=${encodeURIComponent(greeting)}`
+        : `https://${leg.host}/voice/${leg.token}/incoming?msg=${encodeURIComponent(greeting)}`;
+      const via = leg.kind === 'cloud' ? 'cloud-conversation' : 'twilio-conversation';
       const call = await client.calls.create({
         url, method: 'POST', to: target, from: c.twilioFrom,
         machineDetection: 'DetectMessageEnd', machineDetectionTimeout: 30,
-        statusCallback: `https://${host}/voice/${wtok}/status`, statusCallbackEvent: ['completed']
+        statusCallback: `https://${leg.host}/voice/${leg.token}/status`, statusCallbackEvent: ['completed'],
       });
-      recordCall({ to: target, name: name || null, ok: true, via: viaCloud ? 'cloud-conversation' : 'twilio-conversation', sid: call.sid, preflight: pre.stage });
-      return { sent: true, via: viaCloud ? 'cloud-conversation' : 'twilio-conversation', sid: call.sid, to: target, name: name || null, host };
+      recordCall({ to: target, name: name || null, ok: true, via, sid: call.sid, preflight: pre.stage });
+      return { sent: true, via, sid: call.sid, to: target, name: name || null, host: leg.host };
     }
-    const error = 'Selected ElevenLabs voice unavailable: no verified audio webhook; call not placed';
+    if (allowPlainVoice && digitsOf(target) === digitsOf(c.myPhone || '')) {
+      const safe = greeting.replace(/[<>&]/g, ' ');
+      const twiml = `<Response><Say voice="Google.en-US-Neural2-D">${safe}</Say><Pause length="1"/><Say voice="Google.en-US-Neural2-D">Again: ${safe} The details are on Telegram.</Say></Response>`;
+      const call = await client.calls.create({ twiml, to: target, from: c.twilioFrom });
+      recordCall({ to: target, name: name || null, ok: true, via: 'twilio', sid: call.sid, oneWay: true, why: 'no two-way leg passed preflight' });
+      return { sent: true, via: 'twilio', sid: call.sid, to: target, oneWay: true, note: 'one-way message — no two-way leg passed preflight' };
+    }
+    const error = 'no call leg passed preflight (cloud and Mac webhooks both unavailable); call not placed';
     recordCall({ to: target, name: name || null, ok: false, error });
     return { sent: false, downgrade: 'sms', error };
   } catch (e) {
@@ -9669,12 +9714,197 @@ function deliverTwoFactorCode(text) {
 //   call → voice call (quiet → "(URGENT)" SMS). Telegram always keeps a written record.
 // opts.awaitReply registers a pending question keyed by opts.taskId for the SMS loop.
 // Every attempt is logged to the daily audit file.
+// ── REACH: delivery that is confirmed, not assumed ──────────────────────────────────────────────
+// See lib/reach.js for the why. Tickets persist across restarts; a 20-second timer advances them.
+const REACH_FILE = path.join(os.homedir(), '.bhatbot', 'reach.json');
+const CHANNEL_HEALTH = path.join(os.homedir(), '.bhatbot', 'channel-health.json');
+function reachLoad() { try { return JSON.parse(fs.readFileSync(REACH_FILE, 'utf8')); } catch { return []; } }
+function reachSave(list) { try { fs.writeFileSync(REACH_FILE + '.tmp', JSON.stringify(list.slice(-60), null, 1)); fs.renameSync(REACH_FILE + '.tmp', REACH_FILE); } catch {} }
+function channelHealth() { try { return JSON.parse(fs.readFileSync(CHANNEL_HEALTH, 'utf8')); } catch { return {}; } }
+function setChannelHealth(ch, v) { const h = channelHealth(); h[ch] = { ...v, at: new Date().toISOString() }; try { fs.writeFileSync(CHANNEL_HEALTH, JSON.stringify(h, null, 1)); } catch {} }
+function reachUpdate(t) { const list = reachLoad(); const i = list.findIndex((x) => x.id === t.id); if (i >= 0) list[i] = t; else list.push(t); reachSave(list); }
+function reachCreate(msg, urgency, { needsReply = false, taskId = null } = {}) {
+  const t = { id: 'r' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), msg, urgency, needsReply, taskId, createdAt: Date.now(), sent: {}, delivered: [], calls: [], log: [] };
+  reachUpdate(t);
+  return t;
+}
+function quietWindow(now = new Date()) {
+  const q = loadConfig().quietHours || { start: '22:30', end: '06:30' };
+  const mins = (hm) => { const [h, m] = String(hm).split(':').map(Number); return (h || 0) * 60 + (m || 0); };
+  const cur = now.getHours() * 60 + now.getMinutes(), a = mins(q.start), b = mins(q.end);
+  const quiet = a > b ? (cur >= a || cur < b) : (cur >= a && cur < b);
+  if (!quiet) return { quiet: false };
+  const end = new Date(now); end.setHours(Math.floor(b / 60), b % 60, 0, 0); if (end <= now) end.setDate(end.getDate() + 1);
+  return { quiet: true, endsAt: end.getTime() };
+}
+let _availCache = { at: 0, v: null };
+async function reachFacts() {
+  const c = loadConfig();
+  let atMac = false;
+  try { atMac = powerMonitor.getSystemIdleState(90) === 'active'; } catch {}
+  const q = quietWindow();
+  let busy = false, busyUntil = null;
+  if (!q.quiet && (c.calls || {}).respectCalendar !== false) {
+    if (Date.now() - _availCache.at > 120000) {
+      try { _availCache = { at: Date.now(), v: await availability.check({ listEvents: (range) => calendarEventsOrThrow(range), now: Date.now() }) }; } catch { _availCache = { at: Date.now(), v: null }; }
+    }
+    const a = _availCache.v;
+    if (a && a.free === false) { busy = true; busyUntil = a.until ? Date.parse(a.until) || a.until : null; }
+  }
+  return {
+    atMac, telegramLinked: !!c.telegramChatId, telegramDown: !!_tgDownSince,
+    smsHealthy: (channelHealth().sms || {}).ok !== false,
+    callable: !!(c.twilioSid && c.twilioToken && c.twilioFrom && c.myPhone),
+    quiet: q.quiet, quietEndsAt: q.endsAt || null, busy, busyUntil,
+  };
+}
+async function twilioGet(pathPart) {
+  const c = credentials.resolveRefs(loadConfig());
+  const auth = 'Basic ' + Buffer.from(c.twilioSid + ':' + c.twilioToken).toString('base64');
+  const r = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${c.twilioSid}/${pathPart}`, { headers: { authorization: auth }, signal: AbortSignal.timeout(10000) });
+  return r.json();
+}
+// Follow a call until Twilio says how it ended, and record whether a PERSON picked up.
+function reachWatchCall(t, sid) {
+  let n = 0;
+  const tick = async () => {
+    n++;
+    let res = null; try { res = await twilioGet(`Calls/${sid}.json`); } catch {}
+    const o = reachLib.callOutcome(res);
+    if (!o.final && n < 30) return setTimeout(tick, 10000);
+    const cur = reachLoad().find((x) => x.id === t.id) || t;
+    const call = (cur.calls || []).find((c) => c.sid === sid);
+    if (call) { call.pending = false; call.reached = !!o.reached; call.outcome = o.final ? o.why : 'unknown'; }
+    cur.log.push(`${new Date().toISOString()} call ${o.final ? o.why : 'no final status'}`);
+    reachUpdate(cur);
+    console.log(`[reach] ${cur.id} call → ${o.final ? o.why : 'unknown'}`);
+    if (!o.reached) setTimeout(() => reachAdvance(cur).catch(() => {}), 1000);
+  };
+  setTimeout(tick, 15000);
+}
+// Follow an SMS to its carrier verdict; a dead number takes SMS out of the ladder until re-tested.
+function reachWatchSms(sid) {
+  let n = 0;
+  const tick = async () => {
+    n++;
+    let m = null; try { m = await twilioGet(`Messages/${sid}.json`); } catch {}
+    const o = reachLib.smsOutcome(m);
+    if (!o.final && n < 8) return setTimeout(tick, 15000);
+    if (o.final && o.ok) setChannelHealth('sms', { ok: true });
+    if (o.final && !o.ok && o.channelDead) { setChannelHealth('sms', { ok: false, code: o.code, why: o.why }); console.warn('[reach] SMS is not reaching him: ' + o.why); }
+  };
+  setTimeout(tick, 20000);
+}
+async function reachSend(ch, t) {
+  const label = (t.urgency === 'call' || t.urgency === 'high' ? '🔴 ' : t.urgency === 'medium' ? '🟡 ' : '⚪ ') + 'BhatBot: ' + t.msg;
+  if (ch === 'desktop') {
+    try { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('tool-update', { kind: 'notify', text: t.msg, urgency: t.urgency }); } catch {}
+    try {
+      const { Notification } = require('electron');
+      const n = new Notification({ title: 'BhatBot', body: t.msg.slice(0, 240), silent: t.urgency === 'low' });
+      n.on('click', () => reachAck('desktop'));
+      n.show();
+    } catch {}
+    if (t.urgency !== 'low' && !quietWindow().quiet) { try { speakDesktop(t.msg, { full: false }); } catch {} }
+    return { ok: true };
+  }
+  if (ch === 'telegram') {
+    const c = loadConfig();
+    if (!telegramBot || !c.telegramChatId) return { ok: false, why: 'Telegram not linked' };
+    try { await telegramBot.sendMessage(c.telegramChatId, label.slice(0, 4000)); tgMarkUp(); return { ok: true }; }
+    catch (e) { tgMarkDown(e && e.message); return { ok: false, why: String(e && e.message).slice(0, 80) }; }
+  }
+  if (ch === 'sms') {
+    const r = await twilioSMS(label);
+    if (r.sent && r.sid) reachWatchSms(r.sid);
+    return { ok: !!r.sent, why: r.error };
+  }
+  if (ch === 'call') {
+    const r = await twilioCall(t.msg, { allowPlainVoice: true });
+    if (r.sent && r.sid) { t.calls.push({ at: Date.now(), sid: r.sid, placed: true, pending: true, via: r.via }); reachWatchCall(t, r.sid); return { ok: true }; }
+    t.calls.push({ at: Date.now(), placed: false, reached: false, error: r.error });
+    if (r.busy && r.until) t.busyUntil = Date.parse(r.until) || null;
+    return { ok: false, why: r.error };
+  }
+  return { ok: false, why: 'unknown channel' };
+}
+let _reachRunning = false;
+async function reachAdvance(t) {
+  const facts = await reachFacts();
+  if (t.busyUntil && t.busyUntil > Date.now()) { facts.busy = true; facts.busyUntil = t.busyUntil; }
+  const step = reachLib.next(t, facts, Date.now());
+  if (step.done) { t.closedAt = Date.now(); t.closed = step.why; t.log.push(`${new Date().toISOString()} done: ${step.why}`); reachUpdate(t); return step; }
+  for (const ch of step.send || []) {
+    if (ch !== 'call') t.sent[ch] = (t.sent[ch] || 0) + 1;
+    const r = await reachSend(ch, t);
+    t.log.push(`${new Date().toISOString()} ${ch}: ${r.ok ? 'ok' : 'failed — ' + (r.why || '')}`);
+    if (r.ok && ch !== 'call' && !t.delivered.includes(ch)) t.delivered.push(ch);
+    if (!r.ok && ch !== 'call') t.sent[ch] = 0;          // a failed written send may be retried later
+  }
+  t.nextAt = Date.now() + (step.wait || 20000);
+  t.waiting = step.why || null;
+  reachUpdate(t);
+  return step;
+}
+setInterval(async () => {
+  if (_reachRunning) return; _reachRunning = true;
+  try {
+    for (const t of reachLoad()) if (!t.closedAt && (!t.nextAt || t.nextAt <= Date.now())) await reachAdvance(t).catch((e) => console.warn('[reach] ' + e.message));
+  } finally { _reachRunning = false; }
+}, 20000).unref();
+// Which call legs would carry a call right now — the same signed preflights twilioCall runs, with no
+// phone ringing. Cached for ten minutes; the status view and the reach tool read it.
+let _legs = { at: 0, v: null };
+async function callLegs({ fresh = false } = {}) {
+  if (!fresh && _legs.v && Date.now() - _legs.at < 600000) return _legs.v;
+  const c = credentials.resolveRefs(loadConfig());
+  const out = { cloud: { ok: false, why: 'not configured' }, mac: { ok: false, why: 'not configured' } };
+  const cloudHost = c.cloudUrl ? String(c.cloudUrl).replace(/^https?:\/\//, '').replace(/\/+$/, '') : '';
+  if (cloudHost && c.cloudToken) {
+    const p = await voicepreflight.check({ host: cloudHost, token: c.cloudToken, authToken: c.twilioToken, ownerPhone: c.myPhone, path: 'outgoing', param: 'purpose', externalProbe: false }).catch((e) => ({ ok: false, stage: 'preflight', detail: e.message }));
+    out.cloud = p.ok ? { ok: true } : { ok: false, why: `${p.stage}: ${String(p.detail || '').slice(0, 120)}` };
+  }
+  const mh = getPublicHost();
+  if (mh && c.mcpToken) {
+    const rr = publicHostReachable();
+    if (!rr.ok) out.mac = { ok: false, why: rr.why || 'funnel not reachable' };
+    else {
+      const p = await voicepreflight.check({ host: mh, token: c.mcpToken, authToken: c.twilioToken, ownerPhone: c.myPhone }).catch((e) => ({ ok: false, stage: 'preflight', detail: e.message }));
+      out.mac = p.ok ? { ok: true } : { ok: false, why: `${p.stage}: ${String(p.detail || '').slice(0, 120)}` };
+    }
+  }
+  _legs = { at: Date.now(), v: out };
+  return out;
+}
+async function reachStatus({ fresh = false } = {}) {
+  const c = loadConfig(), h = channelHealth(), f = await reachFacts();
+  const legs = await callLegs({ fresh });
+  let link = null, qr = null;
+  if (!c.telegramChatId) { link = await telegramLinkUrl(); if (link) { try { qr = await require('qrcode').toDataURL(link, { margin: 1, width: 240 }); } catch {} } }
+  const open = reachLoad().filter((t) => !t.closedAt).map((t) => ({ msg: t.msg.slice(0, 80), urgency: t.urgency, waiting: t.waiting, delivered: t.delivered, calls: t.calls.length }));
+  return {
+    telegram: { linked: !!c.telegramChatId, reachable: !_tgDownSince, viaRelay: !!c.telegramApiBase, linkUrl: link, qr,
+      note: c.telegramChatId ? 'Two-way texting works on any network, eduroam included.' : 'Not linked yet: open the link (or scan the code) on his phone and press Start — once.' },
+    sms: (h.sms && h.sms.ok === false)
+      ? { ok: false, why: h.sms.why, fix: 'Register the Twilio number for US texting: Twilio Console → Messaging → Regulatory Compliance → A2P 10DLC → Sole Proprietor (about $4 once + ~$2/month; approval takes days). Or buy a toll-free number and submit Toll-Free Verification. Until then BhatBot does not use SMS.' }
+      : { ok: true },
+    calls: { cloudLeg: legs.cloud, macLeg: legs.mac, ready: legs.cloud.ok || legs.mac.ok,
+      fallback: 'If neither two-way leg passes, an urgent call to him still goes out as a one-way message.' },
+    now: { atMac: f.atMac, quiet: f.quiet, busy: f.busy }, open,
+  };
+}
+ipcMain.handle('reach-status', (_e, o) => reachStatus(o || {}).catch((e) => ({ error: e.message })));
+/** He has seen it: a Telegram reply, a click on the notification, or talking to BhatBot. */
+function reachAck(via) {
+  const list = reachLoad(); let n = 0;
+  for (const t of list) if (!t.closedAt && !t.ackAt && (via !== 'desktop' || t.sent.desktop)) { t.ackAt = Date.now(); t.ackVia = via; n++; }
+  if (n) { reachSave(list); console.log(`[reach] ${n} message(s) acknowledged via ${via}`); }
+}
+
 async function notifyUser(message, urgency, opts = {}) {
   const msg = String(message || '').slice(0, 1500);
   if (!msg.trim()) return { sent: false, error: 'empty message' };
   urgency = urgency === 'info' ? 'low' : (urgency || 'low');
-  const hour = new Date().getHours();
-  const quiet = hour >= 23 || hour < 7;
   let taskId = null;
   if (opts.awaitReply) {
     taskId = String(opts.taskId || 'task_' + Date.now().toString(36)).replace(/[^\w.-]/g, '_').slice(0, 60);
@@ -9682,61 +9912,18 @@ async function notifyUser(message, urgency, opts = {}) {
     p[taskId] = { message: msg.slice(0, 500), ts: new Date().toISOString() };
     savePendingReplies(p);
   }
-  const mirror = () => { if (mainWindow && !mainWindow.isDestroyed()) { try { mainWindow.webContents.send('tool-update', { kind: 'notify', text: msg, urgency }); } catch {} } };
-  const done = (r) => {
-    security.auditEvent('notify', { urgency, quiet, via: r && r.via, ok: !!(r && r.sent), awaitReply: !!opts.awaitReply, taskId, downgraded: r && r.downgraded, msg: msg.slice(0, 120) });
-    if (taskId && r) r.taskId = taskId;
-    return r;
-  };
-
-  if (urgency === 'call') {
-    if (quiet) {                                   // don't ring at night — URGENT text instead
-      const s = await twilioSMS('🔴 (URGENT — quiet hours, did not call) BhatBot: ' + msg);
-      telegramNotify('📵 (quiet hours → SMS instead of call) ' + msg);
-      return done(s.sent ? { ...s, downgraded: 'quiet-hours' } : { sent: true, via: 'telegram', smsError: s.error, downgraded: 'quiet-hours' });
-    }
-    const r = await twilioCall(msg);
-    if (r.blocked) {
-      // REFUSED, NOT SILENCED. The gate exists to stop a broken channel being redialled, not to
-      // withhold an urgent message — so it goes out by the next loudest channel and SAYS it was
-      // meant to be a call, which is the part that would otherwise be lost.
-      //
-      // A CALENDAR block goes to Telegram rather than SMS: he is sitting in a lecture, and a text
-      // buzzing his phone is most of the interruption a call would have been. Telegram is the quiet
-      // channel and it keeps the written record, which is what he asked for.
-      if (r.busy) {
-        telegramNotify(`📅 (did not call — you are busy: ${r.error.replace(/^he is busy — /, '')}) ${msg}`);
-        return done({ sent: true, via: 'telegram', downgraded: 'busy', until: r.until || null });
-      }
-      const s = await twilioSMS('🔴 (BhatBot tried to CALL you; ' + r.error + ') ' + msg);
-      telegramNotify('📵 (call gated → SMS) ' + msg + '  [' + r.error + ']');
-      return done(s.sent ? { ...s, downgraded: 'call-gate' } : { sent: true, via: 'telegram', smsError: s.error, downgraded: 'call-gate' });
-    }
-    // A one-way announcement got through but he cannot answer it, so the written copy still matters.
-    telegramNotify((r.sent ? (r.oneWay ? '📞 (called you — one-way announcement) ' : '📞 (called you) ') : '📞 (call failed → ') + msg + (r.sent ? '' : ') ' + (r.error || '')));
-    return done(r.sent ? r : { sent: true, via: 'telegram', callError: r.error });
-  }
-
-  if (urgency === 'high' || (urgency === 'medium' && !quiet)) {
-    const r = await twilioSMS((urgency === 'high' ? '🔴 ' : '🟡 ') + 'BhatBot: ' + msg);
-    telegramNotify((urgency === 'high' ? '🔴 ' : '🟡 ') + 'BhatBot: ' + msg);   // record + fallback
-    mirror();
-    return done(r.sent ? r : { sent: true, via: 'telegram', smsError: r.error });
-  }
-
-  // low / info / medium-during-quiet-hours → Telegram only
-  telegramNotify((urgency === 'medium' ? '🟡 (quiet hours) ' : '⚪ ') + 'BhatBot: ' + msg);
-  mirror();
-  // A question that is waiting on HIM cannot sit in an outbox. Outside quiet hours it goes by SMS
-  // while Telegram is unreachable; everything else waits and is delivered when Telegram is back.
-  if (telegramDown()) {
-    if (opts.awaitReply && !quiet) {
-      const r = await twilioSMS('❓ BhatBot (Telegram unreachable): ' + msg);
-      if (r.sent) return done({ ...r, telegram: 'held' });
-    }
-    return done({ sent: false, via: 'telegram-outbox', held: true, error: 'Telegram unreachable — held, delivers when it reconnects' });
-  }
-  return done({ sent: true, via: 'telegram', ...(urgency === 'medium' ? { downgraded: 'quiet-hours' } : {}) });
+  // Every message is a REACH TICKET now (lib/reach.js): it walks desktop → Telegram → (SMS, only if
+  // carriers accept it) → a call, until one is CONFIRMED — he replied, answered, or acknowledged —
+  // within quiet hours and his calendar. The first rung runs here, so the caller still learns at once
+  // what went out; the rest is driven by the reach timer.
+  const t = reachCreate(msg, urgency, { needsReply: !!opts.awaitReply, taskId });
+  const step = await reachAdvance(t);
+  const via = [...(t.delivered || []), ...((t.calls || []).some((c) => c.placed) ? ['call'] : [])];
+  const r = { sent: via.length > 0, via: via.join('+') || 'none', ticket: t.id, next: step && step.why ? step.why : undefined };
+  if (!r.sent) { r.held = true; r.error = step && step.why ? 'not delivered yet — ' + step.why : 'no channel can reach him right now — held and retried'; }
+  security.auditEvent('notify', { urgency, via: r.via, ok: r.sent, awaitReply: !!opts.awaitReply, taskId, ticket: t.id, msg: msg.slice(0, 120) });
+  if (taskId) r.taskId = taskId;
+  return r;
 }
 
 // ---------------------------------------------------------------------------
