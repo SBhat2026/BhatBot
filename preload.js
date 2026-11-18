@@ -68,6 +68,11 @@ contextBridge.exposeInMainWorld('bhatbot', {
   getOpsStatus: () => ipcRenderer.invoke('get-ops-status'),                              // Manage panel — what BhatBot is running
   openBrain: () => ipcRenderer.invoke('open-brain'),
   arrangeWindows: () => ipcRenderer.invoke('arrange-windows'),
+  onPanes: (cb) => ipcRenderer.on('panes', (_e, list) => cb(list)),
+  onPanesArrange: (cb) => ipcRenderer.on('panes-arrange', () => cb()),
+  paneRects: (rects) => ipcRenderer.send('pane-rects', rects),
+  paneClose: (id) => ipcRenderer.send('pane-close', id),
+  panesList: () => ipcRenderer.invoke('panes-list'),
   syncWorkspaceTheme: () => ipcRenderer.send('workspace-theme'),
   onMemoryPressure: (cb) => { ipcRenderer.on('memory-pressure', (_e, v) => cb(v)); },
   getVitals: () => ipcRenderer.invoke('get-vitals'),                                     // HUD gauges — CPU/MEM/NET/PWR

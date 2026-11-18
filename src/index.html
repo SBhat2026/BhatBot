@@ -850,6 +850,11 @@
     box-shadow: 0 24px 80px rgba(0,0,0,.35); }
   #xp-scrim { position: fixed; inset: 0; z-index: 7999; background: color-mix(in oklab, var(--bg) 70%, transparent); }
   #xp-scrim[hidden] { display: none; }
+  /* tool panes: a card whose body is a native view placed by main */
+  #cmd-right > .hcard { order: 100; }
+  #cmd-right > .hcard.pane { flex: 1 1 0; min-height: 240px; }
+  .pane-body { flex: 1; min-height: 0; border-radius: 6px; background: var(--bg); border: 1px solid var(--line); }
+  .pane .pane-title { letter-spacing: .18em; }
   /* the floor: the 3D office, plus a chip per agent at work */
   #floor-3d-wrap { position: relative; flex: 1; min-height: 200px; border-radius: 6px; overflow: hidden; background: var(--bg); }
   #floor3d { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
@@ -5111,6 +5116,7 @@ window.holoSpin = function (mount, model) {
     want.vitals = Date.now() < vitalsUntil || cpuHot >= 3;
     let any = false;
     for (const k of Object.keys(want)) { if (card[k]) card[k].classList.toggle('show', want[k]); any = any || want[k]; }
+    any = any || (window._paneCount > 0);              // an open tool pane is always relevant
     body.classList.toggle('side-on', any);
     const fb = $('#sb-floor'); if (fb) { fb.classList.toggle('on', want.floor); fb.querySelector('span').textContent = floorWorking ? `Agent floor · ${floorCount} working` : want.floor ? 'Hide agent floor' : 'Agent floor · idle'; }
     floorLoad(want.floor);
@@ -5254,7 +5260,66 @@ window.holoSpin = function (mount, model) {
   }
   addExpand($('#stage-bar'), center);
   for (const k of ['floor', 'world', 'vitals', 'jobs', 'media']) if (card[k]) addExpand(card[k].querySelector('.hcard-h'), card[k]);
-  scrim.addEventListener('click', collapse);
+  scrim.addEventListener('click', () => { collapse(); placeSoon(); });
+
+  // ── TOOL PANES: Brain, Maps, Molecule, Studio, terminal… open INSIDE this window ──────────────────
+  // 2026-11-17: "windowing should take place inside the electron app, not on my desktop." Main tells
+  // us which panes exist (newest first); each gets a card in the side column like every other card —
+  // stacked, expandable, closable — and we report where each card's body is so main can put the
+  // native view exactly there. Native views paint above HTML, so whenever HTML has to be on top (the
+  // palette, another card expanded, another panel, a hidden window) the pane is reported as hidden.
+  const paneCards = new Map();
+  let paneRaf = 0, paneTick = null;
+  function paneRects() {
+    const rects = {};
+    const palOpen = $('#palette') && !$('#palette').hidden;
+    const xp = document.querySelector('.xp');
+    for (const [id, el] of paneCards) {
+      const bodyEl = el.querySelector('.pane-body');
+      const cs = $('#call-scrim'), callOpen = !!cs && !cs.hidden && getComputedStyle(cs).display !== 'none';
+      // (offsetParent is null for a position:fixed element, i.e. an EXPANDED card — so ask for boxes instead)
+      const onPage = el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden';
+      const shown = !document.hidden && !palOpen && !callOpen && onPage && (!xp || xp === el);
+      if (!shown) { rects[id] = null; continue; }
+      const r = bodyEl.getBoundingClientRect();
+      rects[id] = r.width > 4 && r.height > 4 ? { x: r.left, y: r.top, width: r.width, height: r.height } : null;
+    }
+    try { window.bhatbot.paneRects && window.bhatbot.paneRects(rects); } catch {}
+  }
+  function placeSoon() { cancelAnimationFrame(paneRaf); paneRaf = requestAnimationFrame(paneRects); }
+  window.placePanes = placeSoon;
+  const paneRO = new ResizeObserver(placeSoon);
+  function paneCard(p) {
+    const el = document.createElement('div');
+    el.className = 'hcard pane show'; el.dataset.pane = p.id;
+    el.innerHTML = '<div class="hcard-h"><span class="pane-title"></span><span class="hc-r"></span><button class="card-x" title="Close">✕</button></div><div class="pane-body"></div>';
+    el.querySelector('.card-x').addEventListener('click', () => { try { window.bhatbot.paneClose(p.id); } catch {} });
+    addExpand(el.querySelector('.hcard-h'), el);
+    el.querySelector('.xp-btn').addEventListener('click', () => setTimeout(placeSoon, 30));
+    paneRO.observe(el.querySelector('.pane-body'));
+    return el;
+  }
+  if (window.bhatbot && window.bhatbot.onPanes) window.bhatbot.onPanes((list) => {
+    const ids = new Set((list || []).map((p) => p.id));
+    for (const [id, el] of paneCards) if (!ids.has(id)) { if (el.classList.contains('xp')) collapse(); el.remove(); paneCards.delete(id); }
+    (list || []).forEach((p, i) => {
+      let el = paneCards.get(p.id);
+      if (!el) { el = paneCard(p); paneCards.set(p.id, el); side.prepend(el); }
+      el.querySelector('.pane-title').textContent = String(p.title || 'Tool').toUpperCase();
+      el.style.order = String(i);                              // newest on top
+    });
+    window._paneCount = paneCards.size;
+    relayout(); placeSoon();
+    clearInterval(paneTick);
+    // Card positions also move when OTHER cards appear or the panel changes; a light re-check keeps
+    // the native views glued to their cards without hooking every one of those paths.
+    if (paneCards.size) paneTick = setInterval(placeSoon, 700);
+  });
+  if (window.bhatbot && window.bhatbot.onPanesArrange) window.bhatbot.onPanesArrange(() => { collapse(); placeSoon(); });
+  window.addEventListener('resize', placeSoon);
+  document.addEventListener('visibilitychange', placeSoon);
+  new MutationObserver(placeSoon).observe(body, { attributes: true, attributeFilter: ['class'] });
+  if ($('#palette')) new MutationObserver(placeSoon).observe($('#palette'), { attributes: true, attributeFilter: ['hidden'] });
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && document.querySelector('.xp') && (!$('#palette') || $('#palette').hidden)) collapse(); });
 
   document.getElementById('arrange-windows').onclick = () => window.bhatbot.arrangeWindows();

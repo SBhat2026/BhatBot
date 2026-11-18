@@ -1,6 +1,6 @@
 'use strict';
 
-const { app, BrowserWindow, globalShortcut, ipcMain, shell, dialog, screen, webContents, systemPreferences, desktopCapturer, powerMonitor } = require('electron');
+const { app, BrowserWindow, WebContentsView, globalShortcut, ipcMain, shell, dialog, screen, webContents, systemPreferences, desktopCapturer, powerMonitor } = require('electron');
 // Electron/Chromium blocks audio autoplay after async calls → desktop TTS was silent.
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
 // ── ONE VAULT IDENTITY, dev and packaged ─────────────────────────────────────────────────────────
@@ -4160,20 +4160,30 @@ const MESH_PY = path.join(os.homedir(), '.bhatbot', 'mesh-venv', 'bin', 'python'
 // Molecule/Maps/3D viewer) is created + state-owned there. Thin consts below keep all call sites
 // (creation.js ctx, executeTool dispatch, IPC handlers, hotkey) unchanged. createWindow is a hoisted
 // function decl so it resolves here even though it's defined further down.
+// Tool windows open as PANES inside the main window (lib/panes.js). config.inAppWindows:false puts
+// them back on the desktop as separate windows.
+const smartWindows = require('./lib/smart-windows').createSmartWindows({
+  getMainWindow: () => mainWindow, themeCSS: fs.readFileSync(path.join(__dirname, 'src/theme.css'), 'utf8'),
+});
+const paneHost = require('./lib/panes').createPaneHost({ WebContentsView, getMainWindow: () => mainWindow, log: (m) => console.log(m) });
+const ToolWindow = loadConfig().inAppWindows === false ? BrowserWindow : class extends paneHost.PaneWindow {
+  constructor(o) { super(o); smartWindows.track(this); }
+};
+ipcMain.on('pane-rects', (_e, rects) => paneHost.place(rects));
+ipcMain.on('pane-close', (_e, id) => paneHost.close(String(id || '')));
+ipcMain.handle('panes-list', () => paneHost.list());
 const wm = require('./window-manager')({
-  BrowserWindow, screen, webContents,
+  BrowserWindow: ToolWindow, screen, webContents,
   getMainWindow: () => mainWindow, createWindow,
   paths: { STUDIO_DIR, STUDIO_INDEX, CHESS_HTML, NEXUS_URL },
 });
-const smartWindows = require('./lib/smart-windows').createSmartWindows({
-  screen, getMainWindow: () => mainWindow, themeCSS: fs.readFileSync(path.join(__dirname, 'src/theme.css'), 'utf8'),
-});
 app.on('browser-window-created', (_event, win) => smartWindows.track(win));
-ipcMain.handle('arrange-windows', () => smartWindows.arrange());
+// "Arrange" now tidies the panes inside the app; nothing on his desktop is moved.
+ipcMain.handle('arrange-windows', () => { try { mainWindow && mainWindow.webContents.send('panes-arrange'); } catch {} return { panes: paneHost.list().length }; });
 let brainWindow = null;
 ipcMain.handle('open-brain', () => {
   if (brainWindow && !brainWindow.isDestroyed()) { brainWindow.show(); brainWindow.focus(); return; }
-  brainWindow = new BrowserWindow({ width: 1000, height: 760, title: 'BhatBot · Brain', webPreferences: { contextIsolation: true, nodeIntegration: false, preload: path.join(__dirname, 'src/preload-brain.js') } });
+  brainWindow = new ToolWindow({ width: 1000, height: 760, title: 'BhatBot · Brain', webPreferences: { contextIsolation: true, nodeIntegration: false, preload: path.join(__dirname, 'src/preload-brain.js') } });
   brainWindow.loadFile(path.join(__dirname, 'src/brain.html'));
   brainWindow.on('closed', () => { brainWindow=null; });
 });
@@ -7294,7 +7304,7 @@ function openAgentWindow(id) {
   if (!fs.existsSync(asset)) return { success: false, error: 'agentmon.html missing' };
   let w = agentWindows.get(id);
   if (w && !w.isDestroyed()) { w.show(); w.focus(); return { success: true }; }
-  w = new BrowserWindow({
+  w = new ToolWindow({
     width: 560, height: 680, resizable: true, minWidth: 360, minHeight: 360,
     title: 'Agent · ' + id, backgroundColor: '#0a0f17',
     webPreferences: { contextIsolation: true, preload: path.join(__dirname, 'preload-agentmon.js') },
@@ -7321,7 +7331,7 @@ function openActionView() {
     if (actionViewWin && !actionViewWin.isDestroyed()) { actionViewWin.show(); return { success: true }; }
     const asset = path.join(__dirname, 'assets', 'agentmon.html');
     if (!fs.existsSync(asset)) return { success: false, error: 'agentmon.html missing' };
-    actionViewWin = new BrowserWindow({
+    actionViewWin = new ToolWindow({
       width: 620, height: 760, resizable: true, minWidth: 380, minHeight: 400,
       title: 'BhatBot — Live Action View', backgroundColor: '#0a0f17', alwaysOnTop: false,
       webPreferences: { contextIsolation: true, preload: path.join(__dirname, 'preload-agentmon.js') },
@@ -7349,7 +7359,7 @@ function openBlenderStudio() {
     if (blenderWin && !blenderWin.isDestroyed()) { blenderWin.show(); return { success: true }; }
     const asset = path.join(__dirname, 'src', 'blender.html');
     if (!fs.existsSync(asset)) return { success: false, error: 'blender.html missing' };
-    blenderWin = new BrowserWindow({
+    blenderWin = new ToolWindow({
       width: 1040, height: 720, resizable: true, minWidth: 620, minHeight: 420,
       title: 'BhatBot — Blender Studio', backgroundColor: '#0a0f17',
       webPreferences: { contextIsolation: true, preload: path.join(__dirname, 'src', 'preload-blender.js') },
@@ -11084,6 +11094,8 @@ function createWindow() {
     webPreferences: { nodeIntegration: false, contextIsolation: true, webviewTag: true, preload: path.join(__dirname, 'preload.js') }
   });
   mainWindow.loadFile(path.join(__dirname, 'src', 'index.html'));
+  // Panes are native views on THIS window: (re)attach and re-announce them whenever its page loads.
+  mainWindow.webContents.on('did-finish-load', () => { try { paneHost.reattach(); } catch {} });
   mainWindow.setFullScreen(true);   // always open fullscreen (still resizable — can exit via ⌃⌘F)
 }
 
@@ -11110,7 +11122,7 @@ ipcMain.handle('wc-snapshot', async () => {
 function openTerminalWindow() {
   if (terminalWindow && !terminalWindow.isDestroyed()) { terminalWindow.show(); terminalWindow.focus(); return; }
   const { width } = screen.getPrimaryDisplay().workAreaSize;
-  terminalWindow = new BrowserWindow({
+  terminalWindow = new ToolWindow({
     width: 860, height: 600, x: Math.max(20, width - 900), y: 80,
     resizable: true, maximizable: true, minWidth: 480, minHeight: 280,
     title: 'Claude Code', backgroundColor: '#0a0f17',
