@@ -850,6 +850,18 @@
     box-shadow: 0 24px 80px rgba(0,0,0,.35); }
   #xp-scrim { position: fixed; inset: 0; z-index: 7999; background: color-mix(in oklab, var(--bg) 70%, transparent); }
   #xp-scrim[hidden] { display: none; }
+  #reach-dlg { position: fixed; inset: 0; z-index: 9001; background: rgba(0,0,0,.42); display: flex; justify-content: center; align-items: flex-start; padding-top: 10vh; }
+  #reach-dlg[hidden] { display: none; }
+  #reach-dlg .rd-box { width: min(640px, calc(100vw - 32px)); max-height: 80vh; overflow-y: auto; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 24px 60px rgba(0,0,0,.45); padding: 14px 16px; }
+  #reach-dlg .rd-h { display: flex; align-items: center; font: 10px var(--font-system); letter-spacing: .18em; color: var(--text-dim); margin-bottom: 10px; }
+  #reach-dlg .rd-h .card-x { margin-left: auto; }
+  .rd-row { display: flex; gap: 10px; padding: 10px 0; border-top: 1px solid var(--line); font-size: 13px; color: var(--text); }
+  .rd-row b { font-weight: 600; } .rd-t { color: var(--text-dim); margin-top: 3px; line-height: 1.45; }
+  .rd-dot { width: 9px; height: 9px; border-radius: 50%; margin-top: 5px; flex-shrink: 0; background: var(--err, #d9534f); } .rd-dot.ok { background: var(--ok, #3fa34d); }
+  .rd-fix { display: inline-block; margin-top: 4px; font-size: 12px; }
+  .rd-qr { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 6px 0 12px; } .rd-qr img { width: 200px; height: 200px; border-radius: 6px; background: #fff; padding: 6px; }
+  .rd-qr a { font-size: 11.5px; color: var(--accent); word-break: break-all; }
+  .rd-now { border-top: 1px solid var(--line); padding-top: 10px; font-size: 12px; color: var(--text-dim2); }
   /* tool panes: a card whose body is a native view placed by main */
   #cmd-right > .hcard { order: 100; }
   #cmd-right > .hcard.pane { flex: 1 1 0; min-height: 240px; }
@@ -5272,7 +5284,7 @@ window.holoSpin = function (mount, model) {
   let paneRaf = 0, paneTick = null;
   function paneRects() {
     const rects = {};
-    const palOpen = $('#palette') && !$('#palette').hidden;
+    const palOpen = ($('#palette') && !$('#palette').hidden) || ($('#reach-dlg') && !$('#reach-dlg').hidden);
     const xp = document.querySelector('.xp');
     for (const [id, el] of paneCards) {
       const bodyEl = el.querySelector('.pane-body');
@@ -5326,6 +5338,41 @@ window.holoSpin = function (mount, model) {
   setLayout(!classic);
   window.renderFloor();
 
+  // ── how BhatBot reaches him: Telegram link (QR), call legs, SMS, anything still being delivered ──
+  async function openReach() {
+    let dlg = document.getElementById('reach-dlg');
+    if (!dlg) {
+      dlg = document.createElement('div'); dlg.id = 'reach-dlg';
+      dlg.innerHTML = '<div class="rd-box"><div class="rd-h">✆ HOW BHATBOT REACHES YOU<button class="card-x" title="Close">✕</button></div><div class="rd-body">Checking…</div></div>';
+      dlg.addEventListener('mousedown', (e) => { if (e.target === dlg) { dlg.hidden = true; placeSoon(); } });
+      dlg.querySelector('.card-x').addEventListener('click', () => { dlg.hidden = true; placeSoon(); });
+      document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !dlg.hidden) { dlg.hidden = true; placeSoon(); } });
+      document.body.appendChild(dlg);
+    }
+    dlg.hidden = false; placeSoon();
+    const bodyEl = dlg.querySelector('.rd-body');
+    bodyEl.textContent = 'Checking every channel…';
+    const st = await window.bhatbot.reachStatus({ fresh: true }).catch((e) => ({ error: e.message }));
+    if (!st || st.error) { bodyEl.textContent = 'Could not check: ' + ((st && st.error) || 'unknown'); return; }
+    const esc = (x) => String(x == null ? '' : x).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+    const row = (ok, title, text) => `<div class="rd-row"><span class="rd-dot ${ok ? 'ok' : 'bad'}"></span><div><b>${title}</b><div class="rd-t">${text}</div></div></div>`;
+    let h = '';
+    const tg = st.telegram || {};
+    h += row(tg.linked && tg.reachable, 'Telegram — texting both ways, works on eduroam', tg.linked ? (tg.reachable ? 'Linked and reachable' + (tg.viaRelay ? ' (through the relay)' : '') + '.' : 'Linked, but not reachable right now — messages are held and sent when it reconnects.') : 'Not linked yet. Scan this with your phone (or open the link there) and press <b>Start</b> — once.');
+    if (!tg.linked && tg.qr) h += `<div class="rd-qr"><img alt="Telegram link QR code" src="${tg.qr}"><a href="#" id="rd-link">${esc(tg.linkUrl)}</a></div>`;
+    const cl = st.calls || {};
+    const leg = (name, l) => (l && l.ok ? `${name} line ready.` : `${name} line not usable${l && l.why ? ' (' + esc(l.why) + ')' : ''}.`);
+    h += row(cl.ready, 'Phone calls', `${leg('Cloud', cl.cloudLeg)} ${leg('Mac', cl.macLeg)} ${esc(cl.fallback || '')}`);
+    const sm = st.sms || {};
+    h += row(sm.ok, 'SMS', sm.ok ? 'Working.' : esc(sm.why) + '<br><span class="rd-fix">' + esc(sm.fix) + '</span>');
+    const nw = st.now || {};
+    h += `<div class="rd-now">${nw.quiet ? 'Quiet hours now — calls wait until morning. ' : ''}${nw.busy ? 'Your calendar says you are busy — calls wait until it ends. ' : ''}${(st.open || []).length ? (st.open.length + ' message(s) still being delivered.') : 'Nothing waiting to be delivered.'}</div>`;
+    bodyEl.innerHTML = h;
+    const a = document.getElementById('rd-link');
+    if (a) a.addEventListener('click', (e) => { e.preventDefault(); try { navigator.clipboard.writeText(tg.linkUrl); a.textContent = 'Copied — open it on your phone'; } catch {} });
+  }
+  window.openReach = openReach;
+
   // ── ⌘K palette ──
   const pal = $('#palette'), pq = $('#pal-q'), pl = $('#pal-list');
   const panels = [...document.querySelectorAll('#rail .navbtn')].map((b) => ({
@@ -5335,6 +5382,7 @@ window.holoSpin = function (mount, model) {
   const fixed = () => [
     { g: '◈', label: 'Show me a place live…', hint: 'LIVE VIEW', run: (q) => window.worldShowPlace(q.replace(/^show me\s*/i, '') || 'Tokyo'), match: /^(show me|what'?s it like in)\b/i },
     { g: '⬡', label: want.floor ? 'Hide the agent floor' : 'Show the agent floor', hint: 'AGENTS', run: () => { floorPinned = !want.floor; relayout(); } },
+    { g: '✆', label: 'How BhatBot reaches me (Telegram link, calls, texting)', hint: 'REACH', run: () => openReach() },
     { g: '◔', label: want.vitals ? 'Hide system vitals' : 'Show system vitals', hint: 'MAC', run: () => { vitalsUntil = want.vitals ? 0 : Date.now() + 10 * 60 * 1000; cpuHot = 0; relayout(); } },
     { g: '⌨', label: body.classList.contains('ambient') ? 'Show the text bar (type + read replies)' : 'Hide the text bar (voice only)', hint: 'TALK', run: () => { const b = document.getElementById('kb'); if (b) b.click(); } },
     { g: '▦', label: body.classList.contains('zones') ? 'Classic layout (all panels at once)' : 'Focus layout', hint: 'LAYOUT', run: () => setLayout(!body.classList.contains('zones')) },

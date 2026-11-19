@@ -88,6 +88,41 @@ let wrote = null;
   ok(/ALLOWED_BOT_ID/.test(w) && /status: 404/.test(w), 'the relay forwards only his bot, and 404s everything else');
   ok(/!c\.telegramChatId \|\| _tgDownSince\) \{ tgHold/.test(main), 'with no chat yet, messages are held, not dropped');
 
+  // ── reach: confirmed delivery (lib/reach.js) ──
+  const R = require('../lib/reach');
+  const now = Date.now(), F = { atMac: false, telegramLinked: true, callable: true };
+  let d = R.next({ urgency: 'call', createdAt: now, sent: {} }, F, now);
+  ok(JSON.stringify(d.send) === '["telegram","call"]', 'an urgent message goes to Telegram AND rings at once');
+  d = R.next({ urgency: 'high', createdAt: now, sent: {} }, F, now);
+  ok(d.send.join() === 'telegram' && d.wait === R.DEFAULTS.ackWindowMs, 'high: written first, a call only if it goes unacknowledged');
+  ok(R.next({ urgency: 'high', createdAt: now - 11 * 60000, sent: { telegram: 1 } }, F, now).send.join() === 'call', '…and after ten minutes unacknowledged, it calls');
+  d = R.next({ urgency: 'call', createdAt: now, sent: { telegram: 1 } }, { ...F, quiet: true, quietEndsAt: now + 3600e3 }, now);
+  ok(!d.send && d.wait >= 3500e3 && /quiet hours/.test(d.why), 'quiet hours hold the call until they end — they do not cancel it');
+  d = R.next({ urgency: 'call', createdAt: now, sent: { telegram: 1 } }, { ...F, busy: true, busyUntil: now + 20 * 60000 }, now);
+  ok(!d.send && d.wait > 20 * 60000 && /meeting or class/.test(d.why), 'a meeting holds the call until just after it ends');
+  ok(/retrying/.test(R.next({ urgency: 'call', createdAt: now, sent: { telegram: 1 }, calls: [{ at: now - 60000 }] }, F, now).why), 'a missed call is retried after a gap');
+  ok(R.next({ urgency: 'call', createdAt: now, sent: { telegram: 1 }, calls: [{ at: now - 9e5 }, { at: now - 1e5 }] }, F, now).done, '…at most twice');
+  ok(R.next({ urgency: 'call', createdAt: now, sent: {}, calls: [{ reached: true }] }, F, now).done, 'answered = done');
+  ok(R.next({ urgency: 'high', createdAt: now, sent: { telegram: 1 }, ackAt: now }, F, now).done, 'acknowledged = done');
+  ok(!R.channels({ smsHealthy: false }).sms, 'a dead SMS channel is never used');
+  ok(R.next({ urgency: 'medium', createdAt: now, sent: {} }, { telegramLinked: false, callable: true }, now).wait > 0, 'medium with nowhere to write waits rather than pretending');
+  const co = R.callOutcome;
+  ok(co({ status: 'completed', answered_by: 'human', duration: '40' }).reached && !co({ status: 'completed', answered_by: 'machine_end_beep', duration: '30' }).reached
+    && !co({ status: 'no-answer' }).reached && !co({ status: 'ringing' }).final, 'only a person picking up counts as reached; voicemail and no-answer do not');
+  const so = R.smsOutcome({ status: 'undelivered', error_code: 30034 });
+  ok(so.final && !so.ok && so.channelDead && /not registered/.test(so.why), 'carrier error 30034 marks SMS dead, with the reason');
+
+  // ── the Mac call leg follows the live Tailscale name, and its reachability is proven from outside ──
+  ok(/_publicHostAt < 600000/.test(main) && /tailscale status --json/.test(main) && /publicHostPinned/.test(main), 'the public host is re-read live, not cached forever');
+  ok(/funnel is published for an old name/.test(main), 'a funnel published under a stale name is reported, not trusted');
+  const vp = require('../lib/voicepreflight');
+  ok(typeof vp.setProbers === 'function' && /setProbers\(\[loadConfig\(\)\.reachProber/.test(main), 'BhatBot\'s own outside prober is used first');
+  ok(/\.ts\\\.net\$/.test(w) && /example\.com/.test(w) && /status: 403/.test(w) && /530/.test(w), 'the prober only fetches his tailnet (and its control), and reads a funnel-edge 530 as unreachable');
+  // reach wiring
+  ok(/reachCreate\(msg, urgency/.test(main) && /setInterval\(async \(\) => \{\s*if \(_reachRunning\)/.test(main), 'notify_user creates tickets and a timer advances them');
+  ok(/reachAck\('telegram'\)/.test(main) && /reachAck\('desktop'\)/.test(main), 'a Telegram reply or talking to BhatBot acknowledges');
+  ok(/said === '\/start ' \+ code/.test(main) && !/First message authorizes this chat/.test(main), 'Telegram links only through BhatBot\'s own code');
+
   console.log(`\n${fail === 0 ? '✅' : '❌'} reach: ${pass} passed, ${fail} failed`);
   process.exit(fail === 0 ? 0 : 1);
 })();

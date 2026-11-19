@@ -7560,17 +7560,25 @@ const getActivity = rstate.getActivity;
 // Public funnel host (for Twilio webhooks + the phone's "open this URL"). Detected from
 // Tailscale, cached in config.publicHost. Returns bare host (no scheme), or '' if unknown.
 let _publicHost = null;
+let _publicHostAt = 0;
 function getPublicHost() {
-  if (_publicHost) return _publicHost;
+  // The LIVE Tailscale name wins, re-read every ten minutes. It used to be read once and saved to
+  // config forever — then the Mac was renamed (macbook-pro → siddhants-macbook-pro) and every call on
+  // the Mac leg pointed Twilio at a name that no longer exists. config.publicHost is now only the
+  // fallback for when Tailscale cannot be asked (or an explicit override: publicHostPinned:true).
   const c = loadConfig();
-  if (c.publicHost) { _publicHost = String(c.publicHost).replace(/^https?:\/\//, '').replace(/\/+$/, ''); return _publicHost; }
+  if (c.publicHostPinned && c.publicHost) return String(c.publicHost).replace(/^https?:\/\//, '').replace(/\/+$/, '');
+  if (_publicHost && Date.now() - _publicHostAt < 600000) return _publicHost;
   try {
-    const out = require('child_process').execSync('tailscale status --json', { timeout: 4000 }).toString();
-    const dns = (JSON.parse(out).Self || {}).DNSName || '';
-    const host = dns.replace(/\.$/, '');
-    if (host) { _publicHost = host; saveConfig({ publicHost: host }); return host; }
+    const out = require('child_process').execSync('tailscale status --json', { timeout: 4000, env: { ...process.env, PATH: EXEC_PATH + ':/Applications/Tailscale.app/Contents/MacOS' } }).toString();
+    const host = ((JSON.parse(out).Self || {}).DNSName || '').replace(/\.$/, '');
+    if (host) {
+      if (host !== c.publicHost) { console.log(`[voice] public host is now ${host}${c.publicHost ? ' (was ' + c.publicHost + ')' : ''}`); saveConfig({ publicHost: host }); }
+      _publicHost = host; _publicHostAt = Date.now(); return host;
+    }
   } catch {}
-  return '';
+  if (c.publicHost) { _publicHost = String(c.publicHost).replace(/^https?:\/\//, '').replace(/\/+$/, ''); _publicHostAt = Date.now(); }
+  return _publicHost || '';
 }
 
 /**
@@ -7591,7 +7599,10 @@ function publicHostReachable() {
   try {
     const out = require('child_process').execSync('tailscale funnel status 2>&1', { timeout: 4000 }).toString();
     // "No serve config" is the literal string it prints when nothing is published.
-    if (!/no serve config/i.test(out) && /https:\/\//.test(out)) { ok = true; why = 'funnel published'; }
+    const host = getPublicHost();
+    if (/no serve config/i.test(out) || !/https:\/\//.test(out)) why = 'funnel not published — run `tailscale funnel --bg 8788`';
+    else if (host && !out.includes('https://' + host)) why = `funnel is published for an old name, not ${host} — run \`tailscale funnel reset && tailscale funnel --bg 8788\``;
+    else { ok = true; why = 'funnel published'; }
   } catch (e) { why = 'could not read funnel status: ' + ((e && e.message) || e); }
   _funnelCache = { at: now, ok, why };
   if (!ok) console.warn('[voice] public webhook host is NOT reachable — ' + why);
@@ -10129,6 +10140,7 @@ const custodian = createCustodian({
   onEvent: (e) => { try { sendToActivity('tool-update', { type: 'thinking', text: '🔍 ' + (e && e.text ? e.text : JSON.stringify(e)) }); } catch {} },
 });
 const voicepreflight = require('./lib/voicepreflight');
+try { voicepreflight.setProbers([loadConfig().reachProber || 'https://bhatbot-telegram-relay.prismlab.workers.dev/probe?url=']); } catch {}
 let _triageRun = null;
 function triageRunner() {
   if (!_triageRun) _triageRun = createTriageRun({ google, actionLog, config: triageCfg(), log: (m) => console.log(m) });

@@ -72,6 +72,7 @@ contextBridge.exposeInMainWorld('bhatbot', {
   onPanesArrange: (cb) => ipcRenderer.on('panes-arrange', () => cb()),
   paneRects: (rects) => ipcRenderer.send('pane-rects', rects),
   paneClose: (id) => ipcRenderer.send('pane-close', id),
+  reachStatus: (o) => ipcRenderer.invoke('reach-status', o || {}),
   panesList: () => ipcRenderer.invoke('panes-list'),
   syncWorkspaceTheme: () => ipcRenderer.send('workspace-theme'),
   onMemoryPressure: (cb) => { ipcRenderer.on('memory-pressure', (_e, v) => cb(v)); },
