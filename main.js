@@ -9844,7 +9844,7 @@ async function reachAdvance(t) {
   const facts = await reachFacts();
   if (t.busyUntil && t.busyUntil > Date.now()) { facts.busy = true; facts.busyUntil = t.busyUntil; }
   const step = reachLib.next(t, facts, Date.now());
-  if (step.done) { t.closedAt = Date.now(); t.closed = step.why; t.log.push(`${new Date().toISOString()} done: ${step.why}`); reachUpdate(t); return step; }
+  if (step.done) { t.closedAt = Date.now(); t.closed = step.why; t.waiting = null; t.log.push(`${new Date().toISOString()} done: ${step.why}`); reachUpdate(t); return step; }
   for (const ch of step.send || []) {
     if (ch !== 'call') t.sent[ch] = (t.sent[ch] || 0) + 1;
     const r = await reachSend(ch, t);
