@@ -10254,7 +10254,7 @@ async function selfHealTick() {
       // Feat-2 — relay what it fixed. Crash-sourced fixes are urgent → also call.
       const summary = `🔧 Self-repair: fixed an issue${r.changed ? ' (' + String(r.changed).slice(0, 200) + ')' : ''}. Verified and kept locally.`;
       try { telegramNotify(summary); } catch {}
-      if (r.source === 'runtimeErrors' || r.urgent) { try { notifyUser(summary, 'call'); } catch {} }
+      if (r.source === 'runtimeErrors' || r.urgent) { try { notifyUser(summary, 'high'); } catch {} }
     }
   } catch (e) { console.error('[self-heal] tick failed:', e.message); }
 }
@@ -10539,7 +10539,10 @@ function startPatrol() {
   try {
     _patrol = makePatrol({
       loadConfig, telegramNotify,
-      notifyUser: (m, u) => notifyUser(m, u || 'call'),
+      // Patrol reports the machine's own health (cloud link, crashes). That is worth a written alert,
+      // never a phone ringing — with confirmed delivery a 'call' default rang at the end of quiet hours
+      // about a cloud link that had dropped at 3 am.
+      notifyUser: (m, u) => notifyUser(m, u === 'call' ? 'high' : (u || 'medium')),
       cloudConnected: () => !!(_cloudBridge && _cloudBridge.connected && _cloudBridge.connected()),
       selfhealStatus: () => { try { return selfheal.status(loadConfig); } catch { return {}; } },
       crashCount,
