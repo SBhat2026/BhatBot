@@ -99,4 +99,26 @@ const quiet = (fn) => { const e = console.error; console.error = () => {}; try {
   fs.rmSync(dir, { recursive: true, force: true });
 }
 
+// TWO PROCESSES, ONE FILE (25 Nov). The worker revives a project; the app, holding an older copy,
+// must not write it back to archived — and its view must show the revival.
+{
+  const dir = tmpdir();
+  const app = brain.createBrain({ dir });
+  app.upsertNode({ type: 'project', ref: 'bhatbot', label: 'bhatbot' }, 1);
+  app.upsertNode({ type: 'memory', ref: 'm1', label: 'M1' }, 1);
+  app.prune('node', 'project:bhatbot');
+  app.save();
+  const worker = brain.createBrain({ dir });
+  worker.upsertNode({ id: 'project:bhatbot', type: 'project', ref: 'bhatbot', status: 'confirmed', _revive: true }, 2);
+  const t = Date.now() + 50; while (Date.now() < t) {}            // mtime granularity
+  worker.save();
+  ok(app.freshen() === true, 'the app notices the worker wrote the graph since it last looked');
+  ok(app.getNode('project:bhatbot').status === 'confirmed', 'and sees the revival instead of its stale archived copy');
+  app.prune('node', 'memory:m1'); app.save();
+  const check = brain.createBrain({ dir });
+  ok(check.getNode('project:bhatbot').status === 'confirmed' && check.getNode('memory:m1').status === 'pruned', 'its next write keeps the worker\'s change and adds its own');
+  ok(app.freshen() === false, 'and freshen() is a no-op when nothing changed on disk');
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
 console.log(`✅ brain durability: ${pass} assertions passed`);

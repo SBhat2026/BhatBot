@@ -30,7 +30,7 @@ const worldcup = require('./lib/worldcup');               // FIFA WC 2026 live b
 const news = require('./lib/news');                       // NYT news skim (RSS, no key; Top Stories API if nytApiKey set)
 const websearch = require('./lib/websearch');             // web_search — ranked results (Brave/Serper/Tavily if keyed, else free DuckDuckGo)
 const { classify } = require('./taskClassifier');
-const { startMcpServer, stopMcpServer, registerGuestCall, prewarmSpeech, amdResult } = require('./mcp-server');
+const { startMcpServer, stopMcpServer, registerGuestCall, prewarmSpeech, amdResult, heardHuman } = require('./mcp-server');
 const callscript = require('./lib/callscript');
 // Workspace multi-agent stack (Architecture v2) — orchestrator delegates big projects to
 // stateless agents over structured state, keeping the chat context flat. See ARCHITECTURE.md.
@@ -127,6 +127,7 @@ let _activeMission = null;
 // Every dep is passed as an arrow rather than a value, so nothing here depends on where in this file
 // notifyUser or fullCatalog happens to be defined. That mattered the moment these moved.
 const designation = require('./lib/designation');
+const modelhue = require('./lib/modelhue');
 const { createEscalations } = require('./lib/escalate');
 const { createForge } = require('./lib/toolforge');
 const { createSupervisor } = require('./lib/supervisor');
@@ -4998,7 +4999,7 @@ function supervisorEvent(e) {
     if (['run-start', 'progress', 'escalated', 'unblocked', 'assumed', 'plan-grew', 'forged', 'gave-up', 'run-end', 'agent', 'agent-gone', 'mode'].includes(e.type)) pushLongRunSoon();
     switch (e.type) {
       case 'agent':
-        supervisedAgents.set(e.id, { id: e.id, name: e.name, designation: e.designation, role: e.role, state: e.state, task: e.task, step: e.step, since: e.since });
+        supervisedAgents.set(e.id, { id: e.id, name: e.name, designation: e.designation, role: e.role, lane: e.lane, model: e.model, state: e.state, task: e.task, step: e.step, since: e.since });
         pushPresenceNow();
         break;
       case 'agent-gone':
@@ -9451,6 +9452,8 @@ function endVoiceCall(callSid) { if (callSid) voiceCalls.delete(callSid); }
 // `to` defaults to Siddhant's own phone (every existing caller relies on that). Passing an explicit
 // number is what lets the call button ring someone in his contacts instead — the conversation webhook
 // is identical either way, so a call to a third party is still a real two-way JARVIS conversation.
+const DIAL_DEDUPE_MS = 90 * 1000;
+let _lastDial = { key: '', at: 0 };
 async function twilioCall(message, { to, name, note, bypassGate = false, allowPlainVoice = false, dryRun = false } = {}) {
   const c = loadConfig();
   const target = to || c.myPhone;
@@ -9463,6 +9466,19 @@ async function twilioCall(message, { to, name, note, bypassGate = false, allowPl
   if (!dryRun && (c.calls || {}).hold) {
     recordCall({ to: target, name: name || null, ok: false, blocked: true, reason: 'calls on hold' });
     return { sent: false, held: true, error: 'calls are on hold (config calls.hold) — nothing dialled' };
+  }
+  // ── ONE NUMBER, ONE RING AT A TIME — EVEN FOR AN EXPLICIT TEST ──────────────────────────────────
+  // 25 Nov: the test was asked for once, the agent running it called the reach tool twice, and two
+  // calls rang him two seconds apart. `bypassGate` skips the CALENDAR and the daily caps; it must never
+  // skip this. A second dial to the same number while the first is still young is a duplicate, not a
+  // retry — a real retry comes from the reach ladder minutes later.
+  if (!dryRun) {
+    const key = digitsOf(target).slice(-10), since = Date.now() - _lastDial.at;
+    if (_lastDial.key === key && since < DIAL_DEDUPE_MS) {
+      recordCall({ to: target, name: name || null, ok: false, blocked: true, reason: 'duplicate dial suppressed' });
+      return { sent: false, duplicate: true, error: `already rang this number ${Math.round(since / 1000)}s ago — not dialling twice` };
+    }
+    _lastDial = { key, at: Date.now() };
   }
   const t0 = Date.now(), timing = {};
   const lap = (k) => { timing[k] = Date.now() - t0; };
@@ -9896,6 +9912,10 @@ function reachWatchCall(t, sid) {
     // Async answering-machine detection reports its verdict to our /amd webhook; the call record
     // may not carry it, so fill it in from there.
     if (res && !res.answered_by) { const by = amdResult(sid); if (by) res.answered_by = by; }
+    // He SPOKE on the call (a Gather came back with words) — that is a person, whatever the length or
+    // the machine-detection guess. 25 Nov: he answered, heard the reason, hung up after 9 s, and the
+    // ladder logged "picked up for 9s only" and went on to chase him.
+    if (res && heardHuman(sid)) res.answered_by = 'human';
     const o = reachLib.callOutcome(res);
     if (!o.final && n < 30) return setTimeout(tick, 10000);
     const cur = reachLoad().find((x) => x.id === t.id) || t;
@@ -11105,6 +11125,9 @@ function presenceSnapshot() {
         id, role: a.role || a.designation, name: a.name,
         state: a.state || 'working', status: a.state || 'working',
         designation: a.designation,
+        // The body wears the MODEL (lib/modelhue.js). The supervisor's local lane is the local model;
+        // its cloud lane runs Sonnet unless the item says otherwise.
+        model: modelhue.classify(a.model || (a.lane === 'local' ? 'local' : 'sonnet')),
         task: String(a.task || '').slice(0, 160),
         step: String(a.step || '').slice(0, 120),
         // A bubble with a TTL. Stale speech is worse than none — a room where everyone is permanently
@@ -11130,6 +11153,9 @@ function presenceSnapshot() {
         name: a.codename || a.role || id,
         state: FLEET_STATE[status] || 'idle',
         status,                                            // raw status, for the hover chip
+        // A suit with no recorded model ran on the fleet default (Sonnet — lib/fleet.js admission);
+        // a background borrower that never said is shown as unknown rather than guessed.
+        model: modelhue.classify(a.model || a._model || (a.background ? '' : 'sonnet')),
         task: String(a.task || '').slice(0, 160),
         step: String(a.step || a.note || '').slice(0, 120),
         tool: a.tool || null,
@@ -11162,6 +11188,7 @@ function presenceSnapshot() {
         name: j.name || j.kind || 'job',
         state: JOB_STATE[j.status] || 'idle',
         status: j.status || 'running',
+        model: modelhue.classify(j.model || ''),
         task: String(j.goal || j.kind || '').slice(0, 160),
         step: String(j.note || '').slice(0, 120),
         tool: null,
@@ -11200,6 +11227,7 @@ function presenceSnapshot() {
         step: '',
         tool: null,
         designation: designation.classify(a.name || ''),
+        model: modelhue.classify(a.model || ''),
         since: Date.now(),
         steerable: false,                                  // no suit-card until it is actually running
         standing: true,                                    // lets the UI style it as "available", not "busy"
@@ -11210,7 +11238,7 @@ function presenceSnapshot() {
   // lib/designation, and the one failure mode worth designing against is a second copy of the palette
   // growing there and drifting — an office whose legend is a lie. scripts/test-designation.js asserts
   // that no designation colour is hardcoded in that file; this is what makes that possible.
-  return { agents, palette: designation.forRenderer() };
+  return { agents, palette: designation.forRenderer(), models: modelhue.forRenderer() };
 }
 
 // Push the live roster to every presence surface a few times a second.
@@ -12847,9 +12875,19 @@ async function transcribeAudio(audioBuffer, mimeType) {
 // ── THE EVIDENCE FOR "IS THIS ONE FOR ME?" ───────────────────────────────────────────────────────
 // Everything lib/addressee.js weighs that is not the words themselves. Gathered here because it
 // needs the OS; decided in the renderer because that is where the session state lives.
-const _audioEnv = createAudioEnv({
-  exec: () => { const r = spawnSync('/usr/bin/pmset', ['-g', 'assertions'], { encoding: 'utf8', timeout: 1500 }); return r.status === 0 ? r.stdout : null; },
-});
+// Asked once per utterance — so it must not spawn synchronously (a sync spawn from this process can
+// take ~1 s, on the voice path). Returns the latest reading and refreshes it in the background.
+const _pmAssert = { out: null, at: 0, busy: false };
+function pmAssertions() {
+  if (!_pmAssert.busy && Date.now() - _pmAssert.at > 3000) {
+    _pmAssert.busy = true;
+    try { require('child_process').execFile('/usr/bin/pmset', ['-g', 'assertions'], { timeout: 3000 }, (err, out) => { _pmAssert.out = err ? _pmAssert.out : String(out || ''); _pmAssert.at = Date.now(); _pmAssert.busy = false; }); }
+    catch { _pmAssert.busy = false; }
+  }
+  return _pmAssert.out;
+}
+pmAssertions();
+const _audioEnv = createAudioEnv({ exec: pmAssertions });
 // A FAILED READ IS NOT AN EMPTY CALENDAR. google.calendarList() reports failure as
 // `{ success: false, error }` with no events, and both callers took `events || []` — so a revoked
 // grant arrived at the gate as "calendar is clear" and was indistinguishable from a free afternoon.
@@ -12882,8 +12920,10 @@ function meetingNow() {
     let on = false;
     // CptHost exists only while a Zoom meeting is actually in progress; the Zoom app itself, Teams'
     // widget and avconferenced are all running whether or not anybody is talking.
-    try { on = spawnSync('/usr/bin/pgrep', ['-x', 'CptHost'], { timeout: 1000 }).status === 0; } catch {}
-    _callApp = { at: Date.now(), on };
+    // Async, read on the NEXT call: a synchronous spawn here froze the whole app for up to a second
+    // every 5 s while the reach ladder polled (see the vitals note — same cause).
+    _callApp = { ..._callApp, at: Date.now() };
+    try { require('child_process').execFile('/usr/bin/pgrep', ['-x', 'CptHost'], { timeout: 3000 }, (err) => { _callApp = { at: Date.now(), on: !err }; }); } catch {}
   }
   return { inCall: _meeting.busy || _callApp.on, why: _callApp.on ? 'a Zoom meeting is live' : _meeting.reason };
 }
@@ -13076,17 +13116,43 @@ ipcMain.handle('get-health', async () => {
 });
 // Live system vitals for the HUD gauges + status-bar telemetry (cheap: os module + cached
 // net-bytes delta; no extra deps). NET is machine-wide throughput sampled between calls.
+//
+// ⚠ LOAD-BEARING — NOTHING HERE MAY SPAWN SYNCHRONOUSLY. This used to execSync `netstat -ib` and
+// `pmset -g batt` on every status-bar poll. Each takes ~20 ms in a terminal, but a synchronous spawn
+// from this (large, many-fd) process routinely ran into its 900 ms timeout — and the main process is
+// frozen for the whole wait. Profiled 25 Nov: 30% of all main-process time, in 0.9–1.8 s freezes
+// every few seconds, which is what "the site stalls whenever I click around" was. Now the readings are
+// refreshed in the background and the handler returns the latest ones immediately.
 let _netPrev = null;
-function netBytesNow() {
+const _vitals = { pwr: null, charging: null, net: null, at: 0, busy: false };
+function execOut(cmd, args) {
+  return new Promise((resolve) => {
+    try { require('child_process').execFile(cmd, args, { timeout: 3000 }, (err, out) => resolve(err ? '' : String(out || ''))); }
+    catch { resolve(''); }
+  });
+}
+async function refreshVitals() {
+  if (_vitals.busy || Date.now() - _vitals.at < 4000) return;
+  _vitals.busy = true;
   try {
-    const out = require('child_process').execSync('netstat -ib', { timeout: 900 }).toString();
-    let rx = 0, tx = 0;
-    for (const l of out.split('\n').slice(1)) {
-      const c = l.trim().split(/\s+/);
-      if (c.length >= 10 && /^en\d/.test(c[0])) { rx += Number(c[6]) || 0; tx += Number(c[9]) || 0; }
+    const [batt, ns] = await Promise.all([execOut('/usr/bin/pmset', ['-g', 'batt']), execOut('/usr/sbin/netstat', ['-ib'])]);
+    const m = batt.match(/(\d+)%/); if (m) _vitals.pwr = Number(m[1]);
+    if (batt) _vitals.charging = /AC Power/.test(batt);
+    if (ns) {
+      let rx = 0, tx = 0;
+      for (const l of ns.split('\n').slice(1)) {
+        const c = l.trim().split(/\s+/);
+        if (c.length >= 10 && /^en\d/.test(c[0])) { rx += Number(c[6]) || 0; tx += Number(c[9]) || 0; }
+      }
+      const now = { rx, tx, t: Date.now() };
+      if (_netPrev && now.t > _netPrev.t) {
+        const dt = (now.t - _netPrev.t) / 1000;
+        _vitals.net = Math.max(0, Math.round(((now.rx + now.tx) - (_netPrev.rx + _netPrev.tx)) / dt / 1024 / 1024 * 10) / 10);
+      }
+      _netPrev = now;
     }
-    return { rx, tx, t: Date.now() };
-  } catch { return null; }
+    _vitals.at = Date.now();
+  } finally { _vitals.busy = false; }
 }
 // ── CALL IPC — the physical interface for the Twilio voice line ──────────────────────────────────
 // Two-way Twilio voice was fully wired but had no way to START a call except the agent deciding to
@@ -13257,7 +13323,23 @@ ipcMain.handle('synapse-projects', () => {
       link(pa, pb); link(pb, pa);
     }
 
-    const list = [...projects.values()]
+    // One row per FOLDER. Two importers name the same repo differently ("bhatbot" from the file index,
+    // "/Users/…/bhatbot" from the repo scan), so the tab listed bhatbot twice with split file counts.
+    const folderKey = (p) => String(p.ref || p.label || '').replace(/\/+$/, '').split('/').pop().toLowerCase();
+    const byFolder = new Map();
+    for (const p of projects.values()) {
+      const k = folderKey(p), cur = byFolder.get(k);
+      if (!cur) { byFolder.set(k, p); continue; }
+      const [keep, drop] = (p.fileCount > cur.fileCount) ? [p, cur] : [cur, p];
+      const have = new Set(keep.files.map((f) => f.path));
+      for (const f of drop.files) if (!have.has(f.path) && keep.files.length < 400) keep.files.push(f);
+      keep.fileCount = Math.max(keep.fileCount, keep.files.length);
+      keep.memories = [...keep.memories, ...drop.memories].slice(0, 60);
+      keep.connections = [...keep.connections, ...drop.connections].slice(0, 40);
+      keep.activity = Math.max(keep.activity, drop.activity); keep.lastTouched = Math.max(keep.lastTouched, drop.lastTouched);
+      byFolder.set(k, keep);
+    }
+    const list = [...byFolder.values()]
       .filter((p) => p.fileCount || p.connections.length || p.memories.length)
       .map((p) => {
         p.files.sort((a, b) => b.mtime - a.mtime);          // most recently touched first
@@ -13274,8 +13356,31 @@ ipcMain.handle('synapse-projects', () => {
         || (b.lastTouched - a.lastTouched)
         || ((b.fileCount + b.connections.length * 5) - (a.fileCount + a.connections.length * 5)));
 
+    // ARCHIVED projects are listed too, not hidden. The dormant rule ("begun 3+ weeks ago, untouched
+    // for 3 days") is his, and it is right that they leave the active list — but a tab that shows only
+    // "(home)" reads as a broken index, not as "everything else is resting". One row per real folder:
+    // the importer made two nodes for some repos ("bhatbot" and "/Users/…/bhatbot").
+    const archived = [];
+    const seenArch = new Set();
+    // graphView() leaves pruned nodes out, so the archive is read from the brain itself.
+    const prunedProjects = (() => { try { return synapse().brain.nodes({ type: 'project', status: 'pruned' }); } catch { return []; } })();
+    for (const n of prunedProjects.filter((x) => x.meta && x.meta.archivedBy === 'recency:dormant')
+      .sort((a, b) => (Number(b.meta.fileCount) || 0) - (Number(a.meta.fileCount) || 0))) {
+      const key = String(n.ref || n.label || '').replace(/^\/Users\/[^/]+\//, '').replace(/^Desktop\/(Folders\/)?/, '').toLowerCase();
+      if (!key || seenArch.has(key) || [...projects.values()].some((p) => String(p.ref || '').toLowerCase().endsWith(key))) continue;
+      // A folder that is gone (trashed, moved) is not resting — it is gone. The recency pass prunes its
+      // files on the next cycle; it just should not be offered here as something that might come back.
+      const abs = path.isAbsolute(String(n.ref || '')) ? String(n.ref) : path.join(os.homedir(), String(n.ref || ''));
+      if (!fs.existsSync(abs)) continue;
+      seenArch.add(key);
+      archived.push({ id: n.id, label: n.label, ref: n.ref, fileCount: Number(n.meta.fileCount) || 0,
+        lastTouched: Number(n.meta.lastTouched) || 0, archivedAt: Number(n.meta.archivedAt) || 0, reason: n.meta.archivedReason || '' });
+    }
+    archived.sort((a, b) => b.lastTouched - a.lastTouched);
+
     return {
       projects: list,
+      archived,
       totals: {
         projects: list.length,
         files: list.reduce((n, p) => n + p.fileCount, 0),
@@ -13334,21 +13439,14 @@ ipcMain.handle('synapse-confirm', (_e, { kind, id } = {}) => { try { return { ok
 ipcMain.handle('get-vitals', () => {
   const cores = os.cpus().length || 1;
   const cpu = Math.max(0, Math.min(100, Math.round((os.loadavg()[0] / cores) * 100)));
-  const mem = Math.round((1 - os.freemem() / os.totalmem()) * 100);
-  let pwr = null, charging = null;
-  try {
-    const b = require('child_process').execSync('pmset -g batt', { timeout: 900 }).toString();
-    const m = b.match(/(\d+)%/); if (m) pwr = Number(m[1]);
-    charging = /AC Power/.test(b);
-  } catch {}
-  let netMbs = null;
-  const now = netBytesNow();
-  if (now && _netPrev && now.t > _netPrev.t) {
-    const dt = (now.t - _netPrev.t) / 1000;
-    netMbs = Math.max(0, Math.round(((now.rx + now.tx) - (_netPrev.rx + _netPrev.tx)) / dt / 1024 / 1024 * 10) / 10);
-  }
-  if (now) _netPrev = now;
-  return { cpu, mem, net: netMbs, pwr, charging, cores, uptime: os.uptime(), freePct: readMemFreePct(), pressure: governor.poll() };
+  refreshVitals().catch(() => {});                       // background; this call returns the last reading
+  // MEM was `1 - os.freemem()/os.totalmem()`, which on macOS is ~100% almost always: free memory is
+  // only what is NOT holding file cache, and the kernel keeps that near zero on purpose. The status
+  // bar read "MEM 100%" with 53% of memory actually available. memory_pressure's free percentage is
+  // the number Activity Monitor's pressure graph is built on.
+  const freePct = readMemFreePct();
+  const mem = Number.isFinite(freePct) ? Math.max(0, Math.min(100, 100 - freePct)) : Math.round((1 - os.freemem() / os.totalmem()) * 100);
+  return { cpu, mem, net: _vitals.net, pwr: _vitals.pwr, charging: _vitals.charging, cores, uptime: os.uptime(), freePct, pressure: governor.poll() };
 });
 ipcMain.handle('hide-window', () => mainWindow && mainWindow.hide());
 ipcMain.handle('minimize-window', () => mainWindow && mainWindow.minimize());
