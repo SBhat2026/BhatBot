@@ -168,7 +168,8 @@
     "test:costpilot": "node scripts/test-costpilot.js",
     "bench:power": "node scripts/bench-power.js",
     "bench:efficiency": "node scripts/efficiency-check.js",
-    "smoke:models": "electron scripts/smoke-models.js"
+    "smoke:models": "electron scripts/smoke-models.js",
+    "wiring": "node scripts/wiring.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
