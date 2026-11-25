@@ -6188,7 +6188,7 @@ async function executeTool(name, input, opts = {}) {
         if (act === 'test') {
           const ch = String((input && input.channel) || 'telegram');
           if (ch === 'call' && quietWindow().quiet) { result = { success: false, error: 'quiet hours — not ringing him now' }; break; }
-          const t = reachCreate(`Test from BhatBot: this is how I reach you by ${ch === 'call' ? 'phone' : 'Telegram'}. Reply or say anything to confirm.`, ch === 'call' ? 'call' : 'medium');
+          const t = reachCreate(ch === 'call' ? 'This is a test call — I am checking that I can reach you by phone. Just say anything to confirm.' : 'Test from BhatBot: this is how I reach you on Telegram. Reply anything to confirm.', ch === 'call' ? 'call' : 'medium');
           t.sent = ch === 'call' ? { desktop: 1, telegram: 1, sms: 1 } : { desktop: 1, sms: 1 };   // test only the channel asked for
           const step = await reachAdvance(t);
           result = { success: true, ticket: t.id, delivered: t.delivered, called: t.calls.length > 0, next: step.why || null };
@@ -6204,9 +6204,10 @@ async function executeTool(name, input, opts = {}) {
             if (!tgt.ok) { result = { success: false, error: tgt.error, candidates: tgt.candidates }; break; }
             to = tgt.number; name = tgt.name;
           }
-          const purpose = String((input && input.purpose) || (name ? 'Ask whether they are free for a quick chat this week.' : 'Test from BhatBot: this is how I reach you by phone. Reply or say anything to confirm.'));
-          const r = await twilioCall(purpose, { to, name, dryRun: true, allowPlainVoice: !name, bypassGate: !!name });
-          result = { success: !!(r.dryRun && r.leg), ...r, to: name || 'Siddhant', held: !!(c.calls || {}).hold };
+          const other = digitsOf(to).slice(-10) !== digitsOf(c.myPhone || '').slice(-10);
+          const purpose = String((input && input.purpose) || (other ? 'Ask whether they are free for a quick chat this week.' : 'This is a test call — I am checking that I can reach you by phone. Just say anything to confirm.'));
+          const r = await twilioCall(purpose, { to, name, dryRun: true, allowPlainVoice: !other, bypassGate: other });
+          result = { success: !!(r.dryRun && r.leg), ...r, to: other ? (name || to) : 'Siddhant', held: !!(c.calls || {}).hold };
           break;
         }
         const st = await reachStatus({ fresh: !!(input && input.fresh) });
@@ -9512,7 +9513,10 @@ async function twilioCall(message, { to, name, note, bypassGate = false, allowPl
     }
   }
 
-  const [macPre, cloudPre] = await Promise.all([macP, cloudP]);
+  // The Mac leg is preferred, so once it passes there is nothing to wait for — the cloud's verdict
+  // is only needed when the Mac's fails.
+  const macPre = await macP;
+  const cloudPre = macPre.ok ? { ok: false, stage: 'skipped', detail: 'not needed — the Mac leg passed' } : await cloudP;
   let leg = null;
   if (macPre.ok) leg = { kind: 'mac', host: macHost, token: c.mcpToken, pre: macPre };
   else {
