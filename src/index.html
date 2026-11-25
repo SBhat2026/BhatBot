@@ -242,8 +242,14 @@
   #synapse-panel .sy-btn { background: var(--surface); border: 1px solid var(--line); color: var(--text-dim); border-radius: 7px; padding: 4px 10px; font-size: 11.5px; cursor: pointer; }
   #synapse-panel .sy-btn:hover { color: var(--text); border-color: var(--accent-dim); }
   #sy-search { width: 160px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); color: var(--text); padding: 5px 9px; }
-  #sy-legend { position: absolute; left: 20px; bottom: 45px; display: flex; gap: 14px; flex-wrap: wrap; max-width: 65%; pointer-events: none; font: 12px var(--font-ui); color: var(--text-dim); }
-  #sy-legend span { display: flex; gap: 5px; align-items: center; } #sy-legend i { width: 7px; height: 7px; border-radius: 50%; }
+  #sy-legend { position: absolute; left: 20px; bottom: 45px; display: flex; gap: 6px; flex-wrap: wrap; max-width: 65%; font: 12px var(--font-ui); color: var(--text-dim); z-index: 3; }
+  #sy-legend button { display: flex; gap: 6px; align-items: center; font: inherit; color: inherit; background: var(--surface); border: 1px solid var(--line); border-radius: 999px; padding: 3px 10px; cursor: pointer; }
+  #sy-legend button[aria-pressed="false"] { opacity: .5; background: transparent; }
+  #sy-legend button:hover { border-color: var(--accent-line); color: var(--text); }
+  #sy-legend i { width: 7px; height: 7px; border-radius: 50%; } #sy-legend b { font-weight: 500; color: var(--text-dim2); }
+  .pj-group { font: 10px var(--font-mono); letter-spacing: .1em; color: var(--text-dim2); padding: 10px 12px 4px; text-transform: uppercase; }
+  .pj-item.pj-arch .pj-name { color: var(--text-dim); }
+  #sy-suggest .sy-sg-age { color: var(--text-dim2); font-size: 10.5px; letter-spacing: .03em; font-weight: 400; }
   #sy-guide { position: absolute; left: 20px; bottom: 18px; color: var(--text-dim2); font: 11px var(--font-ui); pointer-events: none; }
   .brain-cluster { position: absolute; transform: translate(-50%,-50%); color: var(--text); border-left: 3px solid; padding: 3px 7px; background: var(--surface); border-radius: 3px; font: 12px var(--font-ui); pointer-events: none; }
   #synapse-panel .panel-head { flex-wrap: wrap; height: auto; min-height: 48px; gap: 8px; padding: 10px 12px; } #synapse-panel .sy-tools { flex-wrap: wrap; }
@@ -1918,7 +1924,7 @@ function accentRGB() {
   } catch (e) { _accentRGB = '0,200,255'; }
   return _accentRGB;
 }
-try { document.documentElement.addEventListener('bhatbot-theme', () => { _accentRGB = null; }); } catch (e) {}
+try { ['bhatbot-theme', 'bhatbot-accent'].forEach((ev) => document.documentElement.addEventListener(ev, () => { _accentRGB = null; })); } catch (e) {}
 
 'use strict';
 const $ = (s) => document.querySelector(s);
@@ -2973,8 +2979,31 @@ window.bhatbot.onStudioReload && window.bhatbot.onStudioReload(() => reloadStudi
   let hover = null, dragNode = null, panning = false, last = null, running = false;
   const esc = (s) => String(s || '').replace(/[<>&]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
   function size() { const r = cv.getBoundingClientRect(); cv.width = Math.max(1, r.width * devicePixelRatio); cv.height = Math.max(1, r.height * devicePixelRatio); }
+  // ── WHAT IS DRAWN ─────────────────────────────────────────────────────────────────────────────────
+  // 25 Nov redesign: 2,131 of the graph's ~2,250 live nodes are FILES, and drawn they were one grey
+  // ball that buried the projects and memories the panel exists to show. Files are now a toggle, off by
+  // default; the legend is the control, and it counts what each kind holds whether shown or not.
+  let lastGraph = null;
+  const HIDE_KEY = 'synapse.hiddenTypes';
+  let hiddenTypes = new Set(['file']);
+  try { const v = JSON.parse(localStorage.getItem(HIDE_KEY) || 'null'); if (Array.isArray(v)) hiddenTypes = new Set(v); } catch {}
+  function renderLegend(counts) {
+    const el = document.getElementById('sy-legend'); if (!el) return;
+    el.innerHTML = Object.entries(TYPE_COLOR).filter(([k]) => counts[k]).map(([kind, color]) =>
+      `<button type="button" data-type="${kind}" aria-pressed="${!hiddenTypes.has(kind)}" title="${hiddenTypes.has(kind) ? 'Show' : 'Hide'} ${kind}s"><i style="background:${color}"></i>${kind} <b>${counts[kind]}</b></button>`).join('');
+  }
+  document.getElementById('sy-legend').addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-type]'); if (!b) return;
+    const k = b.dataset.type; hiddenTypes.has(k) ? hiddenTypes.delete(k) : hiddenTypes.add(k);
+    try { localStorage.setItem(HIDE_KEY, JSON.stringify([...hiddenTypes])); } catch {}
+    if (lastGraph) ingest(lastGraph);
+  });
   function ingest(g) {
     if (!g || g.error) return;
+    lastGraph = g;
+    const counts = {}; for (const n of g.nodes || []) counts[n.type] = (counts[n.type] || 0) + 1;
+    renderLegend(counts);
+    g = { ...g, nodes: (g.nodes || []).filter((n) => !hiddenTypes.has(n.type)) };
     const prev = {}; for (const n of G.nodes) prev[n.id] = n; byId = {};
     reheat(0.5);   // graph changed → nudge the layout, don't restart it
     G.nodes = (g.nodes || []).map((n) => { const p = prev[n.id] || {}; const node = { ...n, x: p.x != null ? p.x : (Math.random() * 400 - 200), y: p.y != null ? p.y : (Math.random() * 300 - 150), vx: 0, vy: 0 }; byId[n.id] = node; return node; });
@@ -2991,16 +3020,30 @@ window.bhatbot.onStudioReload && window.bhatbot.onStudioReload(() => reloadStudi
     const st = document.getElementById('sy-stats');
     if (st && g.stats) st.textContent = `${g.stats.nodes} nodes · ${g.stats.edges} links · ${g.stats.proposed} proposed`
       + (g.stats.pruned ? ` · ${g.stats.pruned} pruned` : '');
-    const bd = document.getElementById('sy-budget'); if (bd && g.budget) bd.textContent = `$${(g.budget.spent || 0).toFixed(3)} / $${(g.budget.limit || 1).toFixed(2)}`;
-    renderInbox(g.edges || []);
-    if (g.meta) renderSuggest(g.meta.suggestions || []);
+    const bd = document.getElementById('sy-budget');
+    if (bd && g.budget) {
+      const sp = g.budget.spent || 0, lim = g.budget.limit || 1;
+      bd.textContent = sp >= lim ? `today's $${lim.toFixed(2)} spent · free upkeep only until tomorrow` : `$${sp.toFixed(2)} of $${lim.toFixed(2)} today`;
+      bd.title = `Second-brain spend today: $${sp.toFixed(3)} of $${lim.toFixed(2)}. Indexing and pruning are free and keep running.`;
+    }
+    renderInbox(lastGraph.edges || []);
+    if (g.meta) renderSuggest(g.meta.suggestions || [], g.meta.suggestedAt, lastGraph.nodes || []);
     if (!running) { running = true; loop(); }
   }
-  function renderSuggest(list) {
+  // A suggestion names a project. If that project is no longer a live node — archived as dormant,
+  // or deleted (25 Nov: "Iron Man Suit" and TRELLIS.2 were still the top two moves, six weeks after
+  // they were written, for projects that no longer exist) — the suggestion is advice about nothing.
+  const normName = (s) => String(s || '').toLowerCase().replace(/^.*\//, '').replace(/[^a-z0-9]+/g, '');
+  function renderSuggest(list, at, nodes) {
     const box = document.getElementById('sy-suggest'), ul = document.getElementById('sy-suggest-list');
     if (!box || !ul) return;
+    const live = new Set((nodes || []).filter((n) => n.type === 'project').flatMap((n) => [normName(n.label), normName(n.ref)]));
+    list = (list || []).filter((s) => live.has(normName(s.project)));
     if (!list.length) { box.classList.add('empty'); ul.innerHTML = ''; return; }
     box.classList.remove('empty'); ul.innerHTML = '';
+    const days = at ? Math.floor((Date.now() - at) / 864e5) : null;
+    const h = box.querySelector('.sy-sg-h');
+    if (h) { let a = h.querySelector('.sy-sg-age'); if (!a) { a = document.createElement('span'); a.className = 'sy-sg-age'; h.appendChild(a); } a.textContent = days == null ? '' : days < 1 ? 'today' : `${days}d ago`; }
     for (const s of list.slice(0, 5)) { const d = document.createElement('div'); d.className = 'sy-sg';
       d.innerHTML = `<div class="sy-sg-p">${esc(s.project || '')}</div>`
         + (s.why ? `<div class="sy-sg-w">${esc(s.why)}</div>` : '')
@@ -3336,7 +3379,6 @@ window.bhatbot.onStudioReload && window.bhatbot.onStudioReload(() => reloadStudi
   document.getElementById('sy-popout').onclick = () => window.bhatbot.openBrain();
   document.getElementById('sy-reset').onclick = () => three && three.reset();
   document.getElementById('sy-search').oninput = update3D;
-  document.getElementById('sy-legend').innerHTML = Object.entries(TYPE_COLOR).map(([kind, color]) => `<span><i style="background:${color}"></i>${kind}</span>`).join('');
   window.addEventListener('bhatbot-pressure', e => { if (three) three.setPressure(e.detail.level === 'hot' || e.detail.level === 'critical'); });
 
 })();
@@ -3414,25 +3456,41 @@ window.bhatbot.onStudioReload && window.bhatbot.onStudioReload(() => reloadStudi
 
   function renderRail() {
     const f = filter.toLowerCase();
-    const rows = DATA.projects.filter((p) => !f || p.label.toLowerCase().includes(f) || p.ref.toLowerCase().includes(f));
-    if (!rows.length) { listEl.innerHTML = '<div class="pj-more">no projects match</div>'; return; }
-    listEl.innerHTML = rows.map((p) => `
+    const match = (p) => !f || p.label.toLowerCase().includes(f) || String(p.ref || '').toLowerCase().includes(f);
+    const rows = DATA.projects.filter(match);
+    const arch = (DATA.archived || []).filter(match);
+    if (!rows.length && !arch.length) { listEl.innerHTML = '<div class="pj-more">no projects match</div>'; return; }
+    const ago = (t) => { if (!t) return ''; const d = Math.floor((Date.now() - t) / 864e5); return d < 1 ? 'today' : d < 60 ? d + 'd' : Math.round(d / 30) + 'mo'; };
+    listEl.innerHTML = (rows.length ? '<div class="pj-group">ACTIVE · touched in the last 3 days</div>' : '') + rows.map((p) => `
       <div class="pj-item${sel && sel.id === p.id ? ' sel' : ''}" data-id="${esc(p.id)}">
         <span class="pj-name" title="${esc(p.ref)}">${esc(p.label)}</span>
         ${p.connections.length ? `<span class="pj-link">⇄${p.connections.length}</span>` : ''}
         <span class="pj-n">${p.fileCount}</span>
-      </div>`).join('');
+      </div>`).join('')
+      + (arch.length ? `<div class="pj-group">RESTING · ${arch.length} — back on their own when a file changes</div>` + arch.map((p) => `
+      <div class="pj-item pj-arch${sel && sel.id === p.id ? ' sel' : ''}" data-id="${esc(p.id)}" data-arch="1">
+        <span class="pj-name" title="${esc(p.ref)}">${esc(String(p.label).replace(/^\/Users\/[^/]+\//, '~/'))}</span>
+        <span class="pj-n">${ago(p.lastTouched)}</span>
+      </div>`).join('') : '');
     listEl.querySelectorAll('.pj-item').forEach((el) => {
       el.onclick = () => { select(el.dataset.id); };
     });
   }
 
   function select(id) {
-    sel = DATA.projects.find((p) => p.id === id) || null;
+    sel = DATA.projects.find((p) => p.id === id) || (DATA.archived || []).find((p) => p.id === id) || null;
     renderRail(); renderDetail();
   }
 
   function renderDetail() {
+    if (sel && !sel.files) {                     // an archived (resting) project: no live file list
+      const when = (t) => t ? new Date(t).toLocaleDateString([], { month: 'short', day: 'numeric' }) : '—';
+      detailEl.innerHTML = `<h2>${esc(sel.label)}</h2>
+        <div class="pj-empty" style="text-align:left">Resting since ${when(sel.archivedAt)} — ${esc(sel.reason || 'quiet for 3+ days')}.<br>
+        Last worked on ${when(sel.lastTouched)} · ${sel.fileCount} files indexed.<br><br>
+        Nothing on disk was touched. It returns to the active list by itself the next time one of its files changes.</div>`;
+      return;
+    }
     if (!sel) {
       detailEl.innerHTML = `<div class="pj-empty">Select a project.<br><br>
         ${DATA.totals.files || 0} files across ${DATA.totals.projects || 0} projects,
