@@ -1435,6 +1435,45 @@
   :root[data-theme="standby"] .corner,
   :root[data-theme="day"] .brand.glitch::after,
   :root[data-theme="standby"] .brand.glitch::after { display: none; }
+
+  /* ══ NARROW WINDOW (2026-11-25) ════════════════════════════════════════════════════════════════
+     When fullscreen does not take, the window was 430×650 and the page needed 636px: the name ran
+     into the clock ("BHATBOT07:57:09"), the status wrapped to three lines, the minimise button and the
+     status bar fell off the right edge, the message box shrank to "Messag", and the settings gear was
+     cut off below the rail. Everything below keeps the page inside the window at any width. */
+  #titlebar { gap: 12px; }
+  .tb-left, .tb-btns { flex-shrink: 0; }
+  .tb-mid { min-width: 0; overflow: hidden; }
+  #ctxtag { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 38vw; }
+  .tb-status { white-space: nowrap; }
+  #rail { overflow-y: auto; overflow-x: hidden; scrollbar-width: none; }
+  #rail::-webkit-scrollbar { display: none; }
+  #statusbar { min-width: 0; overflow: hidden; white-space: nowrap; }
+  #sysline, #metrics { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  #ta { min-width: 96px; }
+  #ta::placeholder { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  @media (max-width: 1000px) {
+    /* Synapse: the suggestions card (left) and review queue (right) are both pinned over the graph;
+       below ~1000px they met in the middle and the queue sat on top of the suggestions. Stack them. */
+    #sy-suggest { right: 10px; width: auto; max-height: 38%; }
+    #sy-inbox { top: auto; bottom: 46px; left: 10px; width: auto; max-height: 34%; }
+  }
+  @media (max-width: 900px) {
+    .panel-head { flex-wrap: wrap; row-gap: 8px; height: auto; }
+    .panel-head b { letter-spacing: .12em; }
+    #topstate { display: none; }                      /* the dot still says it */
+    #spd, #vcfg { display: none; }                    /* tuning lives in settings; speak/mic stay */
+    #count, #fleetline { display: none; }
+  }
+  @media (max-width: 640px) {
+    #clock { font-size: 12px; letter-spacing: .08em; }
+    .brand { letter-spacing: 2px; }
+    #ctxtag { max-width: 30vw; }
+    #vfirst, #attach { display: none; }
+    #sysline { display: none; }
+    #inputbar { gap: 5px; padding: 8px; }
+    .ibtn { width: 32px; height: 32px; }
+  }
 </style>
 </head>
 <body>
@@ -3850,7 +3889,7 @@ function renderOps(s) {
   // Show live OTPM-available width alongside the static cap so it's clear when they diverge.
   const fleetHdr = (fw != null)
     ? `<div class="op-sec">Fleet — ${f.active || 0} active · ${fw} available now${fcap != null && fw !== fcap ? ` (cap ${fcap})` : ''}</div>`
-      + (f.widthByModel ? `<div class="op-row hl-dim">by model — sonnet ${f.widthByModel.sonnet} · haiku ${f.widthByModel.haiku} · opus ${f.widthByModel.opus}</div>` : '')
+      + (f.widthByModel ? `<div class="op-row hl-dim">by model — ${Object.entries(f.widthByModel).filter(([, v]) => v != null).map(([k, v]) => `${String(k).replace(/[^a-z0-9-]/gi, "")} ${Number(v)}`).join(' · ')}</div>` : '')
     : (f.active ? `<div class="op-sec">Active agents (${f.active})</div>` : '');
   const fleet = fleetHdr + (f.agents || []).map((a) => `<div class="op-row hl-dim">🦾 ${a.role || ''} — ${(a.task || '').slice(0, 60)}</div>`).join('');
   const sched = (s.schedules || []).filter((x) => x.enabled).slice(0, 6).map((x) => `<div class="op-row hl-dim">⏰ ${x.title} ${x.nextRun ? '· next ' + new Date(x.nextRun).toLocaleString() : ''}</div>`).join('');

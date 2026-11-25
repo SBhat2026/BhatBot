@@ -27,7 +27,7 @@ async function prewarmSpeech(texts) { return _prewarm(texts); }
 const _amd = new Map();
 function amdResult(sid) { return _amd.get(String(sid || '')) || null; }
 
-async function startMcpServer({ port, token, runAgent, transcribe, synthesize, synthUlaw, summarize, media, voiceTurn, voiceBegin, voicePoll, endVoiceCall, getActivity, nexusUrl, ownerPhone, twilioAuthToken, publicHost, jobs, control, screenshot, voice, biometrics, opsStatus, guestTurn, onGuestEnd, updateCall }) {
+async function startMcpServer({ port, token, runAgent, transcribe, synthesize, synthUlaw, summarize, media, voiceTurn, voiceBegin, voicePoll, endVoiceCall, getActivity, nexusUrl, ownerPhone, twilioAuthToken, publicHost, jobs, control, screenshot, voice, biometrics, opsStatus, guestTurn, onGuestEnd, updateCall, selfView }) {
   if (httpServer) return httpServer;
   const express = require('express');
   const fs = require('fs');
@@ -206,6 +206,30 @@ async function startMcpServer({ port, token, runAgent, transcribe, synthesize, s
   // stable across server restarts. Drives the phone's auto-reload.
   const appVersion = () => { try { return String(Math.floor(fs.statSync(MOBILE).mtimeMs)); } catch { return '0'; } };
   const noStore = (res) => res.set('Cache-Control', 'no-store, no-cache, must-revalidate').set('Pragma', 'no-cache');
+
+  // ── SELF-VIEW (debugging, this Mac only) ──────────────────────────────────────────────────────────
+  // A picture of BhatBot's OWN window (Electron capturePage — no screen-recording permission, nothing
+  // else on the desktop) and a read-only look at its page. Refused for anything that arrived through
+  // the Tailscale funnel: only a process on this machine can ask.
+  const loopbackOnly = (req, res, next) => {
+    const ra = String(req.socket && req.socket.remoteAddress || '');
+    const proxied = req.get('x-forwarded-for') || req.get('tailscale-funnel-request') || req.get('x-forwarded-host');
+    // Funnel traffic is proxied FROM localhost, so the address alone proves nothing: the Host must be
+    // local too (a funnel request carries the public *.ts.net name) and no proxy header may be present.
+    const localHost = /^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/i.test(String(req.get('host') || ''));
+    if (!/^(::ffff:)?127\.0\.0\.1$|^::1$/.test(ra) || proxied || !localHost) return res.status(404).end();
+    next();
+  };
+  if (selfView) {
+    app.get('/self/:token/shot.png', guard, loopbackOnly, async (req, res) => {
+      try { const png = await selfView.shot({ width: Number(req.query.w) || 0 }); if (!png) return res.status(503).end(); res.type('image/png').send(png); }
+      catch (e) { res.status(500).type('text/plain').send(e.message); }
+    });
+    app.post('/self/:token/eval', guard, loopbackOnly, express.text({ type: '*/*', limit: '200kb' }), async (req, res) => {
+      try { res.json({ ok: true, value: await selfView.evaluate(String(req.body || '')) }); }
+      catch (e) { res.json({ ok: false, error: e.message }); }
+    });
+  }
 
   app.get('/app/:token', guard, (_req, res) => {
     const html = fs.readFileSync(MOBILE, 'utf8').replace(/__BUILD__/g, appVersion());

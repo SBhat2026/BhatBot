@@ -126,6 +126,17 @@ let wrote = null;
   ok(/reachAck\('telegram'\)/.test(main) && /reachAck\('desktop'\)/.test(main), 'a Telegram reply or talking to BhatBot acknowledges');
   ok(/said === '\/start ' \+ code/.test(main) && !/First message authorizes this chat/.test(main), 'Telegram links only through BhatBot\'s own code');
 
+  // A revoked calendar must read as DISCONNECTED, not as a network blip that "assumes free".
+  {
+    const src = main.slice(main.indexOf('async function calendarEventsOrThrow('), main.indexOf('let _meeting ='));
+    const fn = new Function('google', src + '\nreturn calendarEventsOrThrow;')({ calendarList: async () => ({ success: false, accounts: ['a', 'b'], errors: ['personal: invalid_grant', 'princeton: invalid_grant'] }) });
+    let msg = ''; try { await fn({}); } catch (e) { msg = e.message; }
+    const av = await require('../lib/availability').check({ listEvents: fn, now: Date.now() });
+    ok(/invalid_grant/.test(msg) && av.authDead === true, 'every Google account revoked → calendar reported disconnected (calls go in writing), not "assuming free"');
+    ok(/function tgMarkDown[^\n]*tgWatchRecovery\(\)/.test(main) && /await telegramBot\.getMe\(\); tgMarkUp\(\)/.test(main), 'one dropped long-poll no longer takes Telegram out of the ladder: it is re-checked every 30 s');
+    ok(/explicit: true \}\);/.test(main) && /bypassGate: !!t\.explicit/.test(main), 'a test call he asked for is not held back by the calendar gate');
+  }
+
   console.log(`\n${fail === 0 ? '✅' : '❌'} reach: ${pass} passed, ${fail} failed`);
   process.exit(fail === 0 ? 0 : 1);
 })();

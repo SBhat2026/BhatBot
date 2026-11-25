@@ -6188,7 +6188,7 @@ async function executeTool(name, input, opts = {}) {
         if (act === 'test') {
           const ch = String((input && input.channel) || 'telegram');
           if (ch === 'call' && quietWindow().quiet) { result = { success: false, error: 'quiet hours — not ringing him now' }; break; }
-          const t = reachCreate(ch === 'call' ? 'This is a test call — I am checking that I can reach you by phone. Just say anything to confirm.' : 'Test from BhatBot: this is how I reach you on Telegram. Reply anything to confirm.', ch === 'call' ? 'call' : 'medium');
+          const t = reachCreate(ch === 'call' ? 'This is a test call — I am checking that I can reach you by phone. Just say anything to confirm.' : 'Test from BhatBot: this is how I reach you on Telegram. Reply anything to confirm.', ch === 'call' ? 'call' : 'medium', { explicit: true });
           t.sent = ch === 'call' ? { desktop: 1, telegram: 1, sms: 1 } : { desktop: 1, sms: 1 };   // test only the channel asked for
           const step = await reachAdvance(t);
           result = { success: true, ticket: t.id, delivered: t.delivered, called: t.calls.length > 0, next: step.why || null };
@@ -9124,6 +9124,11 @@ async function initMcpServer() {
       opsStatus: () => { try { return opsSnapshot(); } catch { return { error: 'unavailable' }; } },           // Manage view on the phone
       // Calls BhatBot places to other people, and the voicemail redirect for async answering-machine detection.
       guestTurn: guestPhoneTurn, onGuestEnd: guestCallEnded,
+      // Debugging, loopback only: BhatBot's own window as a picture, and a look at its page.
+      selfView: {
+        shot: async ({ width } = {}) => { if (!mainWindow || mainWindow.isDestroyed()) return null; let img = await mainWindow.webContents.capturePage(); if (width) img = img.resize({ width }); return img.toPNG(); },
+        evaluate: async (js) => { if (!mainWindow || mainWindow.isDestroyed()) throw new Error('no window'); return mainWindow.webContents.executeJavaScript(js, true); },
+      },
       updateCall: async (sid, twiml) => { const k = loadConfig(); await require('twilio')(k.twilioSid, k.twilioToken).calls(sid).update({ twiml }); },
       // Phone-call speech-recognition tuning (see gatherTwiml). All optional in config.json.
       voice: { hints: c.voiceHints, speechModel: c.voiceSpeechModel, speechTimeout: c.voiceSpeechTimeout,
@@ -9265,7 +9270,20 @@ function startTelegramBridge() {
 // that needs his answer goes out by SMS while Telegram is down (see notifyUser).
 const TG_OUTBOX = path.join(os.homedir(), '.bhatbot', 'telegram-outbox.json');
 let _tgDownSince = 0;
-function tgMarkDown(why) { if (!_tgDownSince) { _tgDownSince = Date.now(); console.warn('[telegram] unreachable — holding messages in the outbox (' + String(why || '').slice(0, 60) + ')'); } }
+function tgMarkDown(why) { if (!_tgDownSince) { _tgDownSince = Date.now(); console.warn('[telegram] unreachable — holding messages in the outbox (' + String(why || '').slice(0, 60) + ')'); tgWatchRecovery(); } }
+// "Down" used to end only when a message ARRIVED or a send succeeded — but nothing is sent while it is
+// down, and with no chat linked nothing arrives, so one connection reset (eduroam drops idle
+// long-polls every few minutes) took Telegram out of the reach ladder indefinitely. Now, while it is
+// down, the relay is asked every 30 s whether Telegram answers; the first yes brings it back.
+let _tgRecover = null;
+function tgWatchRecovery() {
+  if (_tgRecover) return;
+  _tgRecover = setInterval(async () => {
+    if (!_tgDownSince || !telegramBot) { clearInterval(_tgRecover); _tgRecover = null; return; }
+    try { await telegramBot.getMe(); tgMarkUp(); clearInterval(_tgRecover); _tgRecover = null; } catch {}
+  }, 30000);
+  if (_tgRecover.unref) _tgRecover.unref();
+}
 function tgMarkUp() {
   if (!_tgDownSince) return;
   console.log('[telegram] reachable again after ' + Math.round((Date.now() - _tgDownSince) / 60000) + ' min — flushing the outbox');
@@ -9827,8 +9845,9 @@ function reachSave(list) { try { fs.writeFileSync(REACH_FILE + '.tmp', JSON.stri
 function channelHealth() { try { return JSON.parse(fs.readFileSync(CHANNEL_HEALTH, 'utf8')); } catch { return {}; } }
 function setChannelHealth(ch, v) { const h = channelHealth(); h[ch] = { ...v, at: new Date().toISOString() }; try { fs.writeFileSync(CHANNEL_HEALTH, JSON.stringify(h, null, 1)); } catch {} }
 function reachUpdate(t) { const list = reachLoad(); const i = list.findIndex((x) => x.id === t.id); if (i >= 0) list[i] = t; else list.push(t); reachSave(list); }
-function reachCreate(msg, urgency, { needsReply = false, taskId = null } = {}) {
-  const t = { id: 'r' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), msg, urgency, needsReply, taskId, createdAt: Date.now(), sent: {}, delivered: [], calls: [], log: [] };
+function reachCreate(msg, urgency, { needsReply = false, taskId = null, explicit = false } = {}) {
+  // explicit: he asked for this himself (a test call) — so it is not a "good moment?" question.
+  const t = { id: 'r' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), msg, urgency, needsReply, taskId, explicit, createdAt: Date.now(), sent: {}, delivered: [], calls: [], log: [] };
   reachUpdate(t);
   return t;
 }
@@ -9927,7 +9946,7 @@ async function reachSend(ch, t) {
     return { ok: !!r.sent, why: r.error };
   }
   if (ch === 'call') {
-    const r = await twilioCall(t.msg, { allowPlainVoice: true });
+    const r = await twilioCall(t.msg, { allowPlainVoice: true, bypassGate: !!t.explicit });
     if (r.sent && r.sid) { t.calls.push({ at: Date.now(), sid: r.sid, placed: true, pending: true, via: r.via }); reachWatchCall(t, r.sid); return { ok: true }; }
     t.calls.push({ at: Date.now(), placed: false, reached: false, error: r.error });
     if (r.busy && r.until) t.busyUntil = Date.parse(r.until) || null;
@@ -10561,6 +10580,7 @@ async function healthSync() {
   return garmin.sync(loadConfig, keychainRead, { activities: 3 });
 }
 function pushBiometrics() { try { const p = biometricPortrait(); if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('biometrics-update', p); return p; } catch { return null; } }
+let _healthFailDay = '';
 async function healthTick() {
   const cfg = healthCfg();
   if (!cfg.enabled || !garmin.available()) return;
@@ -10569,7 +10589,20 @@ async function healthTick() {
   if (agentState === 'running' || agentState === 'paused') return;
   if (cfg.quietHours) { const h = new Date().getHours(); if (h < 7 || h >= 23) return; }   // no biometric pings overnight
   try {
-    await healthSync();
+    const r = await healthSync();
+    // A failed sync used to be ignored: Garmin's login expired on 23 Sep and the Health tab kept
+    // showing September as if it were today, with nothing in the log. Say so — once a day.
+    if (r && !r.ok) {
+      const today = new Date().toDateString();
+      if (_healthFailDay !== today) {
+        _healthFailDay = today;
+        const why = String(r.error || r.reason || 'unknown');
+        console.warn('[health] Garmin sync failed: ' + why);
+        if (/not_authenticated|401|403|login|expired|mfa/i.test(why)) {
+          notifyUser('Garmin has logged me out, so your health numbers are stuck at the last sync. To fix it once: run `scripts/garmin-setup.sh` in ~/bhatbot (it asks for your Garmin password and code).', 'low').catch(() => {});
+        }
+      }
+    }
     const p = pushBiometrics();
     if (!cfg.proactive || !p) return;
     // Proactively relay any NEW concern/watch flag (deduped per metric per day).
@@ -10609,7 +10642,7 @@ function opsSnapshot() {
     fleet: () => { try { const a = jobsBus.active() || []; return { active: a.length, agents: a.map((j) => ({ id: j.id, role: j.agent || j.kind, task: j.name })),
       // Live OTPM-derived width so the panel shows what's ACTUALLY available now vs the static cap.
       width: fleetWidth(MODEL_SONNET), cap: FLEET_CAP,
-      widthByModel: { sonnet: fleetWidth(MODEL_SONNET), fable: fleetWidth(MODEL_FABLE), opus: fleetWidth(MODEL_OPUS) } }; }
+      widthByModel: { sonnet: fleetWidth(MODEL_SONNET), haiku: fleetWidth(MODEL_HAIKU), opus: fleetWidth(MODEL_OPUS) } }; }   // Fable is never used (his rule), so it is not shown as capacity
       catch { return { active: 0, agents: [], width: 0, cap: FLEET_CAP }; } },
     budgets: () => [MODEL_SONNET, MODEL_FABLE, MODEL_OPUS].map((m) => { try { const b = rateBudget(m); return { model: m.replace(/^claude-/, ''), outFree: b.outFree, outSafe: b.outSafe }; } catch { return { model: m, outFree: null }; } }),
     costToday: () => { try { return costToday(); } catch { return null; } },
@@ -11384,9 +11417,13 @@ async function resumeMission(id) {
 // Windows
 // ---------------------------------------------------------------------------
 function createWindow() {
-  const { width } = screen.getPrimaryDisplay().workAreaSize;
+  // It opens full screen; this is the size it has when that does not take (a display asleep at launch,
+  // or he leaves full screen). It used to be 430×650 — a phone-shaped strip in the corner that the
+  // focus layout could not fit into — so it is now a proper window, centred on the work area.
+  const work = screen.getPrimaryDisplay().workArea;
+  const winW = Math.min(1280, work.width - 80), winH = Math.min(840, work.height - 60);
   mainWindow = new BrowserWindow({
-    width: 430, height: 650, x: width - 450, y: 50,
+    width: winW, height: winH, x: work.x + Math.round((work.width - winW) / 2), y: work.y + Math.round((work.height - winH) / 2),
     frame: false, fullscreen: true, alwaysOnTop: false, skipTaskbar: false, resizable: true, maximizable: true,
     minWidth: 360, minHeight: 400, backgroundColor: '#090d13',
     webPreferences: { nodeIntegration: false, contextIsolation: true, webviewTag: true, preload: path.join(__dirname, 'preload.js') }
@@ -12820,7 +12857,12 @@ const _audioEnv = createAudioEnv({
 let _calendarDeadNoticeDay = '';
 async function calendarEventsOrThrow({ timeMin, timeMax }) {
   const r = await google.calendarList({ timeMin, timeMax, limit: 20 });
-  if (!r || r.success === false) throw new Error((r && (r.error || r.reason)) || 'calendar read failed');
+  // The reason has to survive: availability tells "the calendar is DISCONNECTED" (invalid_grant →
+  // don't ring blind, warn him) from "Google was slow" (assume free) by reading this message. With
+  // several accounts google.js reports per-account `errors` and no `error`, so the thrown message was
+  // a bare "calendar read failed" — read as a blip, and every account having been revoked since
+  // 22 Sep looked like a free afternoon.
+  if (!r || r.success === false) throw new Error((r && (r.error || r.reason || (Array.isArray(r.errors) && r.errors.join('; ')))) || 'calendar read failed');
   return r.events || r.results || [];
 }
 // On a call or in a meeting he is talking to people. Two sources, because neither is complete: the
