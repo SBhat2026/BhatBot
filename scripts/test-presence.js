@@ -50,9 +50,9 @@ function build(fleetAgents, jobs, standing, supervised) {
   // `designation` and `supervisedAgents` are injected for the same reason `subagents` is: the branch
   // that uses them sits inside a try/catch, so a missing binding would make every assertion about
   // colour-coding pass vacuously while the office rendered grey.
-  return new Function('fleetAgents', 'jobsBus', 'subagents', 'designation', 'supervisedAgents',
+  return new Function('fleetAgents', 'jobsBus', 'subagents', 'designation', 'supervisedAgents', 'modelhue',
     prelude + '\n' + extract(main, 'standingRoster') + '\n' + extract(main, 'presenceSnapshot') + '\nreturn presenceSnapshot;')(
-    fleetAgents, jobsBus, subagents, require('../lib/designation'), supervised || new Map());
+    fleetAgents, jobsBus, subagents, require('../lib/designation'), supervised || new Map(), require('../lib/modelhue'));
 }
 
 // --- THE bug: every agent must carry an id, or the click handler drops it ---------------------
@@ -108,9 +108,9 @@ function build(fleetAgents, jobs, standing, supervised) {
 {
   // jobsBus throwing must not take the office down — it is the lower-priority half of the roster.
   const boom = { active: () => { throw new Error('jobsBus down'); } };
-  const fn = new Function('fleetAgents', 'jobsBus', 'designation', 'supervisedAgents',
+  const fn = new Function('fleetAgents', 'jobsBus', 'designation', 'supervisedAgents', 'modelhue',
     prelude + '\n' + extract(main, 'presenceSnapshot') + '\nreturn presenceSnapshot;')(
-    new Map([['s1', { role: 'r', status: 'working' }]]), boom, require('../lib/designation'), new Map());
+    new Map([['s1', { role: 'r', status: 'working' }]]), boom, require('../lib/designation'), new Map(), require('../lib/modelhue'));
   const snap = fn();
   ok(snap.agents.length === 1, 'a throwing jobsBus still yields the fleet suits');
 }
@@ -253,6 +253,12 @@ function build(fleetAgents, jobs, standing, supervised) {
   ok(by['suit-x'] === 'create',
     'a suit with no usable role falls back to its TASK text — the role is the better signal, the task is the fallback');
   ok(by['job:j1'] === 'comms', 'a background job is classified too, from its kind');
+  // 25 Nov: "add different colors to each of the models" — the body wears the model family.
+  const M = require('../lib/modelhue');
+  ok(snap.agents.every((a) => typeof a.model === 'string' && a.model), 'EVERY presence entry carries a model family');
+  ok(Object.fromEntries(snap.agents.map((a) => [a.id, a.model]))['suit-r'] === 'sonnet', 'a fleet suit with no recorded model is the fleet default, Sonnet');
+  ok(snap.models && snap.models.families.length >= 5 && new Set(snap.models.families.map((f) => f.body)).size === snap.models.families.length, 'the model palette travels with the roster, one distinct colour per family');
+  ok(M.classify('claude-opus-5-5') === 'opus' && M.classify('qwen2.5:7b') === 'local' && M.classify('claude-haiku-5-5') === 'haiku' && M.classify('') === 'model', 'model ids map to families; unknown is its own grey, never a guess');
 
   ok(snap.agents.every((a) => D.get(a.designation).glow), 'every designation resolves to a colour');
 

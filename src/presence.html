@@ -19,6 +19,7 @@
   #hud b { color:var(--accent); font-weight:500; }
   #tally { margin-left:auto; letter-spacing:.12em; }
   #legend { position:fixed; left:16px; bottom:12px; font-size:10.5px; letter-spacing:.06em; color:#6f93a6; line-height:1.85; }
+  #legend .lg-h { text-transform:uppercase; letter-spacing:.14em; font-size:9px; opacity:.7; margin-top:4px; }
   .dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:7px; vertical-align:middle; }
   #loading { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; color:#4a6376; font-size:12px; letter-spacing:.2em; text-transform:uppercase; }
   /* Empty-room notice: shown when the roster is genuinely empty. This REPLACES the old fake demo
@@ -105,6 +106,20 @@ function desigOf(id) { return DESIG.byId.get(String(id || '')) || DESIG.unknown;
 function agentCss(a) {
   if (a.state === 'error') return DESIG.error || STATE_CSS.error;
   return desigOf(a.designation).glow;
+}
+// ── THE BODY WEARS THE MODEL (2026-11-25: "add different colors to each of the models") ──────────
+// Designation keeps the floor ring and the legend's first block; the body, the head orb and its glow
+// take the MODEL family (lib/modelhue.js, pushed with the roster like the designation palette).
+// Until a palette arrives the body is a neutral grey, for the same reason as above.
+let MODELS = { byId: new Map(), order: [], unknown: { id:'model', label:'Model unknown', body:'#9aa7b2' } };
+function setModelPalette(p) {
+  if (!p || !Array.isArray(p.families)) return;
+  MODELS = { byId: new Map(p.families.map((f) => [f.id, f])), order: p.families.map((f) => f.id), unknown: p.unknown || MODELS.unknown };
+}
+function modelOf(id) { return MODELS.byId.get(String(id || '')) || MODELS.unknown; }
+function bodyCss(a) {
+  if (a.state === 'error') return DESIG.error || STATE_CSS.error;
+  return modelOf(a.model).body;
 }
 // How strongly the body carries its designation, per state. This is the second channel: the hue does
 // not change as an agent works, its INTENSITY does, so both facts stay readable at once.
@@ -252,12 +267,11 @@ let charTemplate = null, charScale = 1, floorY = 0, charTargetH = 1.7;
 let clips = {};            // name → AnimationClip (the character ships 12; we use 9)
 let pois = [];             // { name, kind, pos:Vector3, quat:Quaternion, taken:string|null }
 let navTris = [];          // flat navmesh triangles in XZ, for walkability tests
-let navGraph = [];         // adjacency over POI indices — the actual path network
 
 // ---------------------------------------------------------------------------
 // NAVMESH. office.glb ships a `navMesh` object: a flat 308-triangle cutout of the genuinely walkable
 // floor (it excludes desks, the sofa, planters and the counter). We use it for two things: testing
-// whether a straight line between two anchors is clear, and building the path graph below.
+// whether a point is walkable, and rasterising the clearance grid the pathfinder runs on.
 // ---------------------------------------------------------------------------
 function buildNav(mesh) {
   const g = mesh.geometry;
@@ -281,44 +295,139 @@ function onNav(x, z) {
   for (const t of navTris) if (pointInTri(x, z, t)) return true;
   return false;
 }
-/** Is the straight segment A→B walkable? Sampled every ~25cm. */
-function segClear(a, b) {
-  if (!navTris.length) return true;
-  const steps = Math.max(2, Math.ceil(a.distanceTo(b) / 0.25));
-  for (let i = 1; i < steps; i++) {
-    const t = i / steps;
-    if (!onNav(a.x + (b.x - a.x) * t, a.z + (b.z - a.z) * t)) return false;
+// ---------------------------------------------------------------------------
+// PATHFINDING — A* over a clearance grid, from WHERE THE AGENT IS to where it is going.
+//
+// 2026-11-25: "tiny pathfinding algorithms so they don't clip through the office items."
+//
+// The old router was Dijkstra over straight anchor-to-anchor lines, and it clipped in three ways:
+//   1. the seat anchors sit INSIDE desk footprints (that is what a seat is), so every line to or from
+//      a chair failed the navmesh test, the graph was disconnected, and route() fell back to "walk
+//      straight and accept it" — straight through the desk;
+//   2. it tested the line's CENTRE only, so a 0.4 m-wide body brushed table corners the centre missed;
+//   3. a retarget mid-walk routed from the anchor being walked TO, not from where the body stood.
+//
+// Now: the navmesh is rasterised once into a grid whose cells are walkable only if a body-radius
+// disc around the centre is (erosion = clearance). A* runs 8-connected with no corner-cutting, the
+// path is string-pulled to the fewest straight legs that stay inside the grid, and the last metre
+// into a seat comes from whichever side crosses the least furniture (exitCell). Standing agents are soft obstacles, so two people do not walk
+// through each other either.
+// ---------------------------------------------------------------------------
+const NAV_CELL = 0.2, NAV_CLEAR = 0.2;            // metres: cell size, body radius kept clear
+let navGrid = null;                                // { x0, z0, nx, nz, walk:Uint8Array }
+function buildGrid() {
+  if (!navTris.length) { navGrid = null; return; }
+  let x0 = Infinity, z0 = Infinity, x1 = -Infinity, z1 = -Infinity;
+  for (const t of navTris) for (const p of t) { x0 = Math.min(x0, p.x); z0 = Math.min(z0, p.z); x1 = Math.max(x1, p.x); z1 = Math.max(z1, p.z); }
+  const nx = Math.ceil((x1 - x0) / NAV_CELL) + 1, nz = Math.ceil((z1 - z0) / NAV_CELL) + 1;
+  const walk = new Uint8Array(nx * nz);
+  const ring = [[0, 0]];
+  for (let k = 0; k < 8; k++) ring.push([Math.cos(k * Math.PI / 4) * NAV_CLEAR, Math.sin(k * Math.PI / 4) * NAV_CLEAR]);
+  for (let j = 0; j < nz; j++) for (let i = 0; i < nx; i++) {
+    const cx = x0 + i * NAV_CELL, cz = z0 + j * NAV_CELL;
+    walk[j * nx + i] = ring.every(([dx, dz]) => onNav(cx + dx, cz + dz)) ? 1 : 0;
+  }
+  // Waypoint height = the anchors' own floor height (the scene box's min.y can be a slab underside).
+  const ys = pois.map((p) => p.pos.y).sort((a, b) => a - b);
+  navGrid = { x0, z0, nx, nz, walk, y: ys.length ? ys[ys.length >> 1] : floorY };
+}
+const cellOf = (x, z) => [Math.round((x - navGrid.x0) / NAV_CELL), Math.round((z - navGrid.z0) / NAV_CELL)];
+const cellPos = (i, j) => new THREE.Vector3(navGrid.x0 + i * NAV_CELL, navGrid.y, navGrid.z0 + j * NAV_CELL);
+const walkable = (i, j) => i >= 0 && j >= 0 && i < navGrid.nx && j < navGrid.nz && navGrid.walk[j * navGrid.nx + i] === 1;
+/** Metres of the straight segment p→q that lie OFF the walkable floor (over furniture). */
+function offFloor(p, q) {
+  const L = Math.hypot(q.x - p.x, q.z - p.z), steps = Math.max(1, Math.ceil(L / 0.05));
+  let off = 0;
+  for (let k = 1; k <= steps; k++) { const t = k / steps; if (!onNav(p.x + (q.x - p.x) * t, p.z + (q.z - p.z) * t)) off++; }
+  return off * (L / steps);
+}
+/** The walkable cell a body steps onto to leave (or reach) point p — a seat sits inside its desk's or
+ *  sofa's footprint, so this is the last metre of every sit-down. Scored by distance PLUS four times
+ *  the length of that last leg that crosses furniture, so a chair is entered from the open side —
+ *  behind a desk chair, in front of a sofa — without having to know which kind of seat it is. The
+ *  search runs three rings past the first hit, so a clean approach a ring further out still wins. */
+function exitCell(p) {
+  const [ci, cj] = cellOf(p.x, p.z);
+  if (walkable(ci, cj)) return [ci, cj];
+  let best = null, bestS = Infinity, stopAt = 14;
+  for (let r = 1; r <= stopAt; r++) {
+    for (let dj = -r; dj <= r; dj++) for (let di = -r; di <= r; di++) {
+      if (Math.max(Math.abs(di), Math.abs(dj)) !== r || !walkable(ci + di, cj + dj)) continue;
+      const q = cellPos(ci + di, cj + dj);
+      const sc = Math.hypot(q.x - p.x, q.z - p.z) + 4 * offFloor(q, p);
+      if (sc < bestS) { bestS = sc; best = [ci + di, cj + dj]; }
+    }
+    if (best && stopAt === 14) stopAt = Math.min(14, r + 3);
+  }
+  return best;
+}
+/** Grid line of sight with the body's width: every cell the segment passes over must be walkable. */
+function gridClear(a, b) {
+  const steps = Math.max(1, Math.ceil(Math.hypot(b.x - a.x, b.z - a.z) / (NAV_CELL * 0.5)));
+  for (let k = 0; k <= steps; k++) {
+    const t = k / steps, [i, j] = cellOf(a.x + (b.x - a.x) * t, a.z + (b.z - a.z) * t);
+    if (!walkable(i, j)) return false;
   }
   return true;
 }
-/** Visibility graph over the anchors: edge = a clear straight walk. Dijkstra runs over this. */
-function buildGraph() {
-  navGraph = pois.map(() => []);
-  for (let i = 0; i < pois.length; i++) {
-    for (let j = i + 1; j < pois.length; j++) {
-      if (!segClear(pois[i].pos, pois[j].pos)) continue;
-      const d = pois[i].pos.distanceTo(pois[j].pos);
-      navGraph[i].push({ to:j, d }); navGraph[j].push({ to:i, d });
+/** Cells within a body's reach of an agent standing still (not `self`) cost extra to cross. */
+function crowdCost(selfId) {
+  const near = new Map();
+  for (const [, o] of agents) {
+    if (o.id === selfId || o.path.length) continue;
+    const [ci, cj] = cellOf(o.group.position.x, o.group.position.z);
+    for (let dj = -2; dj <= 2; dj++) for (let di = -2; di <= 2; di++) near.set((cj + dj) * navGrid.nx + (ci + di), 6);
+  }
+  return near;
+}
+function astar(s, g, selfId) {
+  const { nx } = navGrid, N = nx * navGrid.nz;
+  const key = (i, j) => j * nx + i, goal = key(g[0], g[1]);
+  const gS = new Float32Array(N).fill(Infinity), from = new Int32Array(N).fill(-1), closed = new Uint8Array(N);
+  const crowd = crowdCost(selfId);
+  const h = (i, j) => { const dx = Math.abs(i - g[0]), dz = Math.abs(j - g[1]); return Math.max(dx, dz) + 0.414 * Math.min(dx, dz); };
+  const open = [[h(s[0], s[1]), key(s[0], s[1])]];          // tiny binary heap of [f, key]
+  const push = (f, k) => { open.push([f, k]); let c = open.length - 1; while (c) { const p = (c - 1) >> 1; if (open[p][0] <= open[c][0]) break; [open[p], open[c]] = [open[c], open[p]]; c = p; } };
+  const pop = () => { const top = open[0], last = open.pop(); if (open.length) { open[0] = last; let c = 0; for (;;) { const l = 2 * c + 1, r = l + 1; let m = c; if (l < open.length && open[l][0] < open[m][0]) m = l; if (r < open.length && open[r][0] < open[m][0]) m = r; if (m === c) break; [open[m], open[c]] = [open[c], open[m]]; c = m; } } return top; };
+  gS[key(s[0], s[1])] = 0;
+  while (open.length) {
+    const [, k] = pop();
+    if (closed[k]) continue;
+    closed[k] = 1;
+    if (k === goal) break;
+    const i = k % nx, j = (k / nx) | 0;
+    for (let dj = -1; dj <= 1; dj++) for (let di = -1; di <= 1; di++) {
+      if (!di && !dj) continue;
+      const ni = i + di, nj = j + dj;
+      if (!walkable(ni, nj)) continue;
+      if (di && dj && (!walkable(i + di, j) || !walkable(i, j + dj))) continue;   // no cutting a corner
+      const nk = key(ni, nj);
+      const cand = gS[k] + (di && dj ? 1.414 : 1) + (nk === goal ? 0 : (crowd.get(nk) || 0));
+      if (cand < gS[nk]) { gS[nk] = cand; from[nk] = k; push(cand + h(ni, nj), nk); }
     }
   }
+  if (from[goal] < 0 && goal !== key(s[0], s[1])) return null;
+  const cells = []; for (let c = goal; c !== -1; c = from[c]) cells.unshift([c % nx, (c / nx) | 0]);
+  return cells;
 }
-/** Shortest anchor-to-anchor route. Returns an array of POI indices (excluding the start). */
-function route(from, to) {
-  if (from === to) return [];
-  if (!navGraph.length) return [to];
-  const dist = new Array(pois.length).fill(Infinity), prev = new Array(pois.length).fill(-1);
-  const seen = new Set();
-  dist[from] = 0;
-  while (true) {
-    let u = -1, best = Infinity;
-    for (let i = 0; i < pois.length; i++) if (!seen.has(i) && dist[i] < best) { best = dist[i]; u = i; }
-    if (u < 0 || u === to) break;
-    seen.add(u);
-    for (const e of navGraph[u]) if (dist[u] + e.d < dist[e.to]) { dist[e.to] = dist[u] + e.d; prev[e.to] = u; }
-  }
-  if (dist[to] === Infinity) return [to];              // disconnected → walk straight and accept it
-  const path = []; for (let c = to; c !== -1 && c !== from; c = prev[c]) path.unshift(c);
-  return path;
+/** Waypoints ({pos}) from the agent's CURRENT position to anchor `destIdx`, ending on the anchor itself. */
+function planPath(a, destIdx) {
+  const dest = pois[destIdx];
+  if (!navGrid) return [dest];
+  const here = a.group.position;
+  const s = exitCell(here), g = exitCell(dest.pos);
+  if (!s || !g) return [dest];
+  const cells = astar(s, g, a.id);
+  if (!cells) return [dest];
+  // String-pull: keep a cell only when the straight line past it would leave the grid.
+  const pts = cells.map(([i, j]) => cellPos(i, j));
+  const legs = [pts[0]];
+  let anchor = pts[0];
+  for (let k = 2; k < pts.length; k++) if (!gridClear(anchor, pts[k])) { anchor = pts[k - 1]; legs.push(anchor); }
+  if (pts.length > 1) legs.push(pts[pts.length - 1]);
+  const out = legs.filter((p, k) => k > 0 || here.distanceTo(p) > 0.05).map((p) => ({ pos: p, quat: null }));
+  out.push(dest);
+  return out;
 }
 /** Claim a free anchor of the requested kind, preferring the one nearest the agent. */
 // `near` given  → the CLOSEST free anchor of that kind (a state change should read as a short walk).
@@ -723,7 +832,7 @@ function strollTo(a) {
   const dest = free[(Math.random() * free.length) | 0];
   for (const p of pois) if (p.taken === a.id && p !== pois[dest]) p.taken = null;
   pois[dest].taken = a.id;
-  a.path = route(a.poi >= 0 ? a.poi : dest, dest).map((i) => pois[i]);
+  a.path = planPath(a, dest);
   a.poi = dest;
   a.restClip = 'Idle';
   if (a.path.length) { playClip(a, 'Walk'); return true; }
@@ -763,7 +872,7 @@ function retarget(a, kind, restClip) {
   // Free the old anchor only once we're actually leaving it.
   for (const p of pois) if (p.taken === a.id && p !== pois[dest]) p.taken = null;
   pois[dest].taken = a.id;
-  a.path = route(a.poi >= 0 ? a.poi : dest, dest).map((i) => pois[i]);
+  a.path = planPath(a, dest);
   a.poi = dest;
   if (a.path.length) playClip(a, 'Walk');
   else { a.group.position.copy(pois[dest].pos); a.group.quaternion.copy(pois[dest].quat); playClip(a, restClip); }
@@ -794,7 +903,9 @@ function applyState(list) {
     a.saysKind = info.saysKind || 'finding';
     // Hue from the DESIGNATION (or the error colour), not from the state. The state is carried by
     // STATE_MIX, the aura pulse and the orb — see the animation block at the bottom of this file.
-    a.target = new THREE.Color(agentCss(a));
+    a.model = info.model || a.model || 'model';
+    a.target = new THREE.Color(agentCss(a));           // ring: what it is doing
+    a.bodyTarget = new THREE.Color(bodyCss(a));        // body + orb: which model is doing it
     refreshPlate(a);        // what it is doing, above its head — repaints only when the text changes
     if (stateChanged) {
       const map = STATE_POI[a.state] || STATE_POI.idle;
@@ -826,19 +937,21 @@ function renderLegend(list) {
   if (!el) return;
   const present = new Set(list.map((x) => x.designation || 'general'));
   const rows = [...DESIG.order.filter((id) => present.has(id)), ...(present.has('general') ? ['general'] : [])];
-  if (!rows.length) { el.innerHTML = ''; return; }
+  if (!list.length) { el.innerHTML = ''; return; }
   const counts = {};
   for (const x of list) counts[x.designation || 'general'] = (counts[x.designation || 'general'] || 0) + 1;
-  el.innerHTML = rows.map((id) => {
-    const d = desigOf(id);
-    const n = counts[id] || 0;
-    return `<div><span class="dot" style="background:${d.glow}"></span>${d.label}${n > 1 ? ` <span style="opacity:.6">×${n}</span>` : ''}</div>`;
-  }).join('');
+  const mCounts = {};
+  for (const x of list) mCounts[x.model || 'model'] = (mCounts[x.model || 'model'] || 0) + 1;
+  const mRows = [...MODELS.order.filter((id) => mCounts[id]), ...(mCounts.model ? ['model'] : [])];
+  const row = (color, label, n, ring) => `<div><span class="dot" style="${ring ? `background:transparent;box-shadow:inset 0 0 0 2px ${color}` : `background:${color}`}"></span>${label}${n > 1 ? ` <span style="opacity:.6">×${n}</span>` : ''}</div>`;
+  el.innerHTML = `<div class="lg-h">model · body</div>` + mRows.map((id) => { const m = modelOf(id); return row(m.body, m.label, mCounts[id], false); }).join('')
+    + `<div class="lg-h">doing · ring</div>` + rows.map((id) => { const d = desigOf(id); return row(d.glow, d.label, counts[id] || 0, true); }).join('');
 }
 function ingest(payload) {
   // The palette must be applied BEFORE the roster, or the first frame of a new agent is grey and
   // then pops to its colour — which looks like a bug and is one.
   if (payload && payload.palette) setDesignationPalette(payload.palette);
+  if (payload && payload.models) setModelPalette(payload.models);
   applyState((payload && payload.agents) || []);
 }
 
@@ -883,7 +996,7 @@ renderer.domElement.addEventListener('pointermove', (ev) => {
   hcTask.textContent = a.task || '(no task recorded)';
   hcStep.textContent = a.step || (a.tool ? '→ ' + a.tool : '');
   hcStep.style.display = (a.step || a.tool) ? '' : 'none';
-  hcFoot.textContent = (a.steerable ? 'click to steer · ' : 'background job · ') + ago(a.since);
+  hcFoot.textContent = modelOf(a.model).label + ' · ' + (a.steerable ? 'click to steer · ' : 'background job · ') + ago(a.since);
   card.style.left = ev.clientX + 'px';
   card.style.top = (ev.clientY - 14) + 'px';
   card.classList.add('on');
@@ -1022,6 +1135,7 @@ function applyPalette(t) {
   // the theme does, which is the wrong way round — the roster is usually already on screen.
   for (const a of agents.values()) {
     a.target = new THREE.Color(agentCss(a));
+    a.bodyTarget = new THREE.Color(bodyCss(a));
     for (const m of (a.tint || [])) if (m.color && m.userData.__base) m.color.copy(m.userData.__base);
   }
   for (const a of agents.values()) if (a.plate && a.plate.userData.redraw) {
@@ -1045,6 +1159,15 @@ window.__cameraProbe = () => ({ azimuth, elevation, radius, dragging: !!drag });
 window.__bubbleProbe = () => [...agents.values()].map((a) => ({
   id: a.id, visible: !!(a.bubble && a.bubble.visible), text: a._bubbleText || '', kind: a.saysKind || null,
 }));
+// Pathfinding, for scripts/test-office-nav.js: the grid, and a planned route between any two anchors.
+window.__navProbe = () => navGrid && ({ nx: navGrid.nx, nz: navGrid.nz, walkable: navGrid.walk.reduce((n, v) => n + v, 0), cell: NAV_CELL, pois: pois.map((p) => ({ name: p.name, kind: p.kind })) });
+window.__planProbe = (fromIdx, toIdx) => {
+  const fake = { id: '__probe', poi: fromIdx, group: { position: pois[fromIdx].pos.clone() }, path: [] };
+  const path = planPath(fake, toIdx);
+  const legs = []; let prev = pois[fromIdx].pos;
+  for (const w of path) { legs.push({ from: [prev.x, prev.z], to: [w.pos.x, w.pos.z], clear: gridClear(prev, w.pos) }); prev = w.pos; }
+  return legs;
+};
 window.__presenceProbe = () => [...agents.values()].map((a) => {
   const v = a.group.position.clone();
   v.y += charTargetH * 0.6;
@@ -1053,7 +1176,7 @@ window.__presenceProbe = () => [...agents.values()].map((a) => {
     id: a.id, name: a.name, state: a.state, clip: a.clip, restClip: a.restClip,
     // The designation and the colour the BODY is actually wearing. A visual test that only checks the
     // roster it pushed is checking its own input; this is what the renderer decided.
-    designation: a.designation || 'general',
+    designation: a.designation || 'general', model: a.model || 'model',
     bodyHex: (a.tint && a.tint[0] && a.tint[0].color) ? '#' + a.tint[0].color.getHexString() : null,
     auraHex: (a.aura && a.aura.material) ? '#' + a.aura.material.color.getHexString() : null,
     plateTier: a.plate ? Math.round((a.plate.position.y - a.plate.userData.baseY) / (a.plate.userData.tierH || 1)) : 0,
@@ -1114,7 +1237,7 @@ Promise.all([ load('./vendor/presence3d/models/office.glb').catch(() => null),
         taken: null,
       });
     }
-    buildGraph();
+    buildGrid();
     const box = new THREE.Box3().setFromObject(office.scene);
     floorY = box.min.y;
     // FRAME THE PEOPLE, NOT THE BUILDING. office.glb's bounding box includes the whole shell — outer
@@ -1131,7 +1254,7 @@ Promise.all([ load('./vendor/presence3d/models/office.glb').catch(() => null),
       const ang = (i / 8) * Math.PI * 2;
       pois.push({ name:'ring-'+i, kind:'idle', pos:new THREE.Vector3(Math.cos(ang)*4, 0, Math.sin(ang)*4), quat:new THREE.Quaternion(), taken:null });
     }
-    buildGraph();
+    buildGrid();
   }
   if (character) {
     charTemplate = character.scene;
@@ -1186,7 +1309,9 @@ const _tmp = new THREE.Vector3();
 (function animate(now){
   requestAnimationFrame(animate);
   now = now || performance.now();
-  if (document.hidden || (memoryConstrained && now - prev < 100)) return;
+  // A hidden panel's iframe is display:none, which does NOT set document.hidden — the office went on
+  // rendering shadows at 60 fps behind every other panel. A zero-size viewport is the tell.
+  if (document.hidden || innerWidth === 0 || innerHeight === 0 || (memoryConstrained && now - prev < 100)) { prev = now; return; }
   const t = (now - clockT0) / 1000, dt = Math.min(0.05, (now - prev) / 1000); prev = now;
 
   // Slow cinematic orbit, now around USER-OWNED azimuth/elevation. Advancing azimuth only while
@@ -1213,12 +1338,29 @@ const _tmp = new THREE.Vector3();
         }
       } else {
         _tmp.normalize();
-        a.group.position.addScaledVector(_tmp, Math.min(WALK_SPEED * dt, dist));
-        // face the direction of travel
-        const yaw = Math.atan2(_tmp.x, _tmp.z);
-        const want = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0), yaw);
-        a.group.quaternion.slerp(want, 1 - Math.pow(0.001, dt));
-        if (a.clip !== 'Walk' && !a.clipOnce) playClip(a, 'Walk');
+        // GIVE WAY. Someone within a body's width ahead → wait; after 1.2 s of waiting, re-plan around
+        // them (A* treats standing agents as costly cells). The lower id yields, so two walkers
+        // heading at each other never both stop.
+        let blocked = false;
+        for (const [, o] of agents) {
+          if (o === a) continue;
+          const ox = o.group.position.x - a.group.position.x, oz = o.group.position.z - a.group.position.z;
+          const d2 = ox * ox + oz * oz;
+          if (d2 < 0.45 * 0.45 && (ox * _tmp.x + oz * _tmp.z) > 0 && (!o.path.length || a.id < o.id) && d2 < dist * dist) { blocked = true; break; }
+        }
+        if (blocked) {
+          a.waited = (a.waited || 0) + dt;
+          if (a.waited > 1.2 && a.poi >= 0) { a.waited = 0; a.path = planPath(a, a.poi); }
+          if (a.clip !== 'Idle' && !a.clipOnce) playClip(a, 'Idle');
+        } else {
+          a.waited = 0;
+          a.group.position.addScaledVector(_tmp, Math.min(WALK_SPEED * dt, dist));
+          // face the direction of travel
+          const yaw = Math.atan2(_tmp.x, _tmp.z);
+          const want = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0), yaw);
+          a.group.quaternion.slerp(want, 1 - Math.pow(0.001, dt));
+          if (a.clip !== 'Walk' && !a.clipOnce) playClip(a, 'Walk');
+        }
       }
     } else if (a.clip === 'Walk' && a.poi >= 0) {
       // SELF-HEAL: the route emptied without the arrival branch firing (a retarget landed mid-step,
@@ -1240,13 +1382,14 @@ const _tmp = new THREE.Vector3();
       a.aura.material.color.lerp(tgt, 0.08);
       a.aura.material.opacity = 0.3 + (a.state==='working' ? (Math.sin(t*5+a.phase)*0.25+0.3) : a.state==='thinking' ? 0.25 : 0.12);
     }
+    const body = a.bodyTarget || tgt;
     if (a.orb) {
-      a.orb.material.color.lerp(tgt, 0.1);
+      a.orb.material.color.lerp(body, 0.1);
       const pulse = a.state==='working' ? 1 + Math.sin(t*6+a.phase)*0.18 : a.state==='thinking' ? 1 + Math.sin(t*3+a.phase)*0.1 : 1;
       a.orb.scale.setScalar(pulse);
     }
     if (a.glow) {
-      a.glow.material.color.lerp(tgt, 0.1);
+      a.glow.material.color.lerp(body, 0.1);
       a.glow.material.opacity = a.state==='idle' ? 0.16 : 0.3 + (a.state==='working' ? Math.sin(t*6+a.phase)*0.12 : 0);
     }
     // COLOUR-CODED BY DESIGNATION, on the body and not only the glow.
@@ -1262,7 +1405,7 @@ const _tmp = new THREE.Vector3();
     // pulsing cyan, and a coder next to them is unmistakably green in both moods. The base keeps some
     // of its own material so they still look like figures rather than blobs.
     const light = PALETTE.mode === 'day' || PALETTE.mode === 'standby';
-    const surf = surfaceOf(agentCss(a), light);   // lit-surface variant, not the ink token
+    const surf = surfaceOf(bodyCss(a), light);    // lit-surface variant of the MODEL colour
     const mix = STATE_MIX[a.state] ?? STATE_MIX.idle;
     for (const m of a.tint) {
       if (m.color) {
@@ -1271,7 +1414,7 @@ const _tmp = new THREE.Vector3();
         m.color.lerp(want, 0.12);
       }
       if (m.emissive) {
-        m.emissive.lerp(tgt, 0.08);
+        m.emissive.lerp(body, 0.08);
         m.emissiveIntensity = a.state==='working' ? 0.5 + Math.sin(t*7+a.phase)*0.2
           : a.state==='error' ? 0.45 + Math.sin(t*11+a.phase)*0.3     // a fast flash reads as alarm, not activity
           : a.state==='done' ? 0.4 : a.state==='thinking' ? 0.35 : 0.12;
