@@ -9126,6 +9126,7 @@ async function initMcpServer() {
       // Calls BhatBot places to other people, and the voicemail redirect for async answering-machine detection.
       guestTurn: guestPhoneTurn, onGuestEnd: guestCallEnded,
       // Debugging, loopback only: BhatBot's own window as a picture, and a look at its page.
+      homeSummary: () => homeSummary(),
       selfView: {
         shot: async ({ width } = {}) => { if (!mainWindow || mainWindow.isDestroyed()) return null; let img = await mainWindow.webContents.capturePage(); if (width) img = img.resize({ width }); return img.toPNG(); },
         evaluate: async (js) => { if (!mainWindow || mainWindow.isDestroyed()) throw new Error('no window'); return mainWindow.webContents.executeJavaScript(js, true); },
@@ -10040,6 +10041,107 @@ async function reachStatus({ fresh = false } = {}) {
   };
 }
 ipcMain.handle('reach-status', (_e, o) => reachStatus(o || {}).catch((e) => ({ error: e.message })));
+// ── THE HOME BRIEF ─────────────────────────────────────────────────────────────────────────────────
+// 2026-11-25: "update the home screen to always show some kind of information." The command stage was
+// an orb on an empty field: everything BhatBot knows was one panel-click away and nothing was on the
+// screen he actually looks at. This is one summary, built from what the app already holds, served to
+// the desktop home (IPC 'home-summary') AND the phone (/api/:token/home) so both say the same thing.
+//
+// Every section is independent and fails soft: a dead calendar is reported as disconnected, never as
+// an empty afternoon (the bug lib/availability.js already had to fix once), and a slow section never
+// holds the others — the calendar is the only network call and it is cached for five minutes.
+let _homeCal = { at: 0, v: null, busy: false };
+async function homeCalendar() {
+  if (_homeCal.v && Date.now() - _homeCal.at < 5 * 60000) return _homeCal.v;
+  if (_homeCal.busy) return _homeCal.v || { loading: true };
+  _homeCal.busy = true;
+  try {
+    const now = Date.now();
+    const evs = await Promise.race([
+      calendarEventsOrThrow({ timeMin: new Date(now).toISOString(), timeMax: new Date(now + 20 * 3600e3).toISOString() }),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('calendar slow')), 6000)),
+    ]);
+    const norm = (e) => {
+      const st = e.start && (e.start.dateTime || e.start.date) || e.startTime || e.start;
+      const en = e.end && (e.end.dateTime || e.end.date) || e.endTime || e.end;
+      return { title: String(e.summary || e.title || '(untitled)').slice(0, 80), start: st ? Date.parse(st) : null, end: en ? Date.parse(en) : null,
+        allDay: !!(e.start && e.start.date && !e.start.dateTime) || !!e.allDay, where: String(e.location || '').slice(0, 60) };
+    };
+    const list = (evs || []).map(norm).filter((e) => e.start && (e.end || e.start) > now).sort((a, b) => a.start - b.start).slice(0, 4);
+    _homeCal = { at: Date.now(), v: { events: list }, busy: false };
+  } catch (e) {
+    const m = String(e && e.message || e);
+    _homeCal = { at: Date.now(), v: { error: /invalid_grant|revoked|unauthor|expired/i.test(m) ? 'disconnected' : 'unavailable' }, busy: false };
+  }
+  return _homeCal.v;
+}
+async function homeSummary() {
+  const now = new Date();
+  const soft = (fn, d = null) => { try { return fn(); } catch { return d; } };
+  const c = loadConfig();
+  const h = now.getHours();
+  const out = {
+    at: now.toISOString(),
+    greeting: h < 5 ? 'Late night' : h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening',
+    date: now.toLocaleDateString([], { weekday: 'long', month: 'long', day: 'numeric' }),
+  };
+  out.calendar = await homeCalendar().catch(() => ({ error: 'unavailable' }));
+  out.agents = soft(() => {
+    const a = presenceSnapshot().agents || [];
+    const working = a.filter((x) => x.state === 'working' || x.state === 'thinking');
+    return { total: a.length, working: working.length, names: working.slice(0, 3).map((x) => ({ name: x.name, task: String(x.task || '').slice(0, 70), model: x.model })) };
+  }, { total: 0, working: 0, names: [] });
+  out.health = soft(() => {
+    const l = garmin.latest(); if (!l) return { configured: garmin.available() };
+    return { date: l.date, steps: l.steps, stepGoal: l.step_goal, restingHr: l.resting_hr, bodyBattery: l.body_battery,
+      sleepH: l.sleep_seconds ? Math.round(l.sleep_seconds / 360) / 10 : null, stress: l.stress_avg };
+  }, null);
+  out.reach = soft(() => {
+    const t = reachLoad();
+    const open = t.filter((x) => !x.closedAt);
+    let lastCall = null;
+    try {
+      const lines = fs.readFileSync(CALL_LOG, 'utf8').trim().split('\n').slice(-20).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter((x) => x && !x.blocked && x.ok !== false);
+      const lc = lines[lines.length - 1]; if (lc) lastCall = { at: lc.at, to: lc.name || (digitsOf(lc.to).slice(-10) === digitsOf(c.myPhone).slice(-10) ? 'you' : 'a contact') };
+    } catch {}
+    const q = quietWindow(now);
+    return { open: open.length, openMsgs: open.slice(-2).map((x) => String(x.msg || '').slice(0, 70)), telegram: !!c.telegramChatId,
+      quiet: q.quiet, callsHeld: !!((c.calls || {}).hold), lastCall };
+  }, null);
+  out.inbox = soft(() => {
+    const day = now.toISOString().slice(0, 10), counts = {};
+    const raw = fs.readFileSync(path.join(os.homedir(), '.bhatbot', 'actions.jsonl'), 'utf8');
+    for (const l of raw.slice(-400000).split('\n')) { if (!l.includes(day)) continue; try { const j = JSON.parse(l); if (String(j.ts || '').startsWith(day)) counts[j.class || 'other'] = (counts[j.class || 'other'] || 0) + 1; } catch {} }
+    const total = Object.values(counts).reduce((a, b) => a + b, 0);
+    return { triaged: total, noise: counts.noise || 0, needsYou: total - (counts.noise || 0) };
+  }, null);
+  out.projects = soft(() => {
+    const seen = new Set();
+    return synapse().brain.nodes({ type: 'project', status: 'confirmed' })
+      .map((n) => ({ label: String(n.label || n.ref || '').replace(/^\/Users\/[^/]+\//, '~/'), key: String(n.ref || n.label || '').replace(/\/+$/, '').split('/').pop().toLowerCase(), last: Number((n.meta || {}).lastTouched) || 0 }))
+      // Container folders (Desktop/Folders, Documents) hold projects; they are not one.
+      .filter((p) => p.key && !['(home)', 'folders', 'desktop', 'documents', 'downloads'].includes(p.key) && !seen.has(p.key) && seen.add(p.key))
+      .sort((a, b) => b.last - a.last).slice(0, 3).map(({ label, last }) => ({ label, last }));
+  }, []);
+  out.spend = soft(() => { const ct = costToday(); return { today: Number(ct && typeof ct === 'object' ? ct.usd : ct) || 0, budget: Number(c.dailyBudgetUsd) || 5 }; }, null);
+  out.system = soft(() => {
+    const st = _vitals, free = readMemFreePct();
+    return { cpu: Math.round((os.loadavg()[0] / (os.cpus().length || 1)) * 100), memUsed: Number.isFinite(free) ? 100 - free : null,
+      battery: st.pwr, charging: st.charging, cloud: !!(_cloudBridge && _cloudBridge.connected && _cloudBridge.connected()) };
+  }, null);
+  // One sentence that says what matters most right now — the thing to read if he reads nothing else.
+  const next = out.calendar && out.calendar.events && out.calendar.events[0];
+  const fmtT = (t) => new Date(t).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  const bits = [];
+  if (out.reach && out.reach.open) bits.push(`${out.reach.open} message${out.reach.open === 1 ? '' : 's'} waiting for you`);
+  if (out.agents && out.agents.working) bits.push(`${out.agents.working} agent${out.agents.working === 1 ? '' : 's'} working`);
+  if (next) bits.push(`next: ${next.title} ${next.allDay ? 'today' : 'at ' + fmtT(next.start)}`);
+  else if (out.calendar && out.calendar.error === 'disconnected') bits.push('calendar disconnected');
+  out.headline = bits.length ? bits[0][0].toUpperCase() + bits.join(' · ').slice(1) : 'Nothing needs you right now.';
+  return out;
+}
+ipcMain.handle('home-summary', () => homeSummary().catch((e) => ({ error: e.message })));
+
 /** He has seen it: a Telegram reply, a click on the notification, or talking to BhatBot. */
 function reachAck(via) {
   const list = reachLoad(); let n = 0;

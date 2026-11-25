@@ -34,3 +34,6 @@ scripts/_suit.html
 
 # stray clone of the soccer-game repo — not part of bhatbot
 BhatBall/
+
+# phone app: real hosts + tokens, generated at build time
+phone-app/Sources/Secrets.swift

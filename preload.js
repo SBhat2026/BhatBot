@@ -65,6 +65,7 @@ contextBridge.exposeInMainWorld('bhatbot', {
   getHealth: () => ipcRenderer.invoke('get-health'),
   getBiometrics: (opts) => ipcRenderer.invoke('get-biometrics', opts),                  // Health panel — Garmin biometrics
   onBiometricsUpdate: (cb) => ipcRenderer.on('biometrics-update', (_e, d) => cb(d)),     // proactive monitor pushes
+  homeSummary: () => ipcRenderer.invoke('home-summary'),                                // command stage home brief
   getOpsStatus: () => ipcRenderer.invoke('get-ops-status'),                              // Manage panel — what BhatBot is running
   openBrain: () => ipcRenderer.invoke('open-brain'),
   arrangeWindows: () => ipcRenderer.invoke('arrange-windows'),

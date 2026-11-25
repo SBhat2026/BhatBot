@@ -22,10 +22,10 @@
     --txt:#c8d6e5; --txt-strong:#dff1ff; --dim:#5b708a;
     --ok:#2fe08a; --warn:#ffb02e; --err:#ff4d5e;
     --mono:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
-    --glow-sm:0 0 8px rgba(0,200,255,.40);
-    --glow-md:0 0 18px rgba(0,200,255,.22);
-    --glow-core:0 0 10px #00c8ff,0 0 22px rgba(0,200,255,.55);
-    --scan:repeating-linear-gradient(0deg,rgba(0,200,255,.022) 0 1px,transparent 1px 3px);
+    --glow-sm:0 0 8px rgba(var(--acc-rgb),.40);
+    --glow-md:0 0 18px rgba(var(--acc-rgb),.22);
+    --glow-core:0 0 10px var(--cyan),0 0 22px rgba(var(--acc-rgb),.55);
+    --scan:repeating-linear-gradient(0deg,rgba(var(--acc-rgb),.022) 0 1px,transparent 1px 3px);
     --ls-brand:.24em; --ls-label:.10em;
   }
   * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
@@ -63,7 +63,7 @@
   .wm b { font:700 13px/1 var(--mono); letter-spacing:var(--ls-brand); color:var(--txt-strong); }
   header { display:flex; align-items:center; gap:11px; padding:calc(env(safe-area-inset-top) + 12px) 16px 12px;
     border-bottom:1px solid var(--line); background:linear-gradient(180deg,#0c1219,#090d13);
-    box-shadow:0 1px 0 rgba(0,200,255,.10); }
+    box-shadow:0 1px 0 rgba(var(--acc-rgb),.10); }
   header small { color:var(--dim); margin-left:auto; font-size:11px; text-transform:uppercase;
     letter-spacing:var(--ls-label); }
   #log { flex:1; overflow-y:auto; padding:16px 12px 8px; -webkit-overflow-scrolling:touch; }
@@ -178,7 +178,7 @@
   #tabs .tab { text-transform:uppercase; }
   #tabs .tab.on .ic { filter:none; text-shadow:var(--glow-sm); }
   .testbtn { box-shadow:var(--glow-sm); }
-  .msg.bot { box-shadow:inset 0 0 24px rgba(0,200,255,.03); }
+  .msg.bot { box-shadow:inset 0 0 24px rgba(var(--acc-rgb),.03); }
   textarea:focus { box-shadow:var(--glow-sm); }
   /* ---- line icons (replace emoji → HUD monochrome, themed by currentColor) ---- */
   .gi { width:20px; height:20px; display:block; fill:none; stroke:currentColor;
@@ -245,6 +245,49 @@
   /* cards everywhere: consistent geometry + hairline borders, flat fills */
   .hcard, .jcard, .act, .attchip, #screenwrap, .qbtn, .testbtn { border-radius:12px; box-shadow:none; }
   .testbtn { background:rgba(75,184,216,.10); border-color:var(--cyan-dim); color:var(--cyan-soft); }
+
+  /* ── 25 Nov 2026: the phone wears the desktop's night palette and its day/night accent ──────────
+     The old HUD (cyan, scanlines, vignette) belonged to a theme the desktop retired. The accent is
+     set by script below from the time of day (burgundy at noon → teal-blue at midnight); every
+     --cyan* name and every rgba(var(--acc-rgb),α) follows it. */
+  :root { --bg:#0b1118; --bg-deep:#080d13; --panel:#111a24; --surface:#0f1720; --line:#1c2836; --txt:#d3dde7; --txt-strong:#eef4fa; --dim:#8597a8;
+    --acc-rgb: 47,168,200; --serif:'Newsreader','Iowan Old Style',Georgia,serif; --ui:-apple-system,'SF Pro Text',system-ui,sans-serif; }
+  body::before { display:none; }
+  body::after { box-shadow:none; }
+  html,body { font-family:var(--ui); }
+  .msg, #ta { font-family:var(--ui); }
+  /* connection chip */
+  #net { display:inline-flex; align-items:center; gap:5px; font:11px var(--mono); letter-spacing:.06em; color:var(--dim);
+    border:1px solid var(--line); border-radius:999px; padding:2px 9px; white-space:nowrap; }
+  #net.mac { color:var(--ok); border-color:rgba(47,224,138,.35); }
+  #net.cloud { color:var(--cyan-soft); border-color:rgba(var(--acc-rgb),.4); }
+  #net.offline { color:var(--warn); border-color:rgba(255,176,46,.4); }
+  /* HOME */
+  #view-home { overflow-y:auto; -webkit-overflow-scrolling:touch; padding:14px 14px 22px; gap:12px; }
+  .hm-greet { font:26px/1.15 var(--serif); color:var(--txt-strong); margin-top:4px; }
+  .hm-date { font:11px var(--mono); letter-spacing:.16em; text-transform:uppercase; color:var(--dim); }
+  .hm-head { font:16px/1.45 var(--serif); color:var(--cyan-soft); margin:2px 0 4px; }
+  .hm-grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+  .hm-tile { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:12px 13px; display:flex; flex-direction:column; gap:5px; min-width:0; text-align:left; color:var(--txt); font:inherit; }
+  .hm-tile.wide { grid-column:1 / -1; }
+  /* the global round-icon button rule (44×44, centred) must not apply to a tile */
+  button.hm-tile, .hm-ask button, #ctl-nexus { width:auto; height:auto; border-radius:14px; justify-content:flex-start; align-items:stretch; }
+  .hm-ask button { justify-content:center; align-items:center; border-radius:12px; }
+  header { gap:8px; } .wm i { display:none; } .hbtn { margin-left:2px; }
+  #net { margin-left:auto; max-width:42vw; overflow:hidden; text-overflow:ellipsis; }
+  button.hm-tile:active { transform:scale(.985); border-color:rgba(var(--acc-rgb),.5); }
+  .hm-k { font:10px var(--mono); letter-spacing:.14em; text-transform:uppercase; color:var(--dim); display:flex; justify-content:space-between; gap:6px; }
+  .hm-v { font:600 17px/1.25 var(--ui); color:var(--txt-strong); overflow:hidden; text-overflow:ellipsis; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; }
+  .hm-v.big { font:500 24px/1.1 var(--mono); color:var(--cyan-soft); }
+  .hm-v.warn { color:var(--warn); }
+  .hm-s { font-size:12.5px; line-height:1.4; color:var(--dim); overflow:hidden; display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; }
+  .hm-bar { height:4px; border-radius:2px; background:#1a2430; overflow:hidden; } .hm-bar i { display:block; height:100%; background:var(--cyan); }
+  .hm-foot { display:flex; flex-wrap:wrap; gap:4px 14px; font:11px var(--mono); color:var(--dim); justify-content:center; padding-top:4px; }
+  .hm-foot b { color:var(--txt); font-weight:500; }
+  .hm-ask { display:flex; gap:8px; }
+  .hm-ask button { flex:1; background:rgba(var(--acc-rgb),.12); border:1px solid rgba(var(--acc-rgb),.4); color:var(--txt-strong); border-radius:12px; padding:12px 8px; font:500 14px var(--ui); }
+  .hm-off { text-align:center; color:var(--dim); padding:30px 12px; line-height:1.5; }
+  #ctl-nexus { width:100%; margin:4px 0 2px; }
 </style>
 </head>
 <body>
@@ -257,6 +300,7 @@
   <symbol id="i-mic" viewBox="0 0 24 24"><rect x="9" y="2.5" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3.5M8.5 21.5h7"/></symbol>
   <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2.5"/></symbol>
   <symbol id="i-send" viewBox="0 0 24 24"><path d="M21.5 2.5L11 13"/><path d="M21.5 2.5l-6.7 19-3.8-8.5-8.5-3.8 19-6.7z"/></symbol>
+  <symbol id="i-home" viewBox="0 0 24 24"><path d="M3.5 11L12 4l8.5 7"/><path d="M6 9.5V20h12V9.5"/><path d="M10 20v-5h4v5"/></symbol>
   <symbol id="i-chat" viewBox="0 0 24 24"><path d="M4 5h16v11H9.5L4.5 20V5z"/></symbol>
   <symbol id="i-activity" viewBox="0 0 24 24"><path d="M3 12h4l2.5 7 5-15 2.5 8H21"/></symbol>
   <symbol id="i-control" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="12.5" rx="2"/><path d="M8.5 20.5h7M12 16.5v4"/></symbol>
@@ -276,7 +320,15 @@
   <button id="gear" class="hbtn" title="Settings"><svg class="gi"><use href="#i-gear"></use></svg></button>
 </header>
 <div id="views">
-<section id="view-chat" class="view on">
+<section id="view-home" class="view on" aria-label="Home">
+  <div class="hm-date" id="hm-date"></div>
+  <div class="hm-greet" id="hm-greet">BhatBot</div>
+  <div class="hm-head" id="hm-head">Connecting to your Mac…</div>
+  <div class="hm-grid" id="hm-grid"></div>
+  <div class="hm-ask"><button data-ask="talk">🎙 Talk</button><button data-ask="type">⌨︎ Type</button></div>
+  <div class="hm-foot" id="hm-foot"></div>
+</section>
+<section id="view-chat" class="view">
 <div id="log"></div>
 <footer>
   <div id="bar"></div>
@@ -294,6 +346,7 @@
 <section id="view-control" class="view">
   <div class="csec">DESKTOP SCREEN <span style="float:right;color:var(--cyan)" id="screenrefresh">⟳ refresh</span></div>
   <div id="screenwrap" class="cf"><img id="screenimg" alt=""><span id="screenhint">tap to refresh</span></div>
+  <button class="qbtn" id="ctl-nexus"><span class="qi"><svg class="gi"><use href="#i-nexus"></use></svg></span>Open Nexus</button>
   <div class="csec">QUICK ACTIONS</div>
   <div class="qgrid">
     <button class="qbtn" data-q="playpause"><span class="qi"><svg class="gi"><use href="#i-play"></use></svg></span>Play/Pause</button>
@@ -315,11 +368,11 @@
 <section id="view-health" class="view"><div id="hbody"><div class="empty">Loading biometrics…</div></div></section>
 </div>
 <nav id="tabs">
-  <div class="tab on" data-tab="chat"><span class="ic"><svg class="gi"><use href="#i-chat"></use></svg></span>Chat</div>
+  <div class="tab on" data-tab="home"><span class="ic"><svg class="gi"><use href="#i-home"></use></svg></span>Home</div>
+  <div class="tab" data-tab="chat"><span class="ic"><svg class="gi"><use href="#i-chat"></use></svg></span>Chat</div>
   <div class="tab" data-tab="activity"><span class="ic"><svg class="gi"><use href="#i-activity"></use></svg></span>Activity<span class="badge" id="actbadge" style="display:none">0</span></div>
   <div class="tab" data-tab="health"><span class="ic">❤</span>Health</div>
   <div class="tab" data-tab="control"><span class="ic"><svg class="gi"><use href="#i-control"></use></svg></span>Control</div>
-  <div class="tab" data-tab="nexus"><span class="ic"><svg class="gi"><use href="#i-nexus"></use></svg></span>Nexus</div>
 </nav>
 <div id="settings" class="modal" style="display:none">
   <div class="sheet cf">
@@ -348,8 +401,14 @@ const CFG = (typeof window !== 'undefined' && window.__BHATBOT__) || {};
 // In-page override (Settings → Server) so the backend can be repointed in Safari too, not
 // just the native app's long-press. Order: saved override → injected (native) → same-origin.
 const _ls = (k) => { try { return localStorage.getItem(k); } catch { return null; } };
-const TOKEN = _ls('bb_token') || CFG.token || location.pathname.split('/')[2] || '';
-const HOST = String(_ls('bb_host') || CFG.host || location.origin).replace(/\/+$/, '');
+// Inside the native app the SHELL chooses the door (Mac direct, else cloud) and re-chooses when the
+// network changes, so its injected host/token win over an in-page override that may be stale.
+const NATIVE_ROUTE = CFG.route || '';
+const TOKEN = (NATIVE_ROUTE ? CFG.token : '') || _ls('bb_token') || CFG.token || location.pathname.split('/')[2] || '';
+const HOST = String((NATIVE_ROUTE ? CFG.host : '') || _ls('bb_host') || CFG.host || location.origin).replace(/\/+$/, '');
+// Tell the shell when a conversation is in flight (it will not switch doors mid-reply) and ask it to
+// re-check the connection when a request fails.
+const shell = (m) => { try { window.webkit.messageHandlers.bhatbot.postMessage(m); } catch {} };
 const API = HOST + '/api/' + TOKEN;
 const APP = HOST + '/app/' + TOKEN;
 const BUILD = '__BUILD__';                       // injected at serve time; drives auto-reload
@@ -406,8 +465,19 @@ ta.addEventListener('input', autoresize);
 ta.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); ensureCtx(); send(); } });
 sendBtn.addEventListener('click', () => { ensureCtx(); send(); });
 
-fetch(HOST + '/health').then(r => r.json()).then(() => { net.textContent = 'online'; dot.classList.remove('off'); })
-  .catch(() => { net.textContent = 'Mac offline'; dot.classList.add('off'); });
+// The chip says which door this page came through. Browser/PWA: same-origin, so it is whichever host
+// served it. Native: the shell's route. Verified against /version (a 200 proves host AND token).
+function setNet(kind, label) { net.className = kind; net.textContent = label; dot.classList.toggle('off', kind === 'offline'); }
+async function pingRoute() {
+  const kind = NATIVE_ROUTE === 'offline' || BUNDLED && !NATIVE_ROUTE ? 'offline' : (NATIVE_ROUTE || (/fly\.dev|cloud/.test(HOST) ? 'cloud' : 'mac'));
+  if (kind === 'offline') { setNet('offline', 'offline · reconnecting'); return false; }
+  try {
+    const r = await fetch(APP + '/version', { cache: 'no-store' });
+    if (!r.ok) throw new Error(String(r.status));
+    setNet(kind, kind === 'mac' ? '● Mac' : '● Cloud relay'); return true;
+  } catch { setNet('offline', 'unreachable'); shell({ recheck: true }); return false; }
+}
+pingRoute(); setInterval(pingRoute, 30000);
 
 // ---- ONE AudioContext, unlocked on first gesture — fixes iOS mic + TTS playback ----
 let actx = null;
@@ -463,6 +533,7 @@ async function send(forced) {
   const nImg = blocks.filter(b => b.type === 'image').length;
   add('me', text + (nImg ? `  [${nImg} image${nImg > 1 ? 's' : ''}]` : ''));
   const t = add('bot thinking', '…');
+  shell({ busy: true });
   try {
     const r = await fetch(API + '/chat', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ text, blocks }) }).then(x => x.json());
     if (r.error) { t.remove(); add('err', r.error); }
@@ -471,7 +542,8 @@ async function send(forced) {
       if ((r.text || '').length > 300) addReadFull(t, r.text);
       await speak(r.text || '');
     }
-  } catch (e) { t.remove(); add('err', String(e.message || e)); }
+  } catch (e) { t.remove(); add('err', String(e.message || e)); shell({ recheck: true }); }
+  shell({ busy: false });
   log.scrollTop = log.scrollHeight; busy = false; return true;
 }
 function addReadFull(bubble, fullText) {
@@ -688,9 +760,9 @@ function encodeWAV(samples, rate) {
 }
 
 // ---- Tabs: Chat / Activity / Control / Nexus ----
-let curTab = 'chat', nexusLoaded = false;
+let curTab = 'home', nexusLoaded = false;
 const tabs = [...document.querySelectorAll('#tabs .tab')];
-const views = { chat: document.getElementById('view-chat'), activity: document.getElementById('view-activity'), health: document.getElementById('view-health'), control: document.getElementById('view-control'), nexus: document.getElementById('view-nexus') };
+const views = { home: document.getElementById('view-home'), chat: document.getElementById('view-chat'), activity: document.getElementById('view-activity'), health: document.getElementById('view-health'), control: document.getElementById('view-control'), nexus: document.getElementById('view-nexus') };
 function showTab(name) {
   curTab = name;
   tabs.forEach(t => t.classList.toggle('on', t.dataset.tab === name));
@@ -698,6 +770,7 @@ function showTab(name) {
   if (name === 'activity') { actSeen = actLastId; updateActBadge(); }
   if (name === 'nexus' && !nexusLoaded) loadNexus();
   if (name === 'health') refreshHealth();
+  if (name === 'home') refreshHome();
   if (name === 'control') { refreshScreen(); refreshJobs(); if (!ctlTimer) ctlTimer = setInterval(refreshJobs, 4000); }
   else if (ctlTimer) { clearInterval(ctlTimer); ctlTimer = null; }
 }
@@ -795,6 +868,89 @@ document.getElementById('shellrun').addEventListener('click', async () => {
   const r = await ctl('run_shell', { command: cmd });
   shellout.textContent = r.error ? ('⚠ ' + r.error) : ((r.stdout || '') + (r.stderr ? '\n[stderr] ' + r.stderr : '') || '(no output)');
 });
+
+// ── HOME — the same brief as the desktop command stage (/api/home → main.js homeSummary) ─────────
+const hmEsc = (v) => String(v == null ? '' : v).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const hmT = (ms) => new Date(ms).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+const hmAgo = (ms) => { const m = Math.round((Date.now() - ms) / 60000); return m < 1 ? 'just now' : m < 60 ? m + ' min ago' : m < 1440 ? Math.round(m / 60) + ' h ago' : Math.round(m / 1440) + ' d ago'; };
+function hmTile(o) {
+  const tag = o.tab ? 'button' : 'div';
+  return `<${tag} class="hm-tile${o.wide ? ' wide' : ''}"${o.tab ? ` data-go="${o.tab}"` : ''}><div class="hm-k"><span>${hmEsc(o.k)}</span>${o.kr ? `<span>${hmEsc(o.kr)}</span>` : ''}</div>`
+    + `<div class="hm-v${o.big ? ' big' : ''}${o.warn ? ' warn' : ''}">${hmEsc(o.v)}</div>`
+    + (o.bar != null ? `<div class="hm-bar"><i style="width:${Math.max(0, Math.min(100, o.bar))}%"></i></div>` : '')
+    + (o.s ? `<div class="hm-s">${hmEsc(o.s)}</div>` : '') + `</${tag}>`;
+}
+function renderHome(d) {
+  const g = document.getElementById('hm-grid');
+  document.getElementById('hm-date').textContent = (d && d.date) || new Date().toLocaleDateString([], { weekday: 'long', month: 'long', day: 'numeric' });
+  if (!d || d.error) {
+    document.getElementById('hm-greet').textContent = 'BhatBot';
+    document.getElementById('hm-head').textContent = NATIVE_ROUTE === 'cloud' ? 'On the cloud relay — the full brief comes from your Mac.' : 'Your Mac is not answering right now.';
+    g.innerHTML = `<div class="hm-off wide" style="grid-column:1/-1">Chat still works${NATIVE_ROUTE === 'cloud' ? ' through the cloud' : ' once it reconnects'}. This page refreshes itself.</div>`;
+    return;
+  }
+  document.getElementById('hm-greet').textContent = d.greeting || 'Hello';
+  document.getElementById('hm-head').textContent = d.headline || '';
+  const tiles = [], cal = d.calendar || {};
+  if (cal.events && cal.events.length) {
+    const e = cal.events[0], now = Date.now();
+    tiles.push({ wide: true, k: 'Next up', kr: e.allDay ? 'today' : (e.start <= now ? 'now · until ' + hmT(e.end || e.start) : hmT(e.start)), v: e.title,
+      s: cal.events.slice(1, 3).map((x) => (x.allDay ? 'all day' : hmT(x.start)) + ' ' + x.title).join(' · ') || e.where || 'Nothing else before tomorrow' });
+  } else tiles.push({ wide: true, k: 'Next up', v: cal.error === 'disconnected' ? 'Calendar disconnected' : cal.error ? 'Calendar unavailable' : 'Clear', warn: !!cal.error, s: cal.error ? '' : 'Nothing on the calendar for the rest of today' });
+  const r = d.reach || {};
+  tiles.push({ k: 'Messages', v: r.open ? `${r.open} waiting` : 'All delivered', warn: !!r.open, s: r.open ? (r.openMsgs || []).join(' · ') : (r.lastCall ? `Last call ${hmAgo(r.lastCall.at)}` : 'No calls yet') + (r.quiet ? ' · quiet hours' : '') });
+  const a = d.agents || {};
+  tiles.push({ k: 'Agents', tab: 'control', v: a.working ? `${a.working} working` : 'All idle', big: !!a.working, s: a.working ? (a.names || []).map((x) => x.name + ': ' + x.task).join(' · ') : `${a.total || 0} on the floor` });
+  const hl = d.health;
+  if (hl && hl.steps != null) {
+    tiles.push({ k: 'Body', tab: 'health', v: `${Number(hl.steps).toLocaleString()} steps`, bar: hl.stepGoal ? Math.round(100 * hl.steps / hl.stepGoal) : null,
+      s: [hl.bodyBattery != null ? `battery ${hl.bodyBattery}` : '', hl.sleepH ? `slept ${hl.sleepH} h` : '', hl.restingHr ? `${hl.restingHr} bpm resting` : ''].filter(Boolean).join(' · ') });
+  } else tiles.push({ k: 'Body', tab: 'health', v: 'No reading yet', s: 'From Garmin, via your Mac' });
+  const ib = d.inbox;
+  tiles.push({ k: 'Inbox today', v: ib && ib.triaged ? (ib.needsYou ? `${ib.needsYou} need you` : 'Nothing needs you') : 'Quiet', warn: !!(ib && ib.needsYou), s: ib && ib.triaged ? `${ib.triaged} sorted · ${ib.noise} noise` : '' });
+  const p = d.projects || [];
+  tiles.push({ wide: true, k: 'Working on', v: p.length ? p.map((x) => x.label).join(' · ') : 'Nothing indexed', s: p[0] && p[0].last ? 'last touched ' + hmAgo(p[0].last) : '' });
+  g.innerHTML = tiles.map(hmTile).join('');
+  const sp = d.spend, sy = d.system || {};
+  document.getElementById('hm-foot').innerHTML = [sp ? `spend <b>$${sp.today.toFixed(2)}</b>/$${sp.budget.toFixed(0)}` : '', sy.battery != null ? `Mac battery <b>${sy.battery}%</b>` : '', `updated ${hmT(Date.parse(d.at))}`].filter(Boolean).join(' · ');
+}
+let _homeBusy = false;
+async function refreshHome() {
+  if (_homeBusy || NATIVE_ROUTE === 'offline') { if (NATIVE_ROUTE === 'offline') renderHome(null); return; }
+  _homeBusy = true;
+  try { const r = await fetch(API + '/home', { cache: 'no-store' }); renderHome(r.ok ? await r.json() : null); }
+  catch { renderHome(null); }
+  finally { _homeBusy = false; }
+}
+document.getElementById('view-home').addEventListener('click', (e) => {
+  const go = e.target.closest('[data-go]'); if (go) { showTab(go.dataset.go); return; }
+  const ask = e.target.closest('[data-ask]'); if (!ask) return;
+  ensureCtx(); showTab('chat');
+  if (ask.dataset.ask === 'talk') mic.click(); else setTimeout(() => ta.focus(), 50);
+});
+document.getElementById('ctl-nexus').addEventListener('click', () => showTab('nexus'));
+refreshHome(); setInterval(() => { if (curTab === 'home' && !document.hidden) refreshHome(); }, 60000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden && curTab === 'home') refreshHome(); });
+
+// ── The accent follows the sun, like the desktop: burgundy at noon → teal-blue at midnight ──────────
+(function phoneAccent() {
+  const hex = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
+  const lerp = (a, b, t) => a.map((v, i) => Math.round(v + (b[i] - v) * t));
+  const css = (c) => '#' + c.map((v) => v.toString(16).padStart(2, '0')).join('');
+  // Pairs tuned for the dark ground (≥5:1). Mixed via a mid stop so dusk passes through plum/indigo
+  // instead of a muddy grey — the same path the desktop takes in OKLCH.
+  const STOPS = { acc: ['#D9728A', '#9B88DB', '#2FA8C8'], bright: ['#EB95A8', '#B3A3E6', '#5CC6E0'], dim: ['#5A2230', '#3B3466', '#0E4A5E'], deep: ['#2A0F17', '#1C1838', '#04222E'] };
+  function paint() {
+    const now = new Date(), noon = new Date(now); noon.setHours(12, 30, 0, 0);
+    const t = 0.5 - 0.5 * Math.cos(((now - noon) / 864e5) * 2 * Math.PI);
+    const pick = (s) => t < 0.5 ? lerp(hex(s[0]), hex(s[1]), t * 2) : lerp(hex(s[1]), hex(s[2]), (t - 0.5) * 2);
+    const acc = pick(STOPS.acc), st = document.documentElement.style;
+    st.setProperty('--acc-rgb', acc.join(','));
+    st.setProperty('--cyan', css(acc)); st.setProperty('--cyan-bright', css(pick(STOPS.bright))); st.setProperty('--cyan-soft', css(pick(STOPS.bright)));
+    st.setProperty('--cyan-dim', css(pick(STOPS.dim))); st.setProperty('--cyan-deep', css(pick(STOPS.deep))); st.setProperty('--cyan-core', css(pick(STOPS.bright)));
+  }
+  paint(); setInterval(paint, 60000);
+})();
 
 async function loadNexus() {
   nexusLoaded = true;

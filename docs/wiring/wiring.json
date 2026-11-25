@@ -1,11 +1,11 @@
 {
  "summary": {
-  "generatedAt": "2026-11-25T15:25:51.621Z",
+  "generatedAt": "2026-11-25T23:57:42.014Z",
   "counts": {
    "pages": 11,
    "bridges": 12,
-   "bridgeKeys": 161,
-   "ipcHandlers": 106,
+   "bridgeKeys": 162,
+   "ipcHandlers": 107,
    "mainToRendererEvents": 40,
    "modules": 375,
    "libModules": 155,
@@ -462,7 +462,7 @@
    "name": "bhatbot",
    "global": "bhatbot",
    "file": "preload.js",
-   "keys": 118,
+   "keys": 119,
    "loaded": true
   },
   {
@@ -745,6 +745,12 @@
    "id": "ipc:get-biometrics",
    "layer": "ipc",
    "name": "get-biometrics",
+   "handled": true
+  },
+  {
+   "id": "ipc:home-summary",
+   "layer": "ipc",
+   "name": "home-summary",
    "handled": true
   },
   {
@@ -2569,6 +2575,11 @@
   },
   {
    "from": "bridge:bhatbot",
+   "to": "ipc:home-summary",
+   "broken": false
+  },
+  {
+   "from": "bridge:bhatbot",
    "to": "ipc:get-ops-status",
    "broken": false
   },
@@ -2960,6 +2971,10 @@
   },
   {
    "from": "ipc:reach-status",
+   "to": "main:main.js"
+  },
+  {
+   "from": "ipc:home-summary",
    "to": "main:main.js"
   },
   {

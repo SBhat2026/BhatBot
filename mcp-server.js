@@ -36,7 +36,7 @@ const markEnded = (sid) => capSet(_ended, sid);
 function heardHuman(sid) { return _heard.has(String(sid || '')); }
 function amdResult(sid) { return _amd.get(String(sid || '')) || null; }
 
-async function startMcpServer({ port, token, runAgent, transcribe, synthesize, synthUlaw, summarize, media, voiceTurn, voiceBegin, voicePoll, endVoiceCall, getActivity, nexusUrl, ownerPhone, twilioAuthToken, publicHost, jobs, control, screenshot, voice, biometrics, opsStatus, guestTurn, onGuestEnd, updateCall, selfView }) {
+async function startMcpServer({ port, token, runAgent, transcribe, synthesize, synthUlaw, summarize, media, voiceTurn, voiceBegin, voicePoll, endVoiceCall, getActivity, nexusUrl, ownerPhone, twilioAuthToken, publicHost, jobs, control, screenshot, voice, biometrics, opsStatus, guestTurn, onGuestEnd, updateCall, selfView, homeSummary }) {
   if (httpServer) return httpServer;
   const express = require('express');
   const fs = require('fs');
@@ -379,6 +379,8 @@ self.addEventListener('fetch', (e) => {
   // host didn't inject the providers (older builds). Data lives on the Mac; this serves it read-only.
   app.get('/api/:token/biometrics', guard, (_req, res) => { noStore(res); res.json(biometrics ? biometrics() : { error: 'not available' }); });
   app.get('/api/:token/ops', guard, (_req, res) => { noStore(res); res.json(opsStatus ? opsStatus() : { error: 'not available' }); });
+  // The home brief — the same summary the desktop command stage shows (main.js homeSummary).
+  app.get('/api/:token/home', guard, async (_req, res) => { noStore(res); try { res.json(homeSummary ? await homeSummary() : { error: 'not available' }); } catch (e) { res.json({ error: e.message }); } });
 
   // Where the phone's Nexus tab should point.
   app.get('/api/:token/config', guard, (_req, res) => { noStore(res); res.json({ nexusUrl: nexusUrl || '' }); });
