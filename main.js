@@ -30,7 +30,8 @@ const worldcup = require('./lib/worldcup');               // FIFA WC 2026 live b
 const news = require('./lib/news');                       // NYT news skim (RSS, no key; Top Stories API if nytApiKey set)
 const websearch = require('./lib/websearch');             // web_search — ranked results (Brave/Serper/Tavily if keyed, else free DuckDuckGo)
 const { classify } = require('./taskClassifier');
-const { startMcpServer, stopMcpServer } = require('./mcp-server');
+const { startMcpServer, stopMcpServer, registerGuestCall, prewarmSpeech, amdResult } = require('./mcp-server');
+const callscript = require('./lib/callscript');
 // Workspace multi-agent stack (Architecture v2) — orchestrator delegates big projects to
 // stateless agents over structured state, keeping the chat context flat. See ARCHITECTURE.md.
 const workspaceMgr = require('./lib/workspace');
@@ -6193,6 +6194,21 @@ async function executeTool(name, input, opts = {}) {
           result = { success: true, ticket: t.id, delivered: t.delivered, called: t.calls.length > 0, next: step.why || null };
           break;
         }
+        if (act === 'rehearse') {
+          // The whole call path up to — not including — the dial: what leg, what words, how fast.
+          const c = loadConfig();
+          let to = c.myPhone, name = null;
+          const toRaw = String((input && input.to) || '').trim();
+          if (toRaw && !/^(me|myself|siddhant)$/i.test(toRaw)) {
+            const tgt = contactsLib.resolve(toRaw, searchContacts);
+            if (!tgt.ok) { result = { success: false, error: tgt.error, candidates: tgt.candidates }; break; }
+            to = tgt.number; name = tgt.name;
+          }
+          const purpose = String((input && input.purpose) || (name ? 'Ask whether they are free for a quick chat this week.' : 'Test from BhatBot: this is how I reach you by phone. Reply or say anything to confirm.'));
+          const r = await twilioCall(purpose, { to, name, dryRun: true, allowPlainVoice: !name, bypassGate: !!name });
+          result = { success: !!(r.dryRun && r.leg), ...r, to: name || 'Siddhant', held: !!(c.calls || {}).hold };
+          break;
+        }
         const st = await reachStatus({ fresh: !!(input && input.fresh) });
         if (st.telegram) delete st.telegram.qr;
         result = { success: true, ...st };
@@ -6256,7 +6272,7 @@ async function executeTool(name, input, opts = {}) {
         const purpose = String((input && input.purpose) || '').trim();
         if (!target.self && !purpose) { result = { success: false, error: 'purpose is required when BhatBot calls someone — what should it say and get done?' }; break; }
         sendToActivity('tool-update', { type: 'thinking', text: `📞 calling ${target.name || target.number}…` });
-        const opening = target.self ? (purpose || 'Good day, sir. You asked me to ring you.') : purpose;
+        const opening = target.self ? (purpose || 'You asked me to ring you.') : purpose;
         const r = await twilioCall(opening, { to: target.number, name: target.name, bypassGate: !target.self });
         try { rstate.event('call', { to: target.number, name: target.name || null, via: r.via, sid: r.sid, self: !!target.self, tool: true }); } catch {}
         result = r.sent
@@ -9105,6 +9121,9 @@ async function initMcpServer() {
       jobs: jobsBus, control: phoneControl, screenshot: captureScreenJpeg,
       biometrics: () => { try { return biometricPortrait(); } catch { return { error: 'unavailable' }; } },   // Health screen on the phone
       opsStatus: () => { try { return opsSnapshot(); } catch { return { error: 'unavailable' }; } },           // Manage view on the phone
+      // Calls BhatBot places to other people, and the voicemail redirect for async answering-machine detection.
+      guestTurn: guestPhoneTurn, onGuestEnd: guestCallEnded,
+      updateCall: async (sid, twiml) => { const k = loadConfig(); await require('twilio')(k.twilioSid, k.twilioToken).calls(sid).update({ twiml }); },
       // Phone-call speech-recognition tuning (see gatherTwiml). All optional in config.json.
       voice: { hints: c.voiceHints, speechModel: c.voiceSpeechModel, speechTimeout: c.voiceSpeechTimeout,
         timeout: c.voiceTimeout, enhanced: c.voiceEnhanced, language: c.voiceLanguage,
@@ -9413,52 +9432,78 @@ function endVoiceCall(callSid) { if (callSid) voiceCalls.delete(callSid); }
 // `to` defaults to Siddhant's own phone (every existing caller relies on that). Passing an explicit
 // number is what lets the call button ring someone in his contacts instead — the conversation webhook
 // is identical either way, so a call to a third party is still a real two-way JARVIS conversation.
-async function twilioCall(message, { to, name, bypassGate = false, allowPlainVoice = false } = {}) {
+async function twilioCall(message, { to, name, note, bypassGate = false, allowPlainVoice = false, dryRun = false } = {}) {
   const c = loadConfig();
   const target = to || c.myPhone;
   if (!c.twilioSid || !c.twilioToken || !c.twilioFrom || !target) {
     return { sent: false, error: 'Twilio not configured (twilioSid/twilioToken/twilioFrom/myPhone)' };
   }
-
-  // ── IS HE IN A LECTURE? ────────────────────────────────────────────────────────────────────────
-  // callgate answers "how OFTEN", never "is this a good moment". The calendar answers the second.
-  // It fails OPEN by design — an unreachable calendar is not evidence that he is busy, and the cost
-  // of a call during a seminar is embarrassment while the cost of silence during an emergency is
-  // the thing calling exists for.
-  if (!bypassGate && (c.calls || {}).respectCalendar !== false) {
-    try {
-      const avail = await availability.check({
-        // Reads every connected calendar — his Princeton teaching schedule is not on the personal
-        // account, and checking only one would be worse than not checking at all.
-        listEvents: (range) => calendarEventsOrThrow(range),
-        now: Date.now(),
-      });
-      // THE CALENDAR IS DISCONNECTED, not merely slow. He asked not to be rung in meetings or class,
-      // and with no calendar there is no way to know — so the message goes by text, and he is told
-      // ONCE a day that the gate is blind and how to fix it, rather than being rung on a guess.
-      if (avail.authDead) {
-        recordCall({ to: target, name: name || null, ok: false, blocked: true, reason: 'calendar disconnected' });
-        const today = new Date().toDateString();
-        if (_calendarDeadNoticeDay !== today) {
-          _calendarDeadNoticeDay = today;
-          notifyUser('My Google Calendar access has expired, so I cannot tell when you are in class — I will text instead of calling until it is reconnected. Fix: `npm run google:auth -- <address>` in ~/bhatbot.', 'low').catch(() => {});
-        }
-        return { sent: false, blocked: true, busy: false, downgrade: 'telegram', error: 'calendar disconnected — not calling blind' };
-      }
-      if (!avail.free) {
-        recordCall({ to: target, name: name || null, ok: false, blocked: true, reason: 'busy: ' + avail.reason });
-        console.warn('[call] not calling — he is busy with ' + avail.reason);
-        return { sent: false, blocked: true, busy: true, downgrade: 'telegram',
-          error: `he is busy — ${avail.reason}`, until: avail.until || null };
-      }
-    } catch { /* the check itself must never block a call */ }
+  const self = !!c.myPhone && digitsOf(target).slice(-10) === digitsOf(c.myPhone).slice(-10);
+  // A deliberate pause on real dialling (config calls.hold) — everything else still runs, so the
+  // path can be rehearsed with dryRun while nothing can ring.
+  if (!dryRun && (c.calls || {}).hold) {
+    recordCall({ to: target, name: name || null, ok: false, blocked: true, reason: 'calls on hold' });
+    return { sent: false, held: true, error: 'calls are on hold (config calls.hold) — nothing dialled' };
   }
+  const t0 = Date.now(), timing = {};
+  const lap = (k) => { timing[k] = Date.now() - t0; };
 
-  // THE GATE. Seven or eight calls in one day, all of them broken, is the thing this prevents — and
-  // it refuses EARLY, on two consecutive failures, because a channel that just failed twice is
-  // broken rather than unheard. A refusal is not a silence: the caller downgrades to SMS/Telegram.
-  // bypassGate is for a call Siddhant asked for by name, which is not the runaway case.
-  if (!bypassGate) {
+  // ── EVERYTHING BEFORE THE DIAL RUNS AT ONCE ──────────────────────────────────────────────────────
+  // The 19 Nov call spent ~6 s between "call him" and Twilio being asked to dial: the calendar, then
+  // the cloud's preflight, then the Mac's, one after another. None depends on another, so they now
+  // run together — and the opening lines are written and voiced in the same window.
+  const calP = (!bypassGate && (c.calls || {}).respectCalendar !== false)
+    ? availability.check({ listEvents: (range) => calendarEventsOrThrow(range), now: Date.now() }).catch(() => null).finally(() => lap('calendar'))
+    : Promise.resolve(null);
+
+  const cloudHost = (c.cloudUrl && c.cloudToken && !/^CRED_REF/.test(String(c.cloudToken)))
+    ? String(c.cloudUrl).replace(/^https?:\/\//, '').replace(/\/+$/, '') : '';
+  // THE LEGS, each proven by a signed preflight before a phone rings (see voicepreflight):
+  //   1. the Mac's own webhook over the Tailscale funnel. It is first because it is the one we can
+  //      change: it answers instantly from lines voiced before the dial, learns about voicemail
+  //      asynchronously, speaks to him as "you" and introduces itself to anyone else. (The cloud is
+  //      on its July build — Fly will not deploy while billing is unpaid.) A call is only ever
+  //      placed while this Mac is awake, so the Mac being up is not an extra assumption.
+  //   2. the cloud's conversation webhook — when the funnel cannot be reached from outside.
+  //   3. only when reaching HIM matters more than the voice (allowPlainVoice), a one-way spoken
+  //      message in Twilio's own voice. Calls to other people never take this leg.
+  const macHost = getPublicHost();
+  const reach = macHost ? publicHostReachable() : { ok: false, why: 'no public host' };
+  const macP = (macHost && c.mcpToken && reach.ok)
+    ? voicepreflight.check({ host: macHost, token: c.mcpToken, authToken: c.twilioToken, ownerPhone: target, ...(self ? {} : { param: 'guest' }) })
+      .catch((e) => ({ ok: false, stage: 'preflight', detail: String((e && e.message) || e) })).finally(() => lap('macPreflight'))
+    : Promise.resolve({ ok: false, stage: 'unreachable', detail: macHost ? (reach.why || 'funnel not published') : 'no public host' });
+  const cloudP = cloudHost
+    ? voicepreflight.check({ host: cloudHost, token: c.cloudToken, authToken: c.twilioToken, ownerPhone: target, path: 'outgoing', param: 'purpose', externalProbe: false })
+      .catch((e) => ({ ok: false, stage: 'preflight', detail: String((e && e.message) || e) })).finally(() => lap('cloudPreflight'))
+    : Promise.resolve({ ok: false, stage: 'config', detail: 'no cloud configured' });
+  // Lines: to him, spoken TO him; to anyone else, the first sentence says who is calling and for whom.
+  const linesP = (self ? Promise.resolve(callscript.ownerLines(message))
+    : phraseGuestPurpose(name, message).then((purposeLine) => callscript.guestLines({ name, purpose: message, purposeLine })))
+    .then(async (lines) => { lap('lines'); const w = await mcpPrewarm(Object.values(lines)).catch(() => ({ ok: false })); lap('voiced'); return { lines, voiced: w }; });
+
+  const avail = await calP;
+  // ── IS HE IN A LECTURE? ── callgate answers "how OFTEN", never "is this a good moment"; the
+  // calendar answers the second. It fails OPEN (an unreachable calendar is not evidence he is busy),
+  // except when the calendar is DISCONNECTED: then the message goes in writing and he is told once a
+  // day that the gate is blind, rather than being rung on a guess.
+  if (avail && avail.authDead && !dryRun) {
+    recordCall({ to: target, name: name || null, ok: false, blocked: true, reason: 'calendar disconnected' });
+    const today = new Date().toDateString();
+    if (_calendarDeadNoticeDay !== today) {
+      _calendarDeadNoticeDay = today;
+      notifyUser('My Google Calendar access has expired, so I cannot tell when you are in class — I will text instead of calling until it is reconnected. Fix: `npm run google:auth -- <address>` in ~/bhatbot.', 'low').catch(() => {});
+    }
+    return { sent: false, blocked: true, busy: false, downgrade: 'telegram', error: 'calendar disconnected — not calling blind' };
+  }
+  if (avail && !avail.authDead && !avail.free && !dryRun) {
+    recordCall({ to: target, name: name || null, ok: false, blocked: true, reason: 'busy: ' + avail.reason });
+    console.warn('[call] not calling — he is busy with ' + avail.reason);
+    return { sent: false, blocked: true, busy: true, downgrade: 'telegram', error: `he is busy — ${avail.reason}`, until: avail.until || null };
+  }
+  // THE GATE. Seven or eight broken calls in one day is what this prevents; a refusal downgrades to
+  // writing. bypassGate is for a call Siddhant asked for by name, which is not the runaway case.
+  if (!bypassGate && !dryRun) {
     const gate = callgate.decide({ history: callHistory(), now: Date.now(), config: (c.calls || {}) });
     if (!gate.allow) {
       recordCall({ to: target, name: name || null, ok: false, blocked: true, reason: gate.reason });
@@ -9467,81 +9512,125 @@ async function twilioCall(message, { to, name, bypassGate = false, allowPlainVoi
     }
   }
 
+  const [macPre, cloudPre] = await Promise.all([macP, cloudP]);
+  let leg = null;
+  if (macPre.ok) leg = { kind: 'mac', host: macHost, token: c.mcpToken, pre: macPre };
+  else {
+    console.warn(`[call] Mac leg not usable (${macPre.stage}: ${macPre.detail})${cloudPre.ok ? ' — using the cloud' : ''}`);
+    if (cloudPre.ok) leg = { kind: 'cloud', host: cloudHost, token: c.cloudToken, pre: cloudPre };
+    else if (cloudHost) console.warn(`[call] cloud leg not usable (${cloudPre.stage}: ${cloudPre.detail})`);
+  }
+  // The lines only matter for the Mac leg (the cloud voices its own) — but they are cheap, already
+  // in flight, and a guest call needs them registered before Twilio asks for its first words.
+  const prep = leg && leg.kind === 'mac' ? await linesP : null;
+  lap('ready');
+  const legs = { mac: macPre.ok ? 'ok' : `${macPre.stage}: ${String(macPre.detail || '').slice(0, 140)}`, cloud: cloudPre.ok ? 'ok' : `${cloudPre.stage}: ${String(cloudPre.detail || '').slice(0, 140)}` };
+  if (dryRun) {
+    const p = prep || await linesP;
+    return { sent: false, dryRun: true, self, leg: leg ? leg.kind : (allowPlainVoice && self ? 'plain-voice' : null), legs,
+      lines: p.lines, voiced: p.voiced, calendar: avail ? (avail.authDead ? 'disconnected' : avail.free ? 'free' : 'busy: ' + avail.reason) : 'not checked', timing };
+  }
+
   let twilio;
   try { twilio = require('twilio'); } catch { return { sent: false, error: 'twilio package not installed (npm i twilio)' }; }
   const client = twilio(c.twilioSid, c.twilioToken);
   const greeting = String(message).slice(0, 600);
-  const cloudHost = (c.cloudUrl && c.cloudToken && !/^CRED_REF/.test(String(c.cloudToken)))
-    ? String(c.cloudUrl).replace(/^https?:\/\//, '').replace(/\/+$/, '') : '';
-  const viaCloud = !!cloudHost;
-  const host = cloudHost || getPublicHost();
-  // A host we cannot prove is reachable is worse than no host at all, because the two-way branch
-  // SKIPS the one-shot fallback — which needs no webhook and would have delivered every one of
-  // those eight messages perfectly.
-  //
-  // But `the funnel is published` was never the question either. The funnel was up, the host was
-  // right, the signature was valid, and the call STILL failed — because the webhook answered 200
-  // with "Unauthorized" (the owner check read `From`, which on an outbound call is the Twilio
-  // number, not Siddhant). Every layer reported success and the phone played an error.
-  //
-  // So the two-way branch is now gated on the only thing that actually settles it: a signed request,
-  // shaped like the call we are about to place, coming back with TwiML that speaks AND listens.
-  // If that fails we take the one-shot announcement, which works without a webhook at all.
-  // THE LEGS, in order, each proven by a signed preflight before a phone rings (see voicepreflight):
-  //   1. the cloud's conversation webhook (public, does not depend on the Mac's network);
-  //   2. the Mac's own webhook over the Tailscale funnel — so a cloud outage or an unpaid host does
-  //      not silence him;
-  //   3. only when reaching HIM matters more than the voice (allowPlainVoice — the reach ladder sets
-  //      it), a one-way spoken message in Twilio's own voice. A missed urgent call is worse than one
-  //      in the wrong voice. Calls to other people never take this leg.
-  let pre = { ok: false, detail: 'not checked' }, leg = null;
-  if (viaCloud && c.cloudToken) {
-    pre = await voicepreflight.check({ host: cloudHost, token: c.cloudToken, authToken: c.twilioToken, ownerPhone: target, path: 'outgoing', param: 'purpose', externalProbe: false })
-      .catch((e) => ({ ok: false, stage: 'preflight', detail: String((e && e.message) || e) }));
-    if (pre.ok) leg = { kind: 'cloud', host: cloudHost, token: c.cloudToken };
-    else console.warn(`[call] cloud leg not usable (${pre.stage}: ${pre.detail}) — trying the Mac's own webhook`);
-  }
-  if (!leg) {
-    const macHost = getPublicHost();
-    const reach = macHost ? publicHostReachable() : { ok: false, why: 'no public host' };
-    if (macHost && c.mcpToken && reach.ok) {
-      const p2 = await voicepreflight.check({ host: macHost, token: c.mcpToken, authToken: c.twilioToken, ownerPhone: target })
-        .catch((e) => ({ ok: false, stage: 'preflight', detail: String((e && e.message) || e) }));
-      if (p2.ok) { leg = { kind: 'mac', host: macHost, token: c.mcpToken }; pre = p2; }
-      else console.warn(`[call] Mac leg not usable (${p2.stage}: ${p2.detail})`);
-    } else if (macHost) console.warn(`[call] Mac leg not reachable (${reach.why || 'unknown'})`);
-  }
   try {
-    if (leg) {
-      // machineDetection=DetectMessageEnd → voicemail answers fire the webhook at the BEEP, which
-      // leaves a message instead of gathering. Humans resolve in ~3-5s and get the conversation.
-      const url = leg.kind === 'cloud'
-        ? `https://${leg.host}/voice/${leg.token}/outgoing?purpose=${encodeURIComponent(greeting)}`
-        : `https://${leg.host}/voice/${leg.token}/incoming?msg=${encodeURIComponent(greeting)}`;
-      const via = leg.kind === 'cloud' ? 'cloud-conversation' : 'twilio-conversation';
+    if (leg && leg.kind === 'mac') {
+      const base = `https://${leg.host}/voice/${leg.token}`;
+      let url = `${base}/incoming?msg=${encodeURIComponent(greeting)}`;
+      if (!self) {
+        const id = crypto.randomBytes(9).toString('hex');
+        registerGuestCall(id, { to: target, name: name || null, purpose: greeting, note: note || '', lines: prep.lines });
+        url = `${base}/incoming?guest=${id}`;
+      }
+      // ASYNC answering-machine detection: Twilio asks for the first words the moment the call is
+      // answered (they are already voiced), and reports person-or-voicemail to /amd a few seconds
+      // later. A voicemail verdict redirects the live call to the prepared message at the beep.
       const call = await client.calls.create({
         url, method: 'POST', to: target, from: c.twilioFrom,
         machineDetection: 'DetectMessageEnd', machineDetectionTimeout: 30,
+        asyncAmd: 'true', asyncAmdStatusCallback: `${base}/amd`, asyncAmdStatusCallbackMethod: 'POST',
+        statusCallback: `${base}/status`, statusCallbackEvent: ['completed'],
+      });
+      lap('dialled');
+      recordCall({ to: target, name: name || null, ok: true, via: 'twilio-conversation', sid: call.sid, preflight: leg.pre.stage, timing });
+      return { sent: true, via: 'twilio-conversation', sid: call.sid, to: target, name: name || null, host: leg.host, timing };
+    }
+    if (leg && leg.kind === 'cloud') {
+      // The cloud's July build writes its own greeting with a model told to "say you're Siddhant's
+      // assistant". To him that is wrong, so until it can be redeployed the purpose carries the
+      // instruction it needs.
+      const purpose = self
+        ? `You are speaking to Siddhant HIMSELF on his own phone. Address him directly as "you" or "sir"; never call him Siddhant or describe yourself as his assistant to him. Tell him: ${callscript.toSecondPerson(greeting)}`
+        : `Introduce yourself first as BhatBot, an AI assistant calling on behalf of Siddhant Bhat. Then: ${greeting}`;
+      // `msg`/`name` are for the rebuilt handler (it writes its own lines); the July build reads `purpose`.
+      const call = await client.calls.create({
+        url: `https://${leg.host}/voice/${leg.token}/outgoing?purpose=${encodeURIComponent(purpose.slice(0, 900))}&msg=${encodeURIComponent(greeting)}${name ? '&name=' + encodeURIComponent(name) : ''}`, method: 'POST', to: target, from: c.twilioFrom,
+        machineDetection: 'DetectMessageEnd', machineDetectionTimeout: 30,
         statusCallback: `https://${leg.host}/voice/${leg.token}/status`, statusCallbackEvent: ['completed'],
       });
-      recordCall({ to: target, name: name || null, ok: true, via, sid: call.sid, preflight: pre.stage });
-      return { sent: true, via, sid: call.sid, to: target, name: name || null, host: leg.host };
+      lap('dialled');
+      recordCall({ to: target, name: name || null, ok: true, via: 'cloud-conversation', sid: call.sid, preflight: leg.pre.stage, timing });
+      return { sent: true, via: 'cloud-conversation', sid: call.sid, to: target, name: name || null, host: leg.host, timing };
     }
-    if (allowPlainVoice && digitsOf(target) === digitsOf(c.myPhone || '')) {
-      const safe = greeting.replace(/[<>&]/g, ' ');
+    if (allowPlainVoice && self) {
+      const safe = callscript.toSecondPerson(greeting).replace(/[<>&]/g, ' ');
       const twiml = `<Response><Say voice="Google.en-US-Neural2-D">${safe}</Say><Pause length="1"/><Say voice="Google.en-US-Neural2-D">Again: ${safe} The details are on Telegram.</Say></Response>`;
       const call = await client.calls.create({ twiml, to: target, from: c.twilioFrom });
       recordCall({ to: target, name: name || null, ok: true, via: 'twilio', sid: call.sid, oneWay: true, why: 'no two-way leg passed preflight' });
       return { sent: true, via: 'twilio', sid: call.sid, to: target, oneWay: true, note: 'one-way message — no two-way leg passed preflight' };
     }
     const error = 'no call leg passed preflight (cloud and Mac webhooks both unavailable); call not placed';
-    recordCall({ to: target, name: name || null, ok: false, error });
-    return { sent: false, downgrade: 'sms', error };
+    recordCall({ to: target, name: name || null, ok: false, error, legs });
+    return { sent: false, downgrade: 'sms', error, legs };
   } catch (e) {
     recordCall({ to: target, name: name || null, ok: false, error: e.message });
     return { sent: false, error: e.message };
   }
 }
+
+// The one sentence that tells a contact why BhatBot is calling, phrased for THEM — written by a fast
+// model while the preflights run, so it costs nothing after they pick up. Falls back to a plain
+// sentence (callscript.guestLines) if no model answers within 4 s.
+async function phraseGuestPurpose(name, purpose) {
+  const apiKey = getApiKey();
+  if (!apiKey || !String(purpose || '').trim()) return '';
+  try {
+    const j = await Promise.race([
+      anthropicRequest({ model: MODEL_HAIKU, max_tokens: 120,
+        system: 'You write ONE short spoken sentence for a phone call. BhatBot, an AI assistant, has already introduced itself as calling on behalf of Siddhant Bhat and asked if they have a moment; they said yes. Now say why it is calling, addressed to the person on the line, in plain natural speech. Refer to Siddhant as "Siddhant". No greeting, no introduction, no quotes, no markdown. Output only the sentence.',
+        messages: [{ role: 'user', content: `Calling: ${name || 'a contact'}\nPurpose (Siddhant's own words to his assistant): ${String(purpose).slice(0, 500)}` }] }, apiKey, { retries: 0 }),
+      new Promise((r) => setTimeout(() => r(null), 4000)),
+    ]);
+    const t = j ? (j.content || []).filter((b) => b.type === 'text').map((b) => b.text).join(' ').replace(/\s+/g, ' ').trim() : '';
+    return t && t.length < 300 ? t.replace(/^["“]|["”]$/g, '') : '';
+  } catch { return ''; }
+}
+// The turns after the prepared lines, on a call to someone else: a fast model, no tools, his context.
+async function guestPhoneTurn(g, speech) {
+  const apiKey = getApiKey();
+  if (!apiKey) return { text: 'I’ll pass that along to him. Thank you — goodbye.', hangup: true };
+  const msgs = [{ role: 'user', content: '[The call connected.]' }, ...g.history.slice(-14)];
+  const j = await Promise.race([
+    anthropicRequest({ model: MODEL_HAIKU, max_tokens: 200, system: callscript.guestSystem({ name: g.name, purpose: g.purpose, note: g.note }), messages: msgs }, apiKey, { retries: 1 }),
+    new Promise((r) => setTimeout(() => r(null), 9000)),
+  ]);
+  const raw = j ? (j.content || []).filter((b) => b.type === 'text').map((b) => b.text).join(' ').trim() : '';
+  if (!raw) return { text: 'Sorry — I’ll have him follow up with you directly. Thank you, goodbye.', hangup: true };
+  return { text: raw.replace(/\[END_?CALL\]/gi, '').trim() || 'Thank you — goodbye.', hangup: /\[END_?CALL\]/i.test(raw) };
+}
+// When a call to someone else ends, he gets what was said — in writing, never a call.
+async function guestCallEnded(g, { status, answeredBy } = {}) {
+  const who = g.name || g.to;
+  const vm = /^machine/.test(String(answeredBy || ''));
+  const said = (g.history || []).map((m) => `${m.role === 'user' ? (g.name || 'Them') : 'BhatBot'}: ${m.content}`).join('\n');
+  const head = vm ? `📞 Called ${who} — voicemail; I left a message saying who I was and that you'd follow up.`
+    : status === 'completed' && (g.history || []).some((m) => m.role === 'user') ? `📞 Call with ${who} finished.`
+    : `📞 Called ${who} — ${status || 'no answer'}.`;
+  await notifyUser(`${head}\nAbout: ${String(g.purpose || '').slice(0, 200)}${said && !vm ? '\n\n' + said.slice(0, 1500) : ''}`, 'low').catch(() => {});
+}
+async function mcpPrewarm(texts) { try { return await prewarmSpeech(texts); } catch (e) { return { ok: false, why: e.message }; } }
 
 // phone_mirror tool backend — operate Siddhant's iPhone via macOS iPhone Mirroring. The actual
 // TAPPING reuses the existing vision loop (screen_parse → vision_click on the mirrored window); this
@@ -9781,6 +9870,9 @@ function reachWatchCall(t, sid) {
   const tick = async () => {
     n++;
     let res = null; try { res = await twilioGet(`Calls/${sid}.json`); } catch {}
+    // Async answering-machine detection reports its verdict to our /amd webhook; the call record
+    // may not carry it, so fill it in from there.
+    if (res && !res.answered_by) { const by = amdResult(sid); if (by) res.answered_by = by; }
     const o = reachLib.callOutcome(res);
     if (!o.final && n < 30) return setTimeout(tick, 10000);
     const cur = reachLoad().find((x) => x.id === t.id) || t;

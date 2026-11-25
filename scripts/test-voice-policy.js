@@ -96,7 +96,7 @@ test('Mac phone synthesis failure throws into route Hangup handling',async()=>{
 test('stream keeps auto_mode and same selected voice; no alternate voice outputs remain',()=>{
  const ws=read('lib/ttsws.js');assert.ok(ws.includes("c.ttsVoice || c.elevenLabsVoiceId || '"+JARVIS+"'"));assert.ok(ws.includes('auto_mode=true'));
  // One guarded exception: reaching Siddhant on an urgent ladder when no two-way leg passed preflight.
- const guarded=main.match(/if \(allowPlainVoice && digitsOf\(target\)[\s\S]*?\n    \}\n/);assert.ok(guarded,'the substitute-voice branch is guarded');
+ const guarded=main.match(/if \(allowPlainVoice && self\)[\s\S]*?\n    \}\n/);assert.ok(guarded,'the substitute-voice branch is guarded');
  assert.doesNotMatch(main.replace(guarded[0],''),/spawn\('say'|<Say/);assert.ok(extract(main,'ttsWsEnsure').includes('ttsRestFeed(seq, text)'));
  for(const f of ['src/mobile.html','phone-app/Web/mobile.html','cloud/public/mobile.html']){const ui=read(f);assert.ok(ui.includes('JARVIS (server-selected ElevenLabs voice)'));assert.ok(!ui.includes('voice: voicePref'));}
 });
@@ -107,7 +107,9 @@ test('outbound calls resolve the cloud host within the call scope and refuse fai
   let valid=true;
   const context={loadConfig:()=>c,require:()=>()=>({calls:{create:async args=>{placed.push(args);return {sid:'test-call'}}}}),
     getPublicHost:()=>'',publicHostReachable:()=>assert.fail('cloud call must not inspect Tailscale'),
-    voicepreflight:{check:async()=>({ok:valid,stage:'test',detail:'failed'})},recordCall:()=>{},console:{warn(){}},Date,String,encodeURIComponent};
+    voicepreflight:{check:async()=>({ok:valid,stage:'test',detail:'failed'})},recordCall:()=>{},console:{warn(){}},Date,String,encodeURIComponent,Promise,Object,
+    digitsOf:(x)=>String(x||'').replace(/\D+/g,''),callscript:require('../lib/callscript'),phraseGuestPurpose:async()=>'',mcpPrewarm:async()=>({ok:true}),
+    registerGuestCall:()=>{},crypto:require('crypto')};
   vm.createContext(context);vm.runInContext(extract(main,'twilioCall'),context);
   const success=await context.twilioCall('Voice check',{bypassGate:true});
   assert.equal(success.sent,true);assert.equal(placed.length,1);assert.match(placed[0].url,/example.invalid/);

@@ -572,8 +572,8 @@ ok(Array.isArray(tagCache('nope')) === false, 'cache: non-array → returned as-
     const body = extract(main, 'twilioCall');
     ok(/voicepreflight\.check\(\{[^}]*c\.cloudToken[^}]*path:\s*'outgoing'[^}]*param:\s*'purpose'/.test(body),
       'the cloud leg runs a signed preflight shaped like the request Twilio will make');
-    ok(/if \(pre\.ok\) leg = \{ kind: 'cloud'/.test(body) && /if \(p2\.ok\) \{ leg = \{ kind: 'mac'/.test(body) && /if \(leg\) \{/.test(body),
-      'and BOTH legs require it to pass before a two-way call is placed (the Mac leg is tried when the cloud fails)');
+    ok(/if \(macPre\.ok\) leg = \{ kind: 'mac'/.test(body) && /if \(cloudPre\.ok\) leg = \{ kind: 'cloud'/.test(body) && /if \(leg && leg\.kind === 'mac'\)/.test(body),
+      'and BOTH legs require it to pass before a two-way call is placed (the cloud is tried when the Mac fails)');
     ok(/avail\.authDead/.test(body) && /downgrade:\s*'telegram'/.test(body), 'a disconnected calendar texts instead of ringing blind');
     ok(/calendarEventsOrThrow/.test(body), 'and a failed calendar read can no longer arrive as an empty calendar');
   }

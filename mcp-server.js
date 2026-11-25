@@ -7,8 +7,27 @@
 
 let httpServer = null;
 let _shuttingDown = false;   // distinguishes an intentional stop from a listener that vanished
+const callscript = require('./lib/callscript');
+// ── CALLS BHATBOT PLACED TO SOMEONE ELSE ───────────────────────────────────────────────────────────
+// The voice webhooks below serve ONE person — Siddhant — with the full agent behind them. A call to
+// a contact is a different conversation with a different, tool-less brain, so it is admitted only by
+// an entry main.js registers at the moment it dials: the id is in the signed webhook URL, and the
+// number Twilio says it dialled must be the number registered. Nobody can talk their way from a
+// guest call into the owner's agent, because the two never share a route.
+const _guests = new Map();   // id → { to, name, purpose, note, lines, history:[], at, callSid }
+function registerGuestCall(id, entry) {
+  const now = Date.now();
+  for (const [k, v] of _guests) if (now - v.at > 60 * 60 * 1000) _guests.delete(k);
+  _guests.set(String(id), { history: [], ...entry, at: now });
+}
+// Speech voiced BEFORE the phone rings, so the first words after he picks up cost no synthesis.
+let _prewarm = async () => ({ ok: false, why: 'MCP server not started' });
+async function prewarmSpeech(texts) { return _prewarm(texts); }
+// Async answering-machine verdicts, by CallSid: Twilio's call record does not always carry them.
+const _amd = new Map();
+function amdResult(sid) { return _amd.get(String(sid || '')) || null; }
 
-async function startMcpServer({ port, token, runAgent, transcribe, synthesize, synthUlaw, summarize, media, voiceTurn, voiceBegin, voicePoll, endVoiceCall, getActivity, nexusUrl, ownerPhone, twilioAuthToken, publicHost, jobs, control, screenshot, voice, biometrics, opsStatus }) {
+async function startMcpServer({ port, token, runAgent, transcribe, synthesize, synthUlaw, summarize, media, voiceTurn, voiceBegin, voicePoll, endVoiceCall, getActivity, nexusUrl, ownerPhone, twilioAuthToken, publicHost, jobs, control, screenshot, voice, biometrics, opsStatus, guestTurn, onGuestEnd, updateCall }) {
   if (httpServer) return httpServer;
   const express = require('express');
   const fs = require('fs');
@@ -79,7 +98,6 @@ async function startMcpServer({ port, token, runAgent, transcribe, synthesize, s
   // Why BhatBot rang, held until he has said he can talk. Bounded — a call that never reaches its
   // second turn must not leak an entry.
   const pendingReason = new Map();
-  const timeGreeting = () => { const h = new Date().getHours(); return h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening'; };
 
   // ── WHO IS THE OWNER ON THIS CALL? ──────────────────────────────────────────────────────────────
   // On an INBOUND call Siddhant is `From` — he dialled us. On an OUTBOUND call he is `To` — we
@@ -380,21 +398,43 @@ self.addEventListener('fetch', (e) => {
 
   // Synthesize `text` in the Jarvis voice → cache → return a <Play>…</Play> element.
   // Fail the voice leg explicitly rather than substituting a Twilio voice.
+  // The same sentence is voiced once: a line prepared while the phone rang — or the canned "is now
+  // a good time?" said on every call — is served from memory instead of round-tripping to TTS.
+  const clipByText = new Map();   // text → clip id
+  const voicing = new Map();      // text → in-flight synthesis (a line still being voiced when Twilio asks for it)
+  function clipFor(t) {
+    const hit = clipByText.get(t);
+    if (hit && clips.has(hit)) { clips.get(hit).at = Date.now(); return Promise.resolve(hit); }
+    if (voicing.has(t)) return voicing.get(t);
+    const p = voiceClip(t).finally(() => voicing.delete(t));
+    voicing.set(t, p);
+    return p;
+  }
+  async function voiceClip(t) {
+    if (!synthesize) return null;
+    const r = await synthesize(t);
+    if (!(r && r.audio)) return null;
+    const id = (++clipSeq).toString(36) + Date.now().toString(36);
+    clips.set(id, { buf: Buffer.from(r.audio, 'base64'), mime: r.mimeType || 'audio/mpeg', at: Date.now() });
+    clipByText.set(t, id);
+    if (clipByText.size > 300) clipByText.delete(clipByText.keys().next().value);
+    return id;
+  }
+  _prewarm = async (texts) => {
+    const list = [...new Set((texts || []).map((x) => String(x || '').trim()).filter(Boolean))];
+    const out = await Promise.all(list.map((t) => clipFor(t).then((id) => !!id).catch(() => false)));
+    return { ok: out.every(Boolean), voiced: out.filter(Boolean).length, of: list.length };
+  };
   async function sayElement(req, text) {
     const t = String(text || '').trim();
     if (!t) return '';
-    if (synthesize) {
-      try {
-        const r = await synthesize(t);
-        if (r && r.audio) {
-          const id = (++clipSeq).toString(36) + Date.now().toString(36);
-          const mime = r.mimeType || 'audio/mpeg';
-          clips.set(id, { buf: Buffer.from(r.audio, 'base64'), mime, at: Date.now() });
-          const ext = /wav/.test(mime) ? 'wav' : 'mp3';
-          return `<Play>https://${req.get('host')}/voice/${token}/clip/${id}.${ext}</Play>`;
-        }
-      } catch {}
-    }
+    try {
+      const id = await clipFor(t);
+      if (id) {
+        const ext = /wav/.test(clips.get(id).mime) ? 'wav' : 'mp3';
+        return `<Play>https://${req.get('host')}/voice/${token}/clip/${id}.${ext}</Play>`;
+      }
+    } catch {}
     throw new Error('Selected ElevenLabs voice unavailable');
   }
   // Voice-recognition tuning (config-driven, sensible defaults). These directly improve how well
@@ -443,13 +483,17 @@ self.addEventListener('fetch', (e) => {
     try {
       if (!twilioVerified(req)) return res.status(403).type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Reject/></Response>');
       const from = req.body.From || '';
+      // A call BhatBot placed to someone else has its own door (see _guests) — checked before the
+      // owner gate, and never falling through to it.
+      if (req.query.guest) return guestOpen(req, res);
       if (!ownerOk(req)) { console.warn(`[voice] refused ${String(req.body.Direction || '?')} call — ${ownerParty(req)} is not the owner`); return res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>'); }
       const callSid = req.body.CallSid || '';
       const answeredBy = String(req.body.AnsweredBy || '');
       const reason = String(req.query.msg || '').trim();
+      // Written before the call was placed (main.js voiced these same strings while it rang).
+      const lines = callscript.ownerLines(reason);
       if (/^(machine|fax)/.test(answeredBy)) {
-        const vm = `Good evening, sir. BhatBot here — you missed my call. ${reason} The details are also in writing on your phone. That is all. Goodbye.`;
-        const play = await sayElement(req, vm);
+        const play = await sayElement(req, lines.voicemail);
         if (endVoiceCall) endVoiceCall(callSid);
         return res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?><Response>${play}<Hangup/></Response>`);
       }
@@ -476,9 +520,8 @@ self.addEventListener('fetch', (e) => {
       //
       // The reason is stashed against the callSid rather than spoken, so the agent picks it up when
       // the conversation actually starts.
-      if (reason && voiceBegin) { try { pendingReason.set(callSid, reason); } catch {} }
-      const opener = `${timeGreeting()}, sir. BhatBot here — is now a good time?`;
-      const play = await sayElement(req, opener);
+      if (reason && voiceBegin) { try { pendingReason.set(callSid, lines); } catch {} }
+      const play = await sayElement(req, lines.opener);
       res.type('text/xml').send(gatherTwiml(req, play, false));
     } catch (e) {
       console.warn('[voice] selected voice failed:', e.message);
@@ -508,16 +551,15 @@ self.addEventListener('fetch', (e) => {
       // is still inside Twilio's ~15s webhook budget, and a model call here would risk the same
       // "application error" the opener used to cause.
       if (pendingReason.has(callSid)) {
-        const reason = pendingReason.get(callSid);
+        const lines = pendingReason.get(callSid);
         pendingReason.delete(callSid);
-        const no = /\b(no|not now|can'?t|busy|later|bad time|call back|another time)\b/i.test(speech);
-        if (no) {
-          const bye = await sayElement(req, 'Understood, sir. I will try later. Goodbye.');
+        if (callscript.saidNotNow(speech)) {
+          const bye = await sayElement(req, lines.later);
           if (endVoiceCall) endVoiceCall(callSid);
           return res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?><Response>${bye}<Hangup/></Response>`);
         }
         // Anything else is taken as "go ahead" — an ambiguous answer should not cost him the call.
-        const play = await sayElement(req, `${reason} What would you like to do?`);
+        const play = await sayElement(req, lines.reason);
         return res.type('text/xml').send(gatherTwiml(req, play, false));
       }
 
@@ -567,12 +609,106 @@ self.addEventListener('fetch', (e) => {
     }
   });
 
+  // ── GUEST CALLS (someone other than Siddhant, dialled by BhatBot) ─────────────────────────────────
+  const guestFor = (req) => {
+    const g = _guests.get(String(req.query.guest || req.query.g || ''));
+    if (!g) return null;
+    // The number Twilio dialled must be the one registered — an id alone does not admit a call.
+    if (!/^outbound/i.test(String(req.body.Direction || '')) || !samePhone(req.body.To, g.to)) return null;
+    return g;
+  };
+  const guestGather = (req, playEl, id) => {
+    const action = `https://${req.get('host')}/voice/${token}/guest?g=${encodeURIComponent(id)}`;
+    return `<?xml version="1.0" encoding="UTF-8"?><Response>` +
+      `<Gather input="speech" action="${action}" method="POST" language="${vLang}" speechTimeout="auto"` +
+      ` speechModel="${xmlEsc(vModel)}" enhanced="${vEnhanced ? 'true' : 'false'}" profanityFilter="false" timeout="${vTimeout}" actionOnEmptyResult="true">` +
+      `${playEl}</Gather><Redirect method="POST">${action}</Redirect></Response>`;
+  };
+  async function guestOpen(req, res) {
+    const id = String(req.query.guest);
+    // The preflight knocks with guest=preflight: answer with the same SHAPE a real guest call gets.
+    if (id === 'preflight') {
+      const play = await sayElement(req, callscript.guestLines({}).opener);
+      return res.type('text/xml').send(guestGather(req, play, 'preflight'));
+    }
+    const g = guestFor(req);
+    if (!g) { console.warn('[voice] refused guest call — no matching registration'); return res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>'); }
+    g.callSid = req.body.CallSid || g.callSid;
+    g.stage = 'asked';
+    g.history.push({ role: 'assistant', content: g.lines.opener });
+    const play = await sayElement(req, g.lines.opener);
+    res.type('text/xml').send(guestGather(req, play, id));
+  }
+  app.post('/voice/:token/guest', guard, form, async (req, res) => {
+    try {
+      if (!twilioVerified(req)) return res.status(403).type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Reject/></Response>');
+      const id = String(req.query.g || '');
+      if (id === 'preflight') return res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>');
+      const g = guestFor(req);
+      if (!g) return res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>');
+      const speech = String(req.body.SpeechResult || '').trim();
+      if (!speech) {
+        g.silences = (g.silences || 0) + 1;
+        if (g.silences >= 3) return res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?><Response>${await sayElement(req, g.lines.voicemail)}<Hangup/></Response>`);
+        return res.type('text/xml').send(guestGather(req, await sayElement(req, 'Sorry, I didn’t catch that.'), id));
+      }
+      g.history.push({ role: 'user', content: speech });
+      // Their answer to "do you have a moment?" — the reason was voiced while the phone rang.
+      if (g.stage === 'asked') {
+        g.stage = 'talking';
+        if (callscript.saidNotNow(speech)) {
+          g.history.push({ role: 'assistant', content: g.lines.later });
+          return res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?><Response>${await sayElement(req, g.lines.later)}<Hangup/></Response>`);
+        }
+        g.history.push({ role: 'assistant', content: g.lines.purposeLine });
+        return res.type('text/xml').send(guestGather(req, await sayElement(req, g.lines.purposeLine), id));
+      }
+      const r = guestTurn ? await guestTurn(g, speech).catch(() => null) : null;
+      const text = (r && r.text) || 'I’ll pass that along to him. Thank you — goodbye.';
+      const end = !r || r.hangup;
+      g.history.push({ role: 'assistant', content: text });
+      const play = await sayElement(req, text);
+      return res.type('text/xml').send(end ? `<?xml version="1.0" encoding="UTF-8"?><Response>${play}<Hangup/></Response>` : guestGather(req, play, id));
+    } catch (e) {
+      console.warn('[voice] guest turn failed:', e.message);
+      res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>');
+    }
+  });
+
+  // ── ASYNC ANSWERING-MACHINE DETECTION ───────────────────────────────────────────────────────────
+  // The call now asks for its first words the moment it is answered, instead of waiting seconds for
+  // Twilio to decide whether a person picked up. The verdict lands here; if it was a voicemail, the
+  // live call is redirected to leave the prepared message at the beep.
+  app.post('/voice/:token/amd', guard, form, async (req, res) => {
+    if (!twilioVerified(req)) return res.status(403).end();
+    res.status(204).end();
+    const sid = String(req.body.CallSid || ''), by = String(req.body.AnsweredBy || '');
+    if (!sid) return;
+    _amd.set(sid, by);
+    if (_amd.size > 200) _amd.delete(_amd.keys().next().value);
+    if (!/^machine_end|^fax/.test(by) || !updateCall) return;
+    try {
+      const guest = [..._guests.values()].find((g) => g.callSid === sid);
+      const lines = guest ? guest.lines : (pendingReason.get(sid) || callscript.ownerLines(''));
+      pendingReason.delete(sid);
+      if (/^fax/.test(by)) return await updateCall(sid, '<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>');
+      const play = await sayElement(req, lines.voicemail);
+      await updateCall(sid, `<?xml version="1.0" encoding="UTF-8"?><Response>${play}<Hangup/></Response>`);
+    } catch (e) { console.warn('[voice] voicemail redirect failed:', e.message); }
+  });
+
   app.post('/voice/:token/status', guard, form, (req, res) => {
     // A call that never reached its second turn still has a reason held for it. Twilio tells us when
     // the call is over; that is the moment to let go of it.
     try { const sid = req.body.CallSid; if (sid) pendingReason.delete(sid); } catch {}
     if (!twilioVerified(req)) return res.status(403).end();
     try { if (endVoiceCall && (req.body.CallStatus === 'completed' || req.body.CallStatus === 'failed')) endVoiceCall(req.body.CallSid); } catch {}
+    try {
+      for (const [k, g] of _guests) if (g.callSid && g.callSid === req.body.CallSid) {
+        _guests.delete(k);
+        if (onGuestEnd) Promise.resolve(onGuestEnd(g, { status: req.body.CallStatus, answeredBy: req.body.AnsweredBy || amdResult(g.callSid) || '' })).catch(() => {});
+      }
+    } catch {}
     res.status(204).end();
   });
 
@@ -650,4 +786,4 @@ self.addEventListener('fetch', (e) => {
 
 function stopMcpServer() { _shuttingDown = true; try { httpServer && httpServer.close(); } catch {} httpServer = null; }
 
-module.exports = { startMcpServer, stopMcpServer };
+module.exports = { startMcpServer, stopMcpServer, registerGuestCall, prewarmSpeech, amdResult };

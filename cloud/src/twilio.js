@@ -9,6 +9,7 @@
 const db = require('./db');
 const { callClaude } = require('./llm');
 const voice = require('./voice');
+const callscript = require('./callscript');
 
 const SID = process.env.TWILIO_SID || '';
 const AUTH = process.env.TWILIO_TOKEN || '';
@@ -62,7 +63,8 @@ async function sayEl(host, text) {
 //    it detects speech, so you can interrupt instead of waiting for it to finish.
 //  • speechModel "phone_call" + enhanced is Twilio's telephony-optimized recognizer → fewer "say
 //    that again" repeats than experimental_conversations on a noisy line.
-const GATHER_TIMEOUT = process.env.GATHER_SPEECH_TIMEOUT || '3';
+// 2 s, not 3: every turn waited this long after he stopped talking before BhatBot even began to think.
+const GATHER_TIMEOUT = process.env.GATHER_SPEECH_TIMEOUT || '2';
 const GATHER_MODEL = process.env.GATHER_SPEECH_MODEL || 'phone_call';
 const GATHER_ENHANCED = process.env.GATHER_ENHANCED !== '0';
 const GATHER_BARGEIN = process.env.GATHER_BARGEIN !== '0';
@@ -100,6 +102,16 @@ function knownHint(c) {
 }
 
 // ---- outbound: the agent tool calls this -------------------------------------
+// The owner's local clock (the cloud runs in UTC) — so "good morning" means his morning.
+function ownerNow() {
+  try {
+    const tz = process.env.OWNER_TZ || 'America/New_York';
+    const p = new Intl.DateTimeFormat('en-US', { timeZone: tz, hour: 'numeric', hour12: false }).formatToParts(new Date());
+    const h = Number((p.find((x) => x.type === 'hour') || {}).value) % 24;
+    const d = new Date(); d.setHours(h); return d;
+  } catch { return new Date(); }
+}
+
 async function placeCall(to, purpose) {
   if (!configured()) return { success: false, error: 'Twilio not configured (set TWILIO_SID/TOKEN/FROM secrets).' };
   if (!to) return { success: false, error: 'need a phone number to call' };
@@ -198,10 +210,23 @@ function mount(app, { token, form }) {
   app.post('/voice/:token/outgoing', form, async (req, res) => {
     if (!verified(req)) return reject(res);
     const sid = req.body.CallSid || ''; const c = getCall(sid); c.dir = 'out'; c.peer = req.body.To || c.peer;
-    const purpose = req.query.purpose || c.purpose || '';
-    const opener = await converse(sid, `[You placed this call. Your goal: ${purpose}. Greet them, say you're Siddhant's assistant BhatBot, and state why you're calling.]`,
-      `This is an OUTBOUND call you placed for Siddhant. Accomplish: ${purpose}. When done, thank them and wrap up.`);
-    res.type('text/xml').send(gather(req.get('host'), token, await sayEl(req.get('host'), opener), 'out'));
+    // `msg` is the plain message (the Mac sends it beside a July-compatible `purpose`).
+    const purpose = String(req.query.msg || req.query.purpose || c.purpose || '').trim();
+    const host = req.get('host');
+    // THE OPENER IS WRITTEN, NOT GENERATED (2026-11-25): to him it speaks TO him — never "Siddhant's
+    // assistant" on his own phone — and to anyone else the first sentence says who is calling and for
+    // whom. No model before the first words, so nothing to wait for after they pick up.
+    const digits = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+    if (OWNER && digits(c.peer) && digits(c.peer) === digits(OWNER)) {
+      c.toOwner = true;
+      c.lines = callscript.ownerLines(purpose, ownerNow());
+      c.history.push({ role: 'assistant', content: c.lines.opener });
+      return res.type('text/xml').send(gather(host, token, await sayEl(host, c.lines.opener), 'ownerask'));
+    }
+    c.purpose = purpose; c.guestName = String(req.query.name || '');
+    c.lines = callscript.guestLines({ name: c.guestName, purpose });
+    c.history.push({ role: 'assistant', content: c.lines.opener });
+    res.type('text/xml').send(gather(host, token, await sayEl(host, c.lines.opener), 'guestask'));
   });
 
   // INBOUND first leg. OWNER calling in → COMMAND MODE (his voice = instructions to the full
@@ -254,6 +279,19 @@ function mount(app, { token, form }) {
       if (winner != null) { c.pendingResult = undefined; return res.type('text/xml').send(gather(host, token, await sayEl(host, winner + ' Anything else, sir?'), 'owner')); }
       const hold = await sayEl(host, 'On it — one moment.');
       return res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?><Response>${hold}<Redirect method="POST">https://${host}/voice/${token}/ownerwait?n=0</Redirect></Response>`);
+    }
+    // The answer to "is now a good time?" / "do you have a moment?" on a call BhatBot placed.
+    if ((leg === 'ownerask' || leg === 'guestask') && c.lines) {
+      c.history.push({ role: 'user', content: speech });
+      if (callscript.saidNotNow(speech)) { relaySummary(sid); return res.type('text/xml').send(hangup(await sayEl(host, c.lines.later))); }
+      const line = leg === 'ownerask' ? c.lines.reason : c.lines.purposeLine;
+      c.history.push({ role: 'assistant', content: line });
+      return res.type('text/xml').send(gather(host, token, await sayEl(host, line), leg === 'ownerask' ? 'ownerout' : 'out'));
+    }
+    if (leg === 'ownerout') {
+      const r = await converse(sid, speech, 'You are speaking to Siddhant HIMSELF, on his own phone, about a call you placed to him. Address him directly as "you" (or "sir"); never refer to him as Siddhant and never describe yourself as his assistant to him. When he is done, say goodbye and append [END_CALL].');
+      if (/\[END_?CALL\]/i.test(r)) { relaySummary(sid); return res.type('text/xml').send(hangup(await sayEl(host, r.replace(/\[END_?CALL\]/ig, '').trim() || 'Goodbye, sir.'))); }
+      return res.type('text/xml').send(gather(host, token, await sayEl(host, r), 'ownerout'));
     }
     // ASK leg: BhatBot called Siddhant for input → capture his spoken answer + end.
     if (leg === 'ask') {
@@ -332,7 +370,7 @@ function mount(app, { token, form }) {
       return res.type('text/xml').send(hangup(await sayEl(host, 'Thank you — I’ll pass that along to Siddhant right away. Goodbye.')));
     }
     // Normal conversational turn (outbound goal, or inbound after HANDLE).
-    const reply = await converse(sid, speech);
+    const reply = await converse(sid, speech, c.lines && !c.toOwner ? callscript.guestSystem({ name: c.guestName, purpose: c.purpose }) : undefined);
     // Heuristic end: if the model says goodbye, hang up + relay summary.
     if (/\b(goodbye|good bye|take care|have a (great|good) (day|one)|bye now)\b/i.test(reply)) {
       relaySummary(sid); return res.type('text/xml').send(hangup(await sayEl(host, reply)));

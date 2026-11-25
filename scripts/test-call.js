@@ -99,19 +99,23 @@ ok(digitsOf(null) === '', 'digitsOf: null → ""');
   // MagicDNS name resolves inside the tailnet and not from Twilio, and taking that branch on an
   // unreachable host skips the one-shot fallback — which needs no webhook and works.
   ok(/publicHostReachable\(\)/.test(fn), 'twilioCall: proves the webhook host is reachable from outside');
-  ok(/if \(macHost && c\.mcpToken && reach\.ok\)/.test(fn),
+  ok(/\(macHost && c\.mcpToken && reach\.ok\)/.test(fn),
     'twilioCall: the Mac leg requires a REACHABLE host, not merely a hostname');
   // Another voice is allowed for one thing only: reaching HIM on the reach ladder when no two-way
   // leg passed preflight. A call to anyone else is refused rather than placed in a substitute voice.
-  ok(/if \(allowPlainVoice && digitsOf\(target\) === digitsOf\(c\.myPhone/.test(fn) && /call not placed/.test(fn),
+  ok(/const self = !!c\.myPhone && digitsOf\(target\)\.slice\(-10\) === digitsOf\(c\.myPhone\)\.slice\(-10\)/.test(fn) && /if \(allowPlainVoice && self\)/.test(fn) && /call not placed/.test(fn),
     'twilioCall: a substitute voice only to reach Siddhant himself, and only when the reach ladder asks; otherwise refused');
 
   ok(/const target = to \|\| c\.myPhone/.test(fn), 'twilioCall: DEFAULTS to myPhone (every existing caller depends on this)');
   ok(!/to: c\.myPhone/.test(fn), 'twilioCall: no longer hardcodes myPhone as the dialed number');
-  // Both real dial sites — the conversation webhook path and the one-shot announcement fallback.
-  const dialSites = (fn.match(/calls\.create\(\{[\s\S]{0,200}?to: target/g) || []).length;
-  const webhookDials = (fn.match(/calls\.create\(\{\s*url,/g) || []).length;
-  ok(dialSites === 2 && webhookDials === 1, `twilioCall: one webhook dial site (the proven two-way leg) plus the guarded fallback (found ${dialSites}/${webhookDials})`);
+  // Three real dial sites — the Mac's conversation webhook, the cloud's, and the one-shot fallback.
+  const dialSites = (fn.match(/calls\.create\(\{[\s\S]{0,330}?to: target/g) || []).length;
+  const webhookDials = (fn.match(/calls\.create\(\{\s*url[,:]/g) || []).length;
+  ok(dialSites === 3 && webhookDials === 2, `twilioCall: two webhook dial sites (Mac, cloud) plus the guarded fallback (found ${dialSites}/${webhookDials})`);
+  ok(/if \(leg && leg\.kind === 'mac'\)/.test(fn) && /if \(leg && leg\.kind === 'cloud'\)/.test(fn), 'twilioCall: each webhook dial is bound to the leg that passed');
+  ok(/asyncAmd: 'true'/.test(fn) && /asyncAmdStatusCallback: `\$\{base\}\/amd`/.test(fn), 'twilioCall: the Mac leg answers instantly — voicemail detection is asynchronous');
+  ok(/if \(!dryRun && \(c\.calls \|\| \{\}\)\.hold\)/.test(fn), 'twilioCall: calls.hold stops every real dial (a rehearsal still runs)');
+  ok(/registerGuestCall\(id, \{ to: target/.test(fn) && /incoming\?guest=\$\{id\}/.test(fn), 'twilioCall: a call to someone else goes through a registered guest entry, never the owner route');
   ok((fn.match(/calls\.create\(\{ twiml, to: target/g) || []).length === 1, 'twilioCall: and exactly one guarded one-way fallback');
   ok(/machineDetection/.test(fn), 'twilioCall: voicemail detection is preserved on the two-way path');
 
@@ -176,7 +180,7 @@ try { fs.rmSync(TMP, { recursive: true, force: true }); } catch {}
   // owner check read `From`, which on an outbound call is the Twilio number. Every layer reported
   // success and the phone played an error. Only an end-to-end probe settles it.
   ok(/voicepreflight\.check\(/.test(fn), 'twilioCall: runs the end-to-end preflight before choosing two-way');
-  ok(/if \(pre\.ok\) leg = \{ kind: 'cloud'/.test(fn) && /if \(p2\.ok\) \{ leg = \{ kind: 'mac'/.test(fn), 'twilioCall: each two-way leg is used only after its preflight PASSES');
+  ok(/if \(macPre\.ok\) leg = \{ kind: 'mac'/.test(fn) && /if \(cloudPre\.ok\) leg = \{ kind: 'cloud'/.test(fn), 'twilioCall: each two-way leg is used only after its preflight PASSES (Mac first, cloud when the Mac fails)');
   ok(/no call leg passed preflight[^']*call not placed/.test(fn), 'twilioCall: with no leg proven, the call is not placed (unless it is the guarded reach fallback)');
 
   const mcp = fs.readFileSync(path.join(__dirname, '..', 'mcp-server.js'), 'utf8');
