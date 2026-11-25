@@ -137,6 +137,17 @@ let wrote = null;
     ok(/explicit: true \}\);/.test(main) && /bypassGate: !!t\.explicit/.test(main), 'a test call he asked for is not held back by the calendar gate');
   }
 
+  // 25 Nov live test: three calls for one request — two duplicate dials, then the ladder re-rang.
+  {
+    const now = Date.now();
+    const t = { id: 'x', msg: 'test', urgency: 'call', explicit: true, createdAt: now - 60000, sent: {}, delivered: [], calls: [{ sid: 'CA1', pending: false, reached: false, outcome: 'picked up for 9s only' }], log: [] };
+    const step = R.next(t, { call: true, desktop: false, telegram: false, sms: false }, now);
+    ok(step.done && /test call finished/.test(step.why), 'a test call he asked for rings ONCE — its outcome is the result, the ladder does not re-dial it');
+    const tw = main.slice(main.indexOf('async function twilioCall('), main.indexOf('async function twilioCall(') + 2600);
+    ok(/DIAL_DEDUPE_MS/.test(tw) && tw.indexOf('duplicate dial suppressed') < tw.indexOf('const t0 = Date.now()') && !/bypassGate[^\n]*_lastDial/.test(tw), 'a second dial to the same number inside 90 s is refused, even for an explicit test');
+    ok(/if \(res && heardHuman\(sid\)\) res\.answered_by = 'human';/.test(main), 'a call where he SPOKE counts as reached, however short');
+  }
+
   console.log(`\n${fail === 0 ? '✅' : '❌'} reach: ${pass} passed, ${fail} failed`);
   process.exit(fail === 0 ? 0 : 1);
 })();

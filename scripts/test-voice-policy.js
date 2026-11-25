@@ -109,7 +109,7 @@ test('outbound calls resolve the cloud host within the call scope and refuse fai
     getPublicHost:()=>'',publicHostReachable:()=>assert.fail('cloud call must not inspect Tailscale'),
     voicepreflight:{check:async()=>({ok:valid,stage:'test',detail:'failed'})},recordCall:()=>{},console:{warn(){}},Date,String,encodeURIComponent,Promise,Object,
     digitsOf:(x)=>String(x||'').replace(/\D+/g,''),callscript:require('../lib/callscript'),phraseGuestPurpose:async()=>'',mcpPrewarm:async()=>({ok:true}),
-    registerGuestCall:()=>{},crypto:require('crypto')};
+    registerGuestCall:()=>{},crypto:require('crypto'),_lastDial:{key:'',at:0},DIAL_DEDUPE_MS:0};
   vm.createContext(context);vm.runInContext(extract(main,'twilioCall'),context);
   const success=await context.twilioCall('Voice check',{bypassGate:true});
   assert.equal(success.sent,true);assert.equal(placed.length,1);assert.match(placed[0].url,/example.invalid/);

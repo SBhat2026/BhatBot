@@ -25,6 +25,15 @@ let _prewarm = async () => ({ ok: false, why: 'MCP server not started' });
 async function prewarmSpeech(texts) { return _prewarm(texts); }
 // Async answering-machine verdicts, by CallSid: Twilio's call record does not always carry them.
 const _amd = new Map();
+// Calls on which a person has said something (a Gather came back with speech), and calls Twilio has
+// reported finished. Both make a late voicemail verdict moot, and the first is the reach ladder's
+// proof that he was really on the line — a 9-second call where he answered and listened counts.
+const _heard = new Set(), _ended = new Set();
+const capSet = (set, v) => { if (!v) return; set.add(String(v)); if (set.size > 300) set.delete(set.values().next().value); };
+const markHeard = (sid) => capSet(_heard, sid);
+const markEnded = (sid) => capSet(_ended, sid);
+/** Did a person speak on this call? */
+function heardHuman(sid) { return _heard.has(String(sid || '')); }
 function amdResult(sid) { return _amd.get(String(sid || '')) || null; }
 
 async function startMcpServer({ port, token, runAgent, transcribe, synthesize, synthUlaw, summarize, media, voiceTurn, voiceBegin, voicePoll, endVoiceCall, getActivity, nexusUrl, ownerPhone, twilioAuthToken, publicHost, jobs, control, screenshot, voice, biometrics, opsStatus, guestTurn, onGuestEnd, updateCall, selfView }) {
@@ -475,12 +484,16 @@ self.addEventListener('fetch', (e) => {
   const vTimeout = Number(V.timeout) || 8;          // seconds of initial silence before reprompt
   const vEnhanced = V.enhanced !== false;
   const vLang = V.language || 'en-US';
-  function gatherTwiml(req, playEl, hangup) {
+  // A yes/no answer needs no end-of-utterance model: one second of quiet after "yes" is the end. On
+  // the 25 Nov live call the opener's answer took the longest of any turn to come back, because
+  // `auto` waits to be sure a sentence is over. Only the "is now a good time?" turn uses this.
+  const vShortTimeout = String(V.openerSpeechTimeout || '1');
+  function gatherTwiml(req, playEl, hangup, { short = false } = {}) {
     if (hangup) return `<?xml version="1.0" encoding="UTF-8"?><Response>${playEl}<Hangup/></Response>`;
     const action = `https://${req.get('host')}/voice/${token}/gather`;
     return `<?xml version="1.0" encoding="UTF-8"?><Response>` +
       `<Gather input="speech" action="${action}" method="POST"` +
-      ` language="${vLang}" speechTimeout="${vSpeechTimeout}" speechModel="${xmlEsc(vModel)}"` +
+      ` language="${vLang}" speechTimeout="${short ? vShortTimeout : vSpeechTimeout}" speechModel="${xmlEsc(vModel)}"` +
       ` enhanced="${vEnhanced ? 'true' : 'false'}" profanityFilter="false" timeout="${vTimeout}"` +
       ` hints="${xmlEsc(vHints)}" actionOnEmptyResult="true">` +
       `${playEl}</Gather>` +
@@ -546,7 +559,7 @@ self.addEventListener('fetch', (e) => {
       // the conversation actually starts.
       if (reason && voiceBegin) { try { pendingReason.set(callSid, lines); } catch {} }
       const play = await sayElement(req, lines.opener);
-      res.type('text/xml').send(gatherTwiml(req, play, false));
+      res.type('text/xml').send(gatherTwiml(req, play, false, { short: true }));
     } catch (e) {
       console.warn('[voice] selected voice failed:', e.message);
       res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>`);
@@ -561,6 +574,7 @@ self.addEventListener('fetch', (e) => {
       if (!ownerOk(req)) { console.warn(`[voice] refused ${String(req.body.Direction || '?')} call — ${ownerParty(req)} is not the owner`); return res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>'); }
       const callSid = req.body.CallSid || '';
       const speech = req.body.SpeechResult || '';
+      if (speech.trim()) markHeard(callSid);
       if (!speech.trim()) {
         // Silence/timeout — gentle reprompt, keep the line open.
         const play = await sayElement(req, 'I am still here, sir. Go on.');
@@ -641,10 +655,10 @@ self.addEventListener('fetch', (e) => {
     if (!/^outbound/i.test(String(req.body.Direction || '')) || !samePhone(req.body.To, g.to)) return null;
     return g;
   };
-  const guestGather = (req, playEl, id) => {
+  const guestGather = (req, playEl, id, { short = false } = {}) => {
     const action = `https://${req.get('host')}/voice/${token}/guest?g=${encodeURIComponent(id)}`;
     return `<?xml version="1.0" encoding="UTF-8"?><Response>` +
-      `<Gather input="speech" action="${action}" method="POST" language="${vLang}" speechTimeout="auto"` +
+      `<Gather input="speech" action="${action}" method="POST" language="${vLang}" speechTimeout="${short ? vShortTimeout : 'auto'}"` +
       ` speechModel="${xmlEsc(vModel)}" enhanced="${vEnhanced ? 'true' : 'false'}" profanityFilter="false" timeout="${vTimeout}" actionOnEmptyResult="true">` +
       `${playEl}</Gather><Redirect method="POST">${action}</Redirect></Response>`;
   };
@@ -661,7 +675,7 @@ self.addEventListener('fetch', (e) => {
     g.stage = 'asked';
     g.history.push({ role: 'assistant', content: g.lines.opener });
     const play = await sayElement(req, g.lines.opener);
-    res.type('text/xml').send(guestGather(req, play, id));
+    res.type('text/xml').send(guestGather(req, play, id, { short: true }));
   }
   app.post('/voice/:token/guest', guard, form, async (req, res) => {
     try {
@@ -676,6 +690,7 @@ self.addEventListener('fetch', (e) => {
         if (g.silences >= 3) return res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?><Response>${await sayElement(req, g.lines.voicemail)}<Hangup/></Response>`);
         return res.type('text/xml').send(guestGather(req, await sayElement(req, 'Sorry, I didn’t catch that.'), id));
       }
+      markHeard(req.body.CallSid);
       g.history.push({ role: 'user', content: speech });
       // Their answer to "do you have a moment?" — the reason was voiced while the phone rang.
       if (g.stage === 'asked') {
@@ -708,6 +723,11 @@ self.addEventListener('fetch', (e) => {
     res.status(204).end();
     const sid = String(req.body.CallSid || ''), by = String(req.body.AnsweredBy || '');
     if (!sid) return;
+    // A PERSON HAS ALREADY SPOKEN, OR THE CALL IS OVER → the verdict is wrong or moot. On the 25 Nov
+    // live call he answered the opener and heard the reason, and 21 s after he hung up Twilio
+    // decided it had been `machine_end_other`. Had that verdict landed mid-sentence, the redirect
+    // below would have cut him off to leave him a voicemail on a call he was talking on.
+    if (_heard.has(sid) || _ended.has(sid)) { _amd.set(sid, _heard.has(sid) ? 'human' : by); return; }
     _amd.set(sid, by);
     if (_amd.size > 200) _amd.delete(_amd.keys().next().value);
     if (!/^machine_end|^fax/.test(by) || !updateCall) return;
@@ -726,6 +746,7 @@ self.addEventListener('fetch', (e) => {
     // the call is over; that is the moment to let go of it.
     try { const sid = req.body.CallSid; if (sid) pendingReason.delete(sid); } catch {}
     if (!twilioVerified(req)) return res.status(403).end();
+    if (/^(completed|failed|busy|no-answer|canceled)$/.test(String(req.body.CallStatus || ''))) markEnded(req.body.CallSid);
     try { if (endVoiceCall && (req.body.CallStatus === 'completed' || req.body.CallStatus === 'failed')) endVoiceCall(req.body.CallSid); } catch {}
     try {
       for (const [k, g] of _guests) if (g.callSid && g.callSid === req.body.CallSid) {
@@ -810,4 +831,4 @@ self.addEventListener('fetch', (e) => {
 
 function stopMcpServer() { _shuttingDown = true; try { httpServer && httpServer.close(); } catch {} httpServer = null; }
 
-module.exports = { startMcpServer, stopMcpServer, registerGuestCall, prewarmSpeech, amdResult };
+module.exports = { startMcpServer, stopMcpServer, registerGuestCall, prewarmSpeech, amdResult, heardHuman };

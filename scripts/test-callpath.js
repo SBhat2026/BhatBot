@@ -84,6 +84,24 @@ const spoken = (twiml) => [...String(twiml).matchAll(/clip\/([^.<]+)\.mp3/g)].ma
   });
   ok(forged === 403 && updates.length === 1, 'an unsigned voicemail verdict is refused (nobody can hijack a live call)');
 
+  // ── 2b. The 25 Nov live call: he answered, spoke, hung up; 21 s later Twilio said "machine" ─────────
+  {
+    await post(`${base}/incoming?msg=${encodeURIComponent(msg)}`, outbound(OWNER, 'CA20'));
+    const op = await post(`${base}/incoming?msg=${encodeURIComponent(msg)}`, outbound(OWNER, 'CA21'));
+    ok(/speechTimeout="1"/.test(op.body), 'the yes/no opener stops listening one second after he answers (no end-of-sentence wait)');
+    await post(`${base}/gather`, outbound(OWNER, 'CA20', { SpeechResult: 'yes' }));
+    const g2 = await post(`${base}/gather`, outbound(OWNER, 'CA20', { SpeechResult: 'thanks' }));
+    ok(!/speechTimeout="1"/.test(g2.body), 'later turns keep natural end-of-utterance detection');
+    const n = updates.length;
+    await post(`${base}/amd`, { AccountSid: 'ACtest', CallSid: 'CA20', AnsweredBy: 'machine_end_other' });
+    await new Promise((r) => setTimeout(r, 80));
+    ok(updates.length === n && mcp.amdResult('CA20') === 'human' && mcp.heardHuman('CA20'), 'a "machine" verdict after he has SPOKEN is ignored — never redirect a live conversation to voicemail');
+    await post(`${base}/status`, { AccountSid: 'ACtest', CallSid: 'CA21', CallStatus: 'completed' });
+    await post(`${base}/amd`, { AccountSid: 'ACtest', CallSid: 'CA21', AnsweredBy: 'machine_end_beep' });
+    await new Promise((r) => setTimeout(r, 80));
+    ok(updates.length === n, 'and a verdict that arrives after the call ended does not try to update it (that was the 400)');
+  }
+
   // ── 3. A call to SOMEONE ELSE ───────────────────────────────────────────────────────────────────
   const stranger = await post(`${base}/incoming`, outbound(FRIEND, 'CA9'));
   ok(/<Hangup\/>/.test(stranger.body) && !/<Gather/.test(stranger.body), 'a call to another number with no registration gets nothing from the owner route');

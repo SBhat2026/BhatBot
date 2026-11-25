@@ -1,7 +1,7 @@
 #!/bin/zsh
 # Electron probes: each resolves vaulted credentials IN-PROCESS (app name bhatbot) and prints no secret.
 # mcp-run: runs one instruction through the running app (INSTR=...). twilio-timings: last calls + webhook timings.
-# NEXT PASS ONLY — places one real test call to Siddhant. Not run on 2026-11-25 (he asked for prep only).
+# Places ONE real test call to Siddhant (first run 2026-11-25: the agent called reach twice → twilioCall now refuses a 2nd dial inside 90 s).
 #  1. lift calls.hold   2. rehearse (no dial)   3. real test call   4. Twilio webhook timings at +2 and +6 min
 set -e
 cd ~/bhatbot
