@@ -1628,7 +1628,7 @@
               <div id="vcap"></div>
               <div id="wavebars" data-state="idle"></div>
               <div id="vtool"></div>
-              <div id="vhint">say "Jarvis" — or just talk · ⌘K to type · 📄 for transcript</div>
+              <div id="vhint" hidden></div>
               <!-- HOME BRIEF: what matters right now, always on the screen he looks at (see main.js homeSummary). -->
               <section id="home-brief" aria-label="Today at a glance" hidden>
                 <div class="hb-top"><span class="hb-greet" id="hb-greet"></span><span class="hb-date" id="hb-date"></span></div>
@@ -4265,7 +4265,7 @@ const windowExpired = () => convoMode && !voiceLocked && (Date.now() - convoAnch
 function closeConvoQuiet() {
   if (!convoMode || voiceLocked) return;
   setConvo(false); _voiceCarry = ''; _goOnCount = 0;
-  tbar.textContent = '🎧 listening window closed — say "Jarvis" when you need me';
+  tbar.textContent = '🎧 listening window closed';
 }
 function setConvo(on) {
   if (on) convoAnchor = Date.now();
@@ -4281,8 +4281,8 @@ function setConvo(on) {
 // onTtsIdle→maybeRearm that fires after the ack sees convo off and does not reopen the mic.
 function endConvo() {
   setConvo(false); _voiceCarry = ''; _goOnCount = 0;
-  tbar.textContent = '🎧 conversation closed — say "Jarvis" when you need me';
-  try { speak('Very good, sir. Say Jarvis when you need me.'); } catch {}
+  tbar.textContent = '🎧 conversation closed';
+  try { speak('Very good, sir.'); } catch {}
 }
 // Re-arm the mic for the next turn once: nothing is busy/recording and speech has drained.
 function maybeRearm() {
@@ -4314,7 +4314,7 @@ function unlockVoice() {
   if (!voiceLocked) { if (convoMode) endConvo(); return; }
   voiceLocked = false; document.body.classList.remove('voicelocked'); setConvo(false);
   if (mic) mic.title = 'Voice';
-  tbar.textContent = '🔓 voice unlocked — say "Jarvis" when you need me';
+  tbar.textContent = '🔓 voice unlocked';
   try { speak('Unlocked, sir.'); } catch {}
 }
 window.bhatbot.onToggleVoiceLock && window.bhatbot.onToggleVoiceLock(() => { voiceLocked ? unlockVoice() : lockVoice(); });

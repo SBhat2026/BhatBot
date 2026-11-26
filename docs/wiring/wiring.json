@@ -1,17 +1,17 @@
 {
  "summary": {
-  "generatedAt": "2026-11-25T23:57:42.014Z",
+  "generatedAt": "2026-11-26T00:15:35.971Z",
   "counts": {
    "pages": 11,
    "bridges": 12,
    "bridgeKeys": 162,
    "ipcHandlers": 107,
    "mainToRendererEvents": 40,
-   "modules": 375,
-   "libModules": 155,
-   "liveLib": 147,
-   "tools": 96,
-   "toolCases": 97,
+   "modules": 376,
+   "libModules": 156,
+   "liveLib": 148,
+   "tools": 97,
+   "toolCases": 98,
    "voiceRoutes": 14,
    "workers": 24
   },
@@ -1373,6 +1373,12 @@
    "tested": true
   },
   {
+   "id": "lib:lib/weather.js",
+   "layer": "lib",
+   "name": "lib/weather.js",
+   "tested": true
+  },
+  {
    "id": "lib:lib/filetools.js",
    "layer": "lib",
    "name": "lib/filetools.js",
@@ -2254,10 +2260,10 @@
    "name": "scripts/test-synapse-worker.js"
   },
   {
-   "id": "tools:96 tools",
+   "id": "tools:97 tools",
    "layer": "tools",
-   "name": "96 tools",
-   "cases": 97
+   "name": "97 tools",
+   "cases": 98
   }
  ],
  "edges": [
@@ -3767,6 +3773,10 @@
   },
   {
    "from": "main:main.js",
+   "to": "lib:lib/weather.js"
+  },
+  {
+   "from": "main:main.js",
    "to": "lib:lib/cloud-bridge.js"
   },
   {
@@ -4187,7 +4197,7 @@
   },
   {
    "from": "main:main.js",
-   "to": "tools:96 tools"
+   "to": "tools:97 tools"
   }
  ]
 }

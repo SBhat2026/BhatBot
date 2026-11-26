@@ -932,6 +932,17 @@ document.getElementById('ctl-nexus').addEventListener('click', () => showTab('ne
 refreshHome(); setInterval(() => { if (curTab === 'home' && !document.hidden) refreshHome(); }, 60000);
 document.addEventListener('visibilitychange', () => { if (!document.hidden && curTab === 'home') refreshHome(); });
 
+// ── KEYBOARD: size the app to the space ABOVE the keyboard ───────────────────────────────────────
+// iOS opens the keyboard by scrolling the whole document up, which pushed the header under the status
+// bar and the clock (seen in the simulator, 25 Nov). Pin the document and fit the body to the visual
+// viewport instead, so the header stays put and the composer sits on top of the keyboard.
+if (window.visualViewport) {
+  const fit = () => { document.body.style.height = Math.round(visualViewport.height) + 'px'; if (window.scrollY) window.scrollTo(0, 0); };
+  visualViewport.addEventListener('resize', fit);
+  visualViewport.addEventListener('scroll', () => { if (window.scrollY) window.scrollTo(0, 0); });
+  fit();
+}
+
 // ── The accent follows the sun, like the desktop: burgundy at noon → teal-blue at midnight ──────────
 (function phoneAccent() {
   const hex = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
@@ -997,7 +1008,7 @@ async function pollActivity() {
 }
 setInterval(pollActivity, 3000); pollActivity();
 
-add('bot', 'BhatBot online. Standing by, sir. Type a message, or tap the mic for hands-free conversation. Tap the ear and say "hey BhatBot" to wake me. Activity, Control, and Nexus are in the tabs below.');
+// (No standing greeting in the chat — the Home tab shows the state; 25 Nov.)
 </script>
 </body>
 </html>

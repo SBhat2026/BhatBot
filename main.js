@@ -767,6 +767,10 @@ function latMark(label) {
     console.log(`[latency] +${String(Date.now() - _latT0).padStart(5)}ms  ${label}`);
   } catch {}
 }
+/** A repeatable timing line (latMark logs each label once). Only with config.debugLatency. */
+function latLog(label) {
+  try { if (_latT0 && loadConfig().debugLatency) console.log(`[latency] +${String(Date.now() - _latT0).padStart(5)}ms  ${label}`); } catch {}
+}
 // TIME ONE STAGE OF THE PREAMBLE. The marks above are cumulative wall-clock stamps, which tell you
 // WHEN something happened but not what it COST — and with the preamble stages now overlapping, "when"
 // no longer implies "how long". This reports the duration of the stage itself, so the critical path
@@ -1333,7 +1337,12 @@ function costBlock() {
   } catch { return ''; }
 }
 function systemBlocks(query) {
-  const blocks = [{ type: 'text', text: buildStaticPrompt(), cache_control: { type: 'ephemeral' } }];
+  // One-hour lifetime on the static prompt (the default is 5 minutes): a personal assistant is used in
+  // bursts with gaps longer than five minutes, and each gap used to cost the whole prefix again on the
+  // first question after it. A 1h write is 2× a normal input token, paid at most hourly — about a third
+  // of a cent on Haiku 5.5. It must stay the FIRST breakpoint: longer TTLs have to precede the 5-minute
+  // one on the conversation tail (prompt-caching ordering rule).
+  const blocks = [{ type: 'text', text: buildStaticPrompt(), cache_control: { type: 'ephemeral', ttl: loadConfig().promptCacheTtl || '1h' } }];
   const nb = nowBlock(); if (nb) blocks.push({ type: 'text', text: nb });
   const cb = costBlock(); if (cb) blocks.push({ type: 'text', text: cb });
   const modeP = modePrompts.selectModePrompt({ suggestedMode: currentMode });
@@ -1478,11 +1487,28 @@ const _liveRate = {};                       // per-model latest live reading fro
 const _liveRateLogged = new Set();          // one-time "now pacing against live headers" log per model
 // Called on EVERY Anthropic response (streaming + non): capture the real remaining budget so pacing
 // stops guessing. Bind res.headers.get so lib/rate can read case-insensitively.
+// ⚠ LOAD-BEARING (25 Nov). The live reading expires with its reset time (a few seconds later), and
+// pacing then fell back to the static table — 100k/min for Haiku — while the account's real limit, read
+// from these very headers, was 10,000,000/min. Every third phone question waited ~60 s for a minute
+// window to drain that was never near its real limit. So the LIMIT the headers report is remembered
+// (and persisted across restarts); only the REMAINING count is treated as short-lived.
+const LEARNED_LIMITS_PATH = path.join(os.homedir(), '.bhatbot', 'rate-limits.json');
+let _learnedLimits = {};
+try { _learnedLimits = JSON.parse(fs.readFileSync(LEARNED_LIMITS_PATH, 'utf8')) || {}; } catch {}
+function learnLimit(model, inLimit, outLimit) {
+  const cur = _learnedLimits[model] || {};
+  const next = { itpm: Number(inLimit) || cur.itpm || null, otpm: Number(outLimit) || cur.otpm || null, at: Date.now() };
+  if (next.itpm === cur.itpm && next.otpm === cur.otpm) return;
+  _learnedLimits[model] = next;
+  try { fs.writeFileSync(LEARNED_LIMITS_PATH, JSON.stringify(_learnedLimits, null, 1)); } catch {}
+  console.log(`[rate] learned ${model} limits: ${next.itpm || '?'} in/min · ${next.otpm || '?'} out/min`);
+}
 function noteRateHeaders(model, headers) {
   try {
     const parsed = rateLib.parseRateHeaders((n) => headers.get(n));
     if (!parsed) return;
     _liveRate[model] = parsed;
+    if (parsed.inLimit || parsed.outLimit) learnLimit(model, parsed.inLimit, parsed.outLimit);
     if (!_liveRateLogged.has(model)) { _liveRateLogged.add(model); console.log(`[rate] now pacing against live headers for ${model}`); }
   } catch {}
 }
@@ -1498,6 +1524,7 @@ function _winSum(bucket, model) {
   const cut = Date.now() - 60000; while (arr.length && arr[0][0] < cut) arr.shift();
   return arr.reduce((s, e) => s + e[1], 0);
 }
+// inTok must EXCLUDE cache reads — they do not count toward the input-token rate limit (callers below).
 function recordTokens(model, inTok, outTok) { _winPush(_win.in, model, inTok); _winPush(_win.out, model, outTok); }
 // Tier-2 per-model caps (ITPM / OTPM). Conservative within the published tier-2 ranges
 // (ITPM 100K–450K, OTPM 8K–90K). Override per model via config.rateLimits[model] = {itpm,otpm}.
@@ -1526,9 +1553,11 @@ function rateLimitsFor(model) {
   // `undefined`, and the very first scheduled task after launch died reading `.itpm` of it. A
   // fallback that can itself be missing is not a fallback; this one is a literal.
   const base = RATE_LIMITS[model] || RATE_LIMITS[MODEL_HAIKU] || { itpm: 100000, otpm: 16000 };
+  // What the API itself last said the limit is beats the starting guesses in the table.
+  const learned = _learnedLimits[model] || {};
   // legacy single knob still respected as an ITPM floor if someone set it
-  const itpm = override.itpm || base.itpm || c.rateLimitTokens || 100000;
-  const otpm = override.otpm || base.otpm || 0;        // 0 ⇒ OTPM untracked for this model
+  const itpm = override.itpm || learned.itpm || base.itpm || c.rateLimitTokens || 100000;
+  const otpm = override.otpm || learned.otpm || base.otpm || 0;        // 0 ⇒ OTPM untracked for this model
   return { itpm, otpm };
 }
 function rateBudget(model = MODEL_HAIKU) {
@@ -1773,6 +1802,7 @@ async function waitForBudget(model, needIn, needOut = 0, maxWaitMs = 75000) {
     if (budgetOk(model, needIn, needOut)) { clear(); return true; }
     if (!announced) {
       const b = rateBudget(model);
+      try { const lv = _liveRate[model] || {}; console.log(`[rate] pacing ${model}: need in ${needIn} out ${needOut} · free in ${b.inFree}/${b.inSafe} out ${b.outFree} (${b.rateSource}) · live in ${lv.inRemaining}/${lv.inLimit} reset ${lv.inResetAt ? Math.round((lv.inResetAt - Date.now()) / 1000) + 's' : '?'} · window used ${b.inUsed}`); } catch {}
       const which = b.inFree < needIn ? `${Math.round(needIn / 1000)}k in` : `${Math.round(needOut / 1000)}k out`;
       sendToActivity('tool-update', { type: 'thinking', text: `⏳ pacing for the ${model.replace(/^claude-/, '')} rate limit — continuing in a moment (${which} needed)` });
       emitRateStatus({ state: 'pacing', model, pct: ratePct(model) });   // subtle titlebar chip in the main window
@@ -2065,7 +2095,7 @@ async function anthropicRequest(body, apiKey, { retries = 5 } = {}) {
     if (res.ok) {
       noteRateHeaders(body.model, res.headers);       // T1 — capture live budget from the response
       const j = noteRefusal(await res.json(), body.model);
-      try { const u = j.usage || {}; recordTokens(body.model, (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0), u.output_tokens || 0); recordCost(body.model, u); noteUsage(body.model, u); } catch {}
+      try { const u = j.usage || {}; recordTokens(body.model, (u.input_tokens || 0) + (u.cache_creation_input_tokens || 0), u.output_tokens || 0); recordCost(body.model, u); noteUsage(body.model, u); } catch {}
       return j;
     }
     const retryable = res.status === 429 || res.status === 529 || res.status >= 500;
@@ -2379,7 +2409,7 @@ async function anthropicStream(body, apiKey, onText, { retries = 3, onThinking =
         } else if (ev.type === 'error') { throw new Error('stream error: ' + JSON.stringify(ev.error).slice(0, 200)); }
       }
     }
-    try { recordTokens(body.model, (usage.input_tokens || 0) + (usage.cache_read_input_tokens || 0) + (usage.cache_creation_input_tokens || 0), usage.output_tokens || 0); recordCost(body.model, usage); noteUsage(body.model, usage); } catch {}
+    try { recordTokens(body.model, (usage.input_tokens || 0) + (usage.cache_creation_input_tokens || 0), usage.output_tokens || 0); recordCost(body.model, usage); noteUsage(body.model, usage); } catch {}
     // EVERY BLOCK GOES BACK AS WHAT IT IS. This used to map anything that was not a tool_use to
     // `{ type: 'text', text: b.text }` — so a thinking block, which has no `text`, came back as a text
     // block with `text: undefined`, and the code thirty lines up that preserves thinking blocks "to
@@ -7047,6 +7077,12 @@ async function executeTool(name, input, opts = {}) {
         result = nr.error ? { success: false, error: nr.error } : { success: true, result: news.format(nr), items: nr.items };
         break;
       }
+      case 'weather': {
+        const g = loadConfig().geo || {};
+        const w = await require('./lib/weather').forecast({ place: input && input.place, lat: g.latitude, lon: g.longitude, label: g.label || 'home', days: input && input.days, units: input && input.units });
+        result = w.ok ? { success: true, result: require('./lib/weather').format(w), forecast: w } : { success: false, error: w.error };
+        break;
+      }
       case 'web_search': {
         const sr = await websearch.search({ query: input && input.query, limit: input && input.limit, config: loadConfig() });
         if (sr.ok) {
@@ -7466,6 +7502,7 @@ function describeAction(name, input = {}) {
   const s = (v, n = 48) => String(v == null ? '' : v).replace(/\s+/g, ' ').trim().slice(0, n);
   try {
     switch (name) {
+      case 'weather': return input.place ? `Checking the weather in ${s(input.place, 40)}` : 'Checking the weather';
       case 'web_search': return `Searching the web for “${s(input.query)}”`;
       case 'find_papers': return `Searching papers for “${s(input.query || input.q)}”`;
       case 'fetch_url': case 'open_in_browser': { let h = s(input.url, 60); try { h = new URL(input.url).host; } catch {} return `Opening ${h}`; }
@@ -8033,8 +8070,13 @@ async function agentLoop(history, apiKey, event, opts = {}) {
     history = evictOldImages(history, KEEP_IMAGES);
     history = validateHistory(history);   // heal any mid-loop tool_use/result corruption (interruptions) before each call
     let response;
+    const _mt = Date.now();
     try {
       response = await callModel(history, apiKey, iterations === 0, onText);
+      try {
+        const u = response.usage || {};
+        latLog(`model #${iterations + 1} ${String(response._model || '?').replace(/^claude-/, '')} ${Date.now() - _mt}ms · in ${u.input_tokens || '?'} (cache ${u.cache_read_input_tokens || 0}) out ${u.output_tokens || '?'} · ${(response.content || []).filter((b) => b.type === 'tool_use').map((b) => b.name).join(',') || 'text'}`);
+      } catch {}
     } catch (e) {
       // RATE ABORT (seam S4). This used to be `history = []` — a pacing failure threw away the entire
       // conversation, including hours of work, over a transient per-minute cap. The rate path above
@@ -8140,6 +8182,7 @@ async function agentLoop(history, apiKey, event, opts = {}) {
       catch (e) { result = { success: false, error: 'tool threw: ' + (e && e.message || String(e)) }; }
       const _spanMs = Date.now() - _spanT0;
       const _spanStatus = result && result.success === false ? 'error' : 'ok';
+      latLog(`tool ${block.name} ${_spanMs}ms ${_spanStatus}`);
       try {
         rstate.event('tool', {
           spanId: _spanId, name: block.name, step: iterations + 1, ms: _spanMs, status: _spanStatus,
@@ -8954,6 +8997,9 @@ async function _dispatchTurnInner(history, apiKey, event, opts = {}) {
       if (loadConfig().fastChat !== false) {
         try { res = await fastReply(history, apiKey, event, opts); }
         catch (e) { console.warn('[fast] reply failed → agent:', e.message); }
+        // An EMPTY quick reply is a failure, not an answer (25 Nov: two phone questions came back as
+        // nothing in 2–3 s). Hand the turn to the full agent instead of returning silence.
+        if (res && !String(res.text || '').trim()) { console.warn('[fast] empty reply → agent'); res = null; }
       }
       // Pipeline can ONLY ever see 'chat' now (never action/ambiguous → never mangles tool work).
       if (!res) res = pipelineCfg().enabled ? await runPipeline(history, apiKey, event, opts) : await agentLoop(history, apiKey, event, opts);
@@ -12896,10 +12942,29 @@ function sttVocabHint() {
     if (c.ownerEmail) bits.push(c.ownerEmail);
     if (Array.isArray(c.sttVocab)) bits.push(...c.sttVocab);
     else if (typeof c.sttVocab === 'string' && c.sttVocab) bits.push(c.sttVocab);
+    // The names commands actually turn on: who to call or email, and what he is working on. These are
+    // the words a general model mishears ("call Priya" → "call prior") and the words a misheard
+    // command cannot recover from. BhatBot's own vocabulary rides along so its features are heard
+    // as names, not as English.
+    bits.push('Synapse', 'Nexus', 'Garmin', 'Telegram', 'SideStore', 'Tailscale');
+    try {
+      const book = JSON.parse(fs.readFileSync(CONTACTS_PATH, 'utf8'));
+      const list = Array.isArray(book) ? book : (book.contacts || Object.values(book || {}));
+      for (const ct of list.slice(0, 40)) if (ct && ct.name) bits.push(String(ct.name).trim());
+    } catch {}
+    try {
+      for (const n of synapse().brain.nodes({ type: 'project', status: 'confirmed' }).slice(0, 12)) {
+        const base = String(n.ref || n.label || '').replace(/\/+$/, '').split('/').pop();
+        if (base && base.length > 2 && !/^\(|^(desktop|folders|documents)$/i.test(base)) bits.push(base.replace(/[-_]+/g, ' '));
+      }
+    } catch {}
     try { for (const p of (logins.list() || [])) if (p && p.username) bits.push(p.username); } catch {}
     const seen = new Set();
     const uniq = bits.filter((b) => b && !seen.has(String(b).toLowerCase()) && seen.add(String(b).toLowerCase()));
-    return uniq.length ? ('Expected names/identifiers (spell exactly, keep emails lowercase): ' + uniq.join(', ') + '.') : '';
+    // Whisper reads only the last ~224 tokens of a prompt; keep the most useful (earliest) names.
+    let out = 'Expected names/identifiers (spell exactly, keep emails lowercase): ';
+    for (const u of uniq) { if ((out + u).length > 900) break; out += u + ', '; }
+    return uniq.length ? out.replace(/, $/, '.') : '';
   } catch { return ''; }
 }
 
@@ -13943,12 +14008,8 @@ app.whenReady().then(() => {
     else console.log('[self-drive] ready (on-demand: "improve yourself" / reflection / capability-gap)');
     startPatrol();      // Feat-2: ambient health watch → relay via Telegram, call if urgent
     startHealthMonitor(); // Health: proactive Garmin biometrics monitor (default on; no-op until garmin-setup.sh is run)
-    // Pre-warm local Kokoro TTS so the first spoken reply isn't cold (~0.8s load), then give a
-    // short spoken "ready" confirmation once warm (ambient mode has no visual chat affordance,
-    // so the greeting tells you BhatBot is live and listening). Fires once.
-    let greeted = false;
-    const greet = () => { if (greeted) return; greeted = true; try { speakDesktop('BhatBot online. Say Jarvis when you need me.', { full: true }); } catch {} };
-    setTimeout(greet, 900);   // ElevenLabs needs no local voice worker.
+    // No spoken boot greeting (25 Nov: "remove the 'BhatBot online, say Jarvis when you need me'").
+    // The home brief on the command stage shows that it is up; the time goes to answering instead.
   } catch (e) { console.error('Startup error:', e); }
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 });

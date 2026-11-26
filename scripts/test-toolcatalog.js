@@ -241,4 +241,15 @@ const ok = (m) => { console.log('✅ ' + m); pass++; };
   ok('a request spanning everything still loads at most 3 categories — the rest is one toolbox call');
 }
 
+// ── everyday phrasings land on the tool in ONE step (25 Nov: each miss cost a toolbox round trip) ──
+{
+  const want = [['how many steps today', 'health'], ['how did I sleep last night', 'health'], ['what is the weather', 'weather'],
+    ['will it rain tomorrow', 'weather'], ['who won the most recent world series', 'web_search'], ['how much have I spent today', 'ops_status'], ['whats on my calendar tomorrow', 'calendar'],
+    ['email priya that I will be late', 'gmail'], ['run the tests in bhatbot', 'run_shell'], ['turn the volume down', 'media_control'],
+    ['take a screenshot of my screen', 'screen_parse'], ['remind me to submit the lab report at 5', 'manage_schedule']];
+  const misses = want.filter(([q, tool]) => !tc.select(q, TOOLS).tools.some((t) => t.name === tool));
+  assert.deepStrictEqual(misses, [], 'every everyday request is offered its tool directly: ' + JSON.stringify(misses));
+  ok(`${want.length} everyday phrasings reach their tool without a toolbox detour`);
+}
+
 console.log(`\n✅ toolcatalog: ${pass} groups passed`);
