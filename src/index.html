@@ -1612,6 +1612,7 @@
               <span id="sb-title">⚛ TALK</span>
               <span id="sb-chips"></span>
               <button class="sb-btn" id="sb-floor" title="Show the agent floor">⬡ <span>Agent floor · idle</span></button>
+              <button class="sb-btn" data-open-office title="Open the 3D Agent Office">🏢 Office</button>
               <button class="sb-btn" id="sb-clear" title="Back to the voice orb">◉ Orb</button>
             </div>
             <!-- voice stage: orb + status word + ephemeral caption (⌘K types; 📄 flips to transcript) -->
@@ -1696,7 +1697,7 @@
 
   <!-- C-Fleet: VANGUARD live panel — one card per parallel suit, steerable in real time -->
   <div id="vanguard-panel" class="stage-panel">
-    <div class="panel-head"><b>⬡ AGENTIC FLEET</b><span class="panel-back" data-back>← Command</span></div>
+    <div class="panel-head"><b>⬡ AGENTIC FLEET</b><span style="flex:1"></span><button class="sb-btn" data-open-office title="Open the 3D Agent Office — Claude and local-model workers at desks">🏢 Agent Office</button><span class="panel-back" data-back style="margin-left:8px">← Command</span></div>
     <!-- THE LONG RUN. An hour of work whose only trace is a scrolling feed makes you reconstruct it
          from log lines; this is the STATE — the goal, how far through, what it is waiting on you for.
          Hidden entirely when nothing is running, so the office stays the hero. -->
@@ -3590,6 +3591,14 @@ window.bhatbot.onStudioReload && window.bhatbot.onStudioReload(() => reloadStudi
   window.bhatbot.onSynapseUpdate && window.bhatbot.onSynapseUpdate(() => { if (panel.classList.contains('active')) load(); });
 })();
 
+// The 3D Agent Office opens in its own BhatBot window, already signed in (main.js openAgentOffice).
+document.addEventListener('click', async (e) => {
+  const b = e.target.closest('[data-open-office]'); if (!b || !window.bhatbot || !window.bhatbot.openAgentOffice) return;
+  const was = b.textContent; b.textContent = '🏢 opening…'; b.disabled = true;
+  try { const r = await window.bhatbot.openAgentOffice(); if (r && !r.ok) b.title = 'Could not open: ' + (r.error || 'unknown'); }
+  finally { b.textContent = was; b.disabled = false; }
+});
+
 // ── HOME BRIEF ─────────────────────────────────────────────────────────────────────────────────────
 // Rendered from main.js homeSummary(); refreshed every minute and whenever the window comes back.
 // It recedes (dims) while the orb is listening, thinking or speaking, so the conversation keeps the
@@ -3600,12 +3609,12 @@ window.bhatbot.onStudioReload && window.bhatbot.onStudioReload(() => reloadStudi
   const esc = (v) => String(v == null ? '' : v).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   const t = (ms) => new Date(ms).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
   const ago = (ms) => { const m = Math.round((Date.now() - ms) / 60000); return m < 1 ? 'just now' : m < 60 ? m + ' min ago' : m < 1440 ? Math.round(m / 60) + ' h ago' : Math.round(m / 1440) + ' d ago'; };
-  const tile = (o) => `<${o.panel ? `button type="button" data-panel-go="${o.panel}"` : 'div'} class="hb-tile">`
+  const tile = (o) => `<${o.panel || o.office ? `button type="button" ${o.office ? 'data-open-office' : `data-panel-go="${o.panel}"`}` : 'div'} class="hb-tile">`
     + `<div class="hb-k"><span>${esc(o.k)}</span>${o.kr ? `<span>${esc(o.kr)}</span>` : ''}</div>`
     + `<div class="hb-v${o.big ? ' big' : ''}${o.warn ? ' hb-warn' : ''}">${esc(o.v)}</div>`
     + (o.bar != null ? `<div class="hb-bar"><i style="width:${Math.max(0, Math.min(100, o.bar))}%"></i></div>` : '')
     + (o.s ? `<div class="hb-s">${esc(o.s)}</div>` : '')
-    + `</${o.panel ? 'button' : 'div'}>`;
+    + `</${o.panel || o.office ? 'button' : 'div'}>`;
   function render(d) {
     if (!d || d.error) return;
     box.hidden = false;
@@ -3629,6 +3638,10 @@ window.bhatbot.onStudioReload && window.bhatbot.onStudioReload(() => reloadStudi
     const a = d.agents || {};
     tiles.push({ k: 'Agents', kr: a.total ? `${a.total} on floor` : '', panel: 'vanguard', v: a.working ? `${a.working} working` : 'All idle', big: !!a.working,
       s: a.working ? a.names.map((x) => `${x.name}: ${x.task}`).join(' · ') : 'Ask for anything long and the fleet takes it' });
+    // Agent Office — the 3D floor with Claude and local-model workers
+    const of = d.office;
+    if (of) tiles.push({ k: 'Agent Office', kr: of.agents ? `${of.agents} at desks` : '', v: of.waiting ? `${of.waiting} waiting on you` : of.working ? `${of.working} working` : 'Desks free', warn: !!of.waiting,
+      s: of.names.length ? of.names.join(' · ') : 'Hire a Claude or local worker: say "hire someone in the office to …"', office: true });
     // Health
     const hl = d.health;
     if (hl && hl.steps != null) {

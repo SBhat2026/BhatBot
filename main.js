@@ -4220,6 +4220,30 @@ ipcMain.handle('open-brain', () => {
   brainWindow.loadFile(path.join(__dirname, 'src/brain.html'));
   brainWindow.on('closed', () => { brainWindow=null; });
 });
+// ── THE 3D AGENT OFFICE, IN A BHATBOT WINDOW ───────────────────────────────────────────────────────
+// Signed in for him: BhatBot logs into the office (lib/agentoffice.js) and puts the session cookie in
+// this window's own partition, so the office opens straight onto the floor instead of its password page.
+let officeWindow = null;
+async function openAgentOffice() {
+  try {
+    if (officeWindow && !officeWindow.isDestroyed()) { officeWindow.show(); officeWindow.focus(); let url = ''; try { url = officeWindow.webContents.getURL(); } catch {} return { ok: true, url, signedIn: !!url && !/\/login/.test(url) }; }
+    const ao = require('./lib/agentoffice');
+    const c = loadConfig(); const oc = ao.cfgOf(c);
+    const run = await ao.ensureRunning(c);
+    if (!run.ok) return { ok: false, error: run.error || 'the office did not start' };
+    const auth = await ao.login(c);
+    if (!auth.ok) return { ok: false, error: auth.error };
+    const { session } = require('electron');
+    const part = session.fromPartition('persist:agent-office');
+    const [name, ...rest] = auth.cookie.split('=');
+    await part.cookies.set({ url: oc.url, name, value: rest.join('='), httpOnly: true, sameSite: 'lax' });
+    officeWindow = new ToolWindow({ width: 1280, height: 820, title: 'BhatBot · Agent Office', webPreferences: { contextIsolation: true, nodeIntegration: false, partition: 'persist:agent-office' } });
+    officeWindow.loadURL(oc.url + '/');
+    officeWindow.on('closed', () => { officeWindow = null; });
+    return { ok: true };
+  } catch (e) { return { ok: false, error: e.message }; }
+}
+ipcMain.handle('open-agent-office', () => openAgentOffice());
 ipcMain.on('workspace-theme', () => smartWindows.syncThemes());
 const { toggleWindow, studioWebContents, openNexusWindow, ensureStudio, openStudioWindow,
   openChessWindow, openChessApplet, openWorldCupWindow, openInteractive3D,
@@ -7077,6 +7101,24 @@ async function executeTool(name, input, opts = {}) {
         result = nr.error ? { success: false, error: nr.error } : { success: true, result: news.format(nr), items: nr.items };
         break;
       }
+      case 'office': {
+        const ao = require('./lib/agentoffice');
+        const c = loadConfig(); const a = String(input.action || 'list');
+        // Opus is opt-in per task (his rule): a hire that names it without his say-so drops to Sonnet.
+        let model = input.model;
+        if (a === 'hire' && /opus/i.test(String(model || '')) && !(c.opusApproved || opts.opusApproved)) model = 'sonnet';
+        if (a === 'list') result = await ao.list(c);
+        else if (a === 'hire') result = await ao.hire(c, { prompt: input.prompt, provider: input.provider || 'claude', model: model || (input.provider === 'opencode' ? 'ollama/qwen3:14b' : 'sonnet'), worktree: !!input.worktree });
+        else if (a === 'tell') result = await ao.tell(c, { who: input.who, prompt: input.prompt });
+        else if (a === 'read') result = await ao.read(c, { who: input.who, lines: input.lines });
+        else if (a === 'home') result = await ao.sendHome(c, { who: input.who });
+        else if (a === 'research') result = await ao.researchSubmit(c, { question: input.question || input.prompt, route: input.route });
+        else if (a === 'research_status') result = await ao.researchStatus(c, { job: input.job });
+        else if (a === 'journal_scan') result = await ao.journalScan(c);
+        else if (a === 'open') { const r = await openAgentOffice(); result = r.ok ? { success: true, result: 'The 3D office is open.' } : { success: false, error: r.error }; }
+        else result = { success: false, error: 'unknown office action ' + a };
+        break;
+      }
       case 'weather': {
         const g = loadConfig().geo || {};
         const w = await require('./lib/weather').forecast({ place: input && input.place, lat: g.latitude, lon: g.longitude, label: g.label || 'home', days: input && input.days, units: input && input.units });
@@ -7502,6 +7544,7 @@ function describeAction(name, input = {}) {
   const s = (v, n = 48) => String(v == null ? '' : v).replace(/\s+/g, ' ').trim().slice(0, n);
   try {
     switch (name) {
+      case 'office': return ({ hire: 'Hiring a worker in the office', tell: 'Messaging an office worker', read: 'Reading a worker\'s terminal', home: 'Sending a worker home', open: 'Opening the 3D office', research: 'Starting a research job', research_status: 'Checking the research desks', journal_scan: 'Checking the watched journals' })[input.action] || 'Checking the office';
       case 'weather': return input.place ? `Checking the weather in ${s(input.place, 40)}` : 'Checking the weather';
       case 'web_search': return `Searching the web for “${s(input.query)}”`;
       case 'find_papers': return `Searching papers for “${s(input.query || input.q)}”`;
@@ -10169,6 +10212,16 @@ async function homeSummary() {
       .filter((p) => p.key && !['(home)', 'folders', 'desktop', 'documents', 'downloads'].includes(p.key) && !seen.has(p.key) && seen.add(p.key))
       .sort((a, b) => b.last - a.last).slice(0, 3).map(({ label, last }) => ({ label, last }));
   }, []);
+  // The 3D Agent Office (~/bhatbot-office): read from its saved roster file, NOT a live connection —
+  // polling the WebSocket every minute would walk a phantom 'BhatBot' visitor through the office.
+  out.office = soft(() => {
+    const dir = require('./lib/agentoffice').cfgOf(c).dir;
+    const ws = JSON.parse(fs.readFileSync(path.join(dir, 'outputs', 'research', '.agent-office', 'workers.json'), 'utf8'));
+    const agents = (Array.isArray(ws) ? ws : []).filter((w) => w.kind === 'agent');
+    const st = (w) => (w.pty && w.pty.status) || w.status || 'idle';
+    return { agents: agents.length, working: agents.filter((w) => st(w) === 'working').length,
+      waiting: agents.filter((w) => ['needs_input', 'done'].includes(st(w))).length, names: agents.slice(0, 3).map((w) => String(w.name).replace(/\s*\p{Extended_Pictographic}/gu, '')) };
+  }, null);
   out.spend = soft(() => { const ct = costToday(); return { today: Number(ct && typeof ct === 'object' ? ct.usd : ct) || 0, budget: Number(c.dailyBudgetUsd) || 5 }; }, null);
   out.system = soft(() => {
     const st = _vitals, free = readMemFreePct();

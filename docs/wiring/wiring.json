@@ -1,23 +1,23 @@
 {
  "summary": {
-  "generatedAt": "2026-11-26T00:15:35.971Z",
+  "generatedAt": "2026-11-26T21:10:32.687Z",
   "counts": {
    "pages": 11,
    "bridges": 12,
-   "bridgeKeys": 162,
-   "ipcHandlers": 107,
+   "bridgeKeys": 163,
+   "ipcHandlers": 108,
    "mainToRendererEvents": 40,
-   "modules": 376,
-   "libModules": 156,
-   "liveLib": 148,
-   "tools": 97,
-   "toolCases": 98,
+   "modules": 377,
+   "libModules": 157,
+   "liveLib": 149,
+   "tools": 98,
+   "toolCases": 99,
    "voiceRoutes": 14,
    "workers": 24
   },
   "grades": {
    "DEAD": 37,
-   "UNTESTED": 8
+   "UNTESTED": 9
   }
  },
  "findings": [
@@ -206,6 +206,12 @@
    "layer": "modules",
    "what": "lib/agenteval.js",
    "detail": "only loaded by tests — nothing in the running app requires it"
+  },
+  {
+   "grade": "UNTESTED",
+   "layer": "modules",
+   "what": "lib/agentoffice.js",
+   "detail": "runs in the app; no test loads or names it"
   },
   {
    "grade": "UNTESTED",
@@ -462,7 +468,7 @@
    "name": "bhatbot",
    "global": "bhatbot",
    "file": "preload.js",
-   "keys": 119,
+   "keys": 120,
    "loaded": true
   },
   {
@@ -751,6 +757,12 @@
    "id": "ipc:home-summary",
    "layer": "ipc",
    "name": "home-summary",
+   "handled": true
+  },
+  {
+   "id": "ipc:open-agent-office",
+   "layer": "ipc",
+   "name": "open-agent-office",
    "handled": true
   },
   {
@@ -1413,6 +1425,12 @@
    "layer": "lib",
    "name": "lib/molecule.js",
    "tested": true
+  },
+  {
+   "id": "lib:lib/agentoffice.js",
+   "layer": "lib",
+   "name": "lib/agentoffice.js",
+   "tested": false
   },
   {
    "id": "lib:window-manager.js",
@@ -2260,10 +2278,10 @@
    "name": "scripts/test-synapse-worker.js"
   },
   {
-   "id": "tools:97 tools",
+   "id": "tools:98 tools",
    "layer": "tools",
-   "name": "97 tools",
-   "cases": 98
+   "name": "98 tools",
+   "cases": 99
   }
  ],
  "edges": [
@@ -2586,6 +2604,11 @@
   },
   {
    "from": "bridge:bhatbot",
+   "to": "ipc:open-agent-office",
+   "broken": false
+  },
+  {
+   "from": "bridge:bhatbot",
    "to": "ipc:get-ops-status",
    "broken": false
   },
@@ -2901,6 +2924,10 @@
   },
   {
    "from": "ipc:open-brain",
+   "to": "main:main.js"
+  },
+  {
+   "from": "ipc:open-agent-office",
    "to": "main:main.js"
   },
   {
@@ -3749,6 +3776,10 @@
   },
   {
    "from": "main:main.js",
+   "to": "lib:lib/agentoffice.js"
+  },
+  {
+   "from": "main:main.js",
    "to": "lib:lib/molecule.js"
   },
   {
@@ -4197,7 +4228,7 @@
   },
   {
    "from": "main:main.js",
-   "to": "tools:97 tools"
+   "to": "tools:98 tools"
   }
  ]
 }
