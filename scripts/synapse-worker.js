@@ -68,12 +68,20 @@ function notionPagesFn() {
 // degradation that let the original worker go unnoticed for weeks.
 function buildLlm() {
   const key = llm.resolveKey('anthropic');
-  if (!key) return null;
-  return async ({ system, content, maxTokens }) => llm.ask(content, { system, maxTokens, apiKey: key, log });
+  if (!key && !llm.canCall()) return null;     // no metered key AND subscription routing off → nothing to call
+  // Subscription first (lib/bgllm.js), metered key only as fallback. `apiKey` may be '' — then a CLI
+  // failure surfaces as "no Anthropic key" and the pass degrades exactly as before.
+  const fn = async ({ system, content, maxTokens }) => {
+    const t = await llm.ask(content, { system, maxTokens, apiKey: key || undefined, log, label: 'synapse' });
+    fn.lastBilling = llm.ask.lastBilling;
+    return t;
+  };
+  return fn;
 }
 
 function build() {
-  const anthropicKey = llm.resolveKey('anthropic');
+  // subscription routing (lib/bgllm.js) counts as reachable even with no metered key
+  const anthropicKey = llm.resolveKey('anthropic') || (llm.canCall() ? 'subscription' : '');
   const openaiKey = llm.resolveKey('openai');
   // semantic.js reads OPENAI_API_KEY from env (it cannot read the vault either) — bridge it in.
   if (openaiKey && !process.env.OPENAI_API_KEY) process.env.OPENAI_API_KEY = openaiKey;
@@ -185,7 +193,7 @@ async function runDueSchedules() {
   try { due = scheduler.due(Date.now()); } catch { return; }
   if (!due.length) return;
 
-  if (!llm.hasKey('anthropic')) {
+  if (!llm.canCall()) {
     log(`⏰ ${due.length} schedule(s) due but no Anthropic key is reachable — leaving them for the app: ` + due.map((s) => s.title).join(', '));
     return;
   }
@@ -232,7 +240,7 @@ function printStatus() {
     console.log(`graph:       ${Object.keys(g.nodes || {}).length} nodes, ${Object.keys(g.edges || {}).length} edges, updated ${age}m ago`);
     console.log(`spend:       $${Number((g.meta || {}).spendUsd || 0).toFixed(4)}`);
   } catch { console.log('graph:       MISSING — the worker has never completed a cycle'); }
-  console.log('anthropic:   ' + (llm.hasKey('anthropic') ? 'resolvable' : 'NOT resolvable (paid pass will be skipped)'));
+  console.log('anthropic:   ' + (llm.canCall() ? 'resolvable (subscription CLI first, metered key fallback)' : 'NOT resolvable (paid pass will be skipped)'));
   console.log('openai:      ' + (llm.hasKey('openai') ? 'resolvable' : 'NOT resolvable (embeddings will be skipped)'));
 }
 

@@ -67,7 +67,7 @@ const errRes = (status, retryAfter) => ({
   // Inject an empty keychain + config: whether THIS machine's login Keychain holds a real key must
   // not decide whether the test passes.
   try {
-    await llm.anthropicRequest({ messages: [] }, { apiKey: '', keychain: noKeychain, config: {}, fetchImpl: async () => okRes({ content: [] }) });
+    await llm.apiRequest({ messages: [] }, { apiKey: '', keychain: noKeychain, config: {}, fetchImpl: async () => okRes({ content: [] }) });
     ok(false, 'anthropicRequest: missing key should throw');
   } catch (e) {
     ok(/no Anthropic key/.test(e.message), 'anthropicRequest: no key → a clear error naming the cause');
@@ -77,7 +77,7 @@ const errRes = (status, retryAfter) => ({
   // Happy path + headers.
   {
     let seen = null;
-    const r = await llm.anthropicRequest({ messages: [{ role: 'user', content: 'hi' }] }, {
+    const r = await llm.apiRequest({ messages: [{ role: 'user', content: 'hi' }] }, {
       apiKey: 'sk-test',
       fetchImpl: async (url, init) => { seen = { url, init }; return okRes({ content: [{ type: 'text', text: 'hello' }] }); },
     });
@@ -91,9 +91,9 @@ const errRes = (status, retryAfter) => ({
 
   // Malformed/empty body must be INERT, not fatal — a worker cannot crash on a bad response.
   {
-    const r = await llm.anthropicRequest({ messages: [] }, { apiKey: 'k', fetchImpl: async () => ({ ok: true, status: 200, json: async () => { throw new Error('bad json'); }, headers: { get: () => null } }) });
+    const r = await llm.apiRequest({ messages: [] }, { apiKey: 'k', fetchImpl: async () => ({ ok: true, status: 200, json: async () => { throw new Error('bad json'); }, headers: { get: () => null } }) });
     ok(r.content.length === 0 && r._malformed, 'anthropicRequest: unparseable body → { content: [] }, not a throw');
-    const r2 = await llm.anthropicRequest({ messages: [] }, { apiKey: 'k', fetchImpl: async () => okRes({ nope: true }) });
+    const r2 = await llm.apiRequest({ messages: [] }, { apiKey: 'k', fetchImpl: async () => okRes({ nope: true }) });
     ok(r2._malformed === true, 'anthropicRequest: a response with no content array → flagged malformed');
   }
 
@@ -101,7 +101,7 @@ const errRes = (status, retryAfter) => ({
   {
     let calls = 0; const waits = [];
     const t0 = Date.now();
-    const r = await llm.anthropicRequest({ messages: [] }, {
+    const r = await llm.apiRequest({ messages: [] }, {
       apiKey: 'k', retries: 2,
       log: (m) => waits.push(m),
       fetchImpl: async () => (++calls === 1 ? errRes(429, 0.05) : okRes({ content: [{ type: 'text', text: 'ok' }] })),
@@ -115,7 +115,7 @@ const errRes = (status, retryAfter) => ({
   {
     let calls = 0;
     try {
-      await llm.anthropicRequest({ messages: [] }, { apiKey: 'k', retries: 1, fetchImpl: async () => { calls++; return errRes(503); } });
+      await llm.apiRequest({ messages: [] }, { apiKey: 'k', retries: 1, fetchImpl: async () => { calls++; return errRes(503); } });
       ok(false, 'anthropicRequest: exhausted 5xx retries should throw');
     } catch (e) { ok(calls === 2 && /failed after/.test(e.message), 'anthropicRequest: retries a 5xx, then reports failure'); }
   }
@@ -124,7 +124,7 @@ const errRes = (status, retryAfter) => ({
   {
     let calls = 0;
     try {
-      await llm.anthropicRequest({ messages: [] }, { apiKey: 'k', retries: 3, fetchImpl: async () => { calls++; return errRes(400); } });
+      await llm.apiRequest({ messages: [] }, { apiKey: 'k', retries: 3, fetchImpl: async () => { calls++; return errRes(400); } });
       ok(false, 'anthropicRequest: a 400 should throw');
     } catch (e) { ok(calls === 1 && /400/.test(e.message), 'anthropicRequest: a 400 fails fast (no pointless retries)'); }
   }
@@ -132,7 +132,7 @@ const errRes = (status, retryAfter) => ({
   // Network errors retry too.
   {
     let calls = 0;
-    const r = await llm.anthropicRequest({ messages: [] }, {
+    const r = await llm.apiRequest({ messages: [] }, {
       apiKey: 'k', retries: 2,
       fetchImpl: async () => { if (++calls === 1) throw new Error('ECONNRESET'); return okRes({ content: [{ type: 'text', text: 'recovered' }] }); },
     });
@@ -142,13 +142,13 @@ const errRes = (status, retryAfter) => ({
   // ask() convenience.
   {
     let body = null;
-    const text = await llm.ask('what is 2+2', {
+    const text = await llm.ask('what is 2+2', { subscription: false,
       system: 'be terse', maxTokens: 32, apiKey: 'k',
       fetchImpl: async (u, i) => { body = JSON.parse(i.body); return okRes({ content: [{ type: 'text', text: ' four ' }] }); },
     });
     ok(text === 'four', 'ask: returns trimmed text');
     ok(body.system === 'be terse' && body.max_tokens === 32, 'ask: passes system + maxTokens through');
-    const empty = await llm.ask('x', { apiKey: 'k', fetchImpl: async () => okRes({ content: [] }) });
+    const empty = await llm.ask('x', { subscription: false, apiKey: 'k', fetchImpl: async () => okRes({ content: [] }) });
     ok(empty === '', 'ask: an empty reply → "" rather than a throw');
   }
 

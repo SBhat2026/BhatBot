@@ -152,7 +152,7 @@ const use = (name, input, id = 't1') => [{ type: 'tool_use', id, name, input }];
     ok(deferIdx < markIdx, 'worker: the deferral branch precedes markRan');
     ok(/continue;[\s\S]{0,400}scheduler\.markRan/.test(block), 'worker: deferred and failed runs `continue` BEFORE markRan — the schedule stays due');
     ok(/only on genuine success/.test(block), 'worker: the markRan call documents that it is success-only');
-    ok(/hasKey\('anthropic'\)/.test(block), 'worker: without a key it leaves schedules for the app rather than failing them');
+    ok(/canCall\(\)/.test(block), 'worker: with neither a key nor subscription routing it leaves schedules for the app rather than failing them');
   }
 
   try { fs.rmSync(TMP, { recursive: true, force: true }); } catch {}

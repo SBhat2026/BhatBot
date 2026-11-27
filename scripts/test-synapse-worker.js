@@ -29,6 +29,7 @@ fs.mkdirSync(path.join(TMP, '.bhatbot', 'projects'), { recursive: true });
 fs.writeFileSync(path.join(TMP, '.bhatbot', 'config.json'), JSON.stringify({
   synapseBudgetUsd: 1,
   synapse: { worker: true, hydrateMin: 5, connectHours: 6, paid: true },
+  billing: { backgroundViaSubscription: false },   // hermetic: never spawn the real `claude` CLI from a test
   apiKey: 'CRED_REF_APIKEY_FAKE',        // a vault handle — exactly what a real install has
   openaiKey: 'CRED_REF_OPENAIKEY_FAKE',
 }));
