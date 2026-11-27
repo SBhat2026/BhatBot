@@ -1,2 +1,2 @@
 const {contextBridge, ipcRenderer} = require('electron');
-contextBridge.exposeInMainWorld('brain', {graph: () => ipcRenderer.invoke('synapse-graph'), onUpdate: cb => ipcRenderer.on('synapse-update',(_e,g)=>cb(g)), onPressure: cb => ipcRenderer.on('memory-pressure',(_e,v)=>cb(v))});
+contextBridge.exposeInMainWorld('brain', {graph: () => ipcRenderer.invoke('synapse-graph'), onUpdate: cb => ipcRenderer.on('synapse-update',(_e,g)=>cb(g)), health: () => ipcRenderer.invoke('brainhealth-latest'), checkup: () => ipcRenderer.invoke('brainhealth-checkup'), onHealth: cb => ipcRenderer.on('brainhealth-update',(_e,r)=>cb(r)), onPressure: cb => ipcRenderer.on('memory-pressure',(_e,v)=>cb(v))});

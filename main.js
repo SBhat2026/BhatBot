@@ -4220,6 +4220,31 @@ ipcMain.handle('open-brain', () => {
   brainWindow.loadFile(path.join(__dirname, 'src/brain.html'));
   brainWindow.on('closed', () => { brainWindow=null; });
 });
+// ── BRAIN HEALTH — the Psychiatrist (lib/brainhealth.js checks + a standing Office hire) ──────────────
+// Daily, and on demand (office tool brain_checkup / the Brain window button). The checks are read-only
+// on ~/.bhatbot/brain; the Psychiatrist writes a health note and PROPOSES repairs — it applies nothing.
+const BRAINHEALTH_EVERY_MS = 24 * 60 * 60 * 1000;
+async function brainCheckup() {
+  try {
+    const r = await require('./lib/agentoffice').checkup(loadConfig());
+    if (r.report) { try { if (brainWindow && !brainWindow.isDestroyed()) brainWindow.webContents.send('brainhealth-update', r.report); } catch {} }
+    return r.success
+      ? { success: true, result: `${require('./lib/brainhealth').format(r.report)}\n(Psychiatrist ${r.reused ? 'briefed' : 'hired'} — its note lands in ${require('./lib/brainhealth').defaults().healthDir}/notes)`, report: r.report }
+      : { success: false, error: r.error, report: r.report };
+  } catch (e) { return { success: false, error: e.message }; }
+}
+ipcMain.handle('brainhealth-latest', () => { try { return require('./lib/brainhealth').loadReport(); } catch { return null; } });
+ipcMain.handle('brainhealth-checkup', () => brainCheckup());
+function startBrainHealth() {
+  const tick = async () => {
+    const last = require('./lib/brainhealth').loadReport();
+    if (last && Date.now() - last.at < BRAINHEALTH_EVERY_MS) return;
+    const r = await brainCheckup();
+    if (r.report && r.report.score < 70) notifyUser(`Brain health ${r.report.score}/100 (${r.report.grade}): ${r.report.findings.filter((f) => f.severity === 'critical' || f.severity === 'high').slice(0, 2).map((f) => f.what).join('; ') || 'see the Brain window'}`, 'low').catch(() => {});
+  };
+  setInterval(bgTick('brainhealth', tick), 60 * 60 * 1000).unref();
+  setTimeout(bgTick('brainhealth', tick), 5 * 60 * 1000).unref();   // first look a few minutes after boot, once synapse has had a cycle
+}
 // ── THE 3D AGENT OFFICE, IN A BHATBOT WINDOW ───────────────────────────────────────────────────────
 // Signed in for him: BhatBot logs into the office (lib/agentoffice.js) and puts the session cookie in
 // this window's own partition, so the office opens straight onto the floor instead of its password page.
@@ -7122,6 +7147,8 @@ async function executeTool(name, input, opts = {}) {
         else if (a === 'research') result = await ao.researchSubmit(c, { question: input.question || input.prompt, route: input.route });
         else if (a === 'research_status') result = await ao.researchStatus(c, { job: input.job });
         else if (a === 'journal_scan') result = await ao.journalScan(c);
+        else if (a === 'brain_checkup') result = await brainCheckup();
+        else if (a === 'brain_health') { const r = require('./lib/brainhealth').loadReport(); result = r ? { success: true, result: require('./lib/brainhealth').format(r), report: r } : { success: false, error: 'no checkup yet — run brain_checkup' }; }
         else if (a === 'invite') result = await ao.invite(c, { name: input.name, role: input.role });
         else if (a === 'open') { const r = await openAgentOffice(); result = r.ok ? { success: true, result: 'The 3D office is open.' } : { success: false, error: r.error }; }
         else result = { success: false, error: 'unknown office action ' + a };
@@ -14011,6 +14038,7 @@ app.whenReady().then(() => {
     startTriage();      // Phase A — proactive mail triage (no-op unless config.triage.enabled)
     startMemoryMaintenance();   // always-on memory upkeep (runs on a timer, independent of the window)
     startSynapseWorker();       // SYNAPSE second brain — free re-import loop + slow budget-capped paid pass
+    startBrainHealth();         // the Psychiatrist: daily read-only brain checkup (lib/brainhealth.js)
     startWeaver();              // always-on connection weaving while a window is open
     startBacklogWorker();       // idle-time: the standing specialists work real BACKLOG.md items
     // Fire-and-forget: connector handshakes are remote round-trips and must never gate boot. They
