@@ -84,6 +84,7 @@
     "worker:uninstall": "node scripts/install-daemon.js --uninstall-worker",
     "doctor": "node scripts/bhatctl.js doctor",
     "test:llm": "node scripts/test-llm.js",
+    "test:bgllm": "node scripts/test-bgllm.js",
     "test:synapse": "node scripts/test-synapse.js",
     "test:worker": "node scripts/test-synapse-worker.js",
     "test:pidlock": "node scripts/test-pidlock.js",

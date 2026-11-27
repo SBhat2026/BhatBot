@@ -87,6 +87,7 @@ const connectors = require('./lib/connectors');       // hosted MCP connectors (
 const visualbuild = require('./lib/visualbuild');     // Seedance generate→poll→artifact (visual building)
 const assetgen = require('./lib/assetgen');           // 2D→3D→printable asset pipeline, run in code not by the model
 const blender = require('./lib/blender');             // headless Blender: designed geometry + animation, not reconstruction
+const bgllm = require('./lib/bgllm');                 // background jobs → Claude subscription via `claude -p`, API as fallback
 const backlogworker = require('./lib/backlogworker'); // specialists work real BACKLOG.md items while idle
 const figures = require('./lib/figures');             // data-accurate matplotlib/seaborn figures
 const logins = require('./lib/logins');               // domain-keyed login profiles (CRED_REF handles)
@@ -1636,7 +1637,18 @@ function applyReasoning(body) {
   }
 }
 
-async function anthropicRequest(body, apiKey, { retries = 5 } = {}) {
+// Interactive callers get the metered API exactly as before. Inside a background tick (bgTick →
+// bgllm.runBackground) a tool-less request is routed subscription-first via `claude -p`, with the
+// metered call below as the fallback (lib/bgllm.js; billing.backgroundViaSubscription toggles it).
+async function anthropicRequest(body, apiKey, opts = {}) {
+  const bg = bgllm.backgroundLabel();
+  if (!bg) return anthropicRequestApi(body, apiKey, opts);
+  return bgllm.backgroundRequest(body, {
+    apiRequest: (b) => anthropicRequestApi(b, apiKey, opts), label: bg, config: loadConfig(),
+    ledgerPath: COSTS_PATH, apiUsd: costOf, log: (m) => console.log(m),
+  });
+}
+async function anthropicRequestApi(body, apiKey, { retries = 5 } = {}) {
   // Add the conversation cache breakpoint when the payload is big enough to be worth a cache write
   // (small one-off judge/plan calls skip it — the write premium would outweigh a prefix that never
   // repeats). Gated by config.convoCache (default on). Failure here must never block the call.
@@ -7803,7 +7815,7 @@ function bgTick(name, fn, { onSkip = null } = {}) {
     try {
       governor.poll();
       if (!governor.allowBackgroundTick(name)) { bgSkipped(name, 'governor is shedding load (thermal/memory)'); if (onSkip) onSkip('governor'); return; }
-      const r = await agentLock.tryRun(name, fn);
+      const r = await agentLock.tryRun(name, () => bgllm.runBackground(name, fn));
       if (r && r.ran === false) { bgSkipped(name, `lock held by ${r.holder || 'another worker'}`); if (onSkip) onSkip(r.holder); return; }
       _bgSkips.delete(name);                             // it ran — reset the streak
       if (r && r.error) console.warn(`[${name}] tick failed:`, r.error.message);
@@ -8318,6 +8330,23 @@ function startScheduler() {
 // never produced a single node, because it only ran while an Electron window was open.
 // main.js keeps just the wiring: the Electron-shaped dependencies, and the IPC surface for the tab.
 let _synapse = null;
+// SYNAPSE is unattended → subscription-first via lib/bgllm.js (`claude -p`, no API key in the child);
+// anthropicRequest is the metered fallback. `lastBilling` lets the engine charge its $ budget 0 for a
+// subscription call (the budget exists to cap API spend — it was exhausted every cycle).
+const synapseLlm = async ({ system, content, maxTokens, schema, schemaName }) => {
+  const body = {
+    model: MODEL_SONNET, max_tokens: maxTokens || 256, system,
+    messages: [{ role: 'user', content }],
+    ...(schema ? { _reason: { schema, schemaName } } : {}),
+  };
+  const r = await bgllm.backgroundRequest(body, {
+    apiRequest: (b) => anthropicRequestApi(b, getApiKey()), label: 'synapse', config: loadConfig(),
+    ledgerPath: COSTS_PATH, apiUsd: costOf, log: (m) => console.log(m),
+  });
+  synapseLlm.lastBilling = r._billing;
+  return (r.content || []).filter((x) => x.type === 'text').map((x) => x.text).join(' ');
+};
+synapseLlm.lastBilling = 'api';
 function synapse() {
   if (!_synapse) {
     _synapse = createSynapse({
@@ -8327,14 +8356,9 @@ function synapse() {
         // opening a second uncounted channel. The headless worker injects lib/llm.js instead.
         // `schema` rides through to output_config.format (lib/reasoning.js), so a caller that needs
         // JSON gets it ENFORCED rather than digging it out of prose with a regex afterwards.
-        llm: async ({ system, content, maxTokens, schema, schemaName }) => {
-          const r = await anthropicRequest({
-            model: MODEL_SONNET, max_tokens: maxTokens || 256, system,
-            messages: [{ role: 'user', content }],
-            ...(schema ? { _reason: { schema, schemaName } } : {}),
-          }, getApiKey());
-          return (r.content || []).filter((x) => x.type === 'text').map((x) => x.text).join(' ');
-        },
+        // SYNAPSE is unattended, so it goes subscription-first (lib/bgllm.js); anthropicRequest is the
+        // metered fallback. `lastBilling` tells the engine a subscription call costs its $ budget 0.
+        llm: synapseLlm,
         listProjects: () => projects.list(),
         getProject: (slug) => projects.get(slug),
         notionPages: notion.listPages ? (o) => notion.listPages(o) : null,
@@ -8504,7 +8528,21 @@ async function backlogTick() {
         // costToday() is the real ledger every LLM call already writes to, so the delta across the
         // run is what was actually billed — including any tools the specialist called.
         const before = costToday().usd || 0;
-        const r = await subagents.run(name, brief, subagentDeps(), { maxSteps: o.maxSteps || 5 });
+        // Subscription first: `claude -p` with a read-only built-in tool set (plans/research/findings —
+        // the backlog worker never edits). The metered subagent tool loop runs only if the CLI is
+        // missing / logged out / rate-limited, or billing.backgroundViaSubscription is false.
+        const spec = subagents.AGENTS[name] || {};
+        const ag = await bgllm.agentRequest(brief, {
+          system: spec.persona, cwd: __dirname, label: 'backlog', config: loadConfig(), ledgerPath: COSTS_PATH,
+          maxTurns: Math.max(4, (o.maxSteps || 5) * 2), timeoutMs: o.timeoutMs, log: (m) => console.log(m),
+          apiFallback: async () => {
+            const rr = await subagents.run(name, brief, subagentDeps(), { maxSteps: o.maxSteps || 5 });
+            return { ok: rr && rr.success !== false, text: (rr && (rr.result || rr.text)) || '', error: rr && rr.error,
+              usd: Math.max(0, (costToday().usd || 0) - before) };
+          },
+        });
+        if (ag.billing === 'subscription') return { success: true, result: ag.text, usd: 0, error: undefined, billing: 'subscription' };
+        const r = { success: ag.ok, result: ag.text, error: ag.error };
         const spent = Math.max(0, (costToday().usd || 0) - before);
         // CARRY THE ERROR. subagents.run returns a specific reason on failure and this wrapper used
         // to drop it, so every failed item logged "no error reported" and the state file recorded the

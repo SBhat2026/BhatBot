@@ -84,7 +84,7 @@ function rest() {
     ok(/schema: SUGGEST_SCHEMA/.test(src), 'suggest() passes it through the injected llm');
     ok(/JSON\.parse\(txt\)/.test(src), 'and parses the constrained reply directly');
     const main = require('fs').readFileSync(require('path').join(__dirname, '..', 'main.js'), 'utf8');
-    ok(/llm: async \(\{ system, content, maxTokens, schema, schemaName \}\)/.test(main), 'and the live llm adapter accepts a schema');
+    ok(/synapseLlm = async \(\{ system, content, maxTokens, schema, schemaName \}\)/.test(main), 'and the live llm adapter accepts a schema');
   }
 
   console.log(`✅ structured output: ${pass} assertions passed`);
