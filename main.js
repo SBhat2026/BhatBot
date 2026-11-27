@@ -4244,6 +4244,13 @@ async function openAgentOffice() {
   } catch (e) { return { ok: false, error: e.message }; }
 }
 ipcMain.handle('open-agent-office', () => openAgentOffice());
+// The over-20-users rule for the office's public door (lib/agentoffice.js exposureGuard), hourly.
+setInterval(async () => {
+  try {
+    const g = await require('./lib/agentoffice').exposureGuard(loadConfig());
+    if (g.closed) { console.warn('[office] ' + g.why); notifyUser(`The Agent Office passed ${g.limit} accounts, so I closed its public link. It is now reachable only on your tailnet.`, 'low').catch(() => {}); }
+  } catch {}
+}, 60 * 60 * 1000).unref();
 ipcMain.on('workspace-theme', () => smartWindows.syncThemes());
 const { toggleWindow, studioWebContents, openNexusWindow, ensureStudio, openStudioWindow,
   openChessWindow, openChessApplet, openWorldCupWindow, openInteractive3D,
@@ -7115,6 +7122,7 @@ async function executeTool(name, input, opts = {}) {
         else if (a === 'research') result = await ao.researchSubmit(c, { question: input.question || input.prompt, route: input.route });
         else if (a === 'research_status') result = await ao.researchStatus(c, { job: input.job });
         else if (a === 'journal_scan') result = await ao.journalScan(c);
+        else if (a === 'invite') result = await ao.invite(c, { name: input.name, role: input.role });
         else if (a === 'open') { const r = await openAgentOffice(); result = r.ok ? { success: true, result: 'The 3D office is open.' } : { success: false, error: r.error }; }
         else result = { success: false, error: 'unknown office action ' + a };
         break;
@@ -7544,7 +7552,7 @@ function describeAction(name, input = {}) {
   const s = (v, n = 48) => String(v == null ? '' : v).replace(/\s+/g, ' ').trim().slice(0, n);
   try {
     switch (name) {
-      case 'office': return ({ hire: 'Hiring a worker in the office', tell: 'Messaging an office worker', read: 'Reading a worker\'s terminal', home: 'Sending a worker home', open: 'Opening the 3D office', research: 'Starting a research job', research_status: 'Checking the research desks', journal_scan: 'Checking the watched journals' })[input.action] || 'Checking the office';
+      case 'office': return ({ hire: 'Hiring a worker in the office', tell: 'Messaging an office worker', read: 'Reading a worker\'s terminal', home: 'Sending a worker home', open: 'Opening the 3D office', research: 'Starting a research job', research_status: 'Checking the research desks', journal_scan: 'Checking the watched journals', invite: 'Making an office invite' })[input.action] || 'Checking the office';
       case 'weather': return input.place ? `Checking the weather in ${s(input.place, 40)}` : 'Checking the weather';
       case 'web_search': return `Searching the web for “${s(input.query)}”`;
       case 'find_papers': return `Searching papers for “${s(input.query || input.q)}”`;

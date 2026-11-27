@@ -76,6 +76,23 @@ BhatBot is done when, for one ordinary week:
 - spend stays inside $5/day, with the hard ceiling of $10 never touched;
 - the Projects tab and the second brain agree with what you actually worked on that week.
 
+## Security watch: the Agent Office's public link
+
+The office (`~/bhatbot-office`, the 3D office with live terminals on this Mac) is reachable two ways:
+
+- **Tailnet only:** https://siddhants-macbook-pro.tail816be0.ts.net:8443 (Tailscale Serve). Only devices signed in to his Tailscale.
+- **Public:** https://siddhants-macbook-pro.tail816be0.ts.net:10000 (Tailscale Funnel). Anyone with the URL reaches the sign-in page.
+
+⚠️ **Known risk.** A desk's terminal is a shell on this Mac, so the public link is only as strong as the office's sign-in. The office limits sign-in attempts per visitor (10 per window; `--trust-proxy` makes that apply to the real visitor, not the proxy).
+
+**His rule (26 Nov):** once the office has more than 20 users, it becomes tailnet-only. `lib/agentoffice.js` → `exposureGuard()` checks hourly and closes the public link past 20 accounts, then tells him.
+
+**Guests (26 Nov).** People he invites as guests (BhatBot: "invite Sam to the office", or ☰ → 🔑 Accounts → Guest) can walk round, talk by proximity voice, type in chat, sit at the meeting table or on its bench, and play the games and the jukebox. They can't hire, prompt or send home a worker, read a terminal, or touch GitHub, settings or accounts unless he switches that group on under **What guests can do**. The office checks every guest message and request on the server, not just the buttons. A guest's wall picture can't point at this Mac or its networks, and the office only fetches pictures that are already hung for a guest. Each guest is an account, so guests count toward the 20.
+
+⚠️ Voice between people uses STUN only. Guests behind strict NATs (some campus or phone networks) get text chat but may get no audio. A TURN relay fixes that (`--turn turn:user:pass@host:3478`); the Fly coturn would do once Fly is paid.
+
+⬜ Make yourself an admin account (`agent-office accounts invite <name> --admin`), sign in with it, then switch the shared password off. Anyone with the shared password is an admin and counts as zero accounts, so the 20-user rule can't see them.
+
 ## Needs your judgement (research, held back from the cleanup)
 
 | Folder | Why it might go | Why it's held |
