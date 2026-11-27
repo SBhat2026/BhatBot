@@ -1,0 +1,7 @@
+node_modules
+dist
+.agent-office
+*.log
+.DS_Store
+pw.txt
+__pycache__/

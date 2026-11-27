@@ -34,3 +34,37 @@ scripts/_suit.html
 
 # stray clone of the soccer-game repo — not part of bhatbot
 BhatBall/
+
+# office/ — vendored Agent Office; runtime data stays local
+office/work/venv/
+office/work/xdg/
+office/work/logs/
+office/work/cloud-run/
+office/work/research-docs/
+office/work/office/node_modules/
+office/work/office/dist/
+office/work/*.pid
+office/work/*.sqlite*
+office/work/*.log
+office/home/
+office/floors/
+office/outputs/research/runs/
+office/outputs/research/.agent-office/
+office/outputs/research/*.sqlite*
+
+# office/ — vendored Agent Office; runtime data stays local
+office/work/venv/
+office/work/xdg/
+office/work/logs/
+office/work/cloud-run/
+office/work/research-docs/
+office/work/office/node_modules/
+office/work/office/dist/
+office/work/*.pid
+office/work/*.sqlite*
+office/work/*.log
+office/home/
+office/floors/
+office/outputs/research/runs/
+office/outputs/research/.agent-office/
+office/outputs/research/*.sqlite*

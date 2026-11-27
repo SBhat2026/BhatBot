@@ -67,6 +67,18 @@ Cloud brain (optional, Fly.io):
 cd cloud && fly deploy
 ```
 
+## Agent Office (`office/`)
+
+Vendored copy of [Agent Office](https://github.com/AgentSystemLabs) (MIT, see `office/work/office/LICENSE`) plus the research desks:
+
+```
+office/start.sh              start/stop the office (:4600) and research server (:4612)
+office/work/office/          Agent Office source (npm install && npm run build before first run)
+office/outputs/research/     research desks (research.py, desks.mjs, scan.py, dashboard)
+```
+
+First run: create `office/work/venv` (Python with the research deps), build Agent Office, then `office/start.sh`; `office/start.sh --stop` stops it. Needs Ollama (qwen3:14b) and Claude Code. Runtime data (venv, xdg, logs, pids, sqlite, `home/`, `floors/`, `runs/`, `.agent-office/` incl. the office password) is gitignored. `lib/agentoffice.js` should default to `office/` and honor `config.agentOffice.dir`.
+
 ## Configuration
 
 Config lives in the app's user-data `config.json` (secrets go through the encrypted vault as
@@ -96,6 +108,7 @@ with no GUI required. Every new module ships with a matching suite.
 main.js            desktop brain + tool registry + IPC
 lib/               pure/scoped modules (router, rate, fleet, speech, memory, sims, …)
 src/               Electron renderer (index.html) + phone PWA source (mobile.html)
+office/            vendored Agent Office + research desks
 cloud/             always-on cloud brain + Mac-executor relay (Fly.io)
 phone-app/         generated phone build
 scripts/           test suites + ops tooling

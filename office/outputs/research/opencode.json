@@ -1,0 +1,38 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "ollama/qwen3:14b",
+  "mcp": {
+    "research": {
+      "type": "local",
+      "command": [
+        "../../work/venv/bin/python",
+        "mcp_tools.py"
+      ],
+      "enabled": true
+    }
+  },
+  "provider": {
+    "ollama": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Local (Ollama on this Mac)",
+      "options": {
+        "baseURL": "http://127.0.0.1:11434/v1"
+      },
+      "models": {
+        "qwen3:14b": {
+          "name": "Qwen3 14B \u00b7 local"
+        },
+        "qwen2.5-coder:7b": {
+          "name": "Qwen2.5 Coder 7B \u00b7 local"
+        },
+        "gemma4:latest": {
+          "name": "Gemma 4 \u00b7 local"
+        },
+        "gemma3:12b": {
+          "name": "Gemma 3 12B \u00b7 local"
+        }
+      }
+    }
+  },
+  "autoupdate": false
+}
