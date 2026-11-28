@@ -21,6 +21,7 @@ const crypto = require('crypto');
 const darkbloom = require('./darkbloom');
 const credentials = require('./lib/credentials');
 const configsec = require('./lib/configsec');          // Phase 4 #1 — plaintext-secret migration + write-time guard
+const telegramAuth = require('./lib/telegramauth');
 const makePatrol = require('./lib/patrol');            // Feat-2 — ambient health watch → Telegram/call relay
 const rstate = require('./lib/runtime-state');         // live state feed: ~/.bhatbot/state.json + events.jsonl
 const introspect = require('./lib/introspect');        // Phase 5 — self-portrait (pure telemetry aggregation)
@@ -7283,15 +7284,17 @@ function startTelegramBridge() {
   console.log('[telegram] bridge active');
 
   telegramBot.on('message', async (msg) => {
-    const chatId = msg.chat.id.toString();
     const c = loadConfig();
-    // First message authorizes this chat.
-    if (!c.telegramChatId) {
-      saveConfig({ telegramChatId: chatId });
-      telegramBot.sendMessage(chatId, '✓ Bhatbot connected. This device is now authorized.');
-      return;
+    // Explicit owner only — no trust-on-first-use. See lib/telegramauth.js.
+    const auth = telegramAuth.authorize(msg, c);
+    if (!auth.ok) {
+      if (auth.reason === 'unconfigured' && !startTelegramBridge._warned) {
+        startTelegramBridge._warned = true;
+        console.warn(`[telegram] telegramChatId is not set — ignoring chat ${auth.chatId}. To authorize the owner, set config telegramChatId to that id.`);
+      }
+      return;   // never reply to an unauthorized sender
     }
-    if (chatId !== c.telegramChatId) return;   // ignore everyone else
+    const chatId = auth.chatId;
 
     let userText = msg.text || '';
     if (msg.voice) {
@@ -7314,7 +7317,12 @@ function startTelegramBridge() {
     const hist = (telegramHistories.get(chatId) || []).slice(-20);
     hist.push({ role: 'user', content: '[TELEGRAM] ' + userText });
     try {
-      const res = await agentLoop(hist, getApiKey(), { sender: { send() {} } });
+      // No human at the keyboard: mark the turn remote so destructive/confirm/stepup tools are denied
+      // exactly as on the MCP and phone paths (requestConfirm, lib/risk.js).
+      remoteDepth++;
+      let res;
+      try { res = await agentLoop(hist, getApiKey(), { sender: { send() {} } }); }
+      finally { remoteDepth--; }
       telegramHistories.set(chatId, res.history.slice(-20));
       const reply = (res.text || '(no output)').slice(0, 4000);
       telegramBot.sendMessage(chatId, reply, { parse_mode: 'Markdown' }).catch(() => telegramBot.sendMessage(chatId, reply));
